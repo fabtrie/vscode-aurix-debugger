@@ -25,6 +25,8 @@ fn server() -> Server {
     s.interp
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
+    // The simulated HSM never reports ready: don't wait for it after halting resets.
+    s.interp.eval_global("set tc37x_hsm_ready_ms 0").unwrap();
     s
 }
 
@@ -278,4 +280,41 @@ fn reset_halt_runs_reset_sequence() {
     s.interp.eval("reset halt").unwrap();
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
     assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
+}
+
+#[test]
+fn connect_reset_halt_leaves_cores_halted_with_setup() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    take_writes(&s);
+    s.interp.eval("tc37x_connect_reset_halt").unwrap();
+    let w = take_writes(&s);
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert!(w.contains(&(0xF000_10E8, 0x1200_0000)), "STM suspend not applied: {w:08x?}");
+}
+
+#[test]
+fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    take_writes(&s);
+    s.interp.eval("reset halt").unwrap();
+    let w = take_writes(&s);
+    assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset halt: {w:08x?}");
+    // The last TL1 force (after the reset's own halt pulse) latches TL1 after the STM suspend setup.
+    let ocs = pos(&w, (0xF000_10E8, 0x1200_0000));
+    let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched after reset halt");
+    assert!(ocs < latch, "TL1 must be latched after the STM suspend setup: {w:08x?}");
+    // After the TL1 latch (whose edge would halt the HSM again) the boot ROM's HSM breakpoint is
+    // deleted and the HSM runs.
+    let dbgbase = pos(&w, (0xF004_1010, 0xE000_0000));
+    let bp = pos(&w, (0xF005_2008, 0));
+    let run = pos(&w, (0xF005_EDF0, 0xA05F_0001));
+    assert!(latch < dbgbase && dbgbase < bp && bp < run, "HSM release order: {w:08x?}");
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+
+    s.interp.eval("reset run").unwrap();
+    let w = take_writes(&s);
+    assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset run: {w:08x?}");
+    assert!(!w.contains(&(CBS_TLC, 0x30)), "TL1 latched after reset run: {w:08x?}");
 }

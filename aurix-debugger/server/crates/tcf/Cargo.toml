@@ -1,0 +1,16 @@
+[package]
+name = "tcf"
+description = "TCF (Target Communication Framework) frontend for the aurix-dbg core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aurix-core.workspace = true
+tas.workspace = true
+symbols.workspace = true
+serde = "1"
+serde_json.workspace = true
+base64.workspace = true
+capstone = { version = "0.14", default-features = false, features = ["full", "std", "arch_tricore"] }

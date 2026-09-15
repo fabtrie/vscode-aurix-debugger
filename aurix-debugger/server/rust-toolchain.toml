@@ -1,0 +1,5 @@
+# Jim Tcl is built from OpenOCD's MSYS2-configured jimtcl sources with MinGW gcc,
+# so the whole server uses the GNU toolchain. Build with C:\msys64\mingw64\bin on
+# PATH (see env.ps1).
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"

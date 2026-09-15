@@ -1,0 +1,12 @@
+[package]
+name = "aurix-dbg"
+description = "OpenOCD-compatible AURIX debug server over Infineon TAS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aurix-core.workspace = true
+jim.workspace = true
+tcf.workspace = true

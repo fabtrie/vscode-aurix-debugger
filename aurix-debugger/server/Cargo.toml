@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+tas = { path = "crates/tas" }
+jim = { path = "crates/jim" }
+aurix-core = { path = "crates/core" }
+tcf = { path = "crates/tcf" }
+symbols = { path = "crates/symbols" }
+serde_json = "1"
+base64 = "0.22"
+gimli = "0.34"
+object = "0.40"
+memmap2 = "0.9"
+
+# Loading a 138 MB ELF with DWARF is far too slow unoptimized.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.symbols]
+opt-level = 2

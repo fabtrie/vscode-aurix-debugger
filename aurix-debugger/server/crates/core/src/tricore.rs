@@ -40,6 +40,11 @@ pub struct Tricore {
     cache: Vec<Option<u32>>,
     /// `tricore tl1_halt on`: halt requests also pulse OTGS trigger line 1.
     pub tl1_halt: bool,
+    /// `tricore tl1_step on`: a single step lets all TL1 suspend targets run for
+    /// the instruction. The step releases this core while TL1 still holds it and
+    /// then clears the TL1 hold, so all cores start in the same cycle; the step
+    /// trigger's BRKOUT latches TL1 and stops them in the same cycle.
+    pub tl1_step: bool,
     /// `tricore irq_mask`: run modes executed with interrupts masked.
     pub irq_mask: IrqMask,
     /// The application's ICR.IE while the debugger holds it cleared.
@@ -68,6 +73,7 @@ impl Tricore {
             triggers: [Trigger::default(); NUM_TRIGGERS],
             cache: vec![None; REGS.len()],
             tl1_halt: false,
+            tl1_step: false,
             irq_mask: IrqMask::default(),
             irq_saved_ie: None,
             irq_run: None,
@@ -255,11 +261,21 @@ impl Tricore {
             .ok_or_else(|| Error::Resource("No hardware event available for single step".into()))?;
         let step_trigger = Trigger { enable: true, bbm: false, pc: true, range: false, access: 0, addr: pc };
         let resume = self.resume_value(io)?;
-        io.write32_seq(&[
+        // The trigger event loads DBGSR.SUSP from TRxEVT.SUSP: arm it with the
+        // current state, or the halt would clear suspend-out and let this
+        // core's STM run until the halted handler sets it again.
+        let susp = if resume & DBGSR_SUSP != 0 { TREVT_SUSP } else { 0 };
+        let mut w = vec![
             (self.csfr(trxadr(slot)), pc),
-            (self.csfr(trxevt(slot)), self.trigger_value(&step_trigger)),
+            (self.csfr(trxevt(slot)), self.trigger_value(&step_trigger) | susp),
             (self.csfr(DBGSR), resume),
-        ])?;
+        ];
+        if self.tl1_step && !self.is_v18() {
+            // This core is released but still suspended by the held TL1:
+            // clearing the hold starts all TL1 suspend targets in the same cycle.
+            w.push((CBS_TLCHS, 0x2));
+        }
+        io.write32_seq(&w)?;
         self.invalidate();
         self.state = TargetState::Running;
         self.reason = DebugReason::NotHalted;
@@ -289,6 +305,15 @@ impl Tricore {
             }
         }
         Ok(halted)
+    }
+
+    /// `tl1_step`: makes sure TL1 is latched before the step-start handler
+    /// releases the other cores, so they stay suspended until the step starts.
+    pub fn ensure_tl1_hold(&self, io: &mut Io) -> Result<()> {
+        if io.read32(CBS_TLS)? & CBS_TLS_TL1 == 0 {
+            io.write32_seq(&[(CBS_TLC, 0x30), (CBS_TLC, 0x0)])?;
+        }
+        Ok(())
     }
 
     /// DBGSR value that releases the halt without changing the suspend-out

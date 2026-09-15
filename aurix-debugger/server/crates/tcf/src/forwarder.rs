@@ -21,7 +21,8 @@ pub fn start(shared: Arc<Shared>) {
                 // instruction steps also release and re-halt the other cores
                 // (cfg step-start / TL1), which is not reported either.
                 Event::Halted { target, reason, pc, .. } => {
-                    shared.invalidate_stack(target);
+                    // Any core may have run (TL1-gated steps run all cores).
+                    shared.stacks.lock().unwrap().clear();
                     if !shared.any_stepping() {
                         halted(&shared, target, reason, pc);
                     }

@@ -78,7 +78,18 @@ Only the core thread touches the adapter and the Tcl interpreter. Frontends use 
 The commands the cfg scripts use behave as in OpenOCD. Board policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc37x_ocds_init.cfg`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
 
 - **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `bindto`.
-- **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`.
+- **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore tl1_step on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`.
+
+## Multi-core stepping (`tricore tl1_step`)
+
+With `<target> tricore tl1_step on` (set by `tc37x_ocds_init.cfg`), an instruction step runs **all** cores for the stepped instruction, not only the stepping one:
+
+1. The core makes sure TL1 is latched (capture-and-hold), pulsing it if needed.
+2. The cfg's `step-start` releases the other cores' debug halt; TL1 still suspends them.
+3. The core arms the step trigger, releases the stepping core (still held by TL1) and clears the TL1 hold: all cores start in the same cycle.
+4. The step trigger halts the core and pulses BRKOUT: TL1 latches and stops all cores in the same cycle.
+
+Every core keeps DBGSR.SUSP (suspend-out) during the step, so an STM only advances while its core executes: all STMs advance by the same few ticks per step. Without `tl1_step` (OpenOCD), the other cores stay in debug halt and only the stepping core runs.
 
 ## Interrupts while stepping (`tricore irq_mask`)
 

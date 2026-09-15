@@ -8,6 +8,11 @@ pub const OSTATE_LOCKED: u32 = 1 << 16;
 
 /// CBS trigger line control (OTGS TL1 force).
 pub const CBS_TLC: u32 = 0xF000_0490;
+/// CBS_TLS: trigger line state; bit 1 = TL1 active.
+pub const CBS_TLS: u32 = 0xF000_0470;
+pub const CBS_TLS_TL1: u32 = 1 << 1;
+/// CBS_TLCHS: writing 2 clears a latched TL1 (capture-and-hold).
+pub const CBS_TLCHS: u32 = 0xF000_049C;
 
 // Core special function register offsets inside the CSFR window
 // (address = dbgbase + 0x10000 + offset).
@@ -53,6 +58,9 @@ pub const DBGSR_RESUME: u32 = 0x4;
 /// DBGSR.SUSP: the core's suspend-out signal (suspends e.g. the STMs with OCS.SUS set).
 /// Written directly by every DBGSR write, so resume writes must carry it over.
 pub const DBGSR_SUSP: u32 = 1 << 4;
+/// TRxEVT.SUSP: suspend-out state loaded into DBGSR.SUSP when the trigger
+/// fires (the old state goes to DBGSR.PREVSUSP; observed on the TC377).
+pub const TREVT_SUSP: u32 = 1 << 5;
 pub const SYSCON_BHALT: u32 = 1 << 24;
 
 /// SWEVT value making the DEBUG instruction halt the core (TC1.6.x).

@@ -321,11 +321,32 @@ pub fn step_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()
     if cx.with(|c| c.targets[t].core.state) != TargetState::Halted {
         return Err(Error::NotHalted(name));
     }
+    let tl1_step = cx.with(|c| c.targets[t].core.tl1_step);
+    if tl1_step {
+        // All cores run for the instruction: interrupts masked for an earlier
+        // step of another core go back first, and TL1 must hold the cores
+        // the step-start handler releases.
+        unmask_irq_except(cx, t);
+        cx.with(|c| {
+            let (mut io, e) = c.target_io(t)?;
+            e.core.ensure_tl1_hold(&mut io)
+        })?;
+    }
     fire(cx, t, "step-start");
     let res = cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
         e.core.step(&mut io, addr, mode)
     });
+    if tl1_step {
+        // The other cores ran: their cached registers are stale.
+        cx.with(|c| {
+            for (i, e) in c.targets.iter_mut().enumerate() {
+                if i != t {
+                    e.core.invalidate();
+                }
+            }
+        });
+    }
     fire(cx, t, "resumed");
     let r = match res {
         Ok(true) => {

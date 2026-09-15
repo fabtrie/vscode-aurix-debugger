@@ -121,7 +121,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "help", |_, _| {
         Ok("aurix-dbg supports the OpenOCD commands used by AURIX cfg files: adapter, transport, ifxdap, ocmts, \
             target, targets, flash bank, init, reset, halt, resume, step, reg, bp/rbp, wp/rwp, mdw/mdh/mdb, \
-            mww/mwh/mwb, read_memory, write_memory, poll, sleep, echo, find, script, tricore tl1_halt/irq_mask"
+            mww/mwh/mwb, read_memory, write_memory, poll, sleep, echo, find, script, tricore tl1_halt/tl1_step/irq_mask"
             .into())
     });
 
@@ -1079,6 +1079,13 @@ fn cmd_tricore(cx: &Cx, a: &[&str]) -> CmdResult {
             }
             Ok(format!("tl1_halt {}", if cx.with(|c| c.targets[t].core.tl1_halt) { "on" } else { "off" }))
         }
+        Some("tl1_step") => {
+            if let Some(v) = a.get(2) {
+                let on = parse_bool(v)?;
+                cx.with(|c| c.targets[t].core.tl1_step = on);
+            }
+            Ok(format!("tl1_step {}", if cx.with(|c| c.targets[t].core.tl1_step) { "on" } else { "off" }))
+        }
         Some("irq_mask") => {
             if a.len() > 2 {
                 let m = crate::tricore::IrqMask::parse(&a[2..]).map_err(|e| format!("tricore irq_mask: {e}"))?;
@@ -1104,7 +1111,7 @@ fn cmd_tricore(cx: &Cx, a: &[&str]) -> CmdResult {
                 .collect::<Vec<_>>()
                 .join("\n")
         })),
-        _ => Err("usage: tricore tl1_halt [on|off] | tricore irq_mask [off|on|step step_over step_out] | tricore triggers".into()),
+        _ => Err("usage: tricore tl1_halt [on|off] | tricore tl1_step [on|off] | tricore irq_mask [off|on|step step_over step_out] | tricore triggers".into()),
     }
 }
 

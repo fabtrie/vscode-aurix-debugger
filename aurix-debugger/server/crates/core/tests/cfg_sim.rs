@@ -59,6 +59,7 @@ fn loads_real_cfg_and_inits() {
     assert!(w.contains(&(0xF000_0420, 0x100)), "CBS_TRC0 not written");
     assert_eq!(i.eval("tc37x.cpu2 curstate").unwrap(), "running");
     assert_eq!(i.eval("tc37x.cpu1 tricore tl1_halt").unwrap(), "tl1_halt on");
+    assert_eq!(i.eval("tc37x.cpu2 tricore tl1_step").unwrap(), "tl1_step on");
     assert!(i.eval("targets").unwrap().contains("tc37x.cpu0"));
 }
 
@@ -100,18 +101,39 @@ fn step_uses_non_bbm_pc_trigger() {
     take_writes(&s);
     s.interp.eval("step").unwrap();
     let w = take_writes(&s);
-    // step-start handler holds the other cores first
-    let hold = pos(&w, (DBGSR[1], 0x16));
-    let evt = pos(&w, (0xF881_F038, 0x1002)); // TR7EVT: PC trigger, no BBM, EVTA=halt
-    assert!(hold < evt);
-    // The stepping core keeps SUSOUT (neither the cfg nor the step's release clears it),
-    // so its STM does not run ahead of the others.
-    assert!(!w.contains(&(DBGSR[0], 0)), "step-start released cpu0's SUSOUT: {w:08x?}");
-    assert!(w.contains(&(DBGSR[0], 0x14)) && !w.contains(&(DBGSR[0], 0x4)), "step release cleared SUSP: {w:08x?}");
+    // tl1_step: TL1 latched first (the sim reports it inactive), step-start releases the other
+    // cores under the hold, the core releases cpu0 and then clears the hold.
+    let latch = pos(&w, (CBS_TLC, 0x30));
+    let others = pos(&w, (DBGSR[1], 0x14));
+    // TR7EVT: PC trigger, no BBM, EVTA=halt, SUSP=1 (the halt keeps suspend-out asserted)
+    let evt = pos(&w, (0xF881_F038, 0x1022));
+    let release = pos(&w, (DBGSR[0], 0x14));
+    let start = pos(&w, (CBS_TLCHS, 2));
+    assert!(latch < others && others < evt && evt < release && release < start, "wrong order: {w:08x?}");
+    assert!(!w.contains(&(DBGSR[1], 0x16)), "other core put into debug halt: {w:08x?}");
+    // Every core keeps SUSOUT, so no STM runs ahead of the others.
+    assert!(!w.contains(&(DBGSR[0], 0)) && !w.contains(&(DBGSR[0], 0x4)), "step cleared cpu0's SUSP: {w:08x?}");
     assert!(w.contains(&(0xF881_F03C, pc)));
     let (state, reason) = ops::state(&s.cx(), 0);
     assert_eq!(state.name(), "halted");
     assert_eq!(reason.name(), "single-step");
+}
+
+#[test]
+fn step_without_tl1_step_runs_only_the_stepping_core() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("halt 1000").unwrap();
+    s.interp.eval("tc37x.cpu0 tricore tl1_step off").unwrap();
+    take_writes(&s);
+    s.interp.eval("step").unwrap();
+    let w = take_writes(&s);
+    // The cfg's step-start keeps the other cores in debug halt and clears the hold itself.
+    let hold = pos(&w, (DBGSR[1], 0x16));
+    let clear = pos(&w, (CBS_TLCHS, 2));
+    let release = pos(&w, (DBGSR[0], 0x14));
+    assert!(hold < clear && clear < release, "{w:08x?}");
+    assert!(!w.contains(&(CBS_TLC, 0x30)), "TL1 latched although tl1_step is off");
 }
 
 const ICR0: u32 = 0xF881_FE2C;

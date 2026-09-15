@@ -71,25 +71,53 @@ fn halt_and_resume_follow_cfg_event_order() {
 
     s.interp.eval("halt 1000").unwrap();
     let w = take_writes(&s);
-    // tl1_halt pulse, then the DBGSR halt request, then the halted handler's SUSP writes.
+    // tl1_halt pulse, then the DBGSR halt request. In "run" mode TL1 alone stops the STMs:
+    // the halted handler asserts no suspend-out.
     let p_tlc = pos(&w, (CBS_TLC, 0x30));
     let p_rel = pos(&w, (CBS_TLC, 0));
     let p_halt = pos(&w, (DBGSR[0], 0x6));
     assert!(p_tlc < p_rel && p_rel < p_halt);
     for d in DBGSR {
-        assert!(pos(&w, (d, 0x10)) > p_halt, "SUSP for {d:08x} missing after halt");
+        assert!(!w.contains(&(d, 0x10)), "SUSP asserted for {d:08x} in run mode: {w:08x?}");
     }
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
 
     s.interp.eval("resume").unwrap();
     let w = take_writes(&s);
-    let p1 = pos(&w, (DBGSR[1], 0x14));
-    let p2 = pos(&w, (DBGSR[2], 0x14));
-    // The core's own release keeps SUSP (set by the halted handler); resume-end clears it.
-    let p0 = pos(&w, (DBGSR[0], 0x14));
+    let p1 = pos(&w, (DBGSR[1], 0x4));
+    let p2 = pos(&w, (DBGSR[2], 0x4));
+    let p0 = pos(&w, (DBGSR[0], 0x4));
+    // resume-end: suspend-outs cleared while TL1 still holds the cores, then the hold is dropped.
+    let p_clear = pos(&w, (DBGSR[0], 0));
     let pend = pos(&w, (CBS_TLCHS, 2));
-    assert!(p1 < p0 && p2 < p0 && p0 < pend, "resume-start / resume / resume-end order wrong: {w:08x?}");
+    assert!(p1 < p0 && p2 < p0 && p0 < p_clear && p_clear < pend, "resume-start / resume / resume-end order wrong: {w:08x?}");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "running");
+}
+
+#[test]
+fn frozen_step_timers_keep_suspend_out_while_halted_and_stepping() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    assert_eq!(s.interp.eval("tc37x_step_timers frozen").unwrap(), "frozen");
+    s.interp.eval("halt 1000").unwrap();
+    let w = take_writes(&s);
+    for d in DBGSR {
+        assert!(w.contains(&(d, 0x10)), "SUSP for {d:08x} missing after halt: {w:08x?}");
+    }
+    s.interp.eval("step").unwrap();
+    let w = take_writes(&s);
+    let others = pos(&w, (DBGSR[1], 0x14));
+    let own = pos(&w, (DBGSR[0], 0x10));
+    let evt = pos(&w, (0xF881_F038, 0x1022)); // step trigger keeps SUSP=1
+    let release = pos(&w, (DBGSR[0], 0x14));
+    assert!(others < own && own < evt && evt < release, "{w:08x?}");
+
+    s.interp.eval("resume").unwrap();
+    let w = take_writes(&s);
+    let p_clear = pos(&w, (DBGSR[0], 0));
+    let pend = pos(&w, (CBS_TLCHS, 2));
+    assert!(p_clear < pend, "suspend-out cleared after the TL1 hold was dropped: {w:08x?}");
+    assert!(s.interp.eval("catch {tc37x_step_timers slow}").unwrap() == "1");
 }
 
 #[test]
@@ -102,17 +130,17 @@ fn step_uses_non_bbm_pc_trigger() {
     s.interp.eval("step").unwrap();
     let w = take_writes(&s);
     // tl1_step: TL1 latched first (the sim reports it inactive), step-start releases the other
-    // cores under the hold, the core releases cpu0 and then clears the hold.
+    // cores under the hold and sets every SUSP for "run" mode (clear), the core releases cpu0 and
+    // then clears the hold.
     let latch = pos(&w, (CBS_TLC, 0x30));
-    let others = pos(&w, (DBGSR[1], 0x14));
-    // TR7EVT: PC trigger, no BBM, EVTA=halt, SUSP=1 (the halt keeps suspend-out asserted)
-    let evt = pos(&w, (0xF881_F038, 0x1022));
-    let release = pos(&w, (DBGSR[0], 0x14));
+    let others = pos(&w, (DBGSR[1], 0x4));
+    let own = pos(&w, (DBGSR[0], 0));
+    // TR7EVT: PC trigger, no BBM, EVTA=halt, SUSP=0 (TL1 stops the STMs with the cores)
+    let evt = pos(&w, (0xF881_F038, 0x1002));
+    let release = pos(&w, (DBGSR[0], 0x4));
     let start = pos(&w, (CBS_TLCHS, 2));
-    assert!(latch < others && others < evt && evt < release && release < start, "wrong order: {w:08x?}");
+    assert!(latch < others && others < own && own < evt && evt < release && release < start, "wrong order: {w:08x?}");
     assert!(!w.contains(&(DBGSR[1], 0x16)), "other core put into debug halt: {w:08x?}");
-    // Every core keeps SUSOUT, so no STM runs ahead of the others.
-    assert!(!w.contains(&(DBGSR[0], 0)) && !w.contains(&(DBGSR[0], 0x4)), "step cleared cpu0's SUSP: {w:08x?}");
     assert!(w.contains(&(0xF881_F03C, pc)));
     let (state, reason) = ops::state(&s.cx(), 0);
     assert_eq!(state.name(), "halted");
@@ -223,7 +251,8 @@ fn boot_halted_core_does_not_fire_halted_handler() {
     assert_eq!(s.interp.eval("tc37x.cpu2 curstate").unwrap(), "halted");
     let (_, reason) = ops::state(&s.cx(), 2);
     assert_eq!(reason.name(), "boot-halt");
-    // A real debug halt of cpu0 still runs the handler.
+    // A real debug halt of cpu0 still runs the handler (visible through its SUSP writes in "frozen").
+    s.interp.eval("tc37x_step_timers frozen").unwrap();
     s.interp.eval("halt 1000").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(DBGSR[2], 0x10)));

@@ -89,7 +89,14 @@ With `<target> tricore tl1_step on` (set by `tc37x_ocds_init.cfg`), an instructi
 3. The core arms the step trigger, releases the stepping core (still held by TL1) and clears the TL1 hold: all cores start in the same cycle.
 4. The step trigger halts the core and pulses BRKOUT: TL1 latches and stops all cores in the same cycle.
 
-Every core keeps DBGSR.SUSP (suspend-out) during the step, so an STM only advances while its core executes: all STMs advance by the same few ticks per step. Without `tl1_step` (OpenOCD), the other cores stay in debug halt and only the stepping core runs.
+Without `tl1_step` (OpenOCD), the other cores stay in debug halt and only the stepping core runs.
+
+**STMs.** On the TC377 an STM with `OCS.SUS=2` stops while its CPU is suspended by TL1 *or* has `DBGSR.SUSP` set (measured with raw register writes). A trigger event loads `DBGSR.SUSP` from `TRxEVT.SUSP`; the core carries the current SUSP into the step release and the step trigger, so the cfg decides:
+
+- `tc37x_step_timers run` (default): SUSP stays clear. TL1 stops and restarts the STMs in the same cycle as the cores, so they stop at halt, run with continue, and advance together while the cores execute a step.
+- `tc37x_step_timers frozen`: SUSP is set on every core while halted, so the STMs also stay stopped during steps.
+
+Switch at runtime with `monitor tc37x_step_timers frozen` or `run`.
 
 ## Interrupts while stepping (`tricore irq_mask`)
 

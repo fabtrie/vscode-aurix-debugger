@@ -165,31 +165,41 @@ impl Tricore {
     }
 
     fn decode_reason(&mut self) {
-        if self.reason == DebugReason::SingleStep {
+        // A halt we requested (or a step) keeps its reason. EVTSRC names the last debug event, and a
+        // DBGSR or TL1 halt is none: after a halting reset it still says TR0 (the halt-after-reset
+        // trigger), which would turn every later pause into a breakpoint stop.
+        if matches!(self.reason, DebugReason::SingleStep | DebugReason::DbgRq) {
             return;
         }
         self.reason = DebugReason::DbgRq;
-        if self.dbgsr & DBGSR_HALT_WRITE != 0 {
-            self.reason = DebugReason::DbgRq;
-        }
         match (self.dbgsr >> 8) & 0x1F {
-            EVTSRC_EXTERNAL | EVTSRC_CORE_REGISTER => self.reason = DebugReason::DbgRq,
             EVTSRC_SOFTWARE => self.reason = DebugReason::Breakpoint,
             n @ 16..=23 => {
                 let t = self.triggers[(n - EVTSRC_TRIGGER0) as usize];
-                self.reason = if t.enable && !t.pc { DebugReason::Watchpoint } else { DebugReason::Breakpoint };
+                // Only a trigger that is armed; a stale EVTSRC of a cleared trigger is no breakpoint.
+                if t.enable {
+                    self.reason = if t.pc { DebugReason::Breakpoint } else { DebugReason::Watchpoint };
+                }
             }
             _ => {}
         }
     }
 
-    /// Index of the trigger that caused the current halt, if any.
+    /// Index of the armed trigger that caused the current halt, if any.
     pub fn hit_trigger(&self) -> Option<usize> {
-        match (self.dbgsr >> 8) & 0x1F {
-            n @ 16..=23 => Some((n - EVTSRC_TRIGGER0) as usize),
+        match self.reason {
+            DebugReason::Breakpoint | DebugReason::Watchpoint => self.evtsrc_trigger(),
             _ => None,
         }
     }
+
+    fn evtsrc_trigger(&self) -> Option<usize> {
+        match (self.dbgsr >> 8) & 0x1F {
+            n @ 16..=23 => Some((n - EVTSRC_TRIGGER0) as usize).filter(|&i| self.triggers[i].enable),
+            _ => None,
+        }
+    }
+
 
     pub fn halt(&mut self, io: &mut Io) -> Result<()> {
         if self.state == TargetState::Halted {
@@ -705,6 +715,28 @@ fn irq_step_effect(word: Option<u32>, ie: bool, hw_ie: bool, new_context: bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_evtsrc_of_an_unarmed_trigger_is_no_breakpoint() {
+        let halted_tr0 = DBGSR_DE | DBGSR_HALTED | (EVTSRC_TRIGGER0 << 8);
+        // Pause after a halting reset: EVTSRC still names the cleared halt-after-reset trigger (TR0).
+        let mut c = Tricore::new();
+        let _ = c.poll_apply(DBGSR_DE, 0);
+        c.reason = DebugReason::NotHalted;
+        let _ = c.poll_apply(halted_tr0, 0);
+        assert_eq!(c.reason, DebugReason::DbgRq);
+        assert_eq!(c.hit_trigger(), None);
+
+        // The same EVTSRC with TR0 armed as a code breakpoint is a breakpoint hit.
+        let mut c = Tricore::new();
+        c.triggers[0].enable = true;
+        c.triggers[0].pc = true;
+        let _ = c.poll_apply(DBGSR_DE, 0);
+        c.reason = DebugReason::NotHalted;
+        let _ = c.poll_apply(halted_tr0, 0);
+        assert_eq!(c.reason, DebugReason::Breakpoint);
+        assert_eq!(c.hit_trigger(), Some(0));
+    }
 
     #[test]
     fn decodes_interrupt_instructions() {

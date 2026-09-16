@@ -650,9 +650,46 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
             Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped, args[0]))
         }
+        Some("write_images") => {
+            // Merges the files first (later files win), so a file cannot erase what an earlier
+            // one programmed into a shared sector, and incremental writes see the final content.
+            const USAGE: &str = "usage: flash write_images [erase] [incremental] [unlock] [verify] <file> ...";
+            require_init(cx, "flash")?;
+            let mut files: Vec<&str> = a[2..].to_vec();
+            let (mut erase, mut incremental, mut unlock, mut verify) = (false, false, false, false);
+            while let Some(flag) = files.first().copied() {
+                match flag {
+                    "erase" => erase = true,
+                    "incremental" => incremental = true,
+                    "unlock" => unlock = true,
+                    "verify" => verify = true,
+                    _ => break,
+                }
+                files.remove(0);
+            }
+            if files.is_empty() {
+                return Err(USAGE.into());
+            }
+            let mut img = Image::default();
+            for file in &files {
+                let (merged, changed) = img.overlay(&load_image(&[file], USAGE)?);
+                if changed > 0 {
+                    crate::log_warn!("flash write_images: {file} replaces {changed} bytes of earlier files");
+                }
+                img = merged;
+            }
+            let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
+            let mut out = format!("wrote {} bytes from {} files: {stats}", img.size() - stats.ucb_skipped, files.len());
+            if verify {
+                let t0 = std::time::Instant::now();
+                let n = flash::verify_image(cx, &img).map_err(e2s)?;
+                out += &format!("\nverified {n} bytes in {:.1}s", t0.elapsed().as_secs_f64());
+            }
+            Ok(out)
+        }
         Some("verify_image") => cmd_verify_image(cx, &a[1..]),
         Some(other) => Err(format!("flash {other}: not supported by aurix-dbg")),
-        None => Err("usage: flash bank|banks|list|info|probe|erase_check|erase_sector|write_image|verify_image ...".into()),
+        None => Err("usage: flash bank|banks|list|info|probe|erase_check|erase_sector|write_image|write_images|verify_image ...".into()),
     }
 }
 

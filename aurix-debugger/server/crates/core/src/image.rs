@@ -172,6 +172,22 @@ impl Image {
         }
         (Image::from_sections(kept), removed)
     }
+
+    /// This image with `top` laid over it: where both have data, `top` wins. Also returns the
+    /// number of bytes of this image that `top` replaces with different data.
+    pub fn overlay(&self, top: &Image) -> (Image, usize) {
+        let mut changed = 0;
+        let mut base = self.clone();
+        for s in &top.sections {
+            if !base.touches(s.addr, s.end()) {
+                continue;
+            }
+            changed += s.data.iter().enumerate().filter(|(i, b)| base.byte_at(s.addr + *i as u32).is_some_and(|x| x != **b)).count();
+            base = base.without(s.addr, s.end()).0;
+        }
+        base.sections.extend(top.sections.iter().cloned());
+        (Image::from_sections(base.sections), changed)
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +206,18 @@ mod tests {
         assert_eq!(img.byte_at(0x11), Some(4));
         assert_eq!(img.byte_at(0x12), None);
         assert!(img.touches(0x1F, 0x21) && !img.touches(0x12, 0x20));
+    }
+
+    #[test]
+    fn overlays_later_image() {
+        // The lower section of `top` overlaps the higher one of `base`: sorting alone would let
+        // the base data win.
+        let base = Image::from_sections(vec![Section { addr: 0x10, data: vec![1, 2, 3, 4] }]);
+        let top = Image::from_sections(vec![Section { addr: 0x08, data: vec![9; 10] }]);
+        let (img, changed) = base.overlay(&top);
+        assert_eq!(img.sections, vec![Section { addr: 0x08, data: vec![9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 3, 4] }]);
+        assert_eq!(changed, 2);
+        assert_eq!(top.overlay(&base).0.sections[0].data, vec![9, 9, 9, 9, 9, 9, 9, 9, 1, 2, 3, 4]);
     }
 
     #[test]

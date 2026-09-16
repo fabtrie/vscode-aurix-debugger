@@ -265,7 +265,8 @@ impl<'a, 'b> Driver<'a, 'b> {
         let mut off = 0usize;
         while off < data.len() {
             let a = addr + off as u32;
-            let n = if off % BURST_SIZE == 0 && data.len() - off >= BURST_SIZE { BURST_SIZE } else { PAGE_SIZE as usize };
+            // A burst must start on a 256-byte boundary of the flash, not of the run (SQER otherwise).
+            let n = if a % BURST_SIZE as u32 == 0 && data.len() - off >= BURST_SIZE { BURST_SIZE } else { PAGE_SIZE as usize };
             let mut b = Batch::new();
             b.write32(KEY as u64, KEY_PAGE_MODE_PFLASH);
             for (i, w) in data[off..off + n].chunks(4).enumerate() {

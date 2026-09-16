@@ -51,6 +51,44 @@ export class FindByAddrSymbolsCommand extends SymbolsCommand<string> {
     }
 }
 
+//returns the IDs of the symbols with the given name visible at the given IP
+export class FindByNameSymbolsCommand extends SymbolsCommand<string[]> {
+    contextID: string;
+    ip: number;
+    name: string;
+
+    constructor(contextID: string, ip: number, name: string) {
+        super();
+        this.contextID = contextID;
+        this.ip = ip;
+        this.name = name;
+    }
+
+    debugDescription(tokenID: number): string {
+        return super.debugDescription(tokenID) + "/" + this.command() + "/" + this.contextID + "/" + this.name;
+    }
+
+    command(): string {
+        return "findByName";
+    }
+
+    arguments() {
+        return undefined;
+    }
+
+    toBuffer(token: string): Buffer {
+        return toBuffer(["C", token, this.service(), this.command(), JSON.stringify(this.contextID), JSON.stringify(this.ip), JSON.stringify(this.name)]);
+    }
+
+    override cast(json: any): string[] {
+        // Older agents reply with a single symbol ID, newer ones with an array of IDs.
+        if (json === null) {
+            return [];
+        }
+        return Array.isArray(json) ? json.map(asString) : [asString(json)];
+    }
+}
+
 /* eslint-disable @typescript-eslint/naming-convention */
 export enum TCFSymbolClass {
     unknown,

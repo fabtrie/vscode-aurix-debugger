@@ -45,7 +45,7 @@ import {
 import { GetChildrenRegistersCommand, GetContextRegistersCommand, GetRegistersCommand, SetRegistersCommand } from './tcf/registers';
 import { TCL_SERVICE, TclEvalCommand } from './tcf/tcl';
 import { AssignExpressionsCommand, CreateExpressionsCommand, GetContextExpressionsCommand } from './tcf/expressions';
-import { GetChildrenSymbolsCommand, GetContextSymbolsCommand } from './tcf/symbols';
+import { FindByAddrSymbolsCommand, FindByNameSymbolsCommand, GetChildrenSymbolsCommand, GetContextSymbolsCommand } from './tcf/symbols';
 import { encodeVariableValue } from './variables/encode';
 import { GetChildrenStackTraceCommand } from './tcf/stacktrace';
 import { SetMemoryMapCommand } from './tcf/memorymap';
@@ -297,6 +297,20 @@ class InstructionBreakpointsManager {
 	}
 }
 
+/** Where the Disassembly view shows the opcode bytes of an instruction. */
+export type DisassemblyOpcodeBytes = 'left' | 'right' | 'hidden';
+
+export function isDisassemblyOpcodeBytes(value: unknown): value is DisassemblyOpcodeBytes {
+	return value === 'left' || value === 'right' || value === 'hidden';
+}
+
+/** "xx xx xx xx": TriCore instructions are at most 4 bytes. */
+const DISASSEMBLY_BYTES_WIDTH = 11;
+/** Instruction text width before the opcode bytes when they are shown on the right. */
+const DISASSEMBLY_INSTRUCTION_WIDTH = 32;
+/** Gap between the opcode bytes and the instruction text. */
+const DISASSEMBLY_COLUMN_GAP = ' '.repeat(5);
+
 export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private enabledPathMapper: boolean;
 	private stackTraceDepth: number = -1;
@@ -311,6 +325,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private programPath: string | undefined;
 	private disassemblyCapabilities: string[] | undefined;
 	private disassemblyCapabilitiesLogged = false;
+	/**
+	 * Address picked with "Go to Address or Symbol". VS Code's Disassembly view can only be moved by
+	 * focusing a stack frame, so the target is shown as an extra frame at the bottom of the suspended
+	 * cores' call stacks until a core resumes. It is added to every core because refreshing the call
+	 * stacks may move the focus to another core.
+	 */
+	private disassemblyJumpTarget: { address: number; label: string } | undefined;
+	private elfFunctionSymbols: Array<{ name: string; address: number }> | undefined;
+	private disassemblyOpcodeBytes: DisassemblyOpcodeBytes;
 
 	private breakpointsManager = new BreakpointsManager();
 	private instructionBreakpointsManager = new InstructionBreakpointsManager();
@@ -358,9 +381,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private cachedCoreContextId: string | undefined;
 	private cachedCoreContextKey: number | undefined | null = null; // null = not yet cached
 
-	constructor(enablePathMapper: boolean) {
+	constructor(enablePathMapper: boolean, disassemblyOpcodeBytes: DisassemblyOpcodeBytes = 'left') {
 		super();
 		this.enabledPathMapper = enablePathMapper;
+		this.disassemblyOpcodeBytes = disassemblyOpcodeBytes;
 		this.tcfLogger = new DebugLogger(this);
 
 		const outer = this;
@@ -1407,6 +1431,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
 		this.beginResetTransition();
 		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, this.launchArgs)]);
+		this.elfFunctionSymbols = undefined;
 		// A rebuilt ELF has a new modification time: MemoryMap.set makes the server reload its symbols.
 		if (this.launchArgs) {
 			await this.initMemoryMap(this.launchArgs);
@@ -1787,18 +1812,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 			};
 
-			let list = Array.isArray(lines) ? lines : [];
-			let instructions = list.map((l: any) => {
-				const addr = typeof l?.Address === 'number' ? l.Address : startAddress;
+			const toInstruction = (l: any, fallbackAddr: number): DebugProtocol.DisassembledInstruction => {
+				const addr = typeof l?.Address === 'number' ? l.Address : fallbackAddr;
 				const parts = Array.isArray(l?.Instruction) ? l.Instruction : [];
 				const text = parts.map((p: any) => (p?.Text ? String(p.Text) : '')).join('');
-				const bytes = toHexBytes(l?.OpcodeValue);
 				return {
 					address: `0x${addr.toString(16)}`,
-					instruction: text || '',
-					instructionBytes: bytes,
+					instruction: this.formatDisassemblyText(text, toHexBytes(l?.OpcodeValue)),
 				};
-			});
+			};
+
+			let list = Array.isArray(lines) ? lines : [];
+			let instructions = list.map((l: any) => toInstruction(l, startAddress));
 
 			// Align the returned window to match instructionOffset semantics.
 			let baseIndex = instructions.findIndex((i) => parseAddr(i.address) === alignedBaseAddress);
@@ -1806,17 +1831,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				// Retry disassembly anchored at the aligned base address.
 				lines = await disassembleAt(alignedBaseAddress);
 				list = Array.isArray(lines) ? lines : [];
-				instructions = list.map((l: any) => {
-					const addr = typeof l?.Address === 'number' ? l.Address : alignedBaseAddress;
-					const parts = Array.isArray(l?.Instruction) ? l.Instruction : [];
-					const text = parts.map((p: any) => (p?.Text ? String(p.Text) : '')).join('');
-					const bytes = toHexBytes(l?.OpcodeValue);
-					return {
-						address: `0x${addr.toString(16)}`,
-						instruction: text || '',
-						instructionBytes: bytes,
-					};
-				});
+				instructions = list.map((l: any) => toInstruction(l, alignedBaseAddress));
 				baseIndex = instructions.findIndex((i) => parseAddr(i.address) === alignedBaseAddress);
 			}
 			let startIndex = 0;
@@ -1834,6 +1849,25 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		} catch (e) {
 			this.sendErrorResponse(response, 0, 'Disassemble error {message}', { message: String(e) });
 		}
+	}
+
+	/**
+	 * Puts the opcode bytes into the instruction text instead of `instructionBytes`: VS Code pads that
+	 * column to 30 characters, while a TriCore instruction has at most 4 bytes ("xx xx xx xx").
+	 */
+	private formatDisassemblyText(text: string, bytes: string | undefined): string {
+		if (!bytes || this.disassemblyOpcodeBytes === 'hidden') {
+			return text;
+		}
+		if (this.disassemblyOpcodeBytes === 'right') {
+			// Expand tabs so the padding lines the bytes up in a column.
+			let expanded = '';
+			for (const ch of text) {
+				expanded = ch === '\t' ? expanded.padEnd((Math.floor(expanded.length / 8) + 1) * 8) : expanded + ch;
+			}
+			return `${expanded.padEnd(DISASSEMBLY_INSTRUCTION_WIDTH)}${DISASSEMBLY_COLUMN_GAP}${bytes}`;
+		}
+		return `${bytes.padEnd(DISASSEMBLY_BYTES_WIDTH)}${DISASSEMBLY_COLUMN_GAP}${text}`;
 	}
 
 	/**
@@ -2142,6 +2176,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 			const sf = new StackFrame(frameId, frame.context.Name || frame.context.ID);
 			(sf as any).instructionPointerReference = ipRef;
+			frames.push(sf);
+		}
+
+		const jump = this.disassemblyJumpTarget;
+		if (jump && stack.length > 0) {
+			// Shares the top frame's context so Locals and watches keep working while it is focused.
+			const frameId = this.createNextStackFrameId(args.threadId, stack[0].context);
+			this.rememberFrameMeta(frameId, args.threadId, contextId, stack[0].context?.ID);
+			const sf = new StackFrame(frameId, `[Disassembly] ${jump.label}`);
+			(sf as any).instructionPointerReference = `0x${jump.address.toString(16)}`;
 			frames.push(sf);
 		}
 
@@ -2627,6 +2671,69 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.sendResponse(response);
 	}
 
+	/** Resolves "0x80001234", "2147487796", "symbol" or "symbol+0x10" to an address in the program code. */
+	private async resolveDisassemblyTarget(ctx: string, text: string): Promise<{ address: number; label: string }> {
+		const parseNumber = (s: string): number | undefined => {
+			const t = s.trim().replace(/[uU]?[lL]*$/, '');
+			if (/^0x[0-9a-f]+$/i.test(t)) {
+				return Number.parseInt(t.substring(2), 16);
+			}
+			return /^[0-9]+$/.test(t) ? Number.parseInt(t, 10) : undefined;
+		};
+		const input = text.trim();
+		if (input === '') {
+			throw new Error('no address or symbol given');
+		}
+
+		let address = parseNumber(input);
+		let label: string | undefined;
+		if (address === undefined) {
+			const m = /^&?\s*([A-Za-z_$.][\w$.]*)\s*(?:([+-])\s*(\S+))?$/.exec(input);
+			const offset = m?.[3] !== undefined ? parseNumber(m[3]) : 0;
+			if (!m || offset === undefined) {
+				throw new Error(`"${input}" is neither an address nor a symbol`);
+			}
+			let base = this.getElfFunctionSymbols().find(s => s.name === m[1])?.address;
+			const ids = base === undefined
+				? await this.tcfClient.sendCommand(new FindByNameSymbolsCommand(ctx, 0, m[1])).catch(() => [] as string[])
+				: [];
+			for (const id of ids) {
+				const sym = await this.tcfClient.sendCommand(new GetContextSymbolsCommand(id)).catch(() => undefined);
+				if (typeof sym?.Address === 'number') {
+					base = sym.Address;
+					break;
+				}
+			}
+			if (base === undefined) {
+				throw new Error(`symbol "${m[1]}" not found`);
+			}
+			address = m[2] === '-' ? base - offset : base + offset;
+			label = offset ? `${m[1]}${m[2]}0x${offset.toString(16)}` : m[1];
+		}
+
+		// TriCore instructions start on even addresses.
+		address -= address % 2;
+		if (this.execRanges.length > 0 && !this.findExecutableRangeForAddress(address)) {
+			throw new Error(`0x${address.toString(16)} is not in an executable section of the program`);
+		}
+		label ??= await this.symbolLabelForAddress(ctx, address);
+		return { address, label: `0x${address.toString(16)}${label ? ` <${label}>` : ''}` };
+	}
+
+	private async symbolLabelForAddress(ctx: string, address: number): Promise<string | undefined> {
+		try {
+			const id = await this.tcfClient.sendCommand(new FindByAddrSymbolsCommand(ctx, address));
+			const sym = await this.tcfClient.sendCommand(new GetContextSymbolsCommand(id));
+			if (!sym?.Name) {
+				return undefined;
+			}
+			const offset = typeof sym.Address === 'number' ? address - sym.Address : 0;
+			return offset > 0 ? `${sym.Name}+0x${offset.toString(16)}` : sym.Name;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private findExecutableRangeForAddress(addr: number): { start: number; end: number } | undefined {
 		if (this.execRanges.length === 0) {
 			return undefined;
@@ -2637,6 +2744,72 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 		}
 		return undefined;
+	}
+
+	private getElfFunctionSymbols(): Array<{ name: string; address: number }> {
+		if (!this.elfFunctionSymbols) {
+			try {
+				this.elfFunctionSymbols = this.programPath ? this.loadFunctionSymbolsFromElf(this.programPath) : [];
+			} catch (e) {
+				this.tcfLogger.error(`Failed to read ELF symbols: ${String(e)}`);
+				this.elfFunctionSymbols = [];
+			}
+		}
+		return this.elfFunctionSymbols;
+	}
+
+	/** Reads the function symbols (STT_FUNC) from the ELF .symtab, sorted by name. */
+	private loadFunctionSymbolsFromElf(elfPath: string): Array<{ name: string; address: number }> {
+		const buf = fs.readFileSync(elfPath);
+		if (buf.length < 0x40 || !(buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46)) {
+			throw new Error('Not an ELF file');
+		}
+		const is32 = buf[4] === 1;
+		const little = buf[5] === 1;
+		const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+		const readU16 = (off: number) => view.getUint16(off, little);
+		const readU32 = (off: number) => view.getUint32(off, little);
+		const readAddr = (off: number) => (is32 ? readU32(off) : Number(view.getBigUint64(off, little)));
+
+		const shoff = readAddr(is32 ? 32 : 40);
+		const shentsize = readU16(is32 ? 46 : 58);
+		const shnum = readU16(is32 ? 48 : 60);
+		const section = (i: number) => {
+			const off = shoff + i * shentsize;
+			return {
+				type: readU32(off + 4),
+				offset: readAddr(is32 ? off + 16 : off + 24),
+				size: readAddr(is32 ? off + 20 : off + 32),
+				link: readU32(is32 ? off + 24 : off + 40),
+				entsize: readAddr(is32 ? off + 36 : off + 56),
+			};
+		};
+
+		const byName = new Map<string, number>();
+		for (let i = 0; i < shnum && shoff + (i + 1) * shentsize <= buf.length; i++) {
+			const symtab = section(i);
+			if (symtab.type !== 2 /* SHT_SYMTAB */ || symtab.entsize <= 0 || symtab.link >= shnum) {
+				continue;
+			}
+			const strtab = section(symtab.link);
+			const count = Math.floor(Math.min(symtab.size, buf.length - symtab.offset) / symtab.entsize);
+			for (let n = 0; n < count; n++) {
+				const off = symtab.offset + n * symtab.entsize;
+				const nameOff = readU32(off);
+				const info = is32 ? buf[off + 12] : buf[off + 4];
+				const value = is32 ? readU32(off + 4) : Number(view.getBigUint64(off + 8, little));
+				if ((info & 0xf) !== 2 /* STT_FUNC */ || nameOff === 0 || value === 0) {
+					continue;
+				}
+				const start = strtab.offset + nameOff;
+				const end = buf.indexOf(0, start);
+				const name = buf.toString('utf8', start, end < 0 ? buf.length : end);
+				if (name && !byName.has(name)) {
+					byName.set(name, value);
+				}
+			}
+		}
+		return Array.from(byName, ([name, address]) => ({ name, address })).sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	private loadExecutableRangesFromElf(elfPath: string): Array<{ start: number; end: number }> {
@@ -3168,6 +3341,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.suspendedContextIds.delete(contextId);
 		const threadId = this.getOrAssignThreadId(contextId);
 		this.onThreadResumed(threadId);
+		this.disassemblyJumpTarget = undefined;
 		// Important for multi-core: do NOT let VS Code assume all threads continued.
 		this.sendEvent(new ContinuedEvent(threadId, false));
 		if (this.startupDiagnosticsEnabled) {
@@ -3183,6 +3357,37 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (command === 'aurix-tcf/activeThread') {
 			this.activeThreadId = typeof args?.threadId === 'number' ? args.threadId : undefined;
 			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix-tcf/setDisassemblyOptions') {
+			if (isDisassemblyOpcodeBytes(args?.opcodeBytes)) {
+				this.disassemblyOpcodeBytes = args.opcodeBytes;
+			}
+			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix-tcf/disassemblySymbols') {
+			response.body = { symbols: this.getElfFunctionSymbols().map(s => ({ name: s.name, address: `0x${s.address.toString(16)}` })) };
+			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix-tcf/disassemblyGoTo') {
+			try {
+				const ctx = await this.pickAnySuspendedContextId();
+				if (!ctx) {
+					throw new Error('the target is running; halt it first');
+				}
+				const target = await this.resolveDisassemblyTarget(ctx, String(args?.target ?? ''));
+				this.disassemblyJumpTarget = target;
+				this.sendEvent(new InvalidatedEvent(['stacks']));
+				response.body = { address: `0x${target.address.toString(16)}`, label: target.label };
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
 			return;
 		}
 

@@ -141,6 +141,12 @@
         }
       },
       {
+        "command": "aurix-tcf.disassemblyGoTo",
+        "title": "Go to Address or Symbol in Disassembly",
+        "category": "AURIX™ TCF",
+        "icon": "$(search)"
+      },
+      {
         "command": "aurix-tcf.toggleLiveWatch",
         "title": "Toggle Live Watch",
         "category": "AURIX™ TCF"
@@ -220,7 +226,18 @@
           "group": "navigation"
         }
       ],
+      "editor/title": [
+        {
+          "command": "aurix-tcf.disassemblyGoTo",
+          "when": "debugType == aurix-tcf && debugState == stopped && activeEditor == workbench.debug.disassemblyView",
+          "group": "navigation"
+        }
+      ],
       "commandPalette": [
+        {
+          "command": "aurix-tcf.disassemblyGoTo",
+          "when": "debugType == aurix-tcf && debugState == stopped"
+        },
         {
           "command": "aurix-tcf.showActions",
           "when": "debugType == aurix-tcf"
@@ -265,6 +282,13 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "aurix-tcf.disassemblyGoTo",
+        "key": "ctrl+g",
+        "when": "debugType == aurix-tcf && debugState == stopped && disassemblyViewFocus"
+      }
+    ],
     "configuration": {
       "title": "AURIX™ TCF Debugger",
       "properties": {
@@ -286,6 +310,21 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically open the VS Code Disassembly view when an AURIX TCF debug session starts."
+        },
+        "aurix-tcf.disassembly.opcodeBytes": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "hidden"
+          ],
+          "enumDescriptions": [
+            "Show the opcode bytes between the address and the instruction.",
+            "Show the opcode bytes after the instruction.",
+            "Do not show the opcode bytes."
+          ],
+          "default": "left",
+          "description": "Where the Disassembly view shows the opcode bytes of each instruction. Applies to instructions loaded after the change (after the next stop)."
         },
         "aurix-tcf.autoLockDisassemblyView": {
           "type": "boolean",

@@ -142,6 +142,10 @@ Instruction breakpoints can be set in the same way as in the source code.
 
 If the disassembly view is closed, use the Command Palette and run `Open Disassembly View` to open the view
 
+The setting `aurix-tcf.disassembly.opcodeBytes` places the opcode bytes of each instruction `left` (between address and instruction, default), `right` (after the instruction) or `hidden`. A change applies to instructions loaded after the next stop.
+
+To show any other code location while the target is halted, click the search icon in the disassembly view's title bar (or press `Ctrl+G` in the view) and pick a function or enter an address (`0x80001234`) or `symbol+offset`. VS Code's disassembly view can only follow the selected stack frame, so the target appears as a `[Disassembly] ...` frame at the bottom of the call stack; it disappears when the target resumes.
+
 ### PPU / CDSP Cores
 
 In addition to the TriCore cores, the debugger supports the cores: **PPU** and **CDSP**. Open `AURIX™ TCF: Open Debug Configuration` and switch to the **PPU/CDSP/SCR Cores** tab to assign an ELF file to each core:
@@ -180,8 +184,9 @@ With `agentFlavor` `aurix-dbg`, the launch configuration can define custom Tcl c
       {
         "id": "eraseDflash",
         "label": "Erase DFlash",
-        "tcl": ["<tcl command 1>", "<tcl command 2>"],
-        "confirm": "Erase the complete DFlash?"
+        "tcl": ["reset init", "flash erase_sector dfls0 0 last"],
+        "confirm": "Erase the complete DFlash?",
+        "resetAfter": true
       }
     ]
   },

@@ -10,7 +10,7 @@ import * as path from 'path';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { AurixTCFDebugSession } from './debugProvider';
+import { AurixTCFDebugSession, DisassemblyOpcodeBytes, isDisassemblyOpcodeBytes } from './debugProvider';
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { createGunzip } from 'zlib';
@@ -32,6 +32,7 @@ let lastAgentPort: number | undefined;
 let enforcingMemoryInspectorSettings = false;
 const memoryInspectorExtensionId = 'eclipse-cdt.memory-inspector';
 const openedDisassemblySessions = new Set<string>();
+const aurixDebugSessions = new Set<vscode.DebugSession>();
 let resolvedDisassemblyOpenCommand: string | undefined;
 let instructionStepStatusItem: vscode.StatusBarItem | undefined;
 const instructionStepStateKey = 'aurix-tcf.instructionSteppingEnabled';
@@ -72,6 +73,12 @@ export function activate(context: vscode.ExtensionContext) {
 				event.affectsConfiguration('memory-inspector.periodicRefreshInterval')
 			) {
 				void ensureMemoryInspectorSettings();
+			}
+			if (event.affectsConfiguration('aurix-tcf.disassembly.opcodeBytes')) {
+				const opcodeBytes = getDisassemblyOpcodeBytes();
+				for (const s of aurixDebugSessions) {
+					void Promise.resolve(s.customRequest('aurix-tcf/setDisassemblyOptions', { opcodeBytes })).catch(() => undefined);
+				}
 			}
 		})
 	);
@@ -189,6 +196,21 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('aurix-tcf.toggleInstructionStepping', async () => {
 			const enabled = !(await getInstructionSteppingEnabled());
 			await setInstructionSteppingMode(enabled);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-tcf.disassemblyGoTo', async (target?: string) => {
+			const s = vscode.debug.activeDebugSession;
+			if (!s || s.type !== 'aurix-tcf') {
+				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+				return;
+			}
+			const picked = typeof target === 'string' ? target : await pickDisassemblyTarget(s);
+			if (!picked) {
+				return;
+			}
+			await goToDisassemblyTarget(s, picked);
 		})
 	);
 
@@ -327,6 +349,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.debug.onDidStartDebugSession((session: vscode.DebugSession) => {
 			if (session.type === 'aurix-tcf') {
 				activeAurixSessions++;
+				aurixDebugSessions.add(session);
 				if (pendingStopTimer) {
 					clearTimeout(pendingStopTimer);
 					pendingStopTimer = undefined;
@@ -364,22 +387,20 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!isStackFrame) {
 				return;
 			}
-			if (!openedDisassemblySessions.has(session.id)) {
-				if (!pendingDisassemblyOpenTimers.has(session.id)) {
-					const timer = setTimeout(() => {
-						pendingDisassemblyOpenTimers.delete(session.id);
-						const activeSession = vscode.debug.activeDebugSession;
-						const alive = !!activeSession && activeSession.id === session.id && activeSession.type === 'aurix-tcf';
-						if (!alive || openedDisassemblySessions.has(session.id)) {
-							return;
-						}
-						openedDisassemblySessions.add(session.id);
-						void openDisassemblyEditorLayout(session);
-					}, DISASSEMBLY_OPEN_DELAY_MS);
-					pendingDisassemblyOpenTimers.set(session.id, timer);
-				}
+			// Open the disassembly layout once the source of the first focused frame is shown, so it
+			// lands next to the source editor. The timer is only a fallback for frames without source.
+			if (!openedDisassemblySessions.has(session.id) && !pendingDisassemblyOpenTimers.has(session.id)) {
+				const timer = setTimeout(() => {
+					pendingDisassemblyOpenTimers.delete(session.id);
+					openDisassemblyLayoutOnce(session);
+				}, DISASSEMBLY_OPEN_DELAY_MS);
+				pendingDisassemblyOpenTimers.set(session.id, timer);
 			}
-			void autoRevealSourceForStackItem(item as vscode.DebugStackFrame);
+			void autoRevealSourceForStackItem(item as vscode.DebugStackFrame).then((shown) => {
+				if (shown) {
+					openDisassemblyLayoutOnce(session);
+				}
+			});
 		})
 	);
 	context.subscriptions.push(
@@ -411,7 +432,8 @@ export function activate(context: vscode.ExtensionContext) {
 				pendingDisassemblyOpenTimers.delete(session.id);
 			}
 			openedDisassemblySessions.delete(session.id);
-			activeAurixSessions = Math.max(0, activeAurixSessions - 1);
+			aurixDebugSessions.delete(session);
+			activeAurixSessions =Math.max(0, activeAurixSessions - 1);
 			if (activeAurixSessions === 0) {
 				updateInstructionSteppingStatus(lastInstructionSteppingEnabled, false);
 				updateLiveWatchStatus(lastLiveWatchEnabled, lastLiveWatchIntervalMs, false);
@@ -644,7 +666,7 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 
 		const enablePathMapper = vscode.workspace.isTrusted && pathMapperConfig === true;
 		
-		return new vscode.DebugAdapterInlineImplementation(new AurixTCFDebugSession(enablePathMapper));
+		return new vscode.DebugAdapterInlineImplementation(new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes()));
 		} finally {
 			startingAurixSessions = Math.max(0, startingAurixSessions - 1);
 		}
@@ -1525,6 +1547,21 @@ async function ensureMemoryInspectorSettings(): Promise<void> {
 	}
 }
 
+function openDisassemblyLayoutOnce(session: vscode.DebugSession): void {
+	const pending = pendingDisassemblyOpenTimers.get(session.id);
+	if (pending) {
+		clearTimeout(pending);
+		pendingDisassemblyOpenTimers.delete(session.id);
+	}
+	const activeSession = vscode.debug.activeDebugSession;
+	const alive = !!activeSession && activeSession.id === session.id && activeSession.type === 'aurix-tcf';
+	if (!alive || openedDisassemblySessions.has(session.id)) {
+		return;
+	}
+	openedDisassemblySessions.add(session.id);
+	void openDisassemblyEditorLayout(session);
+}
+
 async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promise<void> {
 	if (session.type !== 'aurix-tcf') {
 		return;
@@ -1540,12 +1577,10 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 	// Preserve the current editor focus so we can return the user to source.
 	const startEditor = vscode.window.activeTextEditor;
 	const startViewColumn = startEditor?.viewColumn;
+	const startIsPreview = startEditor ? isPreviewTab(startEditor.document.uri, startViewColumn) : false;
 	if (startViewColumn !== undefined) {
 		preferredSourceViewColumn = startViewColumn;
 	}
-
-	// Give VS Code a moment to settle the debug UI before opening the view.
-	await new Promise((resolve) => setTimeout(resolve, 150));
 
 	try {
 		const cmd = await resolveDisassemblyOpenCommand();
@@ -1588,13 +1623,106 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 		try {
 			await vscode.window.showTextDocument(startEditor.document, {
 				viewColumn: startViewColumn,
-				preview: false,
+				// Keep a preview tab (opened by the stop reveal) in preview mode instead of pinning it.
+				preview: startIsPreview,
 				preserveFocus: false
 			});
 		} catch (e) {
 			agentOutput?.appendLine(`Failed to restore source editor focus: ${String(e)}`);
 		}
 	}
+}
+
+/** Quick pick listing the program's functions; any other text is sent as an address or symbol. */
+async function pickDisassemblyTarget(session: vscode.DebugSession): Promise<string | undefined> {
+	const qp = vscode.window.createQuickPick<vscode.QuickPickItem>();
+	qp.title = 'Disassembly: Go to Address or Symbol';
+	qp.placeholder = 'Address (0x80001234) or symbol (main, main+0x10)';
+	qp.matchOnDescription = true;
+	qp.busy = true;
+	let symbolItems: vscode.QuickPickItem[] = [];
+	const update = () => {
+		const text = qp.value.trim();
+		const exact = symbolItems.some((i) => i.label === text);
+		// alwaysShow keeps the typed entry visible although it does not match any symbol.
+		qp.items = text && !exact
+			? [{ label: text, description: 'Go to address or symbol', alwaysShow: true }, ...symbolItems]
+			: symbolItems;
+	};
+	void Promise.resolve(session.customRequest('aurix-tcf/disassemblySymbols'))
+		.then((r) => {
+			const symbols: Array<{ name: string; address: string }> = Array.isArray(r?.symbols) ? r.symbols : [];
+			symbolItems = symbols.map((sym) => ({ label: sym.name, description: sym.address }));
+		})
+		.catch(() => undefined)
+		.finally(() => {
+			qp.busy = false;
+			update();
+		});
+	return new Promise((resolve) => {
+		qp.onDidChangeValue(update);
+		qp.onDidAccept(() => {
+			resolve(qp.selectedItems[0]?.label ?? (qp.value.trim() || undefined));
+			qp.hide();
+		});
+		qp.onDidHide(() => {
+			resolve(undefined);
+			qp.dispose();
+		});
+		qp.show();
+	});
+}
+
+/**
+ * VS Code's Disassembly view has no API to show an address; it follows the focused stack frame.
+ * The adapter adds a frame for the target at the bottom of the call stack, which is focused here.
+ */
+async function goToDisassemblyTarget(session: vscode.DebugSession, target: string): Promise<void> {
+	// Refreshing the call stacks refocuses the top frame; wait for that before focusing the target frame.
+	let settle: () => void = () => undefined;
+	const settled = new Promise<void>((resolve) => { settle = resolve; });
+	let quietTimer: NodeJS.Timeout | undefined;
+	const maxTimer = setTimeout(() => settle(), 2000);
+	const listener = vscode.debug.onDidChangeActiveStackItem(() => {
+		if (quietTimer) {
+			clearTimeout(quietTimer);
+		}
+		quietTimer = setTimeout(() => settle(), 200);
+	});
+	try {
+		const result = await session.customRequest('aurix-tcf/disassemblyGoTo', { target });
+		await settled;
+		await vscode.commands.executeCommand('workbench.action.debug.callStackBottom');
+		const cmd = await resolveDisassemblyOpenCommand();
+		if (cmd) {
+			await vscode.commands.executeCommand(cmd);
+		}
+		vscode.window.setStatusBarMessage(`Disassembly: ${String(result?.label ?? target)}`, 5000);
+	} catch (e) {
+		void vscode.window.showErrorMessage(`Go to address or symbol: ${e instanceof Error ? e.message : String(e)}`);
+	} finally {
+		listener.dispose();
+		clearTimeout(maxTimer);
+		if (quietTimer) {
+			clearTimeout(quietTimer);
+		}
+	}
+}
+
+function isPreviewTab(uri: vscode.Uri, viewColumn: vscode.ViewColumn | undefined): boolean {
+	const norm = normalizePathForCompare(uri.fsPath);
+	for (const group of vscode.window.tabGroups.all) {
+		if (viewColumn !== undefined && group.viewColumn !== viewColumn) {
+			continue;
+		}
+		for (const tab of group.tabs) {
+			const input = tab.input;
+			if (input instanceof vscode.TabInputText && normalizePathForCompare(input.uri.fsPath) === norm) {
+				return tab.isPreview;
+			}
+		}
+	}
+	return false;
 }
 
 async function resolveDisassemblyOpenCommand(): Promise<string | undefined> {
@@ -1631,6 +1759,11 @@ async function getInstructionSteppingEnabled(): Promise<boolean> {
 	}
 	const cfg = vscode.workspace.getConfiguration('aurix-tcf');
 	return cfg.get<boolean>('instructionSteppingDefault', false);
+}
+
+function getDisassemblyOpcodeBytes(): DisassemblyOpcodeBytes {
+	const value = vscode.workspace.getConfiguration('aurix-tcf').get('disassembly.opcodeBytes');
+	return isDisassemblyOpcodeBytes(value) ? value : 'left';
 }
 
 function normalizeLiveWatchIntervalMs(value: unknown): number {
@@ -1763,11 +1896,12 @@ async function syncLiveWatchOnSessionStart(session: vscode.DebugSession): Promis
 	await setLiveWatchMode(enabled, intervalMs, session);
 }
 
-async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promise<void> {
+/** Returns true when the frame's source location is shown in an editor. */
+async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promise<boolean> {
 	const frame = item as any;
 	const source = frame?.source as { path?: string } | undefined;
 	if (!source || !source.path) {
-		return;
+		return false;
 	}
 	let srcPath = source.path;
 	// Normalize path separators for the current OS.
@@ -1788,16 +1922,17 @@ async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promi
 	}
 	// Ignore disassembly or non-file sources we still couldn't resolve.
 	if (!(path.isAbsolute(srcPath) || /^[a-zA-Z]:[\\/]/.test(srcPath))) {
-		return;
+		return false;
 	}
 	if (!fs.existsSync(srcPath)) {
-		return;
+		return false;
 	}
 	const line = typeof frame.line === 'number' && frame.line > 0 ? frame.line : 1;
-	await autoRevealSourcePath(srcPath, line);
+	return autoRevealSourcePath(srcPath, line);
 }
 
-async function autoRevealSourcePath(srcPath: string, line: number): Promise<void> {
+/** Returns true when the location is shown in an editor. */
+async function autoRevealSourcePath(srcPath: string, line: number): Promise<boolean> {
 	const norm = normalizePathForCompare(srcPath);
 	// Skip only while the active editor still shows this location (the same stop is revealed by both
 	// the focused stack frame and the adapter's sourceLocation event). A later stop at the same line
@@ -1811,7 +1946,7 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<void
 		active.selection.active.line === line - 1
 	) {
 		focusFileLog(vscode.debug.activeDebugSession, `reveal skipped (already shown) ${srcPath}:${line}`);
-		return;
+		return true;
 	}
 	try {
 		const visible = vscode.window.visibleTextEditors.find((ed) => {
@@ -1823,7 +1958,7 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<void
 		if (visible) {
 			editor = await vscode.window.showTextDocument(visible.document, {
 				viewColumn: visible.viewColumn,
-				preview: false,
+				preview: isPreviewTab(visible.document.uri, visible.viewColumn),
 				preserveFocus: false
 			});
 		} else {
@@ -1844,8 +1979,10 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<void
 		lastAutoSourcePath = srcPath;
 		lastAutoSourceLine = line;
 		focusFileLog(vscode.debug.activeDebugSession, `revealed ${srcPath}:${line}`);
+		return true;
 	} catch (e) {
 		agentOutput?.appendLine(`Failed to auto-open source file: ${String(e)}`);
+		return false;
 	}
 }
 

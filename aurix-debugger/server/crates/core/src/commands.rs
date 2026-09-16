@@ -636,19 +636,19 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
         Some("write_image") => {
             require_init(cx, "flash")?;
             let mut args: Vec<&str> = a[2..].to_vec();
-            let (mut erase, mut incremental) = (false, false);
+            let (mut erase, mut incremental, mut unlock) = (false, false, false);
             while let Some(flag) = args.first().copied() {
                 match flag {
                     "erase" => erase = true,
                     "incremental" => incremental = true,
-                    "unlock" => {}
+                    "unlock" => unlock = true,
                     _ => break,
                 }
                 args.remove(0);
             }
             let img = load_image(&args, "flash write_image [erase] [incremental] [unlock] <file> [offset [type]]")?;
-            let stats = flash::write_image_with(cx, &img, erase, incremental).map_err(e2s)?;
-            Ok(format!("wrote {} bytes from file {}: {stats}", img.size(), args[0]))
+            let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
+            Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped, args[0]))
         }
         Some("verify_image") => cmd_verify_image(cx, &a[1..]),
         Some(other) => Err(format!("flash {other}: not supported by aurix-dbg")),

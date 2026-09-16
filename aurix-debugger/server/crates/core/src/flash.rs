@@ -19,7 +19,7 @@ use crate::adapter::{check, Io};
 use crate::error::{other, usage, Error, Result};
 use crate::image::Image;
 use crate::target::TargetState;
-use crate::{log_info, ops, Cx};
+use crate::{log_info, log_warn, ops, Cx};
 
 #[derive(Clone, Debug)]
 pub struct FlashBank {
@@ -357,6 +357,8 @@ pub struct WriteStats {
     pub unchanged: usize,
     pub erased: usize,
     pub bytes: usize,
+    /// Bytes of UCB data in the image that were not written.
+    pub ucb_skipped: usize,
     pub elapsed: Duration,
 }
 
@@ -371,21 +373,46 @@ impl std::fmt::Display for WriteStats {
             self.erased,
             self.bytes,
             self.elapsed.as_secs_f64()
-        )
+        )?;
+        if self.ucb_skipped > 0 {
+            write!(f, ", {} bytes of UCB data skipped", self.ucb_skipped)?;
+        }
+        Ok(())
     }
+}
+
+/// TC3xx UCB area (0xAF400000, 24 KB).
+const UCB_START: u32 = 0xAF40_0000;
+const UCB_END: u64 = 0xAF40_6000;
+
+/// The image without its UCB data, and the number of bytes removed. UCBs are never written:
+/// a wrong UCB can lock the device permanently. Without `unlock` the UCB data is skipped with a
+/// warning, so a post-build HEX with UCB records still flashes; with `unlock` it is an error,
+/// because UCB flashing is not implemented.
+pub fn skip_ucbs(img: &Image, unlock: bool, what: &str) -> Result<(Image, usize)> {
+    let (rest, n) = img.without(UCB_START, UCB_END);
+    if n > 0 {
+        if unlock {
+            return Err(other(format!("image has {n} bytes of UCB data (0x{UCB_START:08x}..0x{UCB_END:08x}): UCB flashing is not supported")));
+        }
+        log_warn!("{what}: skipping {n} bytes of UCB data (0x{UCB_START:08x}..0x{UCB_END:08x}), UCB flashing is not unlocked");
+    }
+    Ok((rest, n))
 }
 
 /// Programs the image into the flash banks (`flash write_image`): erased sectors are
 /// programmed, other touched sectors are erased first (an error without `erase`).
 pub fn write_image(cx: &Cx, img: &Image, erase: bool) -> Result<WriteStats> {
-    write_image_with(cx, img, erase, false)
+    write_image_with(cx, img, erase, false, false)
 }
 
 /// Like [`write_image`]; with `incremental`, programmed sectors whose image pages already
 /// hold the image data are skipped. That reads the image pages, which is only safe when
 /// they are programmed: reading erased PFLASH raises an ECC error that the application's
-/// SMU configuration may turn into a reset (seen on the TC377 board).
-pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool) -> Result<WriteStats> {
+/// SMU configuration may turn into a reset (seen on the TC377 board). `unlock`: see [`skip_ucbs`].
+pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, unlock: bool) -> Result<WriteStats> {
+    let (img, ucb_skipped) = skip_ucbs(img, unlock, "flash write_image")?;
+    let img = &img;
     let banks = cx.with(|c| c.flash_banks.clone());
     for s in &img.sections {
         if !banks.iter().any(|b| b.contains(s.addr, s.end())) {
@@ -394,7 +421,7 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool) ->
     }
     halt_all(cx)?;
     let t0 = Instant::now();
-    let mut stats = WriteStats::default();
+    let mut stats = WriteStats { ucb_skipped, ..Default::default() };
     for bank in &banks {
         let hi = bank.base as u64 + bank.size as u64;
         if !img.touches(bank.base, hi) {
@@ -444,8 +471,11 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool) ->
 }
 
 /// Compares the image with target memory (`verify_image`). Returns the number
-/// of bytes compared, or the first difference as an error.
+/// of bytes compared, or the first difference as an error. UCB data is not compared,
+/// since write_image does not write it.
 pub fn verify_image(cx: &Cx, img: &Image) -> Result<usize> {
+    let (img, _) = skip_ucbs(img, false, "verify_image")?;
+    let img = &img;
     let mut total = 0;
     let mut diffs = 0usize;
     let mut first: Option<(u32, u8, u8)> = None;

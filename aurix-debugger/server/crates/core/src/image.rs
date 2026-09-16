@@ -157,6 +157,21 @@ impl Image {
     pub fn touches(&self, start: u32, end: u64) -> bool {
         self.sections.iter().any(|s| (s.addr as u64) < end && s.end() > start as u64)
     }
+
+    /// The image without its data in `[start, end)`, and the number of bytes removed.
+    pub fn without(&self, start: u32, end: u64) -> (Image, usize) {
+        let mut kept = Vec::new();
+        let mut removed = 0;
+        for s in &self.sections {
+            let cut_lo = (start as u64).clamp(s.addr as u64, s.end());
+            let cut_hi = end.clamp(cut_lo, s.end());
+            let (lo, hi) = ((cut_lo - s.addr as u64) as usize, (cut_hi - s.addr as u64) as usize);
+            removed += hi - lo;
+            kept.push(Section { addr: s.addr, data: s.data[..lo].to_vec() });
+            kept.push(Section { addr: cut_hi as u32, data: s.data[hi..].to_vec() });
+        }
+        (Image::from_sections(kept), removed)
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +190,16 @@ mod tests {
         assert_eq!(img.byte_at(0x11), Some(4));
         assert_eq!(img.byte_at(0x12), None);
         assert!(img.touches(0x1F, 0x21) && !img.touches(0x12, 0x20));
+    }
+
+    #[test]
+    fn removes_range() {
+        let img = Image::from_sections(vec![Section { addr: 0x10, data: vec![1, 2, 3, 4] }, Section { addr: 0x20, data: vec![5, 6] }]);
+        let (cut, n) = img.without(0x11, 0x21);
+        assert_eq!(n, 4);
+        assert_eq!(cut.sections, vec![Section { addr: 0x10, data: vec![1] }, Section { addr: 0x21, data: vec![6] }]);
+        assert_eq!(img.without(0x30, 0x40), (img.clone(), 0));
+        assert_eq!(img.without(0, 0x100).0.sections, vec![]);
     }
 
     #[test]

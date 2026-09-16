@@ -278,7 +278,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-tcf.liveWatchAddExpression', async () => {
-			await liveWatchProvider?.addExpression();
+			await liveWatchProvider?.addExpression(await pickLiveWatchExpression());
 		})
 	);
 
@@ -291,6 +291,21 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-tcf.liveWatchSetValue', async (item?: { expression?: string }) => {
 			await liveWatchProvider?.setValue(item as any);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-tcf.liveWatchPauseExpression', async (item?: unknown) => {
+			await liveWatchProvider?.setExpressionPaused(item as any, true);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchResumeExpression', async (item?: unknown) => {
+			await liveWatchProvider?.setExpressionPaused(item as any, false);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchDisableRefresh', async () => {
+			await setLiveWatchMode(false);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchEnableRefresh', async () => {
+			await setLiveWatchMode(true);
 		})
 	);
 
@@ -387,6 +402,8 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!isStackFrame) {
 				return;
 			}
+			// Show the values at the stop, also when the periodic refresh is off.
+			void liveWatchProvider?.refreshNow();
 			// Open the disassembly layout once the source of the first focused frame is shown, so it
 			// lands next to the source editor. The timer is only a fallback for frames without source.
 			if (!openedDisassemblySessions.has(session.id) && !pendingDisassemblyOpenTimers.has(session.id)) {
@@ -1634,31 +1651,67 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 }
 
 /** Quick pick listing the program's functions; any other text is sent as an address or symbol. */
-async function pickDisassemblyTarget(session: vscode.DebugSession): Promise<string | undefined> {
+function pickDisassemblyTarget(session: vscode.DebugSession): Promise<string | undefined> {
+	return pickSymbolOrText({
+		title: 'Disassembly: Go to Address or Symbol',
+		placeholder: 'Address (0x80001234) or symbol (main, main+0x10)',
+		typedDescription: 'Go to address or symbol',
+		session,
+		symbolsRequest: 'aurix-tcf/disassemblySymbols',
+	});
+}
+
+function pickLiveWatchExpression(): Promise<string | undefined> {
+	const session = vscode.debug.activeDebugSession;
+	return pickSymbolOrText({
+		title: 'Add Live Watch Expression',
+		placeholder: 'Pick a variable or type an expression, e.g. counter_6 or *(uint32_t*)0x70000044',
+		typedDescription: 'Add expression',
+		session: session?.type === 'aurix-tcf' ? session : undefined,
+		symbolsRequest: 'aurix-tcf/variableSymbols',
+	});
+}
+
+/**
+ * Quick pick listing the program's symbols (from the adapter) that also accepts any typed text: the
+ * typed text is always offered as the first entry unless it matches a symbol exactly.
+ */
+async function pickSymbolOrText(options: {
+	title: string;
+	placeholder: string;
+	typedDescription: string;
+	session: vscode.DebugSession | undefined;
+	symbolsRequest: string;
+}): Promise<string | undefined> {
 	const qp = vscode.window.createQuickPick<vscode.QuickPickItem>();
-	qp.title = 'Disassembly: Go to Address or Symbol';
-	qp.placeholder = 'Address (0x80001234) or symbol (main, main+0x10)';
+	qp.title = options.title;
+	qp.placeholder = options.placeholder;
 	qp.matchOnDescription = true;
-	qp.busy = true;
+	qp.busy = options.session !== undefined;
 	let symbolItems: vscode.QuickPickItem[] = [];
 	const update = () => {
 		const text = qp.value.trim();
 		const exact = symbolItems.some((i) => i.label === text);
 		// alwaysShow keeps the typed entry visible although it does not match any symbol.
 		qp.items = text && !exact
-			? [{ label: text, description: 'Go to address or symbol', alwaysShow: true }, ...symbolItems]
+			? [{ label: text, description: options.typedDescription, alwaysShow: true }, ...symbolItems]
 			: symbolItems;
 	};
-	void Promise.resolve(session.customRequest('aurix-tcf/disassemblySymbols'))
-		.then((r) => {
-			const symbols: Array<{ name: string; address: string }> = Array.isArray(r?.symbols) ? r.symbols : [];
-			symbolItems = symbols.map((sym) => ({ label: sym.name, description: sym.address }));
-		})
-		.catch(() => undefined)
-		.finally(() => {
-			qp.busy = false;
-			update();
-		});
+	if (options.session) {
+		void Promise.resolve(options.session.customRequest(options.symbolsRequest))
+			.then((r) => {
+				const symbols: Array<{ name: string; address: string; size?: number }> = Array.isArray(r?.symbols) ? r.symbols : [];
+				symbolItems = symbols.map((sym) => ({
+					label: sym.name,
+					description: sym.size ? `${sym.address} · ${sym.size} byte${sym.size === 1 ? '' : 's'}` : sym.address,
+				}));
+			})
+			.catch(() => undefined)
+			.finally(() => {
+				qp.busy = false;
+				update();
+			});
+	}
 	return new Promise((resolve) => {
 		qp.onDidChangeValue(update);
 		qp.onDidAccept(() => {

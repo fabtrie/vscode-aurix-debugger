@@ -112,6 +112,10 @@ The Live Watch view periodically refreshes selected global variables. Use the vi
 
 Once configured, the active interval appears in the view header (highlighted in orange). Resume the target to run the cores and observe the selected global variables update automatically.
 
+- Each entry shows `name: value` on one line, like the WATCH section. Structs and arrays show a short preview (`{a: 1, b: 2, …}`) and can be expanded. Pointers can be expanded to show the value they point to.
+- **Pause Updates** on an entry moves it to the **Paused** group. Its last value stays visible, and **Resume Updates** moves it back.
+- The pause/play button in the view header turns the periodic refresh off and on for all entries. The values still update when the target stops.
+
 ![live-watch](media/live-watch.gif)
 
 ### Peripheral View

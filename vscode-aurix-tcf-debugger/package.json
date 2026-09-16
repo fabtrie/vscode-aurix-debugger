@@ -186,6 +186,30 @@
         "title": "Set Live Watch Value",
         "category": "AURIX™ TCF",
         "icon": "$(edit)"
+      },
+      {
+        "command": "aurix-tcf.liveWatchPauseExpression",
+        "title": "Pause Updates",
+        "category": "AURIX™ TCF",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "aurix-tcf.liveWatchResumeExpression",
+        "title": "Resume Updates",
+        "category": "AURIX™ TCF",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "aurix-tcf.liveWatchDisableRefresh",
+        "title": "Pause Live Watch Refresh",
+        "category": "AURIX™ TCF",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "aurix-tcf.liveWatchEnableRefresh",
+        "title": "Resume Live Watch Refresh",
+        "category": "AURIX™ TCF",
+        "icon": "$(debug-start)"
       }
     ],
     "views": {
@@ -245,12 +269,38 @@
         {
           "command": "aurix-tcf.runAction",
           "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchPauseExpression",
+          "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchResumeExpression",
+          "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchSetValue",
+          "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchRemoveExpression",
+          "when": "false"
         }
       ],
       "view/title": [
         {
           "command": "aurix-tcf.liveWatchAddExpression",
           "when": "view == aurixTcfLiveWatch",
+          "group": "navigation"
+        },
+        {
+          "command": "aurix-tcf.liveWatchDisableRefresh",
+          "when": "view == aurixTcfLiveWatch && aurix-tcf.liveWatchEnabled",
+          "group": "navigation"
+        },
+        {
+          "command": "aurix-tcf.liveWatchEnableRefresh",
+          "when": "view == aurixTcfLiveWatch && !aurix-tcf.liveWatchEnabled",
           "group": "navigation"
         },
         {
@@ -272,13 +322,43 @@
       "view/item/context": [
         {
           "command": "aurix-tcf.liveWatchSetValue",
-          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression",
-          "group": "inline"
+          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatch(Expression|Child)/",
+          "group": "inline@1"
+        },
+        {
+          "command": "aurix-tcf.liveWatchPauseExpression",
+          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.live",
+          "group": "inline@2"
+        },
+        {
+          "command": "aurix-tcf.liveWatchResumeExpression",
+          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.paused",
+          "group": "inline@2"
         },
         {
           "command": "aurix-tcf.liveWatchRemoveExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression",
-          "group": "inline"
+          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatchExpression/",
+          "group": "inline@3"
+        },
+        {
+          "command": "aurix-tcf.liveWatchSetValue",
+          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatch(Expression|Child)/",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "aurix-tcf.liveWatchPauseExpression",
+          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.live",
+          "group": "2_updates@1"
+        },
+        {
+          "command": "aurix-tcf.liveWatchResumeExpression",
+          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.paused",
+          "group": "2_updates@1"
+        },
+        {
+          "command": "aurix-tcf.liveWatchRemoveExpression",
+          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatchExpression/",
+          "group": "3_remove@1"
         }
       ]
     },
@@ -446,7 +526,10 @@
               "agentFlavor": {
                 "description": "TCF agent type: 'infineon' (bundled DAS agent, default) or 'aurix-dbg' (OpenOCD-compatible server over Infineon TAS that runs OpenOCD cfg scripts)",
                 "type": "string",
-                "enum": ["infineon", "aurix-dbg"],
+                "enum": [
+                  "infineon",
+                  "aurix-dbg"
+                ],
                 "default": "infineon"
               },
               "autoStartAgent": {
@@ -471,56 +554,147 @@
               "searchDirs": {
                 "description": "aurix-dbg: script search directories (OpenOCD -s), e.g. the OpenOCD tcl directory",
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               },
               "configFiles": {
                 "description": "aurix-dbg: OpenOCD configuration scripts (OpenOCD -f), in order",
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               },
               "configCommands": {
                 "description": "aurix-dbg: additional Tcl commands (OpenOCD -c), run after the configuration files",
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               },
               "actions": {
                 "description": "aurix-dbg: custom Tcl commands offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu, an entry with 'tcl' is an action.",
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["label"],
+                  "required": [
+                    "label"
+                  ],
                   "properties": {
-                    "id": { "type": "string", "description": "Identifier for the command 'aurix-tcf.runAction' (e.g. keybindings with args { \"id\": \"...\" })" },
-                    "label": { "type": "string", "description": "Name shown in the action list" },
-                    "description": { "type": "string", "description": "Text shown next to the label" },
-                    "detail": { "type": "string", "description": "Text shown below the label" },
-                    "icon": { "type": "string", "description": "Codicon name, e.g. 'trash'" },
+                    "id": {
+                      "type": "string",
+                      "description": "Identifier for the command 'aurix-tcf.runAction' (e.g. keybindings with args { \"id\": \"...\" })"
+                    },
+                    "label": {
+                      "type": "string",
+                      "description": "Name shown in the action list"
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "Text shown next to the label"
+                    },
+                    "detail": {
+                      "type": "string",
+                      "description": "Text shown below the label"
+                    },
+                    "icon": {
+                      "type": "string",
+                      "description": "Codicon name, e.g. 'trash'"
+                    },
                     "items": {
                       "type": "array",
                       "description": "Submenu entries (same format as 'actions')",
                       "items": {
                         "type": "object",
-                        "required": ["label"],
+                        "required": [
+                          "label"
+                        ],
                         "properties": {
-                          "id": { "type": "string", "description": "Identifier for the command 'aurix-tcf.runAction'" },
-                          "label": { "type": "string", "description": "Name shown in the action list" },
-                          "description": { "type": "string", "description": "Text shown next to the label" },
-                          "detail": { "type": "string", "description": "Text shown below the label" },
-                          "icon": { "type": "string", "description": "Codicon name, e.g. 'trash'" },
-                          "items": { "type": "array", "description": "Submenu entries (same format as 'actions')" },
-                          "tcl": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Tcl command(s) run in order on the debug server; stops at the first error" },
-                          "confirm": { "type": "string", "description": "Confirmation text shown before running" },
-                          "resetAfter": { "type": "boolean", "default": false, "description": "Reset the target afterwards like the Reset toolbar button" },
-                          "showOutput": { "type": "boolean", "default": false, "description": "Show the Tcl output in a notification (always written to the Debug Console)" },
-                          "timeout": { "type": "number", "default": 900, "description": "Timeout per Tcl command in seconds" }
+                          "id": {
+                            "type": "string",
+                            "description": "Identifier for the command 'aurix-tcf.runAction'"
+                          },
+                          "label": {
+                            "type": "string",
+                            "description": "Name shown in the action list"
+                          },
+                          "description": {
+                            "type": "string",
+                            "description": "Text shown next to the label"
+                          },
+                          "detail": {
+                            "type": "string",
+                            "description": "Text shown below the label"
+                          },
+                          "icon": {
+                            "type": "string",
+                            "description": "Codicon name, e.g. 'trash'"
+                          },
+                          "items": {
+                            "type": "array",
+                            "description": "Submenu entries (same format as 'actions')"
+                          },
+                          "tcl": {
+                            "type": [
+                              "string",
+                              "array"
+                            ],
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Tcl command(s) run in order on the debug server; stops at the first error"
+                          },
+                          "confirm": {
+                            "type": "string",
+                            "description": "Confirmation text shown before running"
+                          },
+                          "resetAfter": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Reset the target afterwards like the Reset toolbar button"
+                          },
+                          "showOutput": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Show the Tcl output in a notification (always written to the Debug Console)"
+                          },
+                          "timeout": {
+                            "type": "number",
+                            "default": 900,
+                            "description": "Timeout per Tcl command in seconds"
+                          }
                         }
                       }
                     },
-                    "tcl": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Tcl command(s) run in order on the debug server; stops at the first error" },
-                    "confirm": { "type": "string", "description": "Confirmation text shown before running" },
-                    "resetAfter": { "type": "boolean", "default": false, "description": "Reset the target afterwards like the Reset toolbar button" },
-                    "showOutput": { "type": "boolean", "default": false, "description": "Show the Tcl output in a notification (always written to the Debug Console)" },
-                    "timeout": { "type": "number", "default": 900, "description": "Timeout per Tcl command in seconds" }
+                    "tcl": {
+                      "type": [
+                        "string",
+                        "array"
+                      ],
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Tcl command(s) run in order on the debug server; stops at the first error"
+                    },
+                    "confirm": {
+                      "type": "string",
+                      "description": "Confirmation text shown before running"
+                    },
+                    "resetAfter": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Reset the target afterwards like the Reset toolbar button"
+                    },
+                    "showOutput": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Show the Tcl output in a notification (always written to the Debug Console)"
+                    },
+                    "timeout": {
+                      "type": "number",
+                      "default": 900,
+                      "description": "Timeout per Tcl command in seconds"
+                    }
                   }
                 }
               },
@@ -562,8 +736,12 @@
               "agentFlavor": "aurix-dbg",
               "autoStartAgent": true,
               "agentPath": "^\"\\${workspaceFolder}/aurix-dbg.exe\"",
-              "searchDirs": ["^\"\\${workspaceFolder}/tcl\""],
-              "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
+              "searchDirs": [
+                "^\"\\${workspaceFolder}/tcl\""
+              ],
+              "configFiles": [
+                "board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"
+              ],
               "program": "^\"\\${workspaceFolder}/build/program.elf\"",
               "host": "127.0.0.1",
               "port": 1534,

@@ -56,7 +56,7 @@ function tryDecodeBase64Text(text: string): Buffer | undefined {
     }
 }
 
-function decodeEvaluatedValue(rawValue: Buffer): Buffer {
+export function decodeEvaluatedValue(rawValue: Buffer): Buffer {
     if (rawValue.length === 0) {
         return rawValue;
     }

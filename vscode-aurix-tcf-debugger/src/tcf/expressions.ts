@@ -320,3 +320,25 @@ export class AssignExpressionsCommand extends ExpressionsCommand<undefined> {
         parseEmptyResponse(responseAll, success, error);
     }
 }
+//see https://download.eclipse.org/tools/tcf/tcf-docs/TCF%20Service%20-%20Expressions.html#CmdDispose
+export class DisposeExpressionsCommand extends ExpressionsCommand<undefined> {
+    constructor(private readonly expressionID: string) {
+        super();
+    }
+
+    debugDescription(tokenID: number): string {
+        return super.debugDescription(tokenID) + "/" + this.command() + "/" + this.expressionID;
+    }
+
+    command(): string {
+        return "dispose";
+    }
+
+    arguments() {
+        return this.expressionID;
+    }
+
+    result(responseAll: Buffer[], success: PromiseSuccess<undefined>, error: PromiseError<undefined>): void {
+        parseEmptyResponse(responseAll, success, error);
+    }
+}

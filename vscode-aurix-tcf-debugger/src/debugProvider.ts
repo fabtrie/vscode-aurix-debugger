@@ -52,6 +52,9 @@ import { SetMemoryMapCommand } from './tcf/memorymap';
 import { DisassembleDisassemblyCommand, GetCapabilitiesDisassemblyCommand } from './tcf/disassembly';
 import { GetMemoryCommand, MemoryErrorAddress, SetMemoryCommand } from './tcf/memory';
 import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/linenumbers';
+import { LiveWatchEvaluator, LiveWatchRequestItem } from './liveWatchEvaluator';
+
+type ElfSymbol = { name: string; address: number; size: number };
 
 export interface InternalLaunchArguments {
 	debugTCFMessages?: boolean;
@@ -332,7 +335,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * stacks may move the focus to another core.
 	 */
 	private disassemblyJumpTarget: { address: number; label: string } | undefined;
-	private elfFunctionSymbols: Array<{ name: string; address: number }> | undefined;
+	private elfSymbols: { functions: ElfSymbol[]; variables: ElfSymbol[] } | undefined;
 	private disassemblyOpcodeBytes: DisassemblyOpcodeBytes;
 
 	private breakpointsManager = new BreakpointsManager();
@@ -349,8 +352,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private liveWatchEnabled = false;
 	private liveWatchIntervalMs = 1000;
 	private agentFlavor: 'infineon' | 'aurix-dbg' = 'infineon';
-	private liveWatchTimer: ReturnType<typeof setInterval> | undefined;
-	private liveWatchRefreshInFlight = false;
+	private liveWatchEvaluator: LiveWatchEvaluator;
+	/** Context the Live Watch evaluates in; picked again after a core suspends or resumes. */
+	private liveWatchContextId: string | undefined;
 	private watchExpressionStates = new Map<string, WatchExpressionState>();
 	private launchArgs: AurixTCFLaunchRequestArguments | undefined;
 	private launchCore: number | undefined;
@@ -420,6 +424,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				outer.sendEvent(new TerminatedEvent());
 			}
 		}(this.tcfLogger);
+		this.liveWatchEvaluator = new LiveWatchEvaluator(this.tcfClient, (message) => this.tcfLogger.log(message));
 
 		this.setDebuggerLinesStartAt1(true);
 		this.setDebuggerColumnsStartAt1(true);
@@ -630,6 +635,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private beginResetTransition(): void {
 		const now = Date.now();
 		this.liveWatchSuspendFallbackBlockedUntilMs = now + 1500;
+		this.liveWatchEvaluator.clear();
+		this.invalidateLiveWatchContext();
 		this.postResetStackTrimUntilMs = now + 2000;
 		this.primaryBreakpointStop = undefined;
 		this.suppressPauseStoppedUntilMs = 0;
@@ -657,11 +664,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	protected override onThreadSuspended(thread: number) {
 		this.clearFrameMetaForThread(thread);
+		this.invalidateLiveWatchContext();
 		super.onThreadSuspended(thread);
 	}
 
 	protected override onThreadResumed(thread: number) {
 		this.clearFrameMetaForThread(thread);
+		this.invalidateLiveWatchContext();
 		super.onThreadResumed(thread);
 	}
 
@@ -1390,19 +1399,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return `flash write_images erase incremental${verify} ${files.map(f => `{${f.replace(/\\/g, '/')}}`).join(' ')}`;
 	}
 
-	/** Runs the Tcl commands, printing each with its output and duration, and a total at the end. */
+	/** Runs the Tcl commands, printing each with its output. */
 	private async runFlashSteps(steps: string[]): Promise<void> {
 		const oldTimeout = (this.tcfClient as any).commandTimeout;
 		try {
 			this.tcfClient.setCommandTimeout(15 * 60 * 1000);
-			const t0 = Date.now();
 			for (const step of steps) {
 				this.sendEvent(new OutputEvent(`> ${step}\n`, 'console'));
-				const t = Date.now();
 				const out = await this.tcfClient.sendCommand(new TclEvalCommand(step));
-				this.sendEvent(new OutputEvent(`${out ? `${out}\n` : ''}(${((Date.now() - t) / 1000).toFixed(1)} s)\n`, 'console'));
+				if (out) {
+					this.sendEvent(new OutputEvent(`${out}\n`, 'console'));
+				}
 			}
-			this.sendEvent(new OutputEvent(`aurix-dbg: flashing done in ${((Date.now() - t0) / 1000).toFixed(1)} s\n`, 'console'));
 		} catch (e) {
 			this.sendEvent(new OutputEvent(`${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
 			throw e;
@@ -1431,7 +1439,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
 		this.beginResetTransition();
 		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, this.launchArgs)]);
-		this.elfFunctionSymbols = undefined;
+		this.elfSymbols = undefined;
 		// A rebuilt ELF has a new modification time: MemoryMap.set makes the server reload its symbols.
 		if (this.launchArgs) {
 			await this.initMemoryMap(this.launchArgs);
@@ -2046,7 +2054,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 			}
 			await this.initMemoryMap(args);
-			this.refreshLiveWatchTimer();
+			this.invalidateLiveWatchContext();
 			this.sendResponse(response);
 			this.sendEvent(new InitializedEvent());
 			await this.startupLogThreads('after InitializedEvent');
@@ -2531,7 +2539,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 					result: response.body.result,
 					liveRefreshable,
 				});
-				this.refreshLiveWatchTimer();
+				this.invalidateLiveWatchContext();
 			}
 			this.sendResponse(response);
 		} catch (e) {
@@ -2619,15 +2627,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return running[0].info.ID;
 	}
 
-	private refreshLiveWatchTimer(): void {
-		if (this.liveWatchTimer) {
-			clearInterval(this.liveWatchTimer);
-			this.liveWatchTimer = undefined;
-		}
-	}
-
-	private async onLiveWatchTimerTick(): Promise<void> {
-		return;
+	private invalidateLiveWatchContext(): void {
+		this.liveWatchContextId = undefined;
 	}
 
 	private setLiveWatchState(enabled: boolean, intervalMs?: number): void {
@@ -2635,24 +2636,21 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (intervalMs !== undefined) {
 			this.liveWatchIntervalMs = this.normalizeLiveWatchIntervalMs(intervalMs);
 		}
-		this.refreshLiveWatchTimer();
 	}
 
-	private async evaluateGlobalExpressionValue(expressionText: string): Promise<string | undefined> {
-		const runningCtx = await this.pickContextIdForRunningWatch();
-		const ctx = runningCtx
+	/**
+	 * Context for Live Watch evaluation: a running core (preferably the launch core), else a suspended
+	 * one. Cached until a core suspends or resumes, so a refresh does not walk the context tree.
+	 */
+	private async pickLiveWatchContextId(): Promise<string | undefined> {
+		if (this.liveWatchContextId) {
+			return this.liveWatchContextId;
+		}
+		const ctx = (await this.pickContextIdForRunningWatch())
 			?? (Date.now() < this.liveWatchSuspendFallbackBlockedUntilMs ? undefined : await this.pickAnySuspendedContextId());
-		if (!ctx) {
-			return undefined;
-		}
-		const exprId = await this.tcfClient.sendCommand(new CreateExpressionsCommand(ctx, null, expressionText));
-		const v = await this.tcfClient.getExpressionIDVariable(ctx, ctx, exprId, expressionText);
-		if (!v) {
-			return undefined;
-		}
-		return (await v.displayValue?.()) ?? '';
+		this.liveWatchContextId = ctx;
+		return ctx;
 	}
-
 
 	protected override async continueRequestAsync(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): Promise<void> {
 		const contextId = this.threadIdToContext.get(args.threadId);
@@ -2746,20 +2744,24 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return undefined;
 	}
 
-	private getElfFunctionSymbols(): Array<{ name: string; address: number }> {
-		if (!this.elfFunctionSymbols) {
+	private getElfSymbols(): { functions: ElfSymbol[]; variables: ElfSymbol[] } {
+		if (!this.elfSymbols) {
 			try {
-				this.elfFunctionSymbols = this.programPath ? this.loadFunctionSymbolsFromElf(this.programPath) : [];
+				this.elfSymbols = this.programPath ? this.loadSymbolsFromElf(this.programPath) : { functions: [], variables: [] };
 			} catch (e) {
 				this.tcfLogger.error(`Failed to read ELF symbols: ${String(e)}`);
-				this.elfFunctionSymbols = [];
+				this.elfSymbols = { functions: [], variables: [] };
 			}
 		}
-		return this.elfFunctionSymbols;
+		return this.elfSymbols;
 	}
 
-	/** Reads the function symbols (STT_FUNC) from the ELF .symtab, sorted by name. */
-	private loadFunctionSymbolsFromElf(elfPath: string): Array<{ name: string; address: number }> {
+	private getElfFunctionSymbols(): ElfSymbol[] {
+		return this.getElfSymbols().functions;
+	}
+
+	/** Reads the function (STT_FUNC) and variable (STT_OBJECT) symbols from the ELF .symtab, sorted by name. */
+	private loadSymbolsFromElf(elfPath: string): { functions: ElfSymbol[]; variables: ElfSymbol[] } {
 		const buf = fs.readFileSync(elfPath);
 		if (buf.length < 0x40 || !(buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46)) {
 			throw new Error('Not an ELF file');
@@ -2785,7 +2787,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			};
 		};
 
-		const byName = new Map<string, number>();
+		const functions = new Map<string, ElfSymbol>();
+		const variables = new Map<string, ElfSymbol>();
 		for (let i = 0; i < shnum && shoff + (i + 1) * shentsize <= buf.length; i++) {
 			const symtab = section(i);
 			if (symtab.type !== 2 /* SHT_SYMTAB */ || symtab.entsize <= 0 || symtab.link >= shnum) {
@@ -2798,18 +2801,22 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				const nameOff = readU32(off);
 				const info = is32 ? buf[off + 12] : buf[off + 4];
 				const value = is32 ? readU32(off + 4) : Number(view.getBigUint64(off + 8, little));
-				if ((info & 0xf) !== 2 /* STT_FUNC */ || nameOff === 0 || value === 0) {
+				const size = is32 ? readU32(off + 8) : Number(view.getBigUint64(off + 16, little));
+				const type = info & 0xf;
+				const target = type === 2 /* STT_FUNC */ ? functions : type === 1 /* STT_OBJECT */ ? variables : undefined;
+				if (!target || nameOff === 0 || value === 0) {
 					continue;
 				}
 				const start = strtab.offset + nameOff;
 				const end = buf.indexOf(0, start);
 				const name = buf.toString('utf8', start, end < 0 ? buf.length : end);
-				if (name && !byName.has(name)) {
-					byName.set(name, value);
+				if (name && !target.has(name)) {
+					target.set(name, { name, address: value, size });
 				}
 			}
 		}
-		return Array.from(byName, ([name, address]) => ({ name, address })).sort((a, b) => a.name.localeCompare(b.name));
+		const sorted = (m: Map<string, ElfSymbol>) => Array.from(m.values()).sort((a, b) => a.name.localeCompare(b.name));
+		return { functions: sorted(functions), variables: sorted(variables) };
 	}
 
 	private loadExecutableRangesFromElf(elfPath: string): Array<{ start: number; end: number }> {
@@ -3275,7 +3282,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 		}
 		if (reason === StoppedEventReason.breakpoint) {
-			this.refreshLiveWatchTimer();
+			this.invalidateLiveWatchContext();
 			this.cancelPendingPauseStoppedTimers('runcontrolBreakpoint');
 			this.suppressPauseStoppedUntilMs = Date.now() + Math.max(150, this.stopStormPauseDelayMs * 4);
 			this.notePrimaryBreakpointStop(threadId, contextId);
@@ -3286,7 +3293,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		// Step is an explicit user action; don't delay or suppress it.
 		if (reason === StoppedEventReason.step) {
-			this.refreshLiveWatchTimer();
+			this.invalidateLiveWatchContext();
 			this.sendStoppedEvent(reason, threadId);
 			void this.emitSourceLocation(contextId);
 			return;
@@ -3298,7 +3305,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (Date.now() < this.userPauseUntilMs) {
 			this.focusLog(`pause StoppedEvent without focus for ${contextId} (threadId=${threadId}, user pause)`);
 			this.sendStoppedEvent(StoppedEventReason.pause, threadId, { preserveFocus: true });
-			this.refreshLiveWatchTimer();
+			this.invalidateLiveWatchContext();
 			return;
 		}
 		const takesFocus = this.isLaunchCoreContext(contextId);
@@ -3331,7 +3338,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		this.sendStoppedEvent(reason, threadId, { preserveFocus: !takesFocus });
-		this.refreshLiveWatchTimer();
+		this.invalidateLiveWatchContext();
 		if (takesFocus) {
 			void this.emitSourceLocation(contextId);
 		}
@@ -3350,7 +3357,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (this.startupDiagnosticsEnabled) {
 			this.tcfLogger.log(`[runcontrol] resumed id=${contextId} threadId=${threadId}`);
 		}
-		this.refreshLiveWatchTimer();
+		this.invalidateLiveWatchContext();
 	}
 
 	protected override async customRequestAsync(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): Promise<void> {
@@ -3364,6 +3371,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (isDisassemblyOpcodeBytes(args?.opcodeBytes)) {
 				this.disassemblyOpcodeBytes = args.opcodeBytes;
 			}
+			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix-tcf/variableSymbols') {
+			response.body = {
+				symbols: this.getElfSymbols().variables.map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, size: s.size })),
+			};
 			this.sendResponse(response);
 			return;
 		}
@@ -3592,28 +3607,30 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		if (command === 'aurix-tcf/liveWatchEvaluate') {
-			const expressions = Array.isArray(args?.expressions)
-				? args.expressions.filter((value: unknown): value is string => typeof value === 'string' && value.trim() !== '')
-				: [];
-			const values = [] as Array<{ expression: string; result: string; available: boolean; error?: string }>;
-			for (const expression of expressions) {
-				try {
-					const result = await this.evaluateGlobalExpressionValue(expression);
-					values.push({
-						expression,
-						result: result ?? '',
-						available: result !== undefined,
-					});
-				} catch (e) {
-					values.push({
-						expression,
-						result: '',
-						available: false,
-						error: e instanceof Error ? e.message : String(e),
-					});
-				}
+			const items: LiveWatchRequestItem[] = (Array.isArray(args?.items) ? args.items : [])
+				.filter((item: any) => typeof item?.expression === 'string' && item.expression.trim() !== '')
+				.map((item: any) => ({
+					expression: item.expression.trim(),
+					expanded: Array.isArray(item.expanded) ? item.expanded.filter((e: unknown) => typeof e === 'string') : [],
+				}));
+			let ctx: string | undefined;
+			try {
+				ctx = await this.pickLiveWatchContextId();
+			} catch {
+				ctx = undefined;
 			}
-			response.body = { values };
+			response.body = {
+				values: ctx
+					? await this.liveWatchEvaluator.evaluate(ctx, items)
+					: items.map((item) => ({
+						name: item.expression,
+						expression: item.expression,
+						value: '',
+						hasChildren: false,
+						available: false,
+						error: 'No debug context available',
+					})),
+			};
 			this.sendResponse(response);
 			return;
 		}

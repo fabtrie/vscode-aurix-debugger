@@ -7,8 +7,9 @@ import { Logger } from "./helper";
 import { AbstractVariable, ClientVariable, NameProvider, RawValueProvider } from "./types";
 
 function isCharLikeType(type: TCFSymbolContextData): boolean {
+    // By name: 1-byte integer typedefs such as uint8/boolean are numbers, not characters.
     const normalizedName = (type.Name ?? '').trim().toLowerCase();
-    return (type.Size === 1 || normalizedName.includes('char'))
+    return normalizedName.includes('char')
         && (type.TypeClass === TCFTypeClass.integer || type.TypeClass === TCFTypeClass.cardinal);
 }
 

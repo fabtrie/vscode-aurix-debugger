@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT
 */
 import { TCFError } from './error';
 import { TCFSymbolClass } from './symbols';
-import { asNullable, asString, asStringArray, handleError, handleErrorBuffer, PromiseError, PromiseSuccess, responseLengthAbout, SimpleCommand, TCFPartialResultError, toBuffer, validateJSON, ValidatingCommand } from './tcfutils';
+import { asNullable, asString, asStringArray, handleError, handleErrorBuffer, parseEmptyResponse, PromiseError, PromiseSuccess, responseLengthAbout, SimpleCommand, TCFPartialResultError, toBuffer, validateJSON, ValidatingCommand } from './tcfutils';
 import * as validateValueProperties from './validators/validate-ValueProperties';
 import * as validateExpressionsContextData from './validators/validate-ExpressionsContextData';
 
@@ -292,4 +292,31 @@ export class GetContextExpressionsCommand extends ExpressionsValidatingCommand<E
         return asNullable(json, asExpressionsContextData);
     }
 
+}
+
+//see https://download.eclipse.org/tools/tcf/tcf-docs/TCF%20Service%20-%20Expressions.html#CmdAssign
+export class AssignExpressionsCommand extends ExpressionsCommand<undefined> {
+    constructor(private readonly expressionID: string, private readonly value: Buffer) {
+        super();
+    }
+
+    debugDescription(tokenID: number): string {
+        return super.debugDescription(tokenID) + "/" + this.command() + "/" + this.expressionID;
+    }
+
+    command(): string {
+        return "assign";
+    }
+
+    arguments() {
+        return undefined;
+    }
+
+    toBuffer(token: string): Buffer {
+        return toBuffer(["C", token, this.service(), this.command(), JSON.stringify(this.expressionID), JSON.stringify(this.value.toString("base64"))]);
+    }
+
+    result(responseAll: Buffer[], success: PromiseSuccess<undefined>, error: PromiseError<undefined>): void {
+        parseEmptyResponse(responseAll, success, error);
+    }
 }

@@ -6,8 +6,9 @@ import { GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from "..
 import { AbstractVariable, ClientVariable, NameProvider, RawValueProvider, VariableHelper } from "./types";
 
 function isCharLikeType(type: TCFSymbolContextData): boolean {
+    // By name: arrays of uint8 are byte arrays, not strings.
     const normalizedName = (type.Name ?? '').trim().toLowerCase();
-    return (type.Size === 1 || normalizedName.includes('char'))
+    return normalizedName.includes('char')
     && (type.TypeClass === TCFTypeClass.cardinal || type.TypeClass === TCFTypeClass.integer);
 }
 

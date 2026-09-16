@@ -42,13 +42,16 @@ import {
 	SmallCommandStamper,
 	TCFLogger,
 } from './tcf-all';
-import { GetChildrenRegistersCommand, GetContextRegistersCommand, GetRegistersCommand } from './tcf/registers';
-import { CreateExpressionsCommand } from './tcf/expressions';
+import { GetChildrenRegistersCommand, GetContextRegistersCommand, GetRegistersCommand, SetRegistersCommand } from './tcf/registers';
+import { TCL_SERVICE, TclEvalCommand } from './tcf/tcl';
+import { AssignExpressionsCommand, CreateExpressionsCommand, GetContextExpressionsCommand } from './tcf/expressions';
+import { GetChildrenSymbolsCommand, GetContextSymbolsCommand } from './tcf/symbols';
+import { encodeVariableValue } from './variables/encode';
 import { GetChildrenStackTraceCommand } from './tcf/stacktrace';
 import { SetMemoryMapCommand } from './tcf/memorymap';
 import { DisassembleDisassemblyCommand, GetCapabilitiesDisassemblyCommand } from './tcf/disassembly';
 import { GetMemoryCommand, MemoryErrorAddress, SetMemoryCommand } from './tcf/memory';
-import { TCFCodeAreaLineNumbers } from './tcf/linenumbers';
+import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/linenumbers';
 
 export interface InternalLaunchArguments {
 	debugTCFMessages?: boolean;
@@ -99,6 +102,13 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	instructionStepping?: boolean;
 	liveWatchEnabled?: boolean;
 	liveWatchIntervalMs?: number;
+
+	// 'aurix-dbg': OpenOCD-compatible server over TAS (allows SFR memory access,
+	// register writes, monitor commands and flashing through Tcl).
+	agentFlavor?: 'infineon' | 'aurix-dbg';
+	enableFlashing?: boolean;
+	// Debugger Actions toolbar button; handled in the extension (debuggerActions.ts).
+	actions?: unknown[];
 }
 
 const DEFAULT_TCF_HOST = 'localhost';
@@ -315,9 +325,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private configuredGlobals: string[] = [];
 	private liveWatchEnabled = false;
 	private liveWatchIntervalMs = 1000;
+	private agentFlavor: 'infineon' | 'aurix-dbg' = 'infineon';
 	private liveWatchTimer: ReturnType<typeof setInterval> | undefined;
 	private liveWatchRefreshInFlight = false;
 	private watchExpressionStates = new Map<string, WatchExpressionState>();
+	private launchArgs: AurixTCFLaunchRequestArguments | undefined;
 	private launchCore: number | undefined;
 	private launchResetType: string | undefined;
 	private launchResetSuspend: boolean = true;
@@ -329,6 +341,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private pendingBreakpointStoppedTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private breakpointStopDelayMs: number = 60;
 	private suppressPauseStoppedUntilMs: number = 0;
+	// Thread VS Code has focused (aurix-tcf/activeThread from the extension). VS Code's toolbar pause
+	// button pauses the focused thread; a pause for any other thread comes from its Call Stack entry.
+	private activeThreadId: number | undefined;
+	// Explicit pause in progress: suspend events of the cores TL1 stopped with it must not take the
+	// focus, only the core chosen by pauseRequestAsync.
+	private userPauseUntilMs: number = 0;
 	private refocusOnWrongContext: boolean = true;
 	private primaryBreakpointStop:
 		| { threadId: number; ctx: string; untilMs: number; refocused: boolean; stackSuppressUntilMs: number }
@@ -387,7 +405,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (!this.uiFocusDiagnosticsEnabled) {
 			return;
 		}
-		this.tcfLogger.log(`[focus] ${message}`);
+		this.sendEvent(new OutputEvent(`[focus] ${message}\n`, 'console'));
+		try {
+			const dir = process.env.TEMP || process.env.TMPDIR || '/tmp';
+			fs.appendFileSync(path.join(dir, 'aurix-tcf-focus.log'), `${new Date().toISOString()} [adapter] ${message}\n`);
+		} catch {
+			// diagnostics only
+		}
 	}
 
 	private startupLog(message: string) {
@@ -461,7 +485,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	) {
 		const ctx = this.threadIdToContext.get(threadId);
 		this.focusLog(
-			`StoppedEvent: reason=${reason} threadId=${threadId} ctx=${String(ctx ?? '')}`
+			`StoppedEvent: reason=${reason} threadId=${threadId} ctx=${String(ctx ?? '')} allThreadsStopped=${String(Boolean(opts?.allThreadsStopped))} preserveFocusHint=${String(opts?.preserveFocus)}`
 		);
 		if (this.startupDiagnosticsEnabled) {
 			this.tcfLogger.log(
@@ -473,7 +497,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			(ev.body as any).allThreadsStopped = true;
 		}
 		if (opts?.preserveFocus !== undefined) {
-			(ev.body as any).preserveFocus = opts.preserveFocus;
+			(ev.body as DebugProtocol.StoppedEvent['body']).preserveFocusHint = opts.preserveFocus;
 		}
 		this.sendEvent(ev);
 	}
@@ -1055,6 +1079,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (!sourcePath) {
 				return;
 			}
+			this.focusLog(`sourceLocation ctx=${contextId} ${sourcePath}:${mapped.SLine}`);
 			this.sendEvent(new Event('aurix-tcf/sourceLocation', { path: sourcePath, line: mapped.SLine }));
 		} catch (e) {
 			if (this.startupDiagnosticsEnabled) {
@@ -1216,7 +1241,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				getChildren: async () => {
 					const children = [];
 					for (const childId of childrenIds) {
-						children.push(await this.registersContextToVariable(childId, parentRef));
+						try {
+							children.push(await this.registersContextToVariable(childId, parentRef));
+						} catch (e) {
+							// One unreadable register must not hide the whole group.
+							const childName = childId.split('.').pop() || childId;
+							const message = AurixTCFDebugSession.formatError(e);
+							children.push({
+								name: () => childName,
+								displayValue: async () => `<${message}>`,
+								getChildren: async () => [],
+							});
+						}
 					}
 					return children;
 				},
@@ -1224,14 +1260,35 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		if (ctx?.Readable && typeof ctx.Size === 'number' && ctx.Size > 0) {
-			const buf = await this.tcfClient.sendCommand(new GetRegistersCommand(registerContextId));
-			// Show raw bytes as hex. Endianness varies by target; presenting bytes avoids guessing.
-			const hex = buf.toString('hex');
-			const value = hex.length ? `0x${hex}` : '';
+			const size = ctx.Size;
+			const bigEndian = (ctx as any).BigEndian;
+			const format = (buf: Buffer): string => {
+				// Agents that declare the byte order (BigEndian: false for TriCore) get a
+				// numeric value. Otherwise show raw bytes, since endianness varies by target.
+				if (bigEndian === false && buf.length > 0 && buf.length <= 8) {
+					let hex = '';
+					for (let i = buf.length - 1; i >= 0; i--) {
+						hex += buf[i].toString(16).padStart(2, '0');
+					}
+					return `0x${hex}`;
+				}
+				const hex = buf.toString('hex');
+				return hex.length ? `0x${hex}` : '';
+			};
+			let value = format(await this.tcfClient.sendCommand(new GetRegistersCommand(registerContextId)));
+			const writeable = (ctx as any).Writeable === true;
 			return {
 				name: () => name,
 				displayValue: async () => value,
 				getChildren: async () => [],
+				setValue: writeable
+					? async (text: string) => {
+						const buf = AurixTCFDebugSession.parseRegisterValue(text, size, bigEndian === true);
+						await this.tcfClient.sendCommand(new SetRegistersCommand(registerContextId, buf));
+						value = format(await this.tcfClient.sendCommand(new GetRegistersCommand(registerContextId)));
+						return value;
+					}
+					: undefined,
 			};
 		}
 
@@ -1242,12 +1299,127 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		};
 	}
 
+	/**
+	 * Parses a register value typed in the Variables view: hex (0x...), binary (0b...)
+	 * or decimal, negative values as two's complement of the register size.
+	 */
+	private static parseRegisterValue(text: string, size: number, bigEndian: boolean): Buffer {
+		const t = text.trim().replace(/_/g, '');
+		let n: number;
+		if (/^-?0x[0-9a-f]+$/i.test(t)) {
+			n = Number.parseInt(t.replace(/0x/i, ''), 16);
+		} else if (/^0b[01]+$/i.test(t)) {
+			n = Number.parseInt(t.substring(2), 2);
+		} else if (/^-?[0-9]+$/.test(t)) {
+			n = Number.parseInt(t, 10);
+		} else {
+			throw new Error(`Invalid register value '${text}' (use decimal, 0x hex or 0b binary)`);
+		}
+		const bytes = Math.min(size, 6);
+		if (!Number.isSafeInteger(n) || Math.abs(n) >= 2 ** (8 * bytes)) {
+			throw new Error(`Value '${text}' does not fit into ${size} byte(s)`);
+		}
+		let u = n < 0 ? 2 ** (8 * bytes) + n : n;
+		const buf = Buffer.alloc(size);
+		for (let i = 0; i < bytes; i++) {
+			buf[i] = u % 256;
+			u = Math.floor(u / 256);
+		}
+		if (bigEndian) {
+			buf.reverse();
+		}
+		return buf;
+	}
+
+	private static formatError(e: unknown): string {
+		if (e instanceof Error) {
+			return e.message;
+		}
+		if (Array.isArray(e)) {
+			return e.map(x => AurixTCFDebugSession.formatError(x)).join('; ');
+		}
+		if (e && typeof e === 'object' && typeof (e as any).Format === 'string') {
+			return (e as any).Format;
+		}
+		return typeof e === 'object' ? JSON.stringify(e) : String(e);
+	}
+
+	/** Images to flash: the "flashFiles" launch option, or the program if it is not set. */
+	private static getFlashFiles(args: any): string[] {
+		const files = Array.isArray(args?.flashFiles)
+			? args.flashFiles.filter((f: unknown): f is string => typeof f === 'string' && f.trim() !== '')
+			: [];
+		if (files.length > 0) {
+			return files;
+		}
+		return typeof args?.program === 'string' && args.program ? [args.program] : [];
+	}
+
+	/**
+	 * The Tcl command that flashes the images: all files are merged by the server (later files win)
+	 * and written in one go, so files sharing a 16 KB sector do not erase each other's data.
+	 * - "incremental": sectors that already hold the image are not erased and rewritten.
+	 * - "verify" (launch option "verifyFlash", default true): reads the programmed sectors back afterwards.
+	 */
+	private static flashCommand(files: string[], args: any): string {
+		const verify = args?.verifyFlash === false ? '' : ' verify';
+		return `flash write_images erase incremental${verify} ${files.map(f => `{${f.replace(/\\/g, '/')}}`).join(' ')}`;
+	}
+
+	/** Runs the Tcl commands, printing each with its output and duration, and a total at the end. */
+	private async runFlashSteps(steps: string[]): Promise<void> {
+		const oldTimeout = (this.tcfClient as any).commandTimeout;
+		try {
+			this.tcfClient.setCommandTimeout(15 * 60 * 1000);
+			const t0 = Date.now();
+			for (const step of steps) {
+				this.sendEvent(new OutputEvent(`> ${step}\n`, 'console'));
+				const t = Date.now();
+				const out = await this.tcfClient.sendCommand(new TclEvalCommand(step));
+				this.sendEvent(new OutputEvent(`${out ? `${out}\n` : ''}(${((Date.now() - t) / 1000).toFixed(1)} s)\n`, 'console'));
+			}
+			this.sendEvent(new OutputEvent(`aurix-dbg: flashing done in ${((Date.now() - t0) / 1000).toFixed(1)} s\n`, 'console'));
+		} catch (e) {
+			this.sendEvent(new OutputEvent(`${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
+			throw e;
+		} finally {
+			if (typeof oldTimeout === 'number') {
+				this.tcfClient.setCommandTimeout(oldTimeout);
+			}
+		}
+	}
+
+	/**
+	 * Flashes the images at launch (enableFlashing), then resets the target into the software.
+	 * "reset init" first: PFLASH can only be erased while the cores are halted right after a
+	 * reset; once the software has run, the DMU rejects erases with a protection error.
+	 */
+	private async flashWithAurixDbg(files: string[], args: any): Promise<void> {
+		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
+		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, args), 'reset run']);
+	}
+
+	/**
+	 * Flashes the images during a debug session (Flash Target toolbar button). The caller resets
+	 * the target afterwards like the Reset button does.
+	 */
+	private async flashInSession(files: string[]): Promise<void> {
+		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
+		this.beginResetTransition();
+		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, this.launchArgs)]);
+		// A rebuilt ELF has a new modification time: MemoryMap.set makes the server reload its symbols.
+		if (this.launchArgs) {
+			await this.initMemoryMap(this.launchArgs);
+		}
+	}
+
 	protected override initializeRequestAsync(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): Promise<void> {
 		response.body = response.body || {};
 		response.body.supportsConfigurationDoneRequest = true;
 		response.body.supportsEvaluateForHovers = true;
 		(response.body as any).supportsInvalidatedEvent = true;
-		response.body.supportsSetVariable = false;
+		response.body.supportsSetVariable = true;
+		response.body.supportsSetExpression = true;
 		response.body.supportSuspendDebuggee = true;
 		response.body.supportTerminateDebuggee = true;
 		response.body.supportsInstructionBreakpoints = true;
@@ -1298,6 +1470,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	private isPeripheralAddress(address: number): boolean {
 		if (!Number.isFinite(address)) {
+			return false;
+		}
+		// aurix-dbg accesses SFRs over TAS without problems: no special handling.
+		if (this.agentFlavor === 'aurix-dbg') {
 			return false;
 		}
 		// AURIX peripheral/SFR space lives in the 0xF000_0000+ region.
@@ -1469,14 +1645,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			);
 			const errorBytes = this.sumErrorBytes(errors);
 			if (errorBytes > 0 && args?.allowPartial !== true) {
-				this.sendErrorResponse(response, 0, 'Partial write refused by adapter');
+				const first = errors?.[0];
+				const reason = first?.msg ? AurixTCFDebugSession.formatError(first.msg) : 'refused by adapter';
+				const at = first && Number.isFinite(first.addr) ? ` at 0x${first.addr.toString(16)}` : '';
+				this.sendErrorResponse(response, 0, 'writeMemory failed{at}: {message}', { at, message: reason });
 				return;
 			}
 
 			response.body = { bytesWritten: Math.max(0, requestedLength - errorBytes) };
 			this.sendResponse(response);
 		} catch (e) {
-			this.sendErrorResponse(response, 0, 'writeMemory failed {message}', { message: String(e) });
+			this.sendErrorResponse(response, 0, 'writeMemory failed: {message}', { message: AurixTCFDebugSession.formatError(e) });
 		}
 	}
 
@@ -1650,17 +1829,61 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 			instructions = instructions.slice(startIndex, startIndex + instructionCount);
 
-			response.body = { instructions };
+			response.body = { instructions: await this.withDisassemblySource(ctx, instructions) };
 			this.sendResponse(response);
 		} catch (e) {
 			this.sendErrorResponse(response, 0, 'Disassemble error {message}', { message: String(e) });
 		}
 	}
 
+	/**
+	 * Adds the source location to disassembled instructions, which VS Code shows between the
+	 * instructions when "Debug › Disassembly View: Show Source Code" is enabled.
+	 */
+	private async withDisassemblySource(
+		ctx: string,
+		instructions: Array<{ address: string; instruction: string; instructionBytes?: string }>
+	): Promise<DebugProtocol.DisassembledInstruction[]> {
+		const addrs = instructions.map(i => Number.parseInt(i.address.substring(2), 16));
+		if (addrs.length === 0) {
+			return instructions;
+		}
+		let areas: TCFCodeAreaLineNumbers[] = [];
+		try {
+			// One query for the whole window: the agent returns every line entry overlapping it.
+			areas = (await this.tcfClient.sendCommand(
+				new MapToSourceLineNumbersCommand(ctx, Math.min(...addrs), Math.max(...addrs) + 4)
+			)) || [];
+		} catch (e) {
+			this.tcfLogger.error(`Disassembly source lookup failed: ${String(e)}`);
+			return instructions;
+		}
+		const sources = new Map<string, Source | undefined>();
+		return instructions.map((ins, idx) => {
+			const addr = addrs[idx];
+			const area = areas.find(a => a.File && a.SLine && a.SAddr !== undefined && a.EAddr !== undefined && addr >= a.SAddr && addr < a.EAddr);
+			if (!area) {
+				return ins;
+			}
+			const key = `${area.Dir ?? ''}|${area.File}`;
+			if (!sources.has(key)) {
+				const sourcePath = this.resolveMappedSourcePath(area);
+				sources.set(key, sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined);
+			}
+			const location = sources.get(key);
+			if (!location) {
+				return ins;
+			}
+			return { ...ins, location, line: area.SLine, endLine: area.ELine ?? area.SLine };
+		});
+	}
+
 
 	protected override async launchRequestAsync(response: DebugProtocol.LaunchResponse, rawArgs: DebugProtocol.LaunchRequestArguments): Promise<void> {
 		const args = rawArgs as AurixTCFLaunchRequestArguments;
+		this.launchArgs = args;
 		this.launchCore = args.core;
+		this.agentFlavor = args.agentFlavor === 'aurix-dbg' ? 'aurix-dbg' : 'infineon';
 		this.instructionSteppingEnabled = args.instructionStepping === true;
 		this.liveWatchEnabled = args.liveWatchEnabled === true;
 		this.liveWatchIntervalMs = this.normalizeLiveWatchIntervalMs(args.liveWatchIntervalMs);
@@ -1779,6 +2002,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.startupLog('connecting...');
 			await this.tcfClient.connect(host, port);
 			this.startupLog('connected');
+			const flashFiles = AurixTCFDebugSession.getFlashFiles(args);
+			if (this.agentFlavor === 'aurix-dbg' && args.enableFlashing === true && flashFiles.length > 0) {
+				try {
+					await this.flashWithAurixDbg(flashFiles, args);
+				} catch (e) {
+					this.sendErrorResponse(response, 1, 'Flashing with aurix-dbg failed: {message}', { message: AurixTCFDebugSession.formatError(e) });
+					return;
+				}
+			}
 			await this.initMemoryMap(args);
 			this.refreshLiveWatchTimer();
 			this.sendResponse(response);
@@ -2014,6 +2246,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 						// AURIX agent: createInScope can hang; prefer standard Expressions.create.
 						const exprId = await this.tcfClient.sendCommand(new CreateExpressionsCommand(ctx, null, expr));
 						const v = await this.tcfClient.getExpressionIDVariable(ctx, stack, exprId);
+						AurixTCFDebugSession.annotateVariable(v, expr, ctx);
 						if (v) {
 							globals.push(v);
 						}
@@ -2028,6 +2261,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 
 			const vars = await this.tcfClient.getStackVariables(ctx, stack);
+			for (const v of vars) {
+				AurixTCFDebugSession.annotateVariable(v, v.name(), stack);
+			}
 			const filtered = vars.filter(v => v.isRegister() === false);
 			const dapVars = await Promise.all(filtered.map(v => this.toDAPVariable(v, args.variablesReference)));
 			response.body = { variables: dapVars };
@@ -2061,6 +2297,84 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
+	protected override async setVariableRequestAsync(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments): Promise<void> {
+		try {
+			let vars: any[] = [];
+			if (this.isSubVariableReference(args.variablesReference)) {
+				vars = this.getSubVariable(args.variablesReference);
+			} else if (!this.isRegisterScopeVariableReference(args.variablesReference) && !this.isGlobalScopeVariableReference(args.variablesReference)) {
+				const [ctx, stack] = this.getStackFrameDetails(args.variablesReference);
+				vars = await this.tcfClient.getStackVariables(ctx, stack);
+				for (const v of vars) {
+					AurixTCFDebugSession.annotateVariable(v, v.name?.(), stack);
+				}
+			}
+			const variable = vars.find(v => (v?.name?.() ?? '') === args.name);
+			if (variable && typeof variable.setValue === 'function') {
+				const value = await variable.setValue(args.value);
+				response.body = { value: String(value ?? (await variable.displayValue?.()) ?? '') };
+				this.sendResponse(response);
+				return;
+			}
+			if (variable?.__aurixExpr && variable?.__aurixScope) {
+				response.body = { value: await this.assignExpression(variable.__aurixScope, variable.__aurixExpr, args.value) };
+				this.sendResponse(response);
+				return;
+			}
+			this.sendErrorResponse(response, 0, `'${args.name}' cannot be modified`);
+		} catch (e) {
+			this.sendErrorResponse(response, 0, 'Could not set {name}: {message}', { name: args.name, message: AurixTCFDebugSession.formatError(e) });
+		}
+	}
+
+	protected override async setExpressionRequestAsync(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments): Promise<void> {
+		try {
+			let scope: string | undefined;
+			if (typeof args.frameId === 'number') {
+				scope = this.getStackFrameDetails(this.getLocalScopeVariableReference(args.frameId))[1];
+			} else {
+				scope = (await this.pickAnySuspendedContextId()) ?? (await this.pickContextIdForRunningWatch());
+			}
+			if (!scope) {
+				this.sendErrorResponse(response, 0, 'No context to evaluate {expression} in', { expression: args.expression });
+				return;
+			}
+			response.body = { value: await this.assignExpression(scope, args.expression.trim(), args.value) };
+			this.sendResponse(response);
+		} catch (e) {
+			this.sendErrorResponse(response, 0, 'Could not set {expression}: {message}', { expression: args.expression, message: AurixTCFDebugSession.formatError(e) });
+		}
+	}
+
+	/**
+	 * Assigns a value typed in the UI to a C expression (Expressions.assign) and returns the new
+	 * display value. `scope` is a stack frame or core context.
+	 */
+	private async assignExpression(scope: string, expression: string, valueText: string): Promise<string> {
+		const exprId = await this.tcfClient.sendCommand(new CreateExpressionsCommand(scope, null, expression));
+		const exprCtx = await this.tcfClient.sendCommand(new GetContextExpressionsCommand(exprId));
+		if (!exprCtx?.CanAssign || !exprCtx.Type || exprCtx.Size === undefined) {
+			throw new Error(`'${expression}' is not assignable`);
+		}
+		const type = await this.tcfClient.sendCommand(new GetContextSymbolsCommand(exprCtx.Type));
+		const enumerators = async () => {
+			const ids = (await this.tcfClient.sendCommand(new GetChildrenSymbolsCommand(type.ID))) || [];
+			const out: Array<{ name: string; value: Buffer }> = [];
+			for (const id of ids) {
+				const c = await this.tcfClient.sendCommand(new GetContextSymbolsCommand(id));
+				if (c.Name && c.Value) {
+					out.push({ name: c.Name, value: Buffer.from(c.Value, 'base64') });
+				}
+			}
+			return out;
+		};
+		const data = await encodeVariableValue(valueText, type, exprCtx.Size, enumerators);
+		await this.tcfClient.sendCommand(new AssignExpressionsCommand(exprId, data));
+		const core = scope.replace(/\.F\d+$/, '');
+		const v = await this.tcfClient.getExpressionIDVariable(core, scope, exprId, expression);
+		return (await v?.displayValue?.()) ?? valueText;
+	}
+
 	protected override async evaluateRequestAsync(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments): Promise<void> {
 		if (this.startupDiagnosticsEnabled) {
 			if (typeof args.frameId === 'number') {
@@ -2081,6 +2395,24 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 
 			const expressionText = args.expression.trim();
+
+			// "monitor <cmd>" in the debug console: run a Tcl command on the debug server.
+			const monitor = /^(?:monitor|mon)\s+([\s\S]+)$/i.exec(expressionText);
+			if (args.context === 'repl' && monitor) {
+				if (!this.tcfClient.supportedServices?.includes(TCL_SERVICE)) {
+					this.sendErrorResponse(response, 0, 'This TCF agent has no Tcl console (monitor commands need aurix-dbg)');
+					return;
+				}
+				try {
+					const out = await this.tcfClient.sendCommand(new TclEvalCommand(monitor[1]));
+					response.body = { result: out, variablesReference: 0 };
+					this.sendResponse(response);
+				} catch (e) {
+					this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+				}
+				return;
+			}
+
 			const isWatchRequest = args.context === 'watch';
 			const liveRefreshable = this.isLiveWatchRefreshableExpression(expressionText);
 
@@ -2133,11 +2465,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.sendResponse(response);
 				return;
 			}
+			AurixTCFDebugSession.annotateVariable(v, expressionText, createParentContext);
 
 			let variablesReference = 0;
 			try {
 				const children = await v.getChildren?.();
 				if (children && children.length > 0) {
+					AurixTCFDebugSession.annotateChildren(v, children);
 					variablesReference = parentRef ? this.createSubVariableReference(parentRef, children) : 0;
 				}
 			} catch {
@@ -2412,12 +2746,45 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async pauseRequestAsync(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): Promise<void> {
-		const contextId = this.threadIdToContext.get(args.threadId);
-		// Even when VS Code sends Pause for a specific thread, users expect "pause" to stop the whole
-		// multi-core system. Explicitly suspend all core contexts and then emit stopped events.
-		await this.pauseAllCoresBestEffort('pauseRequestAsync');
-		await this.emitStoppedForAllSuspendedAtStartup(contextId, { targetReason: StoppedEventReason.pause, otherReason: StoppedEventReason.pause });
+		// Pause always stops the whole multi-core system, but only one core gets the focus (and its
+		// source opened):
+		//  - pause button of a core in the Call Stack view: that core;
+		//  - toolbar pause button (VS Code sends the focused thread): the launch core (core 0).
+		const requested = this.threadIdToContext.get(args.threadId);
+		const fromToolbar = this.activeThreadId === undefined || args.threadId === this.activeThreadId;
+		const focusCtx = fromToolbar ? (await this.pickContextIdForCore(this.launchCore ?? 0)) ?? requested : requested;
+		this.focusLog(`pauseRequest threadId=${args.threadId} active=${String(this.activeThreadId)} toolbar=${fromToolbar} focus=${String(focusCtx)}`);
+		this.cancelPendingPauseStoppedTimers('pauseRequest');
+		this.userPauseUntilMs = Number.POSITIVE_INFINITY;
+		try {
+			await this.pauseAllCoresBestEffort('pauseRequestAsync');
+			// The focus core may be reported suspended a moment later than the pause returns; without
+			// it no stopped event would take the focus (the other cores' events preserve it).
+			if (focusCtx) {
+				for (let i = 0; i < 10; i++) {
+					const infos = await this.tcfClient.getThreads();
+					if (infos.some(t => t.info.ID === focusCtx && Boolean(t.state?.suspended))) {
+						break;
+					}
+					await new Promise(resolve => setTimeout(resolve, 50));
+				}
+			}
+			await this.emitStoppedForAllSuspendedAtStartup(focusCtx, { targetReason: StoppedEventReason.pause, otherReason: StoppedEventReason.pause });
+			// VS Code cannot always open the frame's source itself (mapped paths); open it like a
+			// breakpoint stop does, for the focus core only.
+			if (focusCtx) {
+				void this.emitSourceLocation(focusCtx);
+			}
+		} finally {
+			// Late suspend events of the other cores must not take the focus either.
+			this.userPauseUntilMs = Date.now() + 500;
+		}
 		this.sendResponse(response);
+	}
+
+	private isLaunchCoreContext(contextId: string): boolean {
+		const m = /(?:^|\.)C(\d+)/.exec(contextId);
+		return m !== null && Number(m[1]) === (this.launchCore ?? 0);
 	}
 
 	protected override async setBreakPointsRequestAsync(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): Promise<void> {
@@ -2563,6 +2930,39 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		await this.tcfClient.setBreakpointsList(data);
 	}
 
+	/** C expression of a child variable shown under a parent expression. */
+	private static childExpression(parentExpr: string, childName: string): string {
+		const simple = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*$/.test(parentExpr);
+		const p = simple ? parentExpr : `(${parentExpr})`;
+		if (childName === '*') {
+			return `*${p}`;
+		}
+		if (/^\[\d+\]$/.test(childName)) {
+			return `${p}${childName}`;
+		}
+		return `${p}.${childName}`;
+	}
+
+	/** Remembers a variable's expression and evaluation scope, so it can be assigned later. */
+	private static annotateVariable(v: any, expression: string | undefined, scope: string | undefined): void {
+		if (v && expression && scope && v.__aurixExpr === undefined) {
+			v.__aurixExpr = expression;
+			v.__aurixScope = scope;
+		}
+	}
+
+	private static annotateChildren(parent: any, children: any[]): void {
+		if (!parent?.__aurixExpr || !parent?.__aurixScope) {
+			return;
+		}
+		for (const c of children) {
+			const name = c?.name?.();
+			if (typeof name === 'string' && name !== '') {
+				AurixTCFDebugSession.annotateVariable(c, AurixTCFDebugSession.childExpression(parent.__aurixExpr, name), parent.__aurixScope);
+			}
+		}
+	}
+
 	private async toDAPVariable(v: any, parentRef: number): Promise<DebugProtocol.Variable> {
 		const name = v.name?.() ?? '<unnamed>';
 		const value = (await v.displayValue?.()) ?? '';
@@ -2570,6 +2970,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		try {
 			const children = await v.getChildren?.();
 			if (children && children.length > 0) {
+				AurixTCFDebugSession.annotateChildren(v, children);
 				variablesReference = this.createSubVariableReference(parentRef, children);
 			}
 		} catch {
@@ -2641,6 +3042,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.onThreadSuspended(threadId);
 
 		const reasonText = (info.reason || '').toLowerCase();
+		this.focusLog(`contextSuspended ctx=${contextId} threadId=${threadId} reason=${String(info.reason ?? '')} pc=0x${Number(info.pc ?? 0).toString(16)}`);
 		const pendingStep = this.pendingStepThreads.delete(threadId);
 		let reason = reasonText.includes('breakpoint') ? StoppedEventReason.breakpoint : StoppedEventReason.pause;
 		if (reason !== StoppedEventReason.breakpoint) {
@@ -2717,6 +3119,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
+		// TL1 stops all cores together, so a pause-type stop takes the focus (and opens a source) for
+		// one core only, otherwise VS Code jumps between the sources of all cores. During an explicit
+		// pause, pauseRequestAsync focuses the chosen core itself; otherwise the launch core does.
+		if (Date.now() < this.userPauseUntilMs) {
+			this.focusLog(`pause StoppedEvent without focus for ${contextId} (threadId=${threadId}, user pause)`);
+			this.sendStoppedEvent(StoppedEventReason.pause, threadId, { preserveFocus: true });
+			this.refreshLiveWatchTimer();
+			return;
+		}
+		const takesFocus = this.isLaunchCoreContext(contextId);
+
 		// Delay pause-type stops slightly. This helps ensure a breakpoint stop becomes the primary
 		// UI context when multiple cores suspend nearly simultaneously.
 		if (Date.now() < this.suppressPauseStoppedUntilMs) {
@@ -2732,19 +3145,23 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				if (!this.suspendedContextIds.has(contextId)) {
 					return;
 				}
-				if (Date.now() < this.suppressPauseStoppedUntilMs) {
+				if (Date.now() < this.suppressPauseStoppedUntilMs || Date.now() < this.userPauseUntilMs) {
 					return;
 				}
-				this.sendStoppedEvent(StoppedEventReason.pause, threadId);
-				void this.emitSourceLocation(contextId);
+				this.sendStoppedEvent(StoppedEventReason.pause, threadId, { preserveFocus: !takesFocus });
+				if (takesFocus) {
+					void this.emitSourceLocation(contextId);
+				}
 			}, this.stopStormPauseDelayMs);
 			this.pendingPauseStoppedTimers.set(contextId, timer);
 			return;
 		}
 
-		this.sendStoppedEvent(reason, threadId);
+		this.sendStoppedEvent(reason, threadId, { preserveFocus: !takesFocus });
 		this.refreshLiveWatchTimer();
-		void this.emitSourceLocation(contextId);
+		if (takesFocus) {
+			void this.emitSourceLocation(contextId);
+		}
 	}
 
 	private onContextResumed(contextId: string) {
@@ -2763,6 +3180,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async customRequestAsync(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): Promise<void> {
+		if (command === 'aurix-tcf/activeThread') {
+			this.activeThreadId = typeof args?.threadId === 'number' ? args.threadId : undefined;
+			this.sendResponse(response);
+			return;
+		}
+
 		if (command === 'aurix-tcf/setInstructionStepping') {
 			this.instructionSteppingEnabled = Boolean(args?.enabled);
 			this.sendResponse(response);
@@ -2790,6 +3213,59 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
+		if (command === 'aurix-tcf/flash') {
+			try {
+				const files = AurixTCFDebugSession.getFlashFiles(this.launchArgs);
+				if (this.agentFlavor !== 'aurix-dbg') {
+					throw new Error('flashing from the debug toolbar needs agentFlavor "aurix-dbg"');
+				}
+				if (files.length === 0) {
+					throw new Error('no "flashFiles" or "program" in the launch configuration');
+				}
+				await this.flashInSession(files);
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 1, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		// Tcl command from a launch configuration "actions" entry (Debugger Actions toolbar button).
+		if (command === 'aurix-tcf/tcl') {
+			const script = typeof args?.script === 'string' ? args.script.trim() : '';
+			if (!script) {
+				this.sendErrorResponse(response, 0, 'No Tcl command given');
+				return;
+			}
+			if (!this.tcfClient.supportedServices?.includes(TCL_SERVICE)) {
+				this.sendErrorResponse(response, 0, 'This TCF agent has no Tcl console (debugger actions need aurix-dbg)');
+				return;
+			}
+			const timeoutMs = typeof args?.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : undefined;
+			const oldTimeout = (this.tcfClient as any).commandTimeout;
+			try {
+				if (timeoutMs) {
+					this.tcfClient.setCommandTimeout(timeoutMs);
+				}
+				this.sendEvent(new OutputEvent(`> ${script}\n`, 'console'));
+				const out = await this.tcfClient.sendCommand(new TclEvalCommand(script));
+				if (out) {
+					this.sendEvent(new OutputEvent(`${out}\n`, 'console'));
+				}
+				response.body = { result: out ?? '' };
+				this.sendResponse(response);
+			} catch (e) {
+				const message = AurixTCFDebugSession.formatError(e);
+				this.sendEvent(new OutputEvent(`${message}\n`, 'stderr'));
+				this.sendErrorResponse(response, 0, '{message}', { message });
+			} finally {
+				if (timeoutMs && typeof oldTimeout === 'number') {
+					this.tcfClient.setCommandTimeout(oldTimeout);
+				}
+			}
+			return;
+		}
+
 		if (command === 'aurix-tcf/reset') {
 			try {
 				this.beginResetTransition();
@@ -2808,7 +3284,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				if (!ctx) {
 					throw new Error('No target context available for reset.');
 				}
-				const pauseAllAfterReset = typeof args?.pauseAll === 'boolean' ? args.pauseAll : false;
+				// A running reset is paused afterwards unless the caller says otherwise; a halting reset
+				// (resetSuspend) is already stopped.
+				const pauseAllAfterReset = typeof args?.pauseAll === 'boolean' ? args.pauseAll : !suspend;
 
 				// Temporarily increase timeout for reset; reset can legitimately take longer.
 				const oldTimeout = (this.tcfClient as any).commandTimeout;
@@ -2866,6 +3344,33 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
+		if (command === 'aurix-tcf/resetCapabilities') {
+			// NOTE: ContextReset.getCapabilities is unreliable on some AURIX agents and can
+			// hang until the command timeout (see the reset handler above, which avoids it
+			// entirely). Use a short dedicated timeout here so this diagnostic fails fast
+			// instead of silently sitting there for 30+ seconds.
+			const oldTimeout = (this.tcfClient as any).commandTimeout;
+			try {
+				this.tcfClient.setCommandTimeout(5_000);
+				const caps = await this.tcfClient.getResetCapabilities();
+				this.tcfLogger.log(
+					caps.length > 0
+						? `ContextReset.getCapabilities: ${caps.map(c => `${c.Type}${c.Description ? ` (${c.Description})` : ''}`).join(', ')}`
+						: 'ContextReset.getCapabilities returned no reset types.'
+				);
+				response.body = { capabilities: caps };
+			} catch (e) {
+				this.tcfLogger.error(`ContextReset.getCapabilities failed: ${String(e)}`);
+				response.body = { capabilities: [], error: String(e) };
+			} finally {
+				if (typeof oldTimeout === 'number') {
+					this.tcfClient.setCommandTimeout(oldTimeout);
+				}
+			}
+			this.sendResponse(response);
+			return;
+		}
+
 		if (command === 'aurix-tcf/addGlobal') {
 			const expression = typeof args?.expression === 'string' ? args.expression.trim() : '';
 			if (expression !== '' && !this.configuredGlobals.includes(expression)) {
@@ -2905,6 +3410,27 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 			response.body = { values };
 			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix-tcf/liveWatchWrite') {
+			const expression = typeof args?.expression === 'string' ? args.expression.trim() : '';
+			const value = typeof args?.value === 'string' ? args.value : String(args?.value ?? '');
+			if (!expression) {
+				this.sendErrorResponse(response, 0, 'No expression given');
+				return;
+			}
+			try {
+				const scope = (await this.pickContextIdForRunningWatch()) ?? (await this.pickAnySuspendedContextId());
+				if (!scope) {
+					this.sendErrorResponse(response, 0, 'No debug context to evaluate {expression} in', { expression });
+					return;
+				}
+				response.body = { result: await this.assignExpression(scope, expression, value) };
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, 'Could not set {expression}: {message}', { expression, message: AurixTCFDebugSession.formatError(e) });
+			}
 			return;
 		}
 

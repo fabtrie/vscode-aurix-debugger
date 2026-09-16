@@ -17,6 +17,7 @@ import { createGunzip } from 'zlib';
 import { showDebugConfigPanel } from './debugConfigPanel';
 import { LiveWatchProvider } from './liveWatchView';
 import { getSvdOptionsForDevice } from './svdCatalog';
+import { registerDebuggerActions } from './debuggerActions';
 
 let tcfAgentProcess: ChildProcess | undefined;
 let extensionContext: vscode.ExtensionContext;
@@ -122,7 +123,65 @@ export function activate(context: vscode.ExtensionContext) {
 				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
 				return;
 			}
-			await s.customRequest('aurix-tcf/reset', { suspend: true, pauseAll: true });
+			// The launch configuration decides: "resetSuspend": true halts at the reset vector,
+			// otherwise the target runs after reset and is paused afterwards (pauseAll), since
+			// some firmware only relaxes its watchdog after a startup check that runs a short
+			// time after reset.
+			await s.customRequest('aurix-tcf/reset', {});
+		})
+	);
+
+	let flashing = false;
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-tcf.flashTarget', async () => {
+			const s = vscode.debug.activeDebugSession;
+			if (!s || s.type !== 'aurix-tcf') {
+				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+				return;
+			}
+			if (flashing) {
+				void vscode.window.showWarningMessage('AURIX™ TCF: flashing is already running.');
+				return;
+			}
+			flashing = true;
+			try {
+				await vscode.window.withProgress(
+					{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ TCF: flashing target (see Debug Console)...' },
+					async () => { await s.customRequest('aurix-tcf/flash', {}); }
+				);
+				// Same as the Reset button: the launch configuration decides whether the target halts or runs.
+				await s.customRequest('aurix-tcf/reset', {});
+				void vscode.window.showInformationMessage('AURIX™ TCF: flashing done.');
+			} catch (e) {
+				void vscode.window.showErrorMessage(`AURIX™ TCF: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
+			} finally {
+				flashing = false;
+			}
+		})
+	);
+
+	registerDebuggerActions(context);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-tcf.showResetCapabilities', async () => {
+			const s = vscode.debug.activeDebugSession;
+			if (!s || s.type !== 'aurix-tcf') {
+				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+				return;
+			}
+			const result = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Querying ContextReset.getCapabilities...' },
+				() => s.customRequest('aurix-tcf/resetCapabilities')
+			);
+			const caps = Array.isArray(result?.capabilities) ? result.capabilities : [];
+			if (result?.error) {
+				void vscode.window.showErrorMessage(`ContextReset.getCapabilities failed: ${result.error}`);
+			} else if (caps.length === 0) {
+				void vscode.window.showInformationMessage('Agent reported no ContextReset reset types. See "TCF Agent" / debug console output.');
+			} else {
+				const summary = caps.map((c: { Type: string; Description?: string }) => c.Description ? `${c.Type} (${c.Description})` : c.Type).join(', ');
+				void vscode.window.showInformationMessage(`Supported reset types: ${summary}`);
+			}
 		})
 	);
 
@@ -208,6 +267,12 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-tcf.liveWatchSetValue', async (item?: { expression?: string }) => {
+			await liveWatchProvider?.setValue(item as any);
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-tcf.liveWatchClearExpressions', async () => {
 			await liveWatchProvider?.clearExpressions();
 		})
@@ -286,6 +351,11 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!session || session.type !== 'aurix-tcf') {
 				return;
 			}
+			// The adapter needs the focused thread to tell the toolbar pause button (which pauses the
+			// focused thread) from a core's pause button in the Call Stack view.
+			const focused = item && item.session.id === session.id ? item.threadId : undefined;
+			focusFileLog(session, `activeStackItem thread=${String(focused)} frame=${String((item as vscode.DebugStackFrame | undefined)?.frameId)}`);
+			void Promise.resolve(session.customRequest('aurix-tcf/activeThread', { threadId: focused })).catch(() => undefined);
 			if (!item) {
 				return;
 			}
@@ -326,6 +396,7 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!srcPath || line === undefined) {
 				return;
 			}
+			focusFileLog(e.session, `sourceLocation event ${srcPath}:${line}`);
 			void autoRevealSourcePath(srcPath, line);
 		})
 	);
@@ -437,7 +508,8 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 
 		// Flash firmware via AurixFlasher (single invocation, matching Eclipse launcher).
 		// TriCore ELF uses -elf; PPU/CDSP HEX files use -hex.
-		if (config.enableFlashing === true) {
+		// aurix-dbg programs the flash itself over TAS (Tcl 'program' after connect).
+		if (config.enableFlashing === true && config.agentFlavor !== 'aurix-dbg') {
 			const resolvedElf = resolveConfigPath(session, config.program);
 			if (!resolvedElf) {
 				void vscode.window.showErrorMessage('Enable flashing is set but no program/ELF path is configured.');
@@ -470,7 +542,9 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 		}
 
 		// Auto-start TCF agent if requested
-		if (config.autoStartAgent) {
+		if (config.autoStartAgent && config.agentFlavor === 'aurix-dbg') {
+			await startAurixDbg(session, config);
+		} else if (config.autoStartAgent) {
 			// Preflight: validate targetDevice early so typos fail fast.
 			if (typeof config.targetDevice === 'string' && config.targetDevice.trim() !== '') {
 				try {
@@ -483,7 +557,7 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 			}
 
 			// Use configured agent path, or fallback to bundled agent
-			const configuredPath = config.agentPath || vscode.workspace.getConfiguration("aurix-tcf").get('agentPath');
+			const configuredPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration("aurix-tcf").get('agentPath'));
 			const agentPath = configuredPath || path.join(extensionContext.extensionPath, 'bin', 'aurix-debugger.exe');
 			
 			// Build agent arguments based on Eclipse log format
@@ -549,10 +623,17 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 
 			// Keep this simple: if an agent is already running, reuse it.
 			// This makes VS Code Restart stable (no kill+start churn).
+			let reused = false;
 			if (tcfAgentProcess && tcfAgentProcess.exitCode === null) {
 				agentOutput?.appendLine('Reusing already running TCF agent for new session.');
-				await waitForTcpPort(host, port, 15_000);
-			} else {
+				try {
+					await waitForTcpPort(host, port, 15_000);
+					reused = true;
+				} catch (e) {
+					agentOutput?.appendLine(`Running TCF agent is not reachable (${e instanceof Error ? e.message : String(e)}); restarting it.`);
+				}
+			}
+			if (!reused) {
 				await startTCFAgent(agentPath, agentArgs, host, port);
 			}
 		}
@@ -1083,6 +1164,59 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 	}
 }
 
+/**
+ * Starts aurix-dbg (OpenOCD-compatible debug server over Infineon TAS) with
+ * OpenOCD-style arguments built from the launch configuration:
+ * -s <searchDirs> -f <configFiles> -c <configCommands>.
+ */
+async function startAurixDbg(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<void> {
+	const agentPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration('aurix-tcf').get('agentPath'));
+	if (!agentPath) {
+		void vscode.window.showErrorMessage('agentFlavor "aurix-dbg" requires "agentPath" (path to aurix-dbg.exe).');
+		throw new Error('aurix-dbg agentPath not configured');
+	}
+	const host = String(config.host || '127.0.0.1');
+	const port = Number(config.port || 1534);
+	const asList = (v: unknown): string[] => {
+		if (Array.isArray(v)) {
+			return v.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+		}
+		return typeof v === 'string' && v.trim() !== '' ? [v] : [];
+	};
+
+	const args: string[] = [];
+	for (const dir of asList(config.searchDirs)) {
+		args.push('-s', resolveConfigPath(session, dir) ?? dir);
+	}
+	for (const file of asList(config.configFiles)) {
+		// Names like "board/infineon/x.cfg" are looked up in the search dirs by aurix-dbg;
+		// only pass a resolved path when the file exists relative to the workspace.
+		const resolved = resolveConfigPath(session, file);
+		args.push('-f', resolved && fs.existsSync(resolved) ? resolved : file);
+	}
+	for (const cmd of asList(config.configCommands)) {
+		args.push('-c', cmd);
+	}
+	args.push('-c', `bindto ${host === 'localhost' ? '127.0.0.1' : host}`, '-c', `tcf_port ${port}`);
+	if (Array.isArray(config.agentArgs)) {
+		args.push(...asList(config.agentArgs));
+	}
+
+	let reused = false;
+	if (tcfAgentProcess && tcfAgentProcess.exitCode === null) {
+		agentOutput?.appendLine('Reusing already running aurix-dbg for new session.');
+		try {
+			await waitForTcpPort(host, port, 15_000);
+			reused = true;
+		} catch (e) {
+			agentOutput?.appendLine(`Running aurix-dbg is not reachable (${e instanceof Error ? e.message : String(e)}); restarting it.`);
+		}
+	}
+	if (!reused) {
+		await startTCFAgent(agentPath, args, host, port);
+	}
+}
+
 async function startTCFAgent(agentPath: string, args: string[], host: string, port: number): Promise<void> {
 	// Stop existing agent if running (should be rare now; we prefer reusing it)
 	await stopTCFAgent('restart requested');
@@ -1092,36 +1226,112 @@ async function startTCFAgent(agentPath: string, args: string[], host: string, po
 
 	agentOutput?.show(true);
 	agentOutput?.appendLine(`Starting TCF agent: ${agentPath}`);
-	agentOutput?.appendLine(`Agent arguments: ${args.join(' ')}`);
+	// Quoted, so the line can be pasted into a shell as-is. Unquoted, a single
+	// argument like "bindto 127.0.0.1" looks like two and the agent rejects it with
+	// "unknown option: 127.0.0.1" - spawn() itself passes it as one argument.
+	agentOutput?.appendLine(`Agent command line: ${[agentPath, ...args].map(quoteCommandLineArg).join(' ')}`);
 
-	tcfAgentProcess = spawn(agentPath, args, {
+	const proc = spawn(agentPath, args, {
 		cwd: path.dirname(agentPath),
 		stdio: ['ignore', 'pipe', 'pipe'],
 		windowsHide: true,
 	});
+	tcfAgentProcess = proc;
 
-	tcfAgentProcess.stdout?.on('data', (data) => {
-		agentOutput?.appendLine(String(data).trimEnd());
+	// The agent says on stdout/stderr why it refused to start (bad option, cfg script
+	// error, probe busy). That goes to the output channel, but a failing launch pulls
+	// the panel over to the Debug Console, so keep the tail and put it into the thrown
+	// error as well - that is what the user actually gets shown.
+	const recentOutput: string[] = [];
+	const record = (line: string) => {
+		agentOutput?.appendLine(line);
+		recentOutput.push(line);
+		if (recentOutput.length > 200) {
+			recentOutput.shift();
+		}
+	};
+	// Chunks are not lines: split them so partial lines are not logged as whole ones.
+	const pump = (stream: NodeJS.ReadableStream | null) => {
+		let pending = '';
+		stream?.on('data', (data) => {
+			pending += String(data);
+			const lines = pending.split(/\r?\n/);
+			pending = lines.pop() ?? '';
+			for (const line of lines) {
+				record(line);
+			}
+		});
+		stream?.on('end', () => {
+			if (pending !== '') {
+				record(pending);
+				pending = '';
+			}
+		});
+	};
+	pump(proc.stdout);
+	pump(proc.stderr);
+
+	// A failed spawn (e.g. ENOENT) emits 'error' but never sets exitCode, so without this
+	// waitForTcpPort would poll until its timeout and hide the real cause.
+	const spawnFailed = new Promise<never>((_, reject) => {
+		proc.once('error', (err) => {
+			if (tcfAgentProcess === proc) {
+				tcfAgentProcess = undefined;
+			}
+			reject(new Error(`Failed to start TCF agent '${agentPath}': ${err.message}`));
+		});
 	});
+	spawnFailed.catch(() => { /* surfaced via Promise.race below */ });
 
-	tcfAgentProcess.stderr?.on('data', (data) => {
-		agentOutput?.appendLine(String(data).trimEnd());
+	// 'close', not 'exit': 'exit' can fire before the last stdout/stderr chunks have been
+	// delivered, and those chunks are the failure reason.
+	const closed = new Promise<number | null>((resolve) => proc.once('close', (code) => resolve(code)));
+	const exitedEarly = closed.then((code): never => {
+		throw new Error(`TCF agent exited with code ${code} before listening on ${host}:${port}`);
 	});
+	exitedEarly.catch(() => { /* surfaced via Promise.race below */ });
 
-	tcfAgentProcess.on('exit', (code, signal) => {
+	proc.on('exit', (code, signal) => {
 		agentOutput?.appendLine(`TCF agent exited with code ${code}${signal ? ` (signal ${signal})` : ''}`);
-		tcfAgentProcess = undefined;
+		if (tcfAgentProcess === proc) {
+			tcfAgentProcess = undefined;
+		}
 	});
 
-	tcfAgentProcess.on('error', (err) => {
+	proc.on('error', (err) => {
 		agentOutput?.appendLine(`Failed to start TCF agent: ${err.message}`);
 	});
 
 	// Avoid a race where the debug adapter tries to connect before the agent has
 	// started listening on the requested TCP port.
 	agentOutput?.appendLine(`Waiting for TCF agent to listen on ${host}:${port}...`);
-	await waitForTcpPort(host, port, 15_000);
+	try {
+		await Promise.race([waitForTcpPort(host, port, 15_000), spawnFailed, exitedEarly]);
+	} catch (e) {
+		// If the process is already gone, let its streams drain so the reported tail is
+		// complete (waitForTcpPort can reject on 'exit', i.e. before 'close').
+		if (proc.exitCode !== null || proc.signalCode !== null) {
+			await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 500))]);
+		}
+		const message = `${e instanceof Error ? e.message : String(e)}${formatAgentOutputTail(recentOutput)}`;
+		agentOutput?.appendLine(`TCF agent did not start listening: ${message}`);
+		agentOutput?.show(true);
+		// Don't leave a hung agent behind: it keeps the probe locked and later launches would reuse it.
+		await stopTCFAgent('startup failed');
+		throw new Error(message);
+	}
 	agentOutput?.appendLine(`TCF agent is listening on ${host}:${port}`);
+}
+
+/** Quotes an argument for display, so a logged command line can be pasted into a shell. */
+function quoteCommandLineArg(arg: string): string {
+	return /[\s"]/.test(arg) ? `"${arg.replace(/(\\*)"/g, '$1$1\\"')}"` : arg;
+}
+
+/** The last non-empty lines the agent printed, for appending to a startup error. */
+function formatAgentOutputTail(lines: string[], max = 15): string {
+	const tail = lines.map((l) => l.trimEnd()).filter((l) => l.trim() !== '').slice(-max);
+	return tail.length === 0 ? '' : `\n\nAgent output:\n${tail.join('\n')}`;
 }
 
 async function stopTCFAgent(reason: string): Promise<void> {
@@ -1588,11 +1798,22 @@ async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promi
 }
 
 async function autoRevealSourcePath(srcPath: string, line: number): Promise<void> {
-	if (lastAutoSourcePath === srcPath && lastAutoSourceLine === line) {
+	const norm = normalizePathForCompare(srcPath);
+	// Skip only while the active editor still shows this location (the same stop is revealed by both
+	// the focused stack frame and the adapter's sourceLocation event). A later stop at the same line
+	// reveals again once the editor was closed, switched or the cursor moved.
+	const active = vscode.window.activeTextEditor;
+	if (
+		lastAutoSourcePath === srcPath &&
+		lastAutoSourceLine === line &&
+		active?.document?.uri?.fsPath &&
+		normalizePathForCompare(active.document.uri.fsPath) === norm &&
+		active.selection.active.line === line - 1
+	) {
+		focusFileLog(vscode.debug.activeDebugSession, `reveal skipped (already shown) ${srcPath}:${line}`);
 		return;
 	}
 	try {
-		const norm = normalizePathForCompare(srcPath);
 		const visible = vscode.window.visibleTextEditors.find((ed) => {
 			const edPath = ed.document?.uri?.fsPath;
 			return edPath ? normalizePathForCompare(edPath) === norm : false;
@@ -1609,9 +1830,11 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<void
 			const uri = vscode.Uri.file(srcPath);
 			const doc = await vscode.workspace.openTextDocument(uri);
 			const viewColumn = preferredSourceViewColumn ?? vscode.ViewColumn.One;
+			// Preview tab, like VS Code's own stop reveal: the next stop replaces it, so only the
+			// current location stays open instead of a tab per stop.
 			editor = await vscode.window.showTextDocument(doc, {
 				viewColumn,
-				preview: false,
+				preview: true,
 				preserveFocus: false
 			});
 		}
@@ -1620,8 +1843,22 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<void
 		editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
 		lastAutoSourcePath = srcPath;
 		lastAutoSourceLine = line;
+		focusFileLog(vscode.debug.activeDebugSession, `revealed ${srcPath}:${line}`);
 	} catch (e) {
 		agentOutput?.appendLine(`Failed to auto-open source file: ${String(e)}`);
+	}
+}
+
+/** Appends to %TEMP%/aurix-tcf-focus.log when the session's launch configuration has "debugUIFocus": true. */
+function focusFileLog(session: vscode.DebugSession | undefined, message: string): void {
+	if (session?.type !== 'aurix-tcf' || session.configuration?.debugUIFocus !== true) {
+		return;
+	}
+	try {
+		const dir = process.env.TEMP || process.env.TMPDIR || '/tmp';
+		fs.appendFileSync(path.join(dir, 'aurix-tcf-focus.log'), `${new Date().toISOString()} [extension] ${message}\n`);
+	} catch {
+		// diagnostics only
 	}
 }
 

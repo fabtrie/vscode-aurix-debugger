@@ -160,6 +160,58 @@ Each of the PPU and CDSP sections has a **Flash Hex** checkbox. When checked, th
 - **PPU Flash Hex** — flashes the HEX next to the PPU ELF.
 - **CDSP Flash Hex** — flashes the HEX next to every configured CDSP ELF.
 
+### Debugger Actions
+
+With `agentFlavor` `aurix-dbg`, the launch configuration can define custom Tcl commands in `actions`. They are offered by the `Debugger Actions` toolbar button, which only appears when `actions` is set. An entry with `items` opens a submenu, an entry with `tcl` runs its command(s) in order on the debug server. The output is written to the Debug Console.
+
+```jsonc
+"actions": [
+  {
+    "label": "Mass Erase",
+    "icon": "trash",
+    "items": [
+      {
+        "id": "erasePflash",
+        "label": "Erase PFlash",
+        "tcl": "<tcl command for pflash mass erase>",
+        "confirm": "Erase the complete PFlash?",
+        "resetAfter": true
+      },
+      {
+        "id": "eraseDflash",
+        "label": "Erase DFlash",
+        "tcl": ["<tcl command 1>", "<tcl command 2>"],
+        "confirm": "Erase the complete DFlash?"
+      }
+    ]
+  },
+  {
+    "label": "Read Device ID",
+    "icon": "info",
+    "tcl": "<tcl command>",
+    "showOutput": true
+  }
+]
+```
+
+| Property | Description |
+|---|---|
+| `label` | Name shown in the list (required) |
+| `description`, `detail`, `icon` | Additional text and codicon name |
+| `items` | Submenu entries (same format) |
+| `tcl` | Tcl command or list of commands; stops at the first error |
+| `confirm` | Confirmation text shown before running |
+| `resetAfter` | Reset the target afterwards like the Reset button |
+| `showOutput` | Show the Tcl output in a notification |
+| `timeout` | Timeout per command in seconds (default 900) |
+| `id` | Lets you run the action from a keybinding |
+
+The action is responsible for the target state it needs (e.g. halting the cores first). To run an action from a keybinding:
+
+```json
+{ "key": "ctrl+alt+e", "command": "aurix-tcf.runAction", "args": { "id": "erasePflash" }, "when": "debugType == aurix-tcf" }
+```
+
 
 ## License
 

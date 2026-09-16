@@ -112,6 +112,34 @@ export class LiveWatchProvider implements vscode.TreeDataProvider<LiveWatchItem>
 		this.onDidChangeTreeDataEmitter.fire();
 	}
 
+	async setValue(item?: LiveWatchItem): Promise<void> {
+		const expression = item?.expression ?? this.selectedExpression;
+		if (!expression) {
+			return;
+		}
+		const session = vscode.debug.activeDebugSession;
+		if (!session || session.type !== 'aurix-tcf') {
+			void vscode.window.showWarningMessage('Live watch values can only be set during an AURIX TCF debug session.');
+			return;
+		}
+		const current = this.results.get(expression);
+		const value = await vscode.window.showInputBox({
+			title: `Set ${expression}`,
+			value: current?.available ? current.result : '',
+			prompt: 'New value: decimal, 0x hex, 0b binary, a character or an enumerator name',
+			ignoreFocusOut: true,
+		});
+		if (value === undefined) {
+			return;
+		}
+		try {
+			await session.customRequest('aurix-tcf/liveWatchWrite', { expression, value });
+		} catch (e) {
+			void vscode.window.showErrorMessage(`Could not set ${expression}: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		await this.refreshNow();
+	}
+
 	async clearExpressions(): Promise<void> {
 		this.expressions.clear();
 		this.results.clear();

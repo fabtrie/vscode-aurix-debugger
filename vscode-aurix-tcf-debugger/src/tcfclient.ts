@@ -296,7 +296,8 @@ export abstract class TCFClient extends AbstractTCFClient {
         if (stackTraceDepth === -1) {
             stackFrames = await this.sendCommand(new GetChildrenStackTraceCommand(contextID)) || [];
         } else {
-            stackFrames = await this.sendCommand(new GetChildrenRangeStackTraceCommand(contextID, stackTraceDepth)) || [];
+            // getChildrenRange takes frame indices (0 = top frame): the first stackTraceDepth frames.
+            stackFrames = await this.sendCommand(new GetChildrenRangeStackTraceCommand(contextID, 0, stackTraceDepth - 1)) || [];
         }
         
         let stackFramesContexts: TCFContextDataStackTrace[] = await this.sendChunkedCommand(stackFrames, x => new GetContextStackTraceCommand(x));

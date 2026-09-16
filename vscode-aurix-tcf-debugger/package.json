@@ -96,6 +96,28 @@
         }
       },
       {
+        "command": "aurix-tcf.flashTarget",
+        "title": "Flash Target",
+        "category": "AURIX™ TCF",
+        "icon": "$(desktop-download)"
+      },
+      {
+        "command": "aurix-tcf.showActions",
+        "title": "Debugger Actions",
+        "category": "AURIX™ TCF",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "aurix-tcf.runAction",
+        "title": "Run Debugger Action",
+        "category": "AURIX™ TCF"
+      },
+      {
+        "command": "aurix-tcf.showResetCapabilities",
+        "title": "Show Reset Capabilities",
+        "category": "AURIX™ TCF"
+      },
+      {
         "command": "aurix-tcf.toggleInstructionStepping",
         "title": "Toggle Instruction Stepping",
         "category": "AURIX™ TCF"
@@ -152,6 +174,12 @@
         "title": "Refresh Live Watch",
         "category": "AURIX™ TCF",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "aurix-tcf.liveWatchSetValue",
+        "title": "Set Live Watch Value",
+        "category": "AURIX™ TCF",
+        "icon": "$(edit)"
       }
     ],
     "views": {
@@ -167,8 +195,18 @@
     "menus": {
       "debug/toolBar": [
         {
+          "command": "aurix-tcf.flashTarget",
+          "when": "debugType == aurix-tcf",
+          "group": "navigation"
+        },
+        {
           "command": "aurix-tcf.resetTarget",
           "when": "debugType == aurix-tcf",
+          "group": "navigation"
+        },
+        {
+          "command": "aurix-tcf.showActions",
+          "when": "debugType == aurix-tcf && aurix-tcf.hasActions",
           "group": "navigation"
         },
         {
@@ -180,6 +218,16 @@
           "command": "aurix-tcf.disableInstructionStepping",
           "when": "debugType == aurix-tcf && aurix-tcf.instructionStepping",
           "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "aurix-tcf.showActions",
+          "when": "debugType == aurix-tcf"
+        },
+        {
+          "command": "aurix-tcf.runAction",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -205,6 +253,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "aurix-tcf.liveWatchSetValue",
+          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression",
+          "group": "inline"
+        },
         {
           "command": "aurix-tcf.liveWatchRemoveExpression",
           "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression",
@@ -287,9 +340,21 @@
                 "type": "string"
               },
               "enableFlashing": {
-                "description": "If true, runs the bundled aurixflasher.exe with -elf <program> before starting the debug session",
+                "description": "If true, runs the bundled aurixflasher.exe with -elf <program> before starting the debug session (agentFlavor aurix-dbg: programs flashFiles with the server's 'flash write_images', then resets)",
                 "type": "boolean",
                 "default": false
+              },
+              "flashFiles": {
+                "description": "agentFlavor aurix-dbg: images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX or binary). The files are merged into one image first; where they overlap, later files win. Defaults to [program]. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "verifyFlash": {
+                "description": "agentFlavor aurix-dbg: read the programmed sectors back after flashing and compare them with the image (unchanged sectors are compared while flashing anyway).",
+                "type": "boolean",
+                "default": true
               },
               "targetDevice": {
                 "description": "Target device name (must match lsmcdd.exe output; numeric ids are not supported). Used for agent -p and to resolve aurixflasher -id when enableFlashing is true.",
@@ -338,6 +403,96 @@
                 "description": "Show TCF protocol messages in the debug console",
                 "type": "boolean",
                 "default": false
+              },
+              "agentFlavor": {
+                "description": "TCF agent type: 'infineon' (bundled DAS agent, default) or 'aurix-dbg' (OpenOCD-compatible server over Infineon TAS that runs OpenOCD cfg scripts)",
+                "type": "string",
+                "enum": ["infineon", "aurix-dbg"],
+                "default": "infineon"
+              },
+              "autoStartAgent": {
+                "description": "Start the TCF agent process before connecting",
+                "type": "boolean",
+                "default": false
+              },
+              "agentPath": {
+                "description": "Path to the agent executable (aurix-debugger.exe or aurix-dbg.exe)",
+                "type": "string"
+              },
+              "host": {
+                "description": "TCF host",
+                "type": "string",
+                "default": "127.0.0.1"
+              },
+              "port": {
+                "description": "TCF port",
+                "type": "number",
+                "default": 1534
+              },
+              "searchDirs": {
+                "description": "aurix-dbg: script search directories (OpenOCD -s), e.g. the OpenOCD tcl directory",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "configFiles": {
+                "description": "aurix-dbg: OpenOCD configuration scripts (OpenOCD -f), in order",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "configCommands": {
+                "description": "aurix-dbg: additional Tcl commands (OpenOCD -c), run after the configuration files",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "actions": {
+                "description": "aurix-dbg: custom Tcl commands offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu, an entry with 'tcl' is an action.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["label"],
+                  "properties": {
+                    "id": { "type": "string", "description": "Identifier for the command 'aurix-tcf.runAction' (e.g. keybindings with args { \"id\": \"...\" })" },
+                    "label": { "type": "string", "description": "Name shown in the action list" },
+                    "description": { "type": "string", "description": "Text shown next to the label" },
+                    "detail": { "type": "string", "description": "Text shown below the label" },
+                    "icon": { "type": "string", "description": "Codicon name, e.g. 'trash'" },
+                    "items": {
+                      "type": "array",
+                      "description": "Submenu entries (same format as 'actions')",
+                      "items": {
+                        "type": "object",
+                        "required": ["label"],
+                        "properties": {
+                          "id": { "type": "string", "description": "Identifier for the command 'aurix-tcf.runAction'" },
+                          "label": { "type": "string", "description": "Name shown in the action list" },
+                          "description": { "type": "string", "description": "Text shown next to the label" },
+                          "detail": { "type": "string", "description": "Text shown below the label" },
+                          "icon": { "type": "string", "description": "Codicon name, e.g. 'trash'" },
+                          "items": { "type": "array", "description": "Submenu entries (same format as 'actions')" },
+                          "tcl": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Tcl command(s) run in order on the debug server; stops at the first error" },
+                          "confirm": { "type": "string", "description": "Confirmation text shown before running" },
+                          "resetAfter": { "type": "boolean", "default": false, "description": "Reset the target afterwards like the Reset toolbar button" },
+                          "showOutput": { "type": "boolean", "default": false, "description": "Show the Tcl output in a notification (always written to the Debug Console)" },
+                          "timeout": { "type": "number", "default": 900, "description": "Timeout per Tcl command in seconds" }
+                        }
+                      }
+                    },
+                    "tcl": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Tcl command(s) run in order on the debug server; stops at the first error" },
+                    "confirm": { "type": "string", "description": "Confirmation text shown before running" },
+                    "resetAfter": { "type": "boolean", "default": false, "description": "Reset the target afterwards like the Reset toolbar button" },
+                    "showOutput": { "type": "boolean", "default": false, "description": "Show the Tcl output in a notification (always written to the Debug Console)" },
+                    "timeout": { "type": "number", "default": 900, "description": "Timeout per Tcl command in seconds" }
+                  }
+                }
+              },
+              "core": {
+                "description": "Core number to focus (memory access, instruction breakpoints)",
+                "type": "number"
+              },
+              "stopOnEntry": {
+                "description": "Pause after connecting",
+                "type": "boolean",
+                "default": false
               }
             }
           }
@@ -356,6 +511,26 @@
               "liveWatchEnabled": true,
               "liveWatchIntervalMs": 1000,
               "enableConsoleLog": false
+            }
+          },
+          {
+            "label": "AURIX™ TCF: aurix-dbg (TAS, OpenOCD cfg)",
+            "description": "Debug with aurix-dbg over Infineon TAS using OpenOCD configuration scripts",
+            "body": {
+              "type": "aurix-tcf",
+              "request": "launch",
+              "name": "Debug AURIX™ Program (aurix-dbg)",
+              "agentFlavor": "aurix-dbg",
+              "autoStartAgent": true,
+              "agentPath": "^\"\\${workspaceFolder}/aurix-dbg.exe\"",
+              "searchDirs": ["^\"\\${workspaceFolder}/tcl\""],
+              "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
+              "program": "^\"\\${workspaceFolder}/build/program.elf\"",
+              "host": "127.0.0.1",
+              "port": 1534,
+              "core": 0,
+              "enableFlashing": false,
+              "liveWatchEnabled": true
             }
           }
         ]

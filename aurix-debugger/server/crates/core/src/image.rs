@@ -173,6 +173,20 @@ impl Image {
         (Image::from_sections(kept), removed)
     }
 
+    /// The image data inside `[start, end)`.
+    pub fn within(&self, start: u32, end: u64) -> Image {
+        Image::from_sections(
+            self.sections
+                .iter()
+                .filter_map(|s| {
+                    let (lo, hi) = ((start as u64).max(s.addr as u64), end.min(s.end()));
+                    let (from, to) = ((lo - s.addr as u64) as usize, (hi.max(lo) - s.addr as u64) as usize);
+                    (lo < hi).then(|| Section { addr: lo as u32, data: s.data[from..to].to_vec() })
+                })
+                .collect(),
+        )
+    }
+
     /// This image with `top` laid over it: where both have data, `top` wins. Also returns the
     /// number of bytes of this image that `top` replaces with different data.
     pub fn overlay(&self, top: &Image) -> (Image, usize) {
@@ -226,6 +240,8 @@ mod tests {
         let (cut, n) = img.without(0x11, 0x21);
         assert_eq!(n, 4);
         assert_eq!(cut.sections, vec![Section { addr: 0x10, data: vec![1] }, Section { addr: 0x21, data: vec![6] }]);
+        assert_eq!(img.within(0x11, 0x21).sections, vec![Section { addr: 0x11, data: vec![2, 3, 4] }, Section { addr: 0x20, data: vec![5] }]);
+        assert!(img.within(0x14, 0x20).sections.is_empty());
         assert_eq!(img.without(0x30, 0x40), (img.clone(), 0));
         assert_eq!(img.without(0, 0x100).0.sections, vec![]);
     }

@@ -602,14 +602,15 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             let bank = flash::find_bank(cx, a.get(2).ok_or("usage: flash info|probe <bank>")?).map_err(e2s)?;
             let p = flash::probe_bank(cx, &bank).map_err(e2s)?;
             Ok(format!(
-                "#{} : {} ({}) at 0x{:08x}, size 0x{:08x}: PFLASH, {} sectors of {} KB, physical sectors of {} KB",
+                "#{} : {} ({}) at 0x{:08x}, size 0x{:08x}: {}, {} sectors of {} KB, physical sectors of {} KB",
                 a[2],
                 bank.name,
                 bank.driver,
                 p.base,
                 p.size,
-                p.size / flash::SECTOR_SIZE,
-                flash::SECTOR_SIZE / 1024,
+                if p.dflash { "DFLASH" } else { "PFLASH" },
+                p.size / p.sector_size,
+                p.sector_size / 1024,
                 p.phys_sector / 1024
             ))
         }
@@ -629,7 +630,12 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             }
             let bank = flash::find_bank(cx, a[2]).map_err(e2s)?;
             let first = num32(a[3])?;
-            let last = if a[4] == "last" { bank.size / flash::SECTOR_SIZE - 1 } else { num32(a[4])? };
+            let last = if a[4] == "last" {
+                let p = flash::probe_bank(cx, &bank).map_err(e2s)?;
+                p.size / p.sector_size - 1
+            } else {
+                num32(a[4])?
+            };
             flash::erase_sectors(cx, &bank, first, last).map_err(e2s)?;
             Ok(format!("erased sectors {first} through {last} on flash bank {}", bank.name))
         }
@@ -681,9 +687,16 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
             let mut out = format!("wrote {} bytes from {} files: {stats}", img.size() - stats.ucb_skipped, files.len());
             if verify {
-                let t0 = std::time::Instant::now();
-                let n = flash::verify_image(cx, &img).map_err(e2s)?;
-                out += &format!("\nverified {n} bytes in {:.1}s", t0.elapsed().as_secs_f64());
+                // An incremental write has already compared all unchanged sectors with the image
+                // (including the padding of their pages): only the programmed ones are read back.
+                let (check, what) = if incremental {
+                    let parts = stats.programmed.iter().flat_map(|&s| img.within(s, s as u64 + flash::SECTOR_SIZE as u64).sections);
+                    (Image::from_sections(parts.collect()), format!(" of the {} programmed sectors", stats.programmed.len()))
+                } else {
+                    (img.clone(), String::new())
+                };
+                let n = flash::verify_image(cx, &check).map_err(e2s)?;
+                out += &format!("\nverified {n} bytes{what}");
             }
             Ok(out)
         }

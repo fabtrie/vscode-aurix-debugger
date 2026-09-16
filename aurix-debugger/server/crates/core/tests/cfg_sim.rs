@@ -51,7 +51,8 @@ fn loads_real_cfg_and_inits() {
     let s = server();
     let i = &s.interp;
     assert_eq!(i.eval("target names").unwrap(), "tc37x.cpu0 tc37x.cpu1 tc37x.cpu2");
-    assert_eq!(i.eval("flash banks").unwrap().lines().count(), 2);
+    // pfls0/1 from the target cfg, dfls0/1 from tc37x_ocds_init.cfg.
+    assert_eq!(i.eval("flash banks").unwrap().lines().count(), 4);
     assert_eq!(i.eval("tc37x.cpu1 cget -dbgbase").unwrap(), "0xf8820000");
     assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap().trim(), "tc37x_on_examine");
     i.eval("init").unwrap();

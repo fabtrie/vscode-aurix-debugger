@@ -1,5 +1,5 @@
-//! Flash banks (`flash bank`) and the AURIX TC3xx PFLASH driver (`tc3x_eflash`,
-//! also accepted as `aurix_eflash`).
+//! Flash banks (`flash bank`) and the AURIX TC3xx PFLASH/DFLASH driver (`tc3x_eflash`,
+//! also accepted as `aurix_eflash`). DFLASH banks support erase and erase check only.
 //!
 //! Programming runs the DMU command sequences over the debug interface (no RAM
 //! loader). `write_image` is incremental per 16 KB sector:
@@ -69,6 +69,9 @@ const BURST_SIZE: usize = 256;
 const MAX_ERASE_SECTORS: u32 = 32;
 const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROGRAM_TIMEOUT: Duration = Duration::from_secs(2);
+/// Status reads after a program command before the result is read. A 256-byte burst was seen
+/// to end within 3 reads (TC377, miniWiggler at 5 MHz); if not, the result is polled.
+const PROGRAM_SETTLE_READS: usize = 3;
 /// Bytes of a programmed page that the image does not define.
 const PAD: u8 = 0;
 /// Largest block compared per read in verify_image.
@@ -83,13 +86,25 @@ pub struct Pflash {
     pub phys_sector: u32,
     /// Busy bit of the bank in DMU_HF_STATUS.
     pub busy_bit: u32,
+    /// Logical sector size (the erase unit).
+    pub sector_size: u32,
+    /// Logical sectors one erase command may cover.
+    pub max_erase_sectors: u32,
+    pub dflash: bool,
 }
 
 const MB: u32 = 1024 * 1024;
 
 const fn pf(base: u32, size: u32, busy_bit: u32) -> Pflash {
-    Pflash { base, size, phys_sector: MB, busy_bit }
+    Pflash { base, size, phys_sector: MB, busy_bit, sector_size: SECTOR_SIZE, max_erase_sectors: MAX_ERASE_SECTORS, dflash: false }
 }
+
+/// DFLASH0 (EEPROM emulation, NVM data) of all TC3xx variants: 4 KB logical sectors, up to 256 KB
+/// per erase command, at most 1 MB (the `flash bank` size sets the actual size).
+const DF0: Pflash = Pflash { base: 0xAF00_0000, size: MB, phys_sector: MB, busy_bit: 0, sector_size: 4 * 1024, max_erase_sectors: 64, dflash: true };
+/// DFLASH1 (HSM data) of all TC3xx variants: 128 KB, 4 KB logical sectors. Erasing it from the
+/// debugger only works if the HSM does not protect it.
+const DF1: Pflash = Pflash { base: 0xAFC0_0000, size: 128 * 1024, phys_sector: 128 * 1024, busy_bit: 1, ..DF0 };
 
 const TC36X: &[Pflash] = &[pf(0x8000_0000, 2 * MB, 2), pf(0x8030_0000, 2 * MB, 3)];
 const TC37X: &[Pflash] = &[pf(0x8000_0000, 3 * MB, 2), pf(0x8030_0000, 3 * MB, 3)];
@@ -148,13 +163,19 @@ pub fn probe(io: &mut Io, bank: &FlashBank) -> Result<Pflash> {
         return Err(other(format!("SCU_CHIPID 0x{chipid:08x} is not an AURIX TC3xx device")));
     }
     let variant = (chipid >> 12) & 0xF;
-    pflash_banks(variant)
+    let banks = pflash_banks(variant);
+    banks
         .iter()
-        .find(|p| p.base & 0x0FFF_FFFF == bank.base & 0x0FFF_FFFF && p.size == bank.size)
-        .map(|p| Pflash { base: bank.base, ..*p })
+        .chain(if banks.is_empty() { &[][..] } else { &[DF0, DF1][..] })
+        // The DFLASH size depends on the device (256 KB on the TC377 board): up to 1 MB is accepted.
+        .find(|p| {
+            let size_ok = if p.dflash { bank.size > 0 && bank.size <= p.size && bank.size % p.sector_size == 0 } else { p.size == bank.size };
+            p.base & 0x0FFF_FFFF == bank.base & 0x0FFF_FFFF && size_ok
+        })
+        .map(|p| Pflash { base: bank.base, size: bank.size, ..*p })
         .ok_or_else(|| {
             other(format!(
-                "{}: no TC3{variant:X}x PFLASH bank at 0x{:08x} with size 0x{:x} (DFLASH and UCB banks are not supported)",
+                "{}: no TC3{variant:X}x PFLASH or DFLASH bank at 0x{:08x} with size 0x{:x} (UCB banks are not supported)",
                 bank.name, bank.base, bank.size
             ))
         })
@@ -216,11 +237,11 @@ impl<'a, 'b> Driver<'a, 'b> {
     /// Sectors from `addr` that one command may cover.
     fn chunk(&self, addr: u32, remaining: u32) -> u32 {
         let off = (addr & 0x0FFF_FFFF) - (self.bank.base & 0x0FFF_FFFF);
-        let to_phys = (self.bank.phys_sector - off % self.bank.phys_sector) / SECTOR_SIZE;
-        remaining.min(MAX_ERASE_SECTORS).min(to_phys.max(1))
+        let to_phys = (self.bank.phys_sector - off % self.bank.phys_sector) / self.bank.sector_size;
+        remaining.min(self.bank.max_erase_sectors).min(to_phys.max(1))
     }
 
-    /// Erases `sectors` 16 KB sectors from `addr`.
+    /// Erases `sectors` logical sectors from `addr`.
     pub fn erase(&mut self, mut addr: u32, mut sectors: u32) -> Result<()> {
         self.begin()?;
         while sectors > 0 {
@@ -230,7 +251,7 @@ impl<'a, 'b> Driver<'a, 'b> {
             if err != 0 {
                 return Err(self.fail(format!("erase at 0x{addr:08x}"), err));
             }
-            addr += n * SECTOR_SIZE;
+            addr += n * self.bank.sector_size;
             sectors -= n;
         }
         Ok(())
@@ -250,13 +271,16 @@ impl<'a, 'b> Driver<'a, 'b> {
                 self.key(KEY_CLEAR_STATUS)?;
                 return Ok(false);
             }
-            addr += n * SECTOR_SIZE;
+            addr += n * self.bank.sector_size;
             sectors -= n;
         }
         Ok(true)
     }
 
-    /// Programs erased flash with page-aligned `data` (a multiple of 32 bytes).
+    /// Programs erased flash with page-aligned `data` (a multiple of 32 bytes). Each command is
+    /// one TAS transaction that also reads the result, so polling is only needed if the flash is
+    /// still busy by then. Every TAS operation costs 0.1..0.2 ms at 5 MHz, so fewer operations
+    /// is what makes programming faster.
     pub fn program(&mut self, addr: u32, data: &[u8]) -> Result<()> {
         if addr % PAGE_SIZE != 0 || data.len() % PAGE_SIZE as usize != 0 {
             return Err(usage("flash program: data is not page aligned"));
@@ -269,18 +293,25 @@ impl<'a, 'b> Driver<'a, 'b> {
             let n = if a % BURST_SIZE as u32 == 0 && data.len() - off >= BURST_SIZE { BURST_SIZE } else { PAGE_SIZE as usize };
             let mut b = Batch::new();
             b.write32(KEY as u64, KEY_PAGE_MODE_PFLASH);
-            for (i, w) in data[off..off + n].chunks(4).enumerate() {
-                let reg = LOAD_PAGE + if i % 2 == 0 { 0 } else { 4 };
-                b.write32(reg as u64, u32::from_le_bytes([w[0], w[1], w[2], w[3]]));
+            // One block write per page loads both assembly registers (0x55F0, 0x55F4).
+            for w in data[off..off + n].chunks(8) {
+                b.write(LOAD_PAGE as u64, w);
             }
             b.write32(SEQ_ADDR as u64, seg_a(a));
             b.write32(SEQ_COUNT as u64, 0);
             b.write32(SEQ_CMD as u64, 0xA0);
             b.write32(SEQ_CMD as u64, if n == BURST_SIZE { 0xA6 } else { 0xAA });
-            for r in self.io.batch(&b)? {
-                check(&r, a as u64, true)?;
+            for _ in 0..PROGRAM_SETTLE_READS {
+                b.read32(DMU_HF_STATUS as u64);
             }
-            let err = self.wait(PROGRAM_TIMEOUT)?;
+            b.read32(DMU_HF_STATUS as u64);
+            b.read32(DMU_HF_ERRSR as u64);
+            let res = self.io.batch(&b)?;
+            for r in &res {
+                check(r, a as u64, true)?;
+            }
+            let (st, err) = (res[res.len() - 2].u32(), res[res.len() - 1].u32() & ERR_MASK);
+            let err = if st & (1 << self.bank.busy_bit) != 0 { self.wait(PROGRAM_TIMEOUT)? } else { err };
             if err != 0 {
                 return Err(self.fail(format!("program at 0x{a:08x}"), err));
             }
@@ -331,10 +362,13 @@ fn image_pages(img: &Image, lo: u32, hi: u64) -> BTreeMap<u32, [u8; PAGE_SIZE as
     for s in &img.sections {
         let start = (s.addr as u64).max(lo as u64);
         let end = s.end().min(hi);
-        for a in start..end {
-            let a = a as u32;
-            let page = a & !(PAGE_SIZE - 1);
-            pages.entry(page).or_insert([PAD; PAGE_SIZE as usize])[(a - page) as usize] = s.data[(a - s.addr) as usize];
+        let mut a = start;
+        while a < end {
+            let page = a as u32 & !(PAGE_SIZE - 1);
+            let n = ((page as u64 + PAGE_SIZE as u64).min(end) - a) as usize;
+            let (to, from) = ((a - page as u64) as usize, (a - s.addr as u64) as usize);
+            pages.entry(page).or_insert([PAD; PAGE_SIZE as usize])[to..to + n].copy_from_slice(&s.data[from..from + n]);
+            a += n as u64;
         }
     }
     pages
@@ -361,6 +395,8 @@ pub struct WriteStats {
     /// Bytes of UCB data in the image that were not written.
     pub ucb_skipped: usize,
     pub elapsed: Duration,
+    /// Addresses of the sectors that were programmed.
+    pub programmed: Vec<u32>,
 }
 
 impl std::fmt::Display for WriteStats {
@@ -429,6 +465,9 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, un
             continue;
         }
         let layout = probe_bank(cx, bank)?;
+        if layout.dflash {
+            return Err(other(format!("{}: writing DFLASH is not supported", bank.name)));
+        }
         let pages = image_pages(img, bank.base, hi);
         let sectors: BTreeSet<u32> = pages.keys().map(|p| p - (p - bank.base) % SECTOR_SIZE).collect();
         log_info!("{}: checking {} sectors for {} bytes of image data", bank.name, sectors.len(), pages.len() * PAGE_SIZE as usize);
@@ -462,6 +501,9 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, un
             stats.unchanged += unchanged as usize;
             stats.erased += erased as usize;
             stats.bytes += bytes;
+            if !unchanged {
+                stats.programmed.push(sector);
+            }
             if (i + 1) % 16 == 0 || i + 1 == sectors.len() {
                 log_info!("{}: {}/{} sectors done", bank.name, i + 1, sectors.len());
             }
@@ -510,21 +552,22 @@ pub fn erase_check(cx: &Cx, bank: &FlashBank) -> Result<Vec<(u32, bool)>> {
     cx.with(|c| {
         let mut io = c.io()?;
         let mut f = Driver::new(&mut io, layout);
-        (0..bank.size / SECTOR_SIZE).map(|i| bank.base + i * SECTOR_SIZE).map(|a| f.is_erased(a, 1).map(|e| (a, e))).collect()
+        let n = layout.size / layout.sector_size;
+        (0..n).map(|i| bank.base + i * layout.sector_size).map(|a| f.is_erased(a, 1).map(|e| (a, e))).collect()
     })
 }
 
 /// Erases sectors `first..=last` of a bank.
 pub fn erase_sectors(cx: &Cx, bank: &FlashBank, first: u32, last: u32) -> Result<()> {
-    let count = bank.size / SECTOR_SIZE;
+    let layout = probe_bank(cx, bank)?;
+    let count = layout.size / layout.sector_size;
     if first > last || last >= count {
         return Err(usage(format!("invalid sector range {first}..{last} (bank has {count} sectors)")));
     }
-    let layout = probe_bank(cx, bank)?;
     halt_all(cx)?;
     cx.with(|c| {
         let mut io = c.io()?;
-        Driver::new(&mut io, layout).erase(bank.base + first * SECTOR_SIZE, last - first + 1)
+        Driver::new(&mut io, layout).erase(bank.base + first * layout.sector_size, last - first + 1)
     })
 }
 
@@ -559,6 +602,9 @@ mod tests {
         assert_eq!(d.chunk(0x8030_0000, 100), 32);
         assert_eq!(d.chunk(0x803F_C000, 100), 1);
         assert_eq!(seg_a(0x8012_0400), 0xA012_0400);
+        // DFLASH0: 4 KB sectors, at most 64 per command.
+        let df = Driver::new(d.io, DF0);
+        assert_eq!((df.chunk(0xAF00_0000, 300), df.chunk(0xAF0F_F000, 300)), (64, 1));
         assert_eq!(err_text(ERR_PROER | ERR_PVER), "protection error, program verify error");
     }
 }

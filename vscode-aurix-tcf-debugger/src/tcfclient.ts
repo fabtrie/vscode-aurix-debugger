@@ -422,6 +422,10 @@ export abstract class TCFClient extends AbstractTCFClient {
                         for (const resultData of results) {
                             this.contextInfo[resultData.ID] = resultData;
                         }
+                        if (event === "contextAdded") {
+                            this.invalidateThreadsCache();
+                            this.onRunControlContextAdded(results.map(r => r.ID));
+                        }
                     },
                     (err) => {
                         this.console.log(`Bad contextAdded event: ${JSON.stringify(err)}`);
@@ -434,6 +438,8 @@ export abstract class TCFClient extends AbstractTCFClient {
                         for (const id of removedContextIds) {
                             delete this.contextInfo[id];
                         }
+                        this.invalidateThreadsCache();
+                        this.onRunControlContextRemoved(removedContextIds);
                     },
                     (err) => {
                         this.console.log(`Bad contextRemoved event: ${err}`);
@@ -496,6 +502,19 @@ export abstract class TCFClient extends AbstractTCFClient {
     }
 
     protected onRunControlContextResumed(contextID: string) {
+    }
+
+    /** Execution contexts that appeared after the start (e.g. a GTM MCS channel that started running). */
+    protected onRunControlContextAdded(contextIDs: string[]) {
+    }
+
+    protected onRunControlContextRemoved(contextIDs: string[]) {
+    }
+
+    /** The next getThreads() asks the agent again. */
+    invalidateThreadsCache() {
+        this._threadsCache = undefined;
+        this._threadsCacheTime = 0;
     }
 
     protected abstract onBreakpoint(breakpointID: string, status: InstanceStatusData[]): void;

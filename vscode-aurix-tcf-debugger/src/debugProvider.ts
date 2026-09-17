@@ -27,6 +27,7 @@ import {
 	StoppedEvent,
 	TerminatedEvent,
 	Thread,
+	ThreadEvent,
 	Variable,
 } from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
@@ -425,6 +426,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 			protected onRunControlContextResumed(contextID: string) {
 				outer.onContextResumed(contextID);
+			}
+			protected onRunControlContextAdded(contextIDs: string[]) {
+				void outer.onContextsAdded(contextIDs);
+			}
+			protected onRunControlContextRemoved(contextIDs: string[]) {
+				outer.onContextsRemoved(contextIDs);
 			}
 			protected onSocketError(err: any) {
 				outer.tcfLogger.error(`TCF socket error: ${String(err)}`);
@@ -1021,13 +1028,28 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
+	/** Symbol file kind of GTM MCS assembler sources (no ELF: the server assembles them). */
+	private static readonly MACHINE_MCS_ASM = -1;
+
 	/** ELF e_machine of a RunControl context's architecture ("Architecture" property; default TriCore). */
 	private static contextMachine(info: any): number {
 		const arch = typeof info?.Architecture === 'string' ? info.Architecture.toLowerCase() : 'tricore';
-		return arch === 'arm' ? 40 : 44;
+		switch (arch) {
+			case 'arm': return 40;
+			case 'gtm_mcs': return AurixTCFDebugSession.MACHINE_MCS_ASM;
+			default: return 44;
+		}
 	}
 
-	private async initMemoryMap(args: AurixTCFLaunchRequestArguments): Promise<void> {
+	/** Whether a "cores" entry names the context: ID, name or name without the chip prefix, `*` and `?` as wildcards. */
+	private static coreMatches(pattern: string, contextId: string, contextName: string): boolean {
+		const re = new RegExp('^' + pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+		const names = [contextId, contextName, contextName.split('.').pop() ?? '', contextName.split('.').slice(1).join('.')];
+		return names.some(n => n !== '' && re.test(n.toLowerCase()));
+	}
+
+	/** Maps the symbol files to the execution contexts (all, or only `onlyContexts`). */
+	private async initMemoryMap(args: AurixTCFLaunchRequestArguments, onlyContexts?: string[]): Promise<void> {
 		// Enumerate leaf execution contexts (HasState === true) from the agent,
 		// identify each core type (PPU/CDSPx/SCR/TriCore), and set a MemoryMap
 		// entry pointing to the core-specific ELF plus the additional symbol files
@@ -1043,6 +1065,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 			const machines = new Map<string, number | undefined>();
 			const machineOf = async (file: string) => {
+				if (/\.asm$/i.test(file)) {
+					return AurixTCFDebugSession.MACHINE_MCS_ASM;
+				}
 				if (!machines.has(file)) {
 					machines.set(file, await AurixTCFDebugSession.readElfMachine(file));
 				}
@@ -1054,6 +1079,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			for (const thread of threads) {
 				const contextId = thread.info.ID;
 				const contextName = thread.info.Name ?? '';
+				if (onlyContexts && !onlyContexts.includes(contextId)) {
+					continue;
+				}
 				// Try ID first, then Name for core type detection
 				const coreInfo = AurixTCFDebugSession.extractCoreType(contextId)
 					?? AurixTCFDebugSession.extractCoreType(contextName);
@@ -1071,8 +1099,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 				for (const f of symbolFiles) {
 					if (f.cores) {
-						const names = [contextId, contextName, contextName.split('.').pop() ?? ''].map(n => n.toLowerCase());
-						if (!f.cores.some(c => names.includes(c.toLowerCase()))) {
+						// Still the architecture must fit: an MCS source is never mapped to a TriCore core.
+						const m = await machineOf(f.path);
+						if (!f.cores.some(c => AurixTCFDebugSession.coreMatches(c, contextId, contextName))
+							|| (m !== undefined && m !== machine)) {
 							continue;
 						}
 					} else if ((await machineOf(f.path)) !== machine) {
@@ -1856,9 +1886,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const windowInstrs = instructionCount + Math.abs(instructionOffset) + 16;
 			let byteBudget = Math.max(1, windowInstrs * maxInstrBytes);
 
-			// Clip to executable ranges from the ELF (if available).
-			const execRange = this.findExecutableRangeForAddress(alignedBaseAddress);
-			if (this.execRanges.length > 0 && !execRange) {
+			// Clip to executable ranges from the ELF (if available). GTM MCS code is in the MCS RAM,
+			// not in an ELF.
+			const execRange = isa === 'MCS' ? undefined : this.findExecutableRangeForAddress(alignedBaseAddress);
+			if (this.execRanges.length > 0 && !execRange && isa !== 'MCS') {
 				response.body = { instructions: [] };
 				this.sendResponse(response);
 				return;
@@ -3447,6 +3478,26 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.invalidateLiveWatchContext();
 		if (takesFocus) {
 			void this.emitSourceLocation(contextId);
+		}
+	}
+
+	/** Threads that appeared while debugging (e.g. GTM MCS channels once the application started them). */
+	private async onContextsAdded(contextIds: string[]) {
+		if (this.launchArgs) {
+			await this.initMemoryMap(this.launchArgs, contextIds);
+		}
+		for (const id of contextIds) {
+			this.sendEvent(new ThreadEvent('started', this.getOrAssignThreadId(id)));
+		}
+	}
+
+	private onContextsRemoved(contextIds: string[]) {
+		for (const id of contextIds) {
+			const threadId = this.contextToThreadId.get(id);
+			if (threadId !== undefined) {
+				this.suspendedContextIds.delete(id);
+				this.sendEvent(new ThreadEvent('exited', threadId));
+			}
 		}
 	}
 

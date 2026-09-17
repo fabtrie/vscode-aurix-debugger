@@ -474,12 +474,26 @@
         }
       }
     },
+    "languages": [
+      {
+        "id": "gtm-mcs-asm",
+        "aliases": [
+          "GTM MCS Assembler"
+        ],
+        "extensions": [
+          ".asm"
+        ]
+      }
+    ],
     "breakpoints": [
       {
         "language": "c"
       },
       {
         "language": "cpp"
+      },
+      {
+        "language": "gtm-mcs-asm"
       }
     ],
     "debuggers": [
@@ -543,7 +557,7 @@
                 "type": "string"
               },
               "symbolFiles": {
-                "description": "Additional ELF files to load symbols from (e.g. bootmanager, FBL, HSM). Symbols only: they are never flashed. Without \"cores\", a file applies to every core of the ELF's architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM); \"cores\" limits it to the named cores (context ID or target name, e.g. \"tc37x.cpu0\" or \"cpu0\").",
+                "description": "Additional symbol files (e.g. bootmanager, FBL, HSM ELF files, GTM MCS assembler sources). Symbols only: they are never flashed. Without \"cores\", a file applies to every core of its architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM, a .asm file to the MCS channels); \"cores\" limits it to the named cores (context ID or target name, * and ? as wildcards, e.g. \"tc37x.cpu0\", \"cpu0\" or \"mcs0.*\").",
                 "type": "array",
                 "items": {
                   "anyOf": [
@@ -558,14 +572,14 @@
                       "properties": {
                         "path": {
                           "type": "string",
-                          "description": "Path to the ELF file"
+                          "description": "Path to the ELF file or GTM MCS assembler source (.asm)"
                         },
                         "cores": {
                           "type": "array",
                           "items": {
                             "type": "string"
                           },
-                          "description": "Cores the file applies to (context ID or target name)"
+                          "description": "Cores the file applies to (context ID or target name, * and ? as wildcards)"
                         }
                       }
                     }

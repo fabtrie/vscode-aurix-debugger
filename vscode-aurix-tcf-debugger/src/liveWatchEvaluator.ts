@@ -10,7 +10,7 @@
  */
 
 import { TCFClient, decodeEvaluatedValue } from './tcfclient';
-import { CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, EvaluateResult } from './tcf/expressions';
+import { CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, EvaluateResult, GetContextExpressionsCommand } from './tcf/expressions';
 import { GetMemoryCommand } from './tcf/memory';
 import { GetChildrenSymbolsCommand, GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from './tcf/symbols';
 import { SimpleCommand, TCFPartialResultError } from './tcf/tcfutils';
@@ -163,7 +163,15 @@ export class LiveWatchEvaluator {
 	private async createRoot(ctx: string, expression: string): Promise<RootEntry> {
 		const exprId = await this.client.sendCommand(new CreateExpressionsCommand(ctx, null, expression));
 		try {
-			const evaluated = await this.evaluateExpression(exprId);
+			const evaluated = await this.evaluateExpression(exprId).catch(async (e) => {
+				// Evaluating also reads the value, which fails for memory the agent cannot read (e.g. HSM RAM).
+				// The expression context still has the type and symbol, and reading the memory later gives the real error.
+				const context = await this.client.sendCommand(new GetContextExpressionsCommand(exprId)).catch(() => null);
+				if (!context?.Type) {
+					throw e;
+				}
+				return { properties: { Type: context.Type, Symbol: context.SymbolID } } as EvaluateResult;
+			});
 			const typeId = evaluated.properties?.Type;
 			if (!typeId) {
 				throw new Error(`No type information for '${expression}'`);
@@ -198,7 +206,9 @@ export class LiveWatchEvaluator {
 			return Buffer.from(symbol.Value, 'base64');
 		}
 		if (symbol?.Address && symbol.Size) {
-			const r = await this.client.sendCommand(new GetMemoryCommand(ctx, symbol.Address, 1, symbol.Size));
+			// A symbol owned by one core (e.g. an HSM variable) is read with that core's memory view.
+			const owner = typeof symbol.OwnerID === 'string' && /\.C\d+$/.test(symbol.OwnerID) ? symbol.OwnerID : ctx;
+			const r = await this.client.sendCommand(new GetMemoryCommand(owner, symbol.Address, 1, symbol.Size));
 			return Buffer.from(r.base64, 'base64');
 		}
 		const evaluated = await this.evaluateExpression(entry.exprId);
@@ -351,6 +361,10 @@ async function formatBits(v: ClientVariable, format: LiveWatchRequestItem): Prom
 }
 
 function formatError(e: unknown): string {
+	if (e instanceof TCFPartialResultError && e.cause !== undefined) {
+		// "Partial result" says nothing; the agent's error is the cause.
+		return formatError(e.cause);
+	}
 	if (e instanceof Error) {
 		return e.message;
 	}

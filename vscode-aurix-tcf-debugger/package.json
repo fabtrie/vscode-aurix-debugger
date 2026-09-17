@@ -542,6 +542,36 @@
                 "description": "Path to the SCR ELF executable",
                 "type": "string"
               },
+              "symbolFiles": {
+                "description": "Additional ELF files to load symbols from (e.g. bootmanager, FBL, HSM). Symbols only: they are never flashed. Without \"cores\", a file applies to every core of the ELF's architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM); \"cores\" limits it to the named cores (context ID or target name, e.g. \"tc37x.cpu0\" or \"cpu0\").",
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "path"
+                      ],
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "description": "Path to the ELF file"
+                        },
+                        "cores": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "description": "Cores the file applies to (context ID or target name)"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
               "additionalAgentOptions": {
                 "description": "Additional agent command-line options (appended as-is; default empty)",
                 "type": "string",

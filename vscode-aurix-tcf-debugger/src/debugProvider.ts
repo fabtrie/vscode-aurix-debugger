@@ -93,6 +93,9 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	ppuElfPath?: string;
 	cdspElfPaths?: string[];
 	scrElfPath?: string;
+	// Additional ELF files for symbols (bootmanager, FBL, HSM, ...). A file applies to the cores
+	// whose architecture matches the ELF, or to the cores listed in "cores".
+	symbolFiles?: Array<string | { path: string; cores?: string[] }>;
 
 	// Optional reset behavior (no GUI; can be set in launch.json)
 	resetType?: string;
@@ -326,8 +329,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private projectRootDir: string | undefined;
 	private librariesBasenameIndex: Map<string, string> | undefined;
 	private programPath: string | undefined;
-	private disassemblyCapabilities: string[] | undefined;
-	private disassemblyCapabilitiesLogged = false;
+	/** Additional ELF files ("symbolFiles"). */
+	private symbolFilePaths: string[] = [];
+	// Disassembly ISAs per core context (TriCore cores, Thumb for the HSM).
+	private disassemblyCapabilities = new Map<string, string[]>();
+	// Core context of the frame focused last (scopes request): disassembly decodes with its ISA.
+	private focusedCoreContext: string | undefined;
 	/**
 	 * Address picked with "Go to Address or Symbol". VS Code's Disassembly view can only be moved by
 	 * focusing a stack frame, so the target is shown as an extra frame at the bottom of the suspended
@@ -979,10 +986,52 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return args.program && args.program.trim() !== '' ? args.program : undefined;
 	}
 
+	/** The "symbolFiles" launch option as paths with an optional core filter. */
+	private static getSymbolFiles(args: any): Array<{ path: string; cores?: string[] }> {
+		const list: unknown[] = Array.isArray(args?.symbolFiles) ? args.symbolFiles : [];
+		const out: Array<{ path: string; cores?: string[] }> = [];
+		for (const f of list) {
+			if (typeof f === 'string' && f.trim() !== '') {
+				out.push({ path: f.trim() });
+			} else if (f && typeof f === 'object' && typeof (f as any).path === 'string' && (f as any).path.trim() !== '') {
+				const cores = Array.isArray((f as any).cores)
+					? (f as any).cores.filter((c: unknown): c is string => typeof c === 'string' && c.trim() !== '')
+					: undefined;
+				out.push({ path: (f as any).path.trim(), cores: cores && cores.length > 0 ? cores : undefined });
+			}
+		}
+		return out;
+	}
+
+	/** ELF e_machine of a file (44: TriCore, 40: ARM), or undefined if it is no readable ELF. */
+	private static async readElfMachine(file: string): Promise<number | undefined> {
+		let fh: fsPromises.FileHandle | undefined;
+		try {
+			fh = await fsPromises.open(file, 'r');
+			const buf = Buffer.alloc(20);
+			const { bytesRead } = await fh.read(buf, 0, 20, 0);
+			if (bytesRead < 20 || buf.readUInt32BE(0) !== 0x7f454c46) {
+				return undefined;
+			}
+			return buf[5] === 2 ? buf.readUInt16BE(18) : buf.readUInt16LE(18);
+		} catch {
+			return undefined;
+		} finally {
+			await fh?.close();
+		}
+	}
+
+	/** ELF e_machine of a RunControl context's architecture ("Architecture" property; default TriCore). */
+	private static contextMachine(info: any): number {
+		const arch = typeof info?.Architecture === 'string' ? info.Architecture.toLowerCase() : 'tricore';
+		return arch === 'arm' ? 40 : 44;
+	}
+
 	private async initMemoryMap(args: AurixTCFLaunchRequestArguments): Promise<void> {
 		// Enumerate leaf execution contexts (HasState === true) from the agent,
 		// identify each core type (PPU/CDSPx/SCR/TriCore), and set a MemoryMap
-		// entry pointing to the core-specific ELF.
+		// entry pointing to the core-specific ELF plus the additional symbol files
+		// ("symbolFiles") that apply to the core.
 		// Only leaf contexts with HasState are valid MemoryMap targets; container
 		// contexts (e.g. S0, S0.D0) must be skipped or the agent may reset the connection.
 		try {
@@ -992,6 +1041,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				return;
 			}
 
+			const machines = new Map<string, number | undefined>();
+			const machineOf = async (file: string) => {
+				if (!machines.has(file)) {
+					machines.set(file, await AurixTCFDebugSession.readElfMachine(file));
+				}
+				return machines.get(file);
+			};
+			const symbolFiles = AurixTCFDebugSession.getSymbolFiles(args);
+
 			let mappedCount = 0;
 			for (const thread of threads) {
 				const contextId = thread.info.ID;
@@ -999,29 +1057,57 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				// Try ID first, then Name for core type detection
 				const coreInfo = AurixTCFDebugSession.extractCoreType(contextId)
 					?? AurixTCFDebugSession.extractCoreType(contextName);
-				const elfPath = this.getElfPathForCore(coreInfo, args);
-				if (!elfPath) {
+				const machine = AurixTCFDebugSession.contextMachine(thread.info);
+
+				// Primary ELF first, then the matching symbol files. A file of another
+				// architecture (e.g. the TriCore program on the HSM) is left out.
+				const files: string[] = [];
+				const primary = this.getElfPathForCore(coreInfo, args);
+				if (primary) {
+					const m = await machineOf(primary);
+					if (coreInfo || m === undefined || m === machine) {
+						files.push(primary);
+					}
+				}
+				for (const f of symbolFiles) {
+					if (f.cores) {
+						const names = [contextId, contextName, contextName.split('.').pop() ?? ''].map(n => n.toLowerCase());
+						if (!f.cores.some(c => names.includes(c.toLowerCase()))) {
+							continue;
+						}
+					} else if ((await machineOf(f.path)) !== machine) {
+						continue;
+					}
+					if (!files.includes(f.path)) {
+						files.push(f.path);
+					}
+				}
+
+				// Verify the files exist locally before trying to set the mapping.
+				const existing: string[] = [];
+				for (const file of files) {
+					try {
+						const st = await fsPromises.stat(file);
+						if (st.isFile()) {
+							existing.push(file.replace(/\\/g, '/'));
+						} else {
+							this.tcfLogger.error(`MemoryMap: ${file} is not a file`);
+						}
+					} catch {
+						this.tcfLogger.error(`MemoryMap: ${file} not found`);
+					}
+				}
+				if (existing.length === 0) {
 					continue;
 				}
 
-				// Verify the file exists locally before trying to set the mapping.
-				try {
-					const st = await fsPromises.stat(elfPath);
-					if (!st.isFile()) { continue; }
-				} catch {
-					continue;
-				}
-
-				const fileName = elfPath.replace(/\\/g, '/');
-				const coreLabel = coreInfo ? `${coreInfo.type}${coreInfo.type === 'CDSP' ? coreInfo.index : ''}` : 'TriCore';
+				const coreLabel = coreInfo ? `${coreInfo.type}${coreInfo.type === 'CDSP' ? coreInfo.index : ''}` : (contextName || 'TriCore');
 				try {
 					await this.tcfClient.sendCommand(
-						new SetMemoryMapCommand(contextId, [
-							{ ['FileName']: fileName, ['ID']: contextId },
-						])
+						new SetMemoryMapCommand(contextId, existing.map(fileName => ({ ['FileName']: fileName, ['ID']: contextId })))
 					);
 					mappedCount++;
-					this.tcfLogger.log(`MemoryMap: ${contextId} (${coreLabel}) → ${fileName}`);
+					this.tcfLogger.log(`MemoryMap: ${contextId} (${coreLabel}) → ${existing.join(', ')}`);
 				} catch (e) {
 					this.tcfLogger.error(`MemoryMap failed for ${contextId} (${coreLabel}): ${String(e)}`);
 				}
@@ -1743,28 +1829,27 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const alignedBaseAddress = baseAddress - (baseAddress % minInstrBytes);
 			let startAddress = alignedBaseAddress + (instructionOffset * maxInstrBytes);
 
-			const ctx = (await this.pickContextIdForCore(this.launchCore)) ?? (await this.pickAnySuspendedContextId());
+			const ctx = this.focusedCoreContext ?? (await this.pickContextIdForCore(this.launchCore)) ?? (await this.pickAnySuspendedContextId());
 			if (!ctx) {
 				response.body = { instructions: [] };
 				this.sendResponse(response);
 				return;
 			}
 
-			if (this.disassemblyCapabilities === undefined) {
+			let isas = this.disassemblyCapabilities.get(ctx);
+			if (isas === undefined) {
 				try {
 					const caps = await this.tcfClient.sendCommand(new GetCapabilitiesDisassemblyCommand(ctx));
-					this.disassemblyCapabilities = (caps || [])
+					isas = (caps || [])
 						.map(c => (c?.ISA ? String(c.ISA) : ''))
 						.filter(x => x.trim() !== '');
 				} catch {
-					this.disassemblyCapabilities = [];
+					isas = [];
 				}
+				this.disassemblyCapabilities.set(ctx, isas);
+				this.tcfLogger.log(`Disassembly capabilities of ${ctx} (ISAs): ${isas.join(', ') || '(none reported)'}`);
 			}
-			if (!this.disassemblyCapabilitiesLogged) {
-				this.disassemblyCapabilitiesLogged = true;
-				const capsText = (this.disassemblyCapabilities || []).join(', ');
-				this.tcfLogger.log(`Disassembly capabilities (ISAs): ${capsText || '(none reported)'}`);
-			}
+			const isa = isas[0] ?? 'TRICORE';
 
 			// Request enough bytes to produce the requested window + a small margin.
 			// The agent disassembler falls back to .byte/.half/.word if ISA-specific decoding is unavailable.
@@ -1796,7 +1881,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const disassembleAt = async (addr: number) => {
 				return await this.tcfClient.sendCommand(
 					new DisassembleDisassemblyCommand(ctx, addr, byteBudget, {
-						ISA: 'TRICORE',
+						ISA: isa,
 						Simplified: true,
 						PseudoInstructions: true,
 						OpcodeValue: true,
@@ -1936,18 +2021,19 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const port = args.port || DEFAULT_TCF_PORT;
 		this.breakpointPrefix = args.breakpointPrefix ?? DEFAULT_BREAKPOINTS_PREFIX;
 		this.programPath = args.program;
-		if (this.programPath && this.programPath.trim() !== '') {
+		this.symbolFilePaths = AurixTCFDebugSession.getSymbolFiles(args).map(f => f.path);
+		this.execRanges = [];
+		for (const elf of this.elfPaths()) {
 			try {
-				this.execRanges = this.loadExecutableRangesFromElf(this.programPath);
-				if (this.execRanges.length > 0) {
-					this.tcfLogger.log(
-						`ELF executable ranges: ${this.execRanges.map(r => `0x${r.start.toString(16)}-0x${r.end.toString(16)}`).join(', ')}`
-					);
-				}
+				this.execRanges.push(...this.loadExecutableRangesFromElf(elf));
 			} catch (e) {
-				this.execRanges = [];
-				this.tcfLogger.error(`Failed to parse ELF executable ranges: ${String(e)}`);
+				this.tcfLogger.error(`Failed to parse ELF executable ranges of ${elf}: ${String(e)}`);
 			}
+		}
+		if (this.execRanges.length > 0) {
+			this.tcfLogger.log(
+				`ELF executable ranges: ${this.execRanges.map(r => `0x${r.start.toString(16)}-0x${r.end.toString(16)}`).join(', ')}`
+			);
 		}
 		this.workspaceBaseDir = undefined;
 		this.projectRootDir = undefined;
@@ -2205,6 +2291,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async scopesRequestAsync(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): Promise<void> {
+		// VS Code asks for the scopes of the frame it focuses: its core decides the disassembly ISA.
+		const focusedCore = /^(.*?\.C\d+)/.exec(this.tryResolveFrame(args.frameId).ctx ?? '')?.[1];
+		if (focusedCore) {
+			this.focusedCoreContext = focusedCore;
+		}
 		if (this.startupDiagnosticsEnabled) {
 			const resolved = this.tryResolveFrame(args.frameId);
 			this.tcfLogger.log(
@@ -2750,14 +2841,25 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	private getElfSymbols(): { functions: ElfSymbol[]; variables: ElfSymbol[] } {
 		if (!this.elfSymbols) {
-			try {
-				this.elfSymbols = this.programPath ? this.loadSymbolsFromElf(this.programPath) : { functions: [], variables: [] };
-			} catch (e) {
-				this.tcfLogger.error(`Failed to read ELF symbols: ${String(e)}`);
-				this.elfSymbols = { functions: [], variables: [] };
+			const all: { functions: ElfSymbol[]; variables: ElfSymbol[] } = { functions: [], variables: [] };
+			for (const elf of this.elfPaths()) {
+				try {
+					const s = this.loadSymbolsFromElf(elf);
+					all.functions.push(...s.functions);
+					all.variables.push(...s.variables);
+				} catch (e) {
+					this.tcfLogger.error(`Failed to read ELF symbols of ${elf}: ${String(e)}`);
+				}
 			}
+			this.elfSymbols = all;
 		}
 		return this.elfSymbols;
+	}
+
+	/** The program and the additional symbol files. */
+	private elfPaths(): string[] {
+		const paths = [this.programPath, ...this.symbolFilePaths].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+		return [...new Set(paths)];
 	}
 
 	private getElfFunctionSymbols(): ElfSymbol[] {

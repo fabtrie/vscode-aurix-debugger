@@ -13,7 +13,7 @@ mod proto;
 
 pub use batch::{Batch, BatchOp, OpHandle, OpResult};
 pub use client::{ConInfo, ConnectMode, ServerInfo, TargetInfo, TasClient};
-pub use proto::{pl_err_name, DEFAULT_PORT, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
+pub use proto::{pl_err_name, DEFAULT_PORT, PL0_ERR_CONSEQUENTIAL, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
 
 use std::fmt;
 

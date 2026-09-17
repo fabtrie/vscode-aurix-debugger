@@ -13,6 +13,7 @@ jim = { path = "crates/jim" }
 aurix-core = { path = "crates/core" }
 tcf = { path = "crates/tcf" }
 symbols = { path = "crates/symbols" }
+isa = { path = "crates/isa" }
 serde_json = "1"
 base64 = "0.22"
 gimli = "0.34"

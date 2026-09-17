@@ -17,6 +17,7 @@ use crate::adapter::{Adapter, AdapterSettings, DeviceInfo};
 use crate::arch::{OEC, OSTATE};
 use crate::cortex_m::*;
 use crate::error::Result;
+use crate::sim_mcs::SimGtm;
 
 const NUM_CORES: usize = 3;
 
@@ -163,6 +164,7 @@ pub struct SimAdapter {
     pub pending_resets: u64,
     pub device_id: u32,
     pub hsm: SimHsm,
+    pub gtm: SimGtm,
     initialized: bool,
     srst: bool,
 }
@@ -187,6 +189,7 @@ impl SimAdapter {
             pending_resets: 0,
             device_id: 0x1020_7083,
             hsm: SimHsm::new(),
+            gtm: SimGtm::new(),
             initialized: false,
             srst: false,
         }
@@ -298,6 +301,34 @@ impl SimAdapter {
         }
     }
 
+    /// GTM register and MCS RAM accesses (word access); `None` for other addresses.
+    fn gtm_access(&mut self, op: &BatchOp) -> Option<OpResult> {
+        match *op {
+            BatchOp::Read { addr, len, addr_map: 0 } if SimGtm::claims(addr as u32) => {
+                let mut data = Vec::with_capacity(len);
+                for k in (0..len).step_by(4) {
+                    let v = self.gtm.read(addr as u32 + k as u32).unwrap_or(0);
+                    data.extend_from_slice(&v.to_le_bytes());
+                }
+                data.truncate(len);
+                Some(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: len, data })
+            }
+            BatchOp::Write { addr, data, addr_map: 0 } if SimGtm::claims(addr as u32) => {
+                for (k, chunk) in data.chunks(4).enumerate() {
+                    let mut w = [0u8; 4];
+                    w[..chunk.len()].copy_from_slice(chunk);
+                    let (a, v) = (addr as u32 + 4 * k as u32, u32::from_le_bytes(w));
+                    self.writes.push((a, v));
+                    if self.gtm.write(a, v) == Some(false) {
+                        return Some(OpResult { err: PL0_ERR_DATA, bytes_ok: 4 * k, data: Vec::new() });
+                    }
+                }
+                Some(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: data.len(), data: Vec::new() })
+            }
+            _ => None,
+        }
+    }
+
     fn resume_core(&mut self, i: usize) {
         self.halted[i] = false;
         let base = 0xF881_0000 + 0x2_0000 * i as u32;
@@ -331,7 +362,7 @@ impl Adapter for SimAdapter {
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         let mut out = Vec::with_capacity(batch.len());
         for op in batch.iter() {
-            if let Some(r) = self.hsm_access(&op) {
+            if let Some(r) = self.hsm_access(&op).or_else(|| self.gtm_access(&op)) {
                 out.push(r);
                 continue;
             }
@@ -384,6 +415,8 @@ impl Adapter for SimAdapter {
             let debug_enabled = self.hsm.debug_enabled;
             self.hsm = SimHsm::new();
             self.hsm.debug_enabled = debug_enabled;
+            // The GTM is disabled after a reset until the application enables it and loads the MCS programs.
+            self.gtm = SimGtm::new();
             if halt_after_reset {
                 self.hsm.mem.insert(FP_CTRL, 1);
                 self.hsm.mem.insert(fp_comp(0), 0x0002_85d0 | 1 << 30 | 1);

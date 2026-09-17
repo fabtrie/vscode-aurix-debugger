@@ -11,6 +11,7 @@
 //! - Cortex-M (HSM): after a BL/BLX, LR holds the address of the instruction
 //!   following the call. The stack pointer identifies the frame (recursion);
 //!   step out runs to the return address of the unwound caller frame.
+//! - GTM MCS channel: one instruction per line, see [`run_mcs`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use aurix_core::arch::{CM_REG_LR, CM_REG_PC, CM_REG_SP, REG_A11, REG_PC, REG_PCXI};
+use aurix_core::arch::{CM_REG_LR, CM_REG_PC, CM_REG_SP, MCS_REG_PC, MCS_REG_R7, REG_A11, REG_PC, REG_PCXI};
 use aurix_core::target::{BpKind, DebugReason, RunMode, TargetState};
 use aurix_core::unwind::csa_address;
 use aurix_core::unwind_arm::is_thumb32;
@@ -42,6 +43,14 @@ struct Regs {
     frame: u32,
 }
 
+/// Register roles of the stepped core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    TriCore,
+    Arm,
+    Mcs,
+}
+
 enum Stop {
     Done,
     /// Halted somewhere else (e.g. a user breakpoint).
@@ -55,8 +64,12 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
     shared.invalidate_stack(idx);
     shared.broadcast(&wire::event("RunControl", "contextResumed", &[json!(ctx).to_string()]));
     thread::spawn(move || {
-        let arm = find_core(&shared.handle, &ctx).is_some_and(|c| c.arch.name == "cortex_m");
-        let result = if arm { run_arm(&shared, idx, &ctx, mode, &cancel) } else { run(&shared, idx, &ctx, mode, &cancel) };
+        let arch = find_core(&shared.handle, &ctx).map(|c| c.arch.name);
+        let result = match arch {
+            Some("cortex_m") => run_arm(&shared, idx, &ctx, mode, &cancel),
+            Some("gtm_mcs") => run_mcs(&shared, idx, mode, &cancel),
+            _ => run(&shared, idx, &ctx, mode, &cancel),
+        };
         let h = shared.handle.clone();
         let halted = h.call(move |cx| ops::state(cx, idx).0) == Some(TargetState::Halted);
         if !halted {
@@ -86,8 +99,13 @@ fn call<R: Send + 'static>(h: &ServerHandle, f: impl for<'a, 'b> FnOnce(&'b auri
     h.call(f).unwrap_or_else(|| Err("server stopped".into()))
 }
 
-fn read_regs(h: &ServerHandle, idx: usize, arm: bool) -> Result<Regs, String> {
-    let idxs = if arm { [CM_REG_PC, CM_REG_LR, CM_REG_SP] } else { [REG_PC, REG_A11, REG_PCXI] };
+fn read_regs(h: &ServerHandle, idx: usize, kind: Kind) -> Result<Regs, String> {
+    let idxs = match kind {
+        Kind::Arm => [CM_REG_PC, CM_REG_LR, CM_REG_SP],
+        Kind::TriCore => [REG_PC, REG_A11, REG_PCXI],
+        // The MCS has no return address register: the frame is the stack pointer R7.
+        Kind::Mcs => [MCS_REG_PC, MCS_REG_PC, MCS_REG_R7],
+    };
     let v = call(h, move |cx| {
         cx.with(|c| {
             let (mut io, e) = c.target_io(idx)?;
@@ -95,7 +113,7 @@ fn read_regs(h: &ServerHandle, idx: usize, arm: bool) -> Result<Regs, String> {
         })
         .map_err(|e| e.to_string())
     })?;
-    Ok(if arm { Regs { pc: v[0] & !1, ra: v[1] & !1, frame: v[2] } } else { Regs { pc: v[0], ra: v[1], frame: v[2] } })
+    Ok(if kind == Kind::Arm { Regs { pc: v[0] & !1, ra: v[1] & !1, frame: v[2] } } else { Regs { pc: v[0], ra: v[1], frame: v[2] } })
 }
 
 /// First word (saved PCXI) of the CSA a PCXI value links to.
@@ -125,12 +143,12 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
         step_instruction(h, idx, rm)?;
         return Ok(Stop::Done);
     };
-    let regs = |h| read_regs(h, idx, false);
+    let regs = |h| read_regs(h, idx, Kind::TriCore);
     let mut r = regs(h)?;
 
     if mode == 5 {
         let caller_pcxi = csa_word0(h, r.frame);
-        return run_to(h, idx, false, r.ra, caller_pcxi, rm, cancel, deadline);
+        return run_to(h, idx, Kind::TriCore, r.ra, caller_pcxi, rm, cancel, deadline);
     }
 
     let (Some(f), Some(li)) = (syms.function_at(r.pc), syms.line_at(r.pc)) else {
@@ -172,7 +190,7 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
             if mode == 4 && syms.line_at(r.pc).is_some() {
                 return Ok(Stop::Done);
             }
-            match run_to(h, idx, false, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
+            match run_to(h, idx, Kind::TriCore, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
                 Stop::Done => {
                     // The return address often starts the next line (a call is
                     // commonly the last instruction of a statement).
@@ -203,7 +221,7 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
 
         // Left the function without a CSA change (JL/JI fast call).
         if r.frame == frame_pcxi && in_func(prev.pc) && in_func(r.ra) && (mode == 3 || syms.line_at(r.pc).is_none()) {
-            match run_to(h, idx, false, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
+            match run_to(h, idx, Kind::TriCore, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
                 Stop::Done => {
                     r = regs(h)?;
                     if new_line(&r) {
@@ -246,10 +264,10 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
             step_instruction(h, idx, rm)?;
             return Ok(Stop::Done);
         };
-        return run_to(h, idx, true, caller.pc, caller.sp(), rm, cancel, deadline);
+        return run_to(h, idx, Kind::Arm, caller.pc, caller.sp(), rm, cancel, deadline);
     }
 
-    let mut r = read_regs(h, idx, true)?;
+    let mut r = read_regs(h, idx, Kind::Arm)?;
     let Some((mut func, mut line)) = function_and_line(&syms, r.pc) else {
         step_instruction(h, idx, rm)?;
         return Ok(Stop::Done);
@@ -265,7 +283,7 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
         let prev = r;
         let next = prev.pc + thumb_len(h, idx, prev.pc)?;
         step_instruction(h, idx, rm)?;
-        r = read_regs(h, idx, true)?;
+        r = read_regs(h, idx, Kind::Arm)?;
         let in_func = |pc: u32| pc >= func.0 && pc < func.1;
         let new_line = |r: &Regs| {
             in_func(r.pc) && syms.line_at(r.pc).is_some_and(|li| li.start == r.pc && (li.file.as_str(), li.line) != (line.0.as_str(), line.1))
@@ -276,9 +294,9 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
             if mode == 4 && syms.line_at(r.pc).is_some() {
                 return Ok(Stop::Done);
             }
-            match run_to(h, idx, true, next, Some(prev.frame), rm, cancel, deadline)? {
+            match run_to(h, idx, Kind::Arm, next, Some(prev.frame), rm, cancel, deadline)? {
                 Stop::Done => {
-                    r = read_regs(h, idx, true)?;
+                    r = read_regs(h, idx, Kind::Arm)?;
                     if new_line(&r) {
                         return Ok(Stop::Done);
                     }
@@ -309,10 +327,45 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
     }
 }
 
+/// GTM MCS channel: every source line is one instruction. Step over and into are one instruction
+/// step (the core steps over a CALL for step over); step out runs to the return address of the
+/// caller frame. An instruction waiting for an event (WURM, ARU) completes later: the channel stops
+/// after it on its own, so the step waits for that halt.
+fn run_mcs(shared: &Shared, idx: usize, mode: u64, cancel: &AtomicBool) -> Result<Stop, String> {
+    let h = &shared.handle;
+    let rm = run_mode(mode);
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    if mode == 5 {
+        let frames = crate::stack::unwind_core(shared, idx)?;
+        if let Some(caller) = frames.get(1) {
+            return run_to(h, idx, Kind::Mcs, caller.pc, None, rm, cancel, deadline);
+        }
+    }
+    if step_instruction(h, idx, rm).is_ok() {
+        return Ok(Stop::Done);
+    }
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Stop::Cancelled);
+        }
+        if Instant::now() > deadline {
+            return Err("step timed out: the MCS channel waits for an event".into());
+        }
+        let state = h.call(move |cx| {
+            ops::poll_all(cx);
+            ops::state(cx, idx).0
+        });
+        if state == Some(TargetState::Halted) {
+            return Ok(Stop::Done);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Runs until `addr` is reached in the expected frame (recursion guard: PCXI on TriCore, SP
 /// on Cortex-M).
 #[allow(clippy::too_many_arguments)]
-fn run_to(h: &ServerHandle, idx: usize, arm: bool, addr: u32, expect_frame: Option<u32>, rm: RunMode, cancel: &AtomicBool, deadline: Instant) -> Result<Stop, String> {
+fn run_to(h: &ServerHandle, idx: usize, kind: Kind, addr: u32, expect_frame: Option<u32>, rm: RunMode, cancel: &AtomicBool, deadline: Instant) -> Result<Stop, String> {
     let temp = match call(h, move |cx| ops::add_breakpoint(cx, idx, addr, 4, BpKind::Hard).map_err(|e| e.to_string())) {
         Ok(_) => true,
         Err(e) if e.contains("Duplicate") => false,
@@ -339,7 +392,7 @@ fn run_to(h: &ServerHandle, idx: usize, arm: bool, addr: u32, expect_frame: Opti
                 }
                 thread::sleep(Duration::from_millis(10));
             }
-            let r = read_regs(h, idx, arm)?;
+            let r = read_regs(h, idx, kind)?;
             if r.pc == addr {
                 if expect_frame.is_none_or(|p| p == r.frame) {
                     return Ok(Stop::Done);

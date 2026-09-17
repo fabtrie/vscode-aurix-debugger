@@ -272,6 +272,52 @@ pub static CORTEX_M: ArchInfo = ArchInfo {
     description: "Cortex-M general purpose and system registers",
 };
 
+// --- GTM MCS channel ---------------------------------------------------------------------
+
+/// Offset flag of an MCS register in the module block (channel 0) instead of the channel block.
+pub const MCS_MODULE_REG: u16 = 0x8000;
+
+const fn mcs(name: &'static str, offset: u16, group: RegGroup, description: &'static str) -> RegDef {
+    RegDef { name, offset, gdb: None, dwarf: None, group, description }
+}
+
+/// MCS channel registers (TC3xx UM 28.17.11): offsets in the channel register block, or with
+/// [`MCS_MODULE_REG`] in the module block.
+pub static MCS_REGS: &[RegDef] = &[
+    mcs("r0", 0x00, RegGroup::General, "General purpose register 0"),
+    mcs("r1", 0x04, RegGroup::General, "General purpose register 1"),
+    mcs("r2", 0x08, RegGroup::General, "General purpose register 2"),
+    mcs("r3", 0x0C, RegGroup::General, "General purpose register 3"),
+    mcs("r4", 0x10, RegGroup::General, "General purpose register 4 (upper multiplication result)"),
+    mcs("r5", 0x14, RegGroup::General, "General purpose register 5 (MRDIO/MWRIO offset)"),
+    mcs("r6", 0x18, RegGroup::General, "General purpose register 6 (indirect jump target, WURMX mask)"),
+    mcs("r7", 0x1C, RegGroup::General, "General purpose register 7 (stack pointer)"),
+    mcs("pc", 0x40, RegGroup::General, "Program counter"),
+    mcs("ctrl", 0x20, RegGroup::System, "Channel control: EN, IRQ, ERR, CY, Z, V, N, CAT, CWT, SAT, SP_CNT"),
+    mcs("acb", 0x24, RegGroup::System, "ARU control bits"),
+    mcs("mhb", 0x3C, RegGroup::System, "Memory high byte"),
+    mcs("irq_notify", 0x44, RegGroup::System, "Interrupt notification"),
+    mcs("strg", 0x2C | MCS_MODULE_REG, RegGroup::Debug, "Trigger bits (read STRG, shared by the module)"),
+    mcs("reg_prot", 0x60 | MCS_MODULE_REG, RegGroup::Debug, "Module write protection"),
+    mcs("ctrl_stat", 0x64 | MCS_MODULE_REG, RegGroup::Debug, "Module control and status (scheduling, ERR_SRC_ID)"),
+    mcs("err", 0x7C | MCS_MODULE_REG, RegGroup::Debug, "Module error register"),
+];
+
+pub const MCS_REG_R6: usize = 6;
+pub const MCS_REG_R7: usize = 7;
+pub const MCS_REG_PC: usize = 8;
+pub const MCS_REG_CTRL: usize = 9;
+
+pub static GTM_MCS: ArchInfo = ArchInfo {
+    name: "gtm_mcs",
+    regs: MCS_REGS,
+    pc: MCS_REG_PC,
+    sp: MCS_REG_R7,
+    ra: MCS_REG_PC,
+    aliases: &[("sp", "r7"), ("sta", "ctrl")],
+    description: "GTM MCS channel and module registers",
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Version {
     V1_6,

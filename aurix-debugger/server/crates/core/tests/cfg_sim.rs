@@ -50,7 +50,9 @@ fn pos(w: &[(u32, u32)], item: (u32, u32)) -> usize {
 fn loads_real_cfg_and_inits() {
     let s = server();
     let i = &s.interp;
-    assert_eq!(i.eval("target names").unwrap(), "tc37x.cpu0 tc37x.cpu1 tc37x.cpu2 tc37x.hsm");
+    let names = i.eval("target names").unwrap();
+    assert!(names.starts_with("tc37x.cpu0 tc37x.cpu1 tc37x.cpu2 tc37x.hsm tc37x.mcs0.ch0 tc37x.mcs0.ch1"), "{names}");
+    assert!(names.ends_with("tc37x.mcs1.ch7"), "{names}");
     assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
     // pfls0/1 from the target cfg, dfls0/1 from tc37x_ocds_init.cfg.
     assert_eq!(i.eval("flash banks").unwrap().lines().count(), 4);
@@ -486,4 +488,242 @@ fn reset_halt_keeps_the_hsm_breakpoints_after_the_release() {
     assert!(w.contains(&(0xE000_201C, 0x0002_8700 | 1 << 30 | 1)), "{w:08x?}");
     assert!(w.contains(&(0xE000_2008, 0)), "{w:08x?}");
     assert_eq!(i.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+}
+
+// --- GTM MCS channels -------------------------------------------------------------------------
+
+const MCS0_CH0: usize = 4;
+const MCS0_CH2: usize = 6;
+
+fn asm(name: &str, args: &[i64]) -> u32 {
+    isa::mcs::encode(isa::mcs::find_op(name).unwrap(), args).unwrap()
+}
+
+/// MCS0 test program: channel 0 counts in R0 and calls a subroutine counting in R2, channel 1
+/// counts STRG bit 0 events in R1.
+fn mcs_program() -> Vec<u32> {
+    let mut p = vec![0u32; 0x80 / 4];
+    let mut put = |addr: u32, w: u32| p[(addr / 4) as usize] = w;
+    put(0x00, asm("JMP", &[0x20]));
+    put(0x04, asm("JMP", &[0x40]));
+    put(0x20, asm("MOVL", &[7, 0x100 - 4]));
+    put(0x24, asm("MOVL", &[0, 0]));
+    put(0x28, asm("ADDL", &[0, 1]));
+    put(0x2C, asm("CALL", &[0x60]));
+    put(0x30, asm("JMP", &[0x28]));
+    put(0x40, asm("MOVL", &[1, 0]));
+    put(0x44, asm("WURM", &[0, 11, 1]));
+    put(0x48, asm("ADDL", &[1, 1]));
+    put(0x4C, asm("JMP", &[0x44]));
+    put(0x60, asm("ADDL", &[2, 1]));
+    put(0x64, asm("RET", &[]));
+    p
+}
+
+/// Initialized server with the GTM enabled, the MCS0 program loaded and channels 0 and 1 running.
+fn mcs_server() -> Server {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| {
+        sim.gtm.enabled = true;
+        sim.gtm.load(0, &mcs_program());
+        sim.gtm.modules[0].ch[0].en = true;
+        sim.gtm.modules[0].ch[1].en = true;
+    });
+    ops::poll_all(&s.cx());
+    s
+}
+
+fn poll_until(s: &Server, what: &str, f: impl Fn(&Server) -> bool) {
+    for _ in 0..200 {
+        ops::poll_all(&s.cx());
+        if f(s) {
+            return;
+        }
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn ram_word(s: &Server, addr: u32) -> u32 {
+    with_sim(s, |sim| sim.gtm.modules[0].ram[(addr / 4) as usize])
+}
+
+fn curstate(s: &Server, t: &str) -> String {
+    s.interp.eval(&format!("{t} curstate")).unwrap()
+}
+
+#[test]
+fn mcs_channels_are_examined_with_the_gtm_and_listed_once_used() {
+    let s = server();
+    let i = &s.interp;
+    i.eval("init").unwrap();
+    assert_eq!(i.eval("tc37x.mcs0.ch0 was_examined").unwrap(), "0");
+    with_sim(&s, |sim| {
+        sim.gtm.enabled = true;
+        sim.gtm.load(0, &mcs_program());
+        sim.gtm.modules[0].ch[0].en = true;
+    });
+    ops::poll_all(&s.cx());
+    assert_eq!(i.eval("tc37x.mcs0.ch0 was_examined").unwrap(), "1");
+    assert_eq!(i.eval("tc37x.mcs0.ch2 was_examined").unwrap(), "1");
+    assert_eq!(curstate(&s, "tc37x.mcs0.ch0"), "running");
+    s.cx().with(|c| {
+        assert!(c.targets[MCS0_CH0].core.visible());
+        // Never enabled and still at its reset PC: not shown.
+        assert!(!c.targets[MCS0_CH2].core.visible());
+        assert_eq!(c.targets[MCS0_CH2].core.state().name(), "halted");
+    });
+}
+
+#[test]
+fn mcs_halt_register_access_and_resume() {
+    let s = mcs_server();
+    let i = &s.interp;
+    i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.mcs0.ch0"), "halted");
+    assert!(!with_sim(&s, |sim| sim.gtm.modules[0].ch[0].en));
+    // The other channel of the module keeps running.
+    assert_eq!(curstate(&s, "tc37x.mcs0.ch1"), "running");
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    let r0 = with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[0]);
+    assert_eq!(i.eval("reg r0").unwrap(), format!("r0 (/32): 0x{r0:08x}"));
+    i.eval("reg r3 0x1234").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[3]), 0x1234);
+    i.eval("resume").unwrap();
+    assert!(with_sim(&s, |sim| sim.gtm.modules[0].ch[0].en));
+    assert_eq!(curstate(&s, "tc37x.mcs0.ch0"), "running");
+}
+
+#[test]
+fn mcs_breakpoint_is_a_shared_self_jump_and_is_stepped_over_on_resume() {
+    let s = mcs_server();
+    let i = &s.interp;
+    let orig = ram_word(&s, 0x60);
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("bp 0x60 4").unwrap();
+    i.eval("targets tc37x.mcs0.ch1").unwrap();
+    i.eval("bp 0x60 4").unwrap();
+    assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
+    // Debugger reads show the instruction under the breakpoint.
+    assert_eq!(ops::read_memory_as(&s.cx(), MCS0_CH0, 0x60, 4).unwrap(), orig.to_le_bytes().to_vec());
+
+    poll_until(&s, "breakpoint hit", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    assert_eq!(ops::state(&s.cx(), MCS0_CH0).1.name(), "breakpoint");
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000060");
+    assert_eq!(curstate(&s, "tc37x.mcs0.ch1"), "running");
+
+    // Removed on one channel only: still planted for the other.
+    i.eval("targets tc37x.mcs0.ch1").unwrap();
+    i.eval("rbp 0x60").unwrap();
+    assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
+
+    // Resume executes the instruction under the breakpoint and plants it again.
+    let r2 = with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[2]);
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("resume").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[2]), r2 + 1);
+    assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
+    assert_eq!(ram_word(&s, 0x64), asm("RET", &[]), "step trap removed");
+    poll_until(&s, "second hit", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    i.eval("rbp 0x60").unwrap();
+    assert_eq!(ram_word(&s, 0x60), orig);
+}
+
+#[test]
+fn mcs_step_into_over_and_return() {
+    let s = mcs_server();
+    let i = &s.interp;
+    let cx = s.cx();
+    i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
+    ops::poll_all(&cx);
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("reg pc 0x2c").unwrap();
+    i.eval("step").unwrap();
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000060", "step into the call");
+    i.eval("step").unwrap();
+    i.eval("step").unwrap();
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000030", "return");
+    assert_eq!(ops::state(&cx, MCS0_CH0).1.name(), "single-step");
+    i.eval("reg pc 0x2c").unwrap();
+    ops::step_as(&cx, MCS0_CH0, None, aurix_core::target::RunMode::StepOver).unwrap();
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000030", "step over the call");
+    assert!(!with_sim(&s, |sim| sim.gtm.modules[0].ch[0].en));
+    for a in [0x28, 0x2C, 0x30, 0x60, 0x64] {
+        assert_eq!(ram_word(&s, a), mcs_program()[(a / 4) as usize], "trap at 0x{a:x} left behind");
+    }
+}
+
+#[test]
+fn mcs_halt_of_a_waiting_channel_takes_effect_after_the_wait() {
+    let s = mcs_server();
+    let i = &s.interp;
+    poll_until(&s, "channel 1 waiting", |s| with_sim(s, |sim| sim.gtm.modules[0].ch[1].waiting));
+    i.eval("tc37x.mcs0.ch1 arp_halt").unwrap();
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.mcs0.ch1"), "running");
+    with_sim(&s, |sim| sim.gtm.modules[0].strg |= 1);
+    poll_until(&s, "channel 1 stopped", |s| curstate(s, "tc37x.mcs0.ch1") == "halted");
+    i.eval("targets tc37x.mcs0.ch1").unwrap();
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000048");
+}
+
+#[test]
+fn mcs_breakpoint_is_planted_again_after_the_program_is_reloaded() {
+    let s = mcs_server();
+    let i = &s.interp;
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("bp 0x30 4").unwrap();
+    // The application loads the program again (e.g. after its own re-initialisation).
+    with_sim(&s, |sim| sim.gtm.load(0, &mcs_program()));
+    ops::poll_all(&s.cx());
+    assert_eq!(ram_word(&s, 0x30), 0xE000_0030);
+    i.eval("rbp 0x30").unwrap();
+    assert_eq!(ram_word(&s, 0x30), asm("JMP", &[0x28]));
+}
+
+/// The application protects the MCS code against CPU writes (CCM ARP0 with WPROT_AEI, locked by
+/// CLS_PROT; values read on the TC377): breakpoints open it for the write and restore it.
+#[test]
+fn mcs_breakpoint_opens_the_ram_write_protection_and_restores_it() {
+    let s = mcs_server();
+    let i = &s.interp;
+    let arps = [0x800B_0000, 0x8103_0020, 0x0107_0100, 0x8107_0040];
+    with_sim(&s, |sim| {
+        let md = &mut sim.gtm.modules[0];
+        md.arp[..4].copy_from_slice(&arps);
+        md.cls_prot = true;
+    });
+    i.eval("mww 0xF0138060 0").unwrap_err();
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("bp 0x60 4").unwrap();
+    assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
+    let (arp, cls) = with_sim(&s, |sim| (sim.gtm.modules[0].arp, sim.gtm.modules[0].cls_prot));
+    assert_eq!(&arp[..4], &arps);
+    assert!(cls);
+    // Stepping over the breakpoint writes traps and the instruction through the same path.
+    poll_until(&s, "breakpoint hit", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    i.eval("resume").unwrap();
+    assert_eq!(ram_word(&s, 0x64), asm("RET", &[]));
+    i.eval("rbp 0x60").unwrap();
+    assert_eq!(ram_word(&s, 0x60), asm("ADDL", &[2, 1]));
+    assert!(with_sim(&s, |sim| sim.gtm.modules[0].cls_prot && sim.gtm.modules[0].arp[0] == 0x800B_0000));
+}
+
+#[test]
+fn mcs_halt_all_handler_pulses_tl1_only_for_breakpoints() {
+    let s = mcs_server();
+    let i = &s.interp;
+    i.eval("tc37x.mcs0.ch0 configure -event halted {tc37x_mcs_halt_all tc37x.mcs0.ch0}").unwrap();
+    take_writes(&s);
+    i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
+    ops::poll_all(&s.cx());
+    assert!(!take_writes(&s).contains(&(CBS_TLC, 0x30)), "a pause of the channel does not halt the cores");
+    i.eval("tc37x.mcs0.ch0 arp_resume").unwrap();
+    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("bp 0x28 4").unwrap();
+    take_writes(&s);
+    poll_until(&s, "breakpoint", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    assert!(take_writes(&s).contains(&(CBS_TLC, 0x30)));
 }

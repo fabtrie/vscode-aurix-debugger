@@ -1,7 +1,7 @@
 //! Call stack of a halted core: registers plus the CSA chain (TriCore) or the
 //! decoded function prologues (Cortex-M, the HSM).
 
-use aurix_core::arch::{CM_REGS, REG_PC, REG_PCXI, REG_PSW};
+use aurix_core::arch::{CM_REGS, MCS_REG_CTRL, MCS_REG_PC, MCS_REG_R7, REG_PC, REG_PCXI, REG_PSW};
 use aurix_core::unwind::{self, Frame};
 use aurix_core::{ops, unwind_arm};
 
@@ -14,6 +14,9 @@ pub fn unwind_core(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
     let core = find_core(&sh.handle, &crate::contexts::core_id_of(&sh.handle, idx)).ok_or("invalid core")?;
     if core.arch.name == "cortex_m" {
         return unwind_cortex_m(sh, idx, &core.id);
+    }
+    if core.arch.name == "gtm_mcs" {
+        return unwind_mcs(sh, idx);
     }
     sh.handle
         .call(move |cx| {
@@ -37,6 +40,41 @@ pub fn unwind_core(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
                 };
                 Ok(unwind::unwind(top, MAX_FRAMES, &mut read))
             })
+        })
+        .unwrap_or_else(|| Err("server stopped".into()))
+}
+
+/// GTM MCS channel: the current instruction, plus the caller when the top of the stack (R7) holds
+/// a return address, i.e. an address right after a CALL. PUSH also uses the stack, so deeper
+/// frames cannot be told apart from data.
+fn unwind_mcs(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
+    sh.handle
+        .call(move |cx| {
+            let v = cx
+                .with(|c| {
+                    let (mut io, e) = c.target_io(idx)?;
+                    e.core.read_regs(&mut io, &[MCS_REG_PC, MCS_REG_R7, MCS_REG_CTRL])
+                })
+                .map_err(|e| e.to_string())?;
+            let (pc, sp, sp_cnt) = (v[0], v[1] & 0x7FFC, (v[2] >> 16) & 7);
+            let frame = |pc: u32| {
+                let mut regs = [None; 32];
+                regs[7] = Some(sp);
+                Frame { pc, pcxi: 0, psw: None, regs, arm: false }
+            };
+            let mut frames = vec![frame(pc)];
+            if sp_cnt > 0 {
+                let read = |a: u32| ops::read_memory_as(cx, idx, a, 4).ok().map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                let ret = read(sp).filter(|r| *r >= 4 && r & 3 == 0 && *r < aurix_core::gtm_mcs::RAM_SIZE);
+                let after_call = ret
+                    .and_then(|r| read(r - 4))
+                    .and_then(isa::mcs::decode)
+                    .is_some_and(|op| matches!(op.flow, isa::mcs::Flow::Call | isa::mcs::Flow::CallR6));
+                if let (Some(r), true) = (ret, after_call) {
+                    frames.push(frame(r));
+                }
+            }
+            Ok(frames)
         })
         .unwrap_or_else(|| Err("server stopped".into()))
 }

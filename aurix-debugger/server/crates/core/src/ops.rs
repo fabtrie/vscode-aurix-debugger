@@ -170,8 +170,23 @@ pub fn poll_all(cx: &Cx) {
             if ops.all.iter().all(|&h| r[h].ok()) {
                 let vals: Vec<u32> = ops.reads.iter().map(|&h| r[h].u32()).collect();
                 out.push((i, c.targets[i].core.poll_apply(&vals)));
+            } else if ops.all.iter().all(|&h| r[h].ok() || r[h].err == tas::PL0_ERR_CONSEQUENTIAL) {
+                // Not executed because an access of another target failed before: polled again
+                // next period.
             } else {
+                if let Some(&h) = ops.all.iter().find(|&&h| !r[h].ok()) {
+                    log_debug!("[{}] poll access {h} failed: {}", c.targets[i].name, tas::pl_err_name(r[h].err));
+                }
                 failed.push(i);
+            }
+        }
+        // Follow-ups needing target access (e.g. MCS breakpoints overwritten by a program reload).
+        for i in 0..c.targets.len() {
+            if c.targets[i].core.wants_fixup() {
+                let (mut io, e) = c.target_io(i)?;
+                if let Err(err) = e.core.fixup(&mut io) {
+                    log_warn!("[{}] {err}", e.name);
+                }
             }
         }
         Ok((out, resets, failed))
@@ -206,13 +221,21 @@ pub fn poll_all(cx: &Cx) {
         }
     }
 
-    // Re-examine every target that failed or was never examined.
+    // Re-examine every target that failed or was never examined (some core types not in every
+    // poll period, e.g. MCS channels while the GTM is still disabled).
     let pending: Vec<usize> = cx.with(|c| {
+        let now = Instant::now();
         c.targets
-            .iter()
+            .iter_mut()
             .enumerate()
             .filter(|(_, e)| (e.poll_failures > 0 || !e.core.examined()) && !e.defer_examine)
-            .map(|(i, _)| i)
+            .filter_map(|(i, e)| {
+                let due = e.last_examine.is_none_or(|t| now.duration_since(t) >= e.core.examine_interval());
+                due.then(|| {
+                    e.last_examine = Some(now);
+                    i
+                })
+            })
             .collect()
     });
     for t in pending {
@@ -436,11 +459,13 @@ pub fn arp_reset_deassert(cx: &Cx, t: usize, halt: bool) -> Result<()> {
                 core.restore_triggers(&mut io)?;
                 Ok(tr)
             }
-            Core::CortexM(core) => {
+            core => {
                 // The HSM starts when the host startup software releases it and is only
-                // accessible when its firmware enables HSM debugging: it is examined again
-                // (e.g. by the reset-end handler after the HSM release) instead of failing the reset.
-                if !core.examined {
+                // accessible when its firmware enables HSM debugging; MCS channels once the
+                // startup software enables the GTM. They are examined again (e.g. by the
+                // reset-end handler after the HSM release, or the background poll) instead of
+                // failing the reset.
+                if !core.examined() {
                     return Ok(Transition::None);
                 }
                 match core.examine(&mut io).and_then(|_| core.poll(&mut io)) {
@@ -450,7 +475,7 @@ pub fn arp_reset_deassert(cx: &Cx, t: usize, halt: bool) -> Result<()> {
                     }
                     Err(err) => {
                         crate::log_debug!("[{name}] not accessible after reset: {err}");
-                        core.examined = false;
+                        core.set_examined(false);
                         Ok(Transition::None)
                     }
                 }
@@ -485,7 +510,9 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     }
     for &t in &all {
         if !cx.with(|c| c.targets[t].core.examined()) {
-            let _ = examine_one(cx, t, false);
+            // Cores that are only accessible after the startup software ran fail quietly.
+            let quiet = cx.with(|c| !c.targets[t].core.examine_interval().is_zero());
+            let _ = examine_one(cx, t, quiet);
         }
     }
     for &t in &all {
@@ -581,7 +608,8 @@ pub fn init(cx: &Cx) -> Result<()> {
     let n = cx.with(|c| c.targets.len());
     for t in 0..n {
         if !cx.with(|c| c.targets[t].defer_examine) {
-            let _ = examine_one(cx, t, false);
+            let quiet = cx.with(|c| !c.targets[t].core.examine_interval().is_zero());
+            let _ = examine_one(cx, t, quiet);
         }
     }
     // A reset that happened before we attached is not a "detected" reset.
@@ -670,25 +698,19 @@ pub fn write_memory(cx: &Cx, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| c.io()?.write(addr, data))
 }
 
-/// Memory as a core sees it: HSM-private addresses of a Cortex-M (HSM) target go
-/// through its debug window, everything else is host memory.
+/// Memory as a core sees it: HSM-private addresses go through the HSM debug window, MCS
+/// program addresses to the module RAM, everything else is host memory.
 pub fn read_memory_as(cx: &Cx, t: usize, addr: u32, len: usize) -> Result<Vec<u8>> {
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
-        match e.core.as_cortex_m_mut() {
-            Some(m) if crate::cortex_m::hsm_private(addr) => m.read_memory(&mut io, addr, len),
-            _ => io.read(addr, len),
-        }
+        e.core.read_memory(&mut io, addr, len)
     })
 }
 
 pub fn write_memory_as(cx: &Cx, t: usize, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
-        match e.core.as_cortex_m_mut() {
-            Some(m) if crate::cortex_m::hsm_private(addr) => m.write_memory(&mut io, addr, data),
-            _ => io.write(addr, data),
-        }
+        e.core.write_memory(&mut io, addr, data)
     })
 }
 

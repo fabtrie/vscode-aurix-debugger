@@ -178,7 +178,7 @@ impl Channel {
             ("Locator", "getPeers") => Ok(vec![String::new(), "[]".into()]),
             ("ContextQuery", "query") => {
                 let mut ids = vec![CONTAINER.to_string()];
-                ids.extend(cores(self.h()).into_iter().map(|c| c.id));
+                ids.extend(cores(self.h()).into_iter().filter(|c| c.visible).map(|c| c.id));
                 Ok(vec![String::new(), j(&ids)])
             }
             ("ContextQuery", "getAttrNames") => Ok(vec![String::new(), j(&["ID", "ParentID", "Name"])]),
@@ -358,7 +358,7 @@ impl Channel {
         let parent = a.opt_string(0)?;
         let ids: Vec<String> = match parent.as_deref() {
             None => vec![CONTAINER.to_string()],
-            Some(CONTAINER) => cores(self.h()).into_iter().map(|c| c.id).collect(),
+            Some(CONTAINER) => cores(self.h()).into_iter().filter(|c| c.visible).map(|c| c.id).collect(),
             Some(_) => vec![],
         };
         Ok(vec![String::new(), j(&ids)])
@@ -380,16 +380,7 @@ impl Channel {
         if owning_core(&id).as_deref() != Some(id.as_str()) {
             return Err(err(ERR_INV_CONTEXT, format!("Invalid context: {id}")));
         }
-        // resume modes: 0 resume, 1 step over, 2 step into, 3 step over line, 4 step into line, 5 step out
-        Ok(vec![
-            String::new(),
-            json!({ "ID": c.id, "ParentID": CONTAINER, "ProcessID": CONTAINER, "Name": c.name,
-                    "IsContainer": false, "HasState": true, "CanSuspend": true, "CanResume": 0x3F,
-                    "CanCount": 0x3E, "CanTerminate": false, "RCGroup": CONTAINER, "SymbolsGroup": CONTAINER,
-                    "CPUGroup": CONTAINER, "WordSize": 4,
-                    "Architecture": if c.arch.name == "cortex_m" { "arm" } else { "tricore" } })
-            .to_string(),
-        ])
+        Ok(vec![String::new(), crate::contexts::context_json(&c).to_string()])
     }
 
     fn rc_state(&self, a: &Args) -> Reply {
@@ -454,11 +445,15 @@ impl Channel {
 
     // --- Memory ----------------------------------------------------------------------
 
-    /// The HSM target for a memory access of a core context to HSM-private addresses.
-    fn hsm_access(&self, ctx: &str, addr: u32, size: usize) -> Option<usize> {
-        let c = find_core(self.h(), ctx)?;
+    /// The target for a memory access of a core context to addresses the core accesses through
+    /// its own path (HSM-private memory, MCS program RAM).
+    fn own_access(&self, ctx: &str, addr: u32, size: usize) -> Option<usize> {
+        let idx = find_core(self.h(), ctx)?.idx;
         let last = addr.wrapping_add(size.saturating_sub(1) as u32);
-        (c.arch.name == "cortex_m" && (aurix_core::cortex_m::hsm_private(addr) || aurix_core::cortex_m::hsm_private(last))).then_some(c.idx)
+        self.h()
+            .call(move |cx| cx.with(|c| c.targets.get(idx).is_some_and(|t| t.core.owns_address(addr) || t.core.owns_address(last))))
+            .unwrap_or(false)
+            .then_some(idx)
     }
 
     fn mem_error(addr: u32, size: usize, msg: String) -> String {
@@ -469,7 +464,7 @@ impl Channel {
         let ctx = a.string(0)?;
         let addr = a.u64(1)? as u32;
         let size = a.u64(3)? as usize;
-        if let Some(t) = self.hsm_access(&ctx, addr, size) {
+        if let Some(t) = self.own_access(&ctx, addr, size) {
             let r = self
                 .h()
                 .call(move |cx| ops::read_memory_as(cx, t, addr, size).map_err(|e| e.to_string()))
@@ -509,7 +504,7 @@ impl Channel {
         let data = B64.decode(a.string(5)?).map_err(|e| err(ERR_JSON_SYNTAX, format!("base64: {e}")))?;
         let data: Vec<u8> = data.into_iter().take(size).collect();
         let len = data.len();
-        if let Some(t) = self.hsm_access(&ctx, addr, len) {
+        if let Some(t) = self.own_access(&ctx, addr, len) {
             let r = self
                 .h()
                 .call(move |cx| ops::write_memory_as(cx, t, addr, &data).map_err(|e| e.to_string()))

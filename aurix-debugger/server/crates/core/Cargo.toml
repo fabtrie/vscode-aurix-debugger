@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 tas.workspace = true
 jim.workspace = true
+isa.workspace = true

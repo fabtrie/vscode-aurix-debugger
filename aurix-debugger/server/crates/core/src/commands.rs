@@ -145,6 +145,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "rwp", cmd_rwp);
     reg(interp, sh, "tricore", cmd_tricore);
     reg(interp, sh, "cortex_m", cmd_tricore);
+    reg(interp, sh, "gtm_mcs", cmd_tricore);
 }
 
 fn port_cmd(cx: &Cx, a: &[&str], field: fn(&mut crate::ctx::Ports) -> &mut Option<u16>) -> CmdResult {
@@ -361,6 +362,19 @@ fn cmd_target(cx: &Cx, a: &[&str]) -> CmdResult {
                 cx.with(|c| c.targets.pop());
                 return Err(format!("[{name}] OCMTS not configured for target (-ocmts)"));
             }
+            // Channels of one MCS module share the program RAM with its breakpoints.
+            cx.with(|c| {
+                let Some(m) = c.targets[t].core.as_mcs() else { return };
+                let (module, rambase) = (m.module, m.rambase);
+                let shared = c.targets[..t]
+                    .iter()
+                    .filter_map(|e| e.core.as_mcs())
+                    .find(|o| o.module == module && o.rambase == rambase)
+                    .map(|o| o.ram.clone());
+                if let (Some(ram), Some(m)) = (shared, c.targets[t].core.as_mcs_mut()) {
+                    m.ram = ram;
+                }
+            });
             cx.with(|c| c.current = Some(t));
             let sh = cx.sh.clone();
             cx.interp.register(&name, move |i, args| target_object(&Cx { interp: i, sh: &sh }, t, args));
@@ -427,6 +441,19 @@ fn configure_target(cx: &Cx, t: usize, a: &[&str]) -> Result<(), String> {
                 cx.with(|c| c.targets[t].chain_position = Some(v));
                 i += 2;
             }
+            "-module" | "-channel" | "-rambase" => {
+                let v = num32(arg(i + 1, opt)?)?;
+                cx.with(|c| {
+                    let m = c.targets[t].core.as_mcs_mut().ok_or_else(|| format!("{opt} is only valid for gtm_mcs targets"))?;
+                    match opt {
+                        "-module" => m.module = v,
+                        "-channel" => m.channel = v,
+                        _ => m.rambase = Some(v),
+                    }
+                    Ok::<(), String>(())
+                })?;
+                i += 2;
+            }
             "-defer-examine" => {
                 cx.with(|c| c.targets[t].defer_examine = true);
                 i += 1;
@@ -453,6 +480,8 @@ fn cget_target(cx: &Cx, t: usize, a: &[&str]) -> CmdResult {
             "-event" => e.event(a.get(1).ok_or("usage: cget -event <name>")?).unwrap_or("").to_string(),
             "-coreid" => e.core.coreid().to_string(),
             "-dbgbase" => format!("0x{:08x}", e.core.dbgbase().unwrap_or(0)),
+            "-module" => e.core.as_mcs().map(|m| m.module.to_string()).ok_or("not a gtm_mcs target")?,
+            "-channel" => e.core.as_mcs().map(|m| m.channel.to_string()).ok_or("not a gtm_mcs target")?,
             "-ocmts" => e.core.ocmts().map(str::to_string).ok_or("OCMTS not configured")?,
             "-chain-position" => e.chain_position.clone().unwrap_or_default(),
             "-endian" => "little".into(),
@@ -470,6 +499,7 @@ fn target_object(cx: &Cx, t: usize, a: &[&str]) -> CmdResult {
         "configure" => configure_target(cx, t, rest).map(|_| String::new()),
         "cget" => cget_target(cx, t, rest),
         "curstate" => Ok(cx.with(|c| c.targets[t].core.state().name().to_string())),
+        "debug_reason" => Ok(cx.with(|c| c.targets[t].core.reason().name().to_string())),
         "was_examined" => Ok((cx.with(|c| c.targets[t].core.examined()) as u8).to_string()),
         "examine_deferred" => Ok((cx.with(|c| c.targets[t].defer_examine) as u8).to_string()),
         "invoke-event" => {
@@ -1173,6 +1203,7 @@ fn cmd_tricore(cx: &Cx, a: &[&str]) -> CmdResult {
                 });
                 bps.chain(wps).collect::<Vec<_>>().join("\n")
             }
+            Core::Mcs(core) => core.describe_breakpoints().join("\n"),
         })),
         // Memory as the core sees it (HSM RAM, boot ROM and peripherals through the debug window).
         Some("mdw") => {

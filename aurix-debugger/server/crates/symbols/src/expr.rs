@@ -571,7 +571,9 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             SymbolRef::Global(i) => {
                 let g = syms.globals.get(*i).ok_or("invalid global")?;
-                Ok(Value { ty: syms.var_type(g.die_ref()), place: Place::Memory(g.addr), bytes: None, symbol: Some(s.clone()) })
+                // Globals without debug information (MCS data labels) are one 32-bit word.
+                let ty = if g.unit == usize::MAX { TypeId::Base(TypeClass::Cardinal, 4) } else { syms.var_type(g.die_ref()) };
+                Ok(Value { ty, place: Place::Memory(g.addr), bytes: None, symbol: Some(s.clone()) })
             }
             SymbolRef::Function(i) => {
                 let f = syms.functions.get(*i).ok_or("invalid function")?;

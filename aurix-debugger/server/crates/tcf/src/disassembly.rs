@@ -35,12 +35,15 @@ pub enum Isa {
     TriCore,
     /// Thumb-2 of the Cortex-M (HSM).
     Thumb,
+    /// GTM MCS (32-bit instructions, decoded by the `isa` crate).
+    Mcs,
 }
 
 impl Isa {
     fn for_ctx(sh: &Shared, ctx: &str) -> Isa {
         match crate::contexts::find_core(&sh.handle, ctx) {
             Some(c) if c.arch.name == "cortex_m" => Isa::Thumb,
+            Some(c) if c.arch.name == "gtm_mcs" => Isa::Mcs,
             _ => Isa::TriCore,
         }
     }
@@ -49,6 +52,7 @@ impl Isa {
         match self {
             Isa::TriCore => "TRICORE",
             Isa::Thumb => "Thumb",
+            Isa::Mcs => "MCS",
         }
     }
 
@@ -56,6 +60,7 @@ impl Isa {
     fn insn_len(self, b0: u8, b1: u8) -> usize {
         match self {
             Isa::TriCore if b0 & 1 == 1 => 4,
+            Isa::Mcs => 4,
             Isa::Thumb if aurix_core::unwind_arm::is_thumb32(u16::from_le_bytes([b0, b1])) => 4,
             _ => 2,
         }
@@ -66,8 +71,18 @@ fn capstone(isa: Isa) -> Res<Capstone> {
     match isa {
         Isa::TriCore => Capstone::new().tricore().mode(ArchMode::TriCore162).build(),
         Isa::Thumb => Capstone::new().arm().mode(arm::ArchMode::Thumb).extra_mode([arm::ArchExtraMode::MClass].into_iter()).build(),
+        Isa::Mcs => return Err((ERR_OTHER, "no Capstone disassembler for the MCS".into())),
     }
     .map_err(|e| (ERR_OTHER, format!("disassembler: {e}")))
+}
+
+/// Disassembles MCS words at `addr` (32-bit instructions; a cut-off word is left out). Branch
+/// targets are shown as `label` names them.
+pub fn disassemble_mcs(code: &[u8], addr: u32, label: &dyn Fn(u32) -> Option<String>) -> Vec<(u32, usize, String)> {
+    code.chunks_exact(4)
+        .enumerate()
+        .map(|(i, w)| (addr + 4 * i as u32, 4, isa::mcs::format(u32::from_le_bytes([w[0], w[1], w[2], w[3]]), label)))
+        .collect()
 }
 
 /// Disassembles `code` located at `addr` into (address, length, text).
@@ -122,6 +137,8 @@ pub fn annotate_target(text: &str, isa: Isa, function_at: impl Fn(u32) -> Option
         Isa::TriCore => mnemonic.starts_with('j') || mnemonic.starts_with("call") || mnemonic.starts_with("fcall") || mnemonic.starts_with("loop"),
         // b, bl, blx, b<cond>, cbz, cbnz (not bic).
         Isa::Thumb => (mnemonic.starts_with('b') && !mnemonic.starts_with("bic")) || mnemonic.starts_with("cb"),
+        // Targets are already shown as labels.
+        Isa::Mcs => false,
     };
     let Some(pos) = text.rfind("#0x").filter(|_| branch) else {
         return text.to_string();
@@ -158,10 +175,15 @@ pub fn dispatch(sh: &Shared, command: &str, args: &[String]) -> Res<Vec<String>>
                 .unwrap_or_else(|| Err("server stopped".into()))
                 .map_err(|e| (ERR_INV_ADDRESS, e))?;
             let isa = Isa::for_ctx(sh, &ctx);
-            let cs = capstone(isa)?;
             let syms = sh.symbols_for(&ctx);
             let function_at = |addr: u32| syms.as_ref()?.function_at(addr).map(|f| (f.name.clone(), addr - (f.low & !1)));
-            let lines: Vec<Value> = disassemble_bytes(&cs, isa, &data, start)
+            let decoded = if isa == Isa::Mcs {
+                let label = |a: u32| function_at(a).filter(|(_, off)| *off == 0).map(|(name, _)| name);
+                disassemble_mcs(&data, start, &label)
+            } else {
+                disassemble_bytes(&capstone(isa)?, isa, &data, start)
+            };
+            let lines: Vec<Value> = decoded
                 .into_iter()
                 .map(|(a, n, text)| {
                     let text = annotate_target(&text, isa, &function_at);

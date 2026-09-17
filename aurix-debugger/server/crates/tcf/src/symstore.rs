@@ -140,7 +140,16 @@ impl SymbolStore {
                 return Ok(*n);
             }
         }
-        let s = Arc::new(Symbols::load(path)?);
+        // GTM MCS programs have no debug information: the source itself is assembled.
+        let is_asm = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("asm"));
+        let s = Arc::new(if is_asm {
+            let t0 = std::time::Instant::now();
+            let mut s = symbols::mcs_asm::assemble(path, &[])?.symbols(path);
+            s.load_time = t0.elapsed();
+            s
+        } else {
+            Symbols::load(path)?
+        });
         log_info!(
             "Symbols: loaded {} in {:.1}s ({} functions, {} globals, {} source files)",
             path.display(),

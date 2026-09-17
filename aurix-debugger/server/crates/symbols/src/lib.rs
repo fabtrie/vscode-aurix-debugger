@@ -6,6 +6,7 @@
 //! references across units), which also covers GCC output.
 
 pub mod expr;
+pub mod mcs_asm;
 pub mod scope;
 pub mod types;
 
@@ -368,6 +369,60 @@ impl Symbols {
         }
         syms.load_time = t0.elapsed();
         Ok(syms)
+    }
+
+    /// Symbols without debug information (e.g. from an assembler source): functions as
+    /// `(name, low, high)`, globals as `(name, address)`, line rows as `(address, file, line)`
+    /// with `end` rows as `(address, None, 0)` marking the end of a code range.
+    pub fn from_tables(
+        path: &Path,
+        functions: Vec<(String, u32, u32)>,
+        globals: Vec<(String, u32)>,
+        files: Vec<String>,
+        rows: Vec<(u32, Option<u32>, u32)>,
+    ) -> Symbols {
+        let no_die = UnitOffset(0);
+        let mut syms = Symbols {
+            path: path.to_path_buf(),
+            dwarf: gimli::Dwarf::default(),
+            units: Vec::new(),
+            functions: functions
+                .into_iter()
+                .map(|(name, low, high)| Function { name, low, high, unit: usize::MAX, die: no_die, decl_line: 0, external: true })
+                .collect(),
+            globals: globals
+                .into_iter()
+                .map(|(name, addr)| Global { name, addr, unit: usize::MAX, die: no_die, external: true })
+                .collect(),
+            functions_by_name: HashMap::new(),
+            globals_by_name: HashMap::new(),
+            types_by_name: HashMap::new(),
+            enumerators_by_name: HashMap::new(),
+            rows: rows
+                .into_iter()
+                .map(|(addr, file, line)| Row { addr, file: file.unwrap_or(0), line, col: 0, end: file.is_none() })
+                .collect(),
+            files_norm: files.iter().map(|f| normalize_path(f)).collect(),
+            files,
+            rows_by_file: HashMap::new(),
+            unit_cache: Vec::new(),
+            unit_offsets: Vec::new(),
+            load_time: Duration::ZERO,
+        };
+        syms.functions.sort_by_key(|f| (f.low, f.high));
+        for (i, f) in syms.functions.iter().enumerate() {
+            syms.functions_by_name.entry(f.name.clone()).or_default().push(i);
+        }
+        for (i, g) in syms.globals.iter().enumerate() {
+            syms.globals_by_name.entry(g.name.clone()).or_default().push(i);
+        }
+        syms.rows.sort_by_key(|r| (r.addr, !r.end));
+        for (i, r) in syms.rows.iter().enumerate() {
+            if !r.end && r.line != 0 {
+                syms.rows_by_file.entry(r.file).or_default().push(i as u32);
+            }
+        }
+        syms
     }
 
     pub(crate) fn attr_str(&self, unit: &gimli::Unit<R>, v: Option<AttributeValue<R>>) -> Option<String> {

@@ -10,3 +10,4 @@ publish = false
 gimli.workspace = true
 object.workspace = true
 memmap2.workspace = true
+isa.workspace = true

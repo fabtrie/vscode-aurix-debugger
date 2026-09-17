@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use tas::Batch;
 
 use crate::adapter::Io;
-use crate::arch::{ArchInfo, CORTEX_M, TRICORE};
+use crate::arch::{ArchInfo, CORTEX_M, GTM_MCS, TRICORE};
 use crate::cortex_m::CortexM;
+use crate::gtm_mcs::McsChannel;
 use crate::error::Result;
 use crate::tricore::{IrqMask, Tricore};
 
@@ -105,10 +106,11 @@ pub struct RunCfg {
     pub irq_mask: IrqMask,
 }
 
-/// A core of a target: TriCore (host cores) or Cortex-M (HSM).
+/// A core of a target: TriCore (host cores), Cortex-M (HSM) or a GTM MCS channel.
 pub enum Core {
     Tricore(Tricore),
     CortexM(CortexM),
+    Mcs(McsChannel),
 }
 
 /// Calls the same method on either core type.
@@ -117,6 +119,7 @@ macro_rules! each {
         match $self {
             Core::Tricore($c) => $e,
             Core::CortexM($c) => $e,
+            Core::Mcs($c) => $e,
         }
     };
 }
@@ -127,16 +130,18 @@ impl Core {
         match type_name {
             "tricore" => Some(Core::Tricore(Tricore::new())),
             "cortex_m" => Some(Core::CortexM(CortexM::new())),
+            "gtm_mcs" => Some(Core::Mcs(McsChannel::new())),
             _ => None,
         }
     }
 
-    pub const TYPES: &'static [&'static str] = &["tricore", "cortex_m"];
+    pub const TYPES: &'static [&'static str] = &["tricore", "cortex_m", "gtm_mcs"];
 
     pub fn arch(&self) -> &'static ArchInfo {
         match self {
             Core::Tricore(_) => &TRICORE,
             Core::CortexM(_) => &CORTEX_M,
+            Core::Mcs(_) => &GTM_MCS,
         }
     }
 
@@ -157,6 +162,20 @@ impl Core {
     pub fn as_cortex_m_mut(&mut self) -> Option<&mut CortexM> {
         match self {
             Core::CortexM(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn as_mcs(&self) -> Option<&McsChannel> {
+        match self {
+            Core::Mcs(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn as_mcs_mut(&mut self) -> Option<&mut McsChannel> {
+        match self {
+            Core::Mcs(c) => Some(c),
             _ => None,
         }
     }
@@ -200,6 +219,64 @@ impl Core {
     /// The core must be halted after a halting reset (the HSM runs depending on its firmware).
     pub fn halts_after_reset(&self) -> bool {
         matches!(self, Core::Tricore(_))
+    }
+
+    /// Whether frontends list the core (an MCS channel only once it is used).
+    pub fn visible(&self) -> bool {
+        match self {
+            Core::Mcs(c) => c.examined && c.visible(),
+            _ => true,
+        }
+    }
+
+    /// Minimum time between examination attempts of an unexamined core in the background poll.
+    pub fn examine_interval(&self) -> std::time::Duration {
+        match self {
+            Core::Mcs(_) => std::time::Duration::from_secs(1),
+            _ => std::time::Duration::ZERO,
+        }
+    }
+
+    /// Addresses the core accesses through its own path instead of the host address space
+    /// (HSM-private memory, MCS program RAM).
+    pub fn owns_address(&self, addr: u32) -> bool {
+        match self {
+            Core::CortexM(_) => crate::cortex_m::hsm_private(addr),
+            Core::Mcs(c) => c.owns_address(addr),
+            Core::Tricore(_) => false,
+        }
+    }
+
+    /// Reads memory as the core sees it (see [`Self::owns_address`]).
+    pub fn read_memory(&mut self, io: &mut Io, addr: u32, len: usize) -> Result<Vec<u8>> {
+        match self {
+            Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.read_memory(io, addr, len),
+            Core::Mcs(c) if c.owns_address(addr) => c.read_memory(io, addr, len),
+            _ => io.read(addr, len),
+        }
+    }
+
+    pub fn write_memory(&mut self, io: &mut Io, addr: u32, data: &[u8]) -> Result<()> {
+        match self {
+            Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.write_memory(io, addr, data),
+            Core::Mcs(c) if c.owns_address(addr) => c.write_memory(io, addr, data),
+            _ => io.write(addr, data),
+        }
+    }
+
+    /// A poll found something that needs target access (see [`Self::fixup`]).
+    pub fn wants_fixup(&self) -> bool {
+        match self {
+            Core::Mcs(c) => c.wants_fixup(),
+            _ => false,
+        }
+    }
+
+    pub fn fixup(&mut self, io: &mut Io) -> Result<()> {
+        match self {
+            Core::Mcs(c) => c.fixup(io),
+            _ => Ok(()),
+        }
     }
 
     pub fn invalidate(&mut self) {
@@ -253,7 +330,7 @@ impl Core {
     pub fn remove_trigger(&mut self, io: &mut Io, slot: u8) -> Result<()> {
         each!(self, c => c.remove_trigger(io, slot))
     }
-    pub fn restore_triggers(&self, io: &mut Io) -> Result<()> {
+    pub fn restore_triggers(&mut self, io: &mut Io) -> Result<()> {
         each!(self, c => c.restore_triggers(io))
     }
     pub fn assert_reset(&mut self) {
@@ -326,6 +403,8 @@ pub struct TargetEntry {
     pub watchpoints: Vec<Watchpoint>,
     /// Set by `arp_reset assert` for the following deassert.
     pub reset_halt: bool,
+    /// Last examination attempt of the background poll.
+    pub last_examine: Option<std::time::Instant>,
 }
 
 impl TargetEntry {
@@ -343,6 +422,7 @@ impl TargetEntry {
             breakpoints: Vec::new(),
             watchpoints: Vec::new(),
             reset_halt: false,
+            last_examine: None,
         }
     }
 

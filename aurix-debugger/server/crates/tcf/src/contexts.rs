@@ -15,6 +15,8 @@ pub struct CoreInfo {
     pub id: String,
     pub name: String,
     pub examined: bool,
+    /// Listed as a thread (e.g. MCS channels only once they ran).
+    pub visible: bool,
     pub state: TargetState,
     pub reason: DebugReason,
     pub arch: &'static ArchInfo,
@@ -24,6 +26,24 @@ impl CoreInfo {
     pub fn suspended(&self) -> bool {
         self.examined && self.state == TargetState::Halted
     }
+}
+
+/// TCF architecture name of a core (`Architecture` context property).
+pub fn tcf_arch(arch: &ArchInfo) -> &'static str {
+    match arch.name {
+        "cortex_m" => "arm",
+        "gtm_mcs" => "gtm_mcs",
+        _ => "tricore",
+    }
+}
+
+/// RunControl context of a core (resume modes: 0 resume, 1 step over, 2 step into, 3 step over
+/// line, 4 step into line, 5 step out).
+pub fn context_json(c: &CoreInfo) -> serde_json::Value {
+    serde_json::json!({ "ID": c.id, "ParentID": CONTAINER, "ProcessID": CONTAINER, "Name": c.name,
+            "IsContainer": false, "HasState": true, "CanSuspend": true, "CanResume": 0x3F,
+            "CanCount": 0x3E, "CanTerminate": false, "RCGroup": CONTAINER, "SymbolsGroup": CONTAINER,
+            "CPUGroup": CONTAINER, "WordSize": 4, "Architecture": tcf_arch(c.arch) })
 }
 
 pub fn core_id(coreid: u32) -> String {
@@ -41,6 +61,7 @@ pub fn cores(h: &ServerHandle) -> Vec<CoreInfo> {
                     id: core_id(t.core.coreid()),
                     name: t.name.clone(),
                     examined: t.core.examined(),
+                    visible: t.core.visible(),
                     state: t.core.state(),
                     reason: t.core.reason(),
                     arch: t.core.arch(),

@@ -210,11 +210,33 @@
         "title": "Resume Live Watch Refresh",
         "category": "AURIX™ TCF",
         "icon": "$(debug-start)"
+      },
+      {
+        "command": "aurix-tcf.liveWatchCopyValue",
+        "title": "Copy Value",
+        "category": "AURIX™ TCF"
+      },
+      {
+        "command": "aurix-tcf.liveWatchCopyExpression",
+        "title": "Copy as Expression",
+        "category": "AURIX™ TCF"
+      },
+      {
+        "command": "aurix-tcf.liveWatchEditExpression",
+        "title": "Edit Expression",
+        "category": "AURIX™ TCF"
+      },
+      {
+        "command": "aurix-tcf.liveWatchAddPeripheral",
+        "title": "Add to Live Watch",
+        "category": "AURIX™ TCF",
+        "icon": "$(eye)"
       }
     ],
     "views": {
       "debug": [
         {
+          "type": "webview",
           "id": "aurixTcfLiveWatch",
           "name": "Live Watch",
           "icon": "media/debugger-icon.png",
@@ -285,33 +307,49 @@
         {
           "command": "aurix-tcf.liveWatchRemoveExpression",
           "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchCopyValue",
+          "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchCopyExpression",
+          "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchEditExpression",
+          "when": "false"
+        },
+        {
+          "command": "aurix-tcf.liveWatchAddPeripheral",
+          "when": "false"
         }
       ],
       "view/title": [
         {
           "command": "aurix-tcf.liveWatchAddExpression",
           "when": "view == aurixTcfLiveWatch",
-          "group": "navigation"
+          "group": "navigation@1"
         },
         {
           "command": "aurix-tcf.liveWatchDisableRefresh",
           "when": "view == aurixTcfLiveWatch && aurix-tcf.liveWatchEnabled",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "aurix-tcf.liveWatchEnableRefresh",
           "when": "view == aurixTcfLiveWatch && !aurix-tcf.liveWatchEnabled",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "aurix-tcf.liveWatchRefresh",
           "when": "view == aurixTcfLiveWatch",
-          "group": "navigation"
+          "group": "navigation@3"
         },
         {
           "command": "aurix-tcf.configureLiveWatch",
           "when": "view == aurixTcfLiveWatch",
-          "group": "navigation"
+          "group": "navigation@4"
         },
         {
           "command": "aurix-tcf.liveWatchClearExpressions",
@@ -319,46 +357,48 @@
           "group": "navigation@9"
         }
       ],
-      "view/item/context": [
+      "webview/context": [
         {
-          "command": "aurix-tcf.liveWatchSetValue",
-          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatch(Expression|Child)/",
-          "group": "inline@1"
-        },
-        {
-          "command": "aurix-tcf.liveWatchPauseExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.live",
-          "group": "inline@2"
-        },
-        {
-          "command": "aurix-tcf.liveWatchResumeExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.paused",
-          "group": "inline@2"
-        },
-        {
-          "command": "aurix-tcf.liveWatchRemoveExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatchExpression/",
-          "group": "inline@3"
+          "command": "aurix-tcf.liveWatchEditExpression",
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.(live|paused)$/",
+          "group": "1_edit@0"
         },
         {
           "command": "aurix-tcf.liveWatchSetValue",
-          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatch(Expression|Child)/",
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.(root\\.(live|paused)(\\.register)?|child)$/",
           "group": "1_edit@1"
         },
         {
+          "command": "aurix-tcf.liveWatchCopyValue",
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "aurix-tcf.liveWatchCopyExpression",
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
+          "group": "2_copy@2"
+        },
+        {
           "command": "aurix-tcf.liveWatchPauseExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.live",
-          "group": "2_updates@1"
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.live/",
+          "group": "3_updates@1"
         },
         {
           "command": "aurix-tcf.liveWatchResumeExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem == aurixTcfLiveWatchExpression.paused",
-          "group": "2_updates@1"
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.paused/",
+          "group": "3_updates@1"
         },
         {
           "command": "aurix-tcf.liveWatchRemoveExpression",
-          "when": "view == aurixTcfLiveWatch && viewItem =~ /^aurixTcfLiveWatchExpression/",
-          "group": "3_remove@1"
+          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root/",
+          "group": "4_remove@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "aurix-tcf.liveWatchAddPeripheral",
+          "when": "view == mcu-debug.peripheral-viewer.svd && debugType == aurix-tcf && viewItem =~ /^(register|registerRW|registerRO|field|fieldRO)$/",
+          "group": "aurix-tcf@1"
         }
       ]
     },

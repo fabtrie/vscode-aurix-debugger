@@ -112,9 +112,12 @@ The Live Watch view periodically refreshes selected global variables. Use the vi
 
 Once configured, the active interval appears in the view header (highlighted in orange). Resume the target to run the cores and observe the selected global variables update automatically.
 
-- Each entry shows `name: value` on one line, like the WATCH section. Structs and arrays show a short preview (`{a: 1, b: 2, …}`) and can be expanded. Pointers can be expanded to show the value they point to.
-- **Pause Updates** on an entry moves it to the **Paused** group. Its last value stays visible, and **Resume Updates** moves it back.
-- The pause/play button in the view header turns the periodic refresh off and on for all entries. The values still update when the target stops.
+- Entries look like the WATCH section: `name: value` in the theme's debug colors, with changed values highlighted. Structs and arrays show a short preview (`{a: 1, b: 2, …}`) and can be expanded. Pointers can be expanded to show the value they point to.
+- Double-click a value (or press Enter) to change it. Double-click the name (or press F2) to edit the expression, e.g. to fix a typo. The context menu also copies the value or the expression.
+- Right-click a register or field in the **XPeripherals** view and choose **Add to Live Watch**. Registers show as hex and can be set. Fields show their bits and are read-only; change them in the XPeripherals view.
+- **Pause Updates** on an entry moves it to the **Paused** group, which is not refreshed while the target runs. **Resume Updates** moves it back.
+- The pause/play button in the view header turns the periodic refresh off and on for all entries.
+- Paused entries, and all entries while the refresh is off, still update like the WATCH section: when the target stops and when you press Refresh.
 
 ![live-watch](media/live-watch.gif)
 

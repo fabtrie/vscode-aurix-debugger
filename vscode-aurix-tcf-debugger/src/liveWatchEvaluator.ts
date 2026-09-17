@@ -40,6 +40,11 @@ export type LiveWatchRequestItem = {
 	expression: string;
 	/** Expressions of the expanded nodes below (and including) this root. */
 	expanded?: string[];
+	/** Shows only these bits of an integer value (a peripheral register field). */
+	bitOffset?: number;
+	bitWidth?: number;
+	/** Shows an integer value as zero-padded hex (a peripheral register). */
+	hex?: boolean;
 };
 
 type RootEntry = {
@@ -112,7 +117,7 @@ export class LiveWatchEvaluator {
 		return Promise.all(items.map(async (item) => {
 			try {
 				const expanded = new Set(item.expanded ?? []);
-				const node = await this.evaluateRoot(ctx, item.expression, item.expression, expanded);
+				const node = await this.evaluateRoot(ctx, item.expression, item.expression, expanded, item);
 				return { ...node, available: true };
 			} catch (e) {
 				return {
@@ -127,7 +132,7 @@ export class LiveWatchEvaluator {
 		}));
 	}
 
-	private async evaluateRoot(ctx: string, name: string, expression: string, expanded: Set<string>): Promise<LiveWatchNode> {
+	private async evaluateRoot(ctx: string, name: string, expression: string, expanded: Set<string>, format?: LiveWatchRequestItem): Promise<LiveWatchNode> {
 		const key = `${ctx}\n${expression}`;
 		let entry = this.roots.get(key);
 		let variable: ClientVariable | undefined;
@@ -148,6 +153,9 @@ export class LiveWatchEvaluator {
 		}
 		if (!variable) {
 			throw new Error(`'${expression}' has no displayable value`);
+		}
+		if (format && (format.hex || format.bitWidth !== undefined)) {
+			return { name, expression, value: await formatBits(variable, format), hasChildren: false };
 		}
 		return this.toNode(ctx, variable, name, expression, expanded);
 	}
@@ -321,6 +329,25 @@ export class LiveWatchEvaluator {
 			this.dropRoot(key);
 		}
 	}
+}
+
+/** Register value as hex, or a field of it: hex for multi-bit fields, 0/1 for single bits. */
+async function formatBits(v: ClientVariable, format: LiveWatchRequestItem): Promise<string> {
+	const raw = await v.value();
+	if (!raw || raw.length === 0) {
+		throw new Error('no value');
+	}
+	const bytes = v.isBigEndian() ? raw : Buffer.from(raw).reverse();
+	let value = BigInt(`0x${bytes.toString('hex')}`);
+	let bits = raw.length * 8;
+	if (format.bitWidth !== undefined) {
+		value = (value >> BigInt(format.bitOffset ?? 0)) & ((1n << BigInt(format.bitWidth)) - 1n);
+		bits = format.bitWidth;
+	}
+	if (bits === 1) {
+		return value.toString();
+	}
+	return `0x${value.toString(16).padStart(Math.ceil(bits / 4), '0')}`;
 }
 
 function formatError(e: unknown): string {

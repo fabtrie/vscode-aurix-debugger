@@ -15,7 +15,8 @@ import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { createGunzip } from 'zlib';
 import { showDebugConfigPanel } from './debugConfigPanel';
-import { LiveWatchProvider } from './liveWatchView';
+import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
+import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
 import { getSvdOptionsForDevice } from './svdCatalog';
 import { registerDebuggerActions } from './debuggerActions';
 
@@ -283,23 +284,52 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchRemoveExpression', async (item?: { expression?: string }) => {
-			await liveWatchProvider?.removeExpression(item as any);
+		vscode.commands.registerCommand('aurix-tcf.liveWatchRemoveExpression', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.removeExpression(item);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchSetValue', async (item?: { expression?: string }) => {
-			await liveWatchProvider?.setValue(item as any);
+		vscode.commands.registerCommand('aurix-tcf.liveWatchSetValue', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.setValue(item);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchPauseExpression', async (item?: unknown) => {
-			await liveWatchProvider?.setExpressionPaused(item as any, true);
+		vscode.commands.registerCommand('aurix-tcf.liveWatchPauseExpression', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.setExpressionPaused(item, true);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchResumeExpression', async (item?: unknown) => {
-			await liveWatchProvider?.setExpressionPaused(item as any, false);
+		vscode.commands.registerCommand('aurix-tcf.liveWatchResumeExpression', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.setExpressionPaused(item, false);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchAddPeripheral', async (node?: unknown) => {
+			const entry = peripheralWatchEntryFromNode(node);
+			if (!entry) {
+				void vscode.window.showWarningMessage('Select a register or field in the XPeripherals view to add it to the Live Watch.');
+				return;
+			}
+			if (entry.hasReadSideEffect) {
+				const add = 'Add Anyway';
+				const answer = await vscode.window.showWarningMessage(
+					`Reading ${entry.label} has a side effect (e.g. clear on read). The Live Watch reads it on every refresh.`,
+					{ modal: true },
+					add
+				);
+				if (answer !== add) {
+					return;
+				}
+			}
+			await liveWatchProvider?.addPeripheral(entry);
+			await vscode.commands.executeCommand(`${LiveWatchProvider.viewType}.focus`);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchEditExpression', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.editExpression(item);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchCopyValue', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.copyValue(item);
+		}),
+		vscode.commands.registerCommand('aurix-tcf.liveWatchCopyExpression', async (item?: LiveWatchCommandArgument) => {
+			await liveWatchProvider?.copyExpression(item);
 		}),
 		vscode.commands.registerCommand('aurix-tcf.liveWatchDisableRefresh', async () => {
 			await setLiveWatchMode(false);
@@ -338,9 +368,20 @@ export function activate(context: vscode.ExtensionContext) {
 	liveWatchStatusItem.command = 'aurix-tcf.configureLiveWatch';
 	liveWatchStatusItem.tooltip = 'Configure live watch refresh for running global variables';
 	context.subscriptions.push(liveWatchStatusItem);
-	const liveWatchTreeView = vscode.window.createTreeView('aurixTcfLiveWatch', { treeDataProvider: liveWatchProvider });
-	liveWatchProvider.attachView(liveWatchTreeView);
-	context.subscriptions.push(liveWatchTreeView);
+	context.subscriptions.push(vscode.window.registerWebviewViewProvider(LiveWatchProvider.viewType, liveWatchProvider));
+	// Like the Watch view, the Live Watch updates on every break, also for paused expressions and when
+	// the periodic refresh is off. The adapter's stopped event also covers cores stopping without focus.
+	context.subscriptions.push(
+		vscode.debug.registerDebugAdapterTrackerFactory('aurix-tcf', {
+			createDebugAdapterTracker: () => ({
+				onDidSendMessage: (message: { type?: string; event?: string }) => {
+					if (message?.type === 'event' && message.event === 'stopped') {
+						liveWatchProvider?.refreshOnBreak();
+					}
+				},
+			}),
+		})
+	);
 
 	// Register debug configuration provider
 	context.subscriptions.push(
@@ -402,8 +443,6 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!isStackFrame) {
 				return;
 			}
-			// Show the values at the stop, also when the periodic refresh is off.
-			void liveWatchProvider?.refreshNow();
 			// Open the disassembly layout once the source of the first focused frame is shown, so it
 			// lands next to the source editor. The timer is only a fallback for frames without source.
 			if (!openedDisassemblySessions.has(session.id) && !pendingDisassemblyOpenTimers.has(session.id)) {

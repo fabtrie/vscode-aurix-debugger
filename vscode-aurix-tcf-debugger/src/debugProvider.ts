@@ -2472,7 +2472,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			let stack: string | undefined;
 			let parentRef: number | undefined;
 			let createParentContext: string | undefined;
-			if (isWatchRequest && this.liveWatchEnabled && liveRefreshable) {
+			// A focused frame of a stopped core is the scope of locals and parameters; only without one
+			// is a (global) watch expression evaluated on a running core.
+			const frameCtx = typeof args.frameId === 'number' ? this.tryResolveFrame(args.frameId).ctx : undefined;
+			const frameIsStopped = frameCtx !== undefined && this.suspendedContextIds.has(frameCtx);
+			if (isWatchRequest && this.liveWatchEnabled && liveRefreshable && !frameIsStopped) {
 				ctx = await this.pickContextIdForRunningWatch();
 				if (ctx) {
 					parentRef = 0;
@@ -3607,12 +3611,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		if (command === 'aurix-tcf/liveWatchEvaluate') {
-			const items: LiveWatchRequestItem[] = (Array.isArray(args?.items) ? args.items : [])
-				.filter((item: any) => typeof item?.expression === 'string' && item.expression.trim() !== '')
-				.map((item: any) => ({
-					expression: item.expression.trim(),
-					expanded: Array.isArray(item.expanded) ? item.expanded.filter((e: unknown) => typeof e === 'string') : [],
-				}));
+			// One result per item, in order: the view matches them by position.
+			const optionalNumber = (value: unknown) => (typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined);
+			const items: LiveWatchRequestItem[] = (Array.isArray(args?.items) ? args.items : []).map((item: any) => ({
+				expression: String(item?.expression ?? '').trim(),
+				expanded: Array.isArray(item?.expanded) ? item.expanded.filter((e: unknown) => typeof e === 'string') : [],
+				bitOffset: optionalNumber(item?.bitOffset),
+				bitWidth: optionalNumber(item?.bitWidth) || undefined,
+				hex: item?.hex === true,
+			}));
 			let ctx: string | undefined;
 			try {
 				ctx = await this.pickLiveWatchContextId();

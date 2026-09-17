@@ -235,6 +235,11 @@ impl Symbols {
                             },
                             None => continue,
                         };
+                        // Functions removed by the linker keep their DIE with address 0; some assembler
+                        // functions have no valid end.
+                        if low == 0 || high <= low {
+                            continue;
+                        }
                         let Some(fname) = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)) else { continue };
                         let decl_line = entry.attr_value(gimli::DW_AT_decl_line).and_then(|v| v.udata_value()).unwrap_or(0) as u32;
                         let external = matches!(entry.attr_value(gimli::DW_AT_external), Some(AttributeValue::Flag(true)));
@@ -301,6 +306,9 @@ impl Symbols {
             if let Some(program) = unit.line_program.clone() {
                 let mut rows = program.rows();
                 let mut map: HashMap<u64, u32> = HashMap::new();
+                // Rows of the current sequence: a sequence starting at address 0 belongs to
+                // code removed by the linker and is dropped.
+                let mut seq: Vec<Row> = Vec::new();
                 while let Some((lheader, row)) = rows.next_row().map_err(err("line program"))? {
                     let fidx = row.file_index();
                     let file = match map.get(&fidx) {
@@ -317,7 +325,7 @@ impl Symbols {
                             id
                         }
                     };
-                    syms.rows.push(Row {
+                    seq.push(Row {
                         addr: row.address() as u32,
                         file,
                         line: row.line().map(|l| l.get() as u32).unwrap_or(0),
@@ -327,6 +335,15 @@ impl Symbols {
                         },
                         end: row.end_sequence(),
                     });
+                    if row.end_sequence() {
+                        if seq[0].addr != 0 {
+                            syms.rows.append(&mut seq);
+                        }
+                        seq.clear();
+                    }
+                }
+                if seq.first().is_some_and(|r| r.addr != 0) {
+                    syms.rows.append(&mut seq);
                 }
             }
             syms.unit_offsets.push(header.debug_info_offset().map(|o| o.0).unwrap_or(0));

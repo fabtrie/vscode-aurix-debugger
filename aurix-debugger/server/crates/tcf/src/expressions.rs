@@ -1,6 +1,6 @@
 //! TCF Expressions service and the variable/type part of the Symbols service.
 //!
-//! Symbol IDs:
+//! Symbol IDs name the ELF file they belong to: `E<n>/<id>` with `<id>`:
 //! - `FN:<i>` function, `GV:<i>` global variable
 //! - `LV:<unit>.<die>@<frame>` local variable/parameter in a stack frame
 //! - `OB:<addr>:<type>` object of a type at an address (e.g. `s.member`)
@@ -9,16 +9,15 @@
 //!
 //! Expressions are evaluated in the scope of a stack frame (locals, then
 //! globals) or of a core (globals only when it is running, which is what
-//! live watch uses).
+//! live watch uses). With several ELF files (application, bootmanager, FBL),
+//! names are looked up in the ELF of the frame's PC first, then in the others.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde_json::{json, Value as Json};
 
-use aurix_core::arch::{REGS, REG_PC};
 use aurix_core::ops;
 use aurix_core::unwind::Frame;
 use symbols::expr::{Eval, Place, SymbolRef, Target, Value, Write};
@@ -26,6 +25,7 @@ use symbols::types::{TypeClass, TypeId};
 use symbols::{DieRef, Symbols, PC_REGISTER};
 
 use crate::contexts::{cores, find_core, CoreInfo, CONTAINER};
+use crate::symstore::{elf_id, split_elf_id, Elf};
 use crate::Shared;
 
 const ERR_OTHER: i64 = 1;
@@ -112,7 +112,7 @@ fn frames(sh: &Shared, c: &CoreInfo) -> Res<Vec<Frame>> {
     if let Some(f) = sh.stacks.lock().unwrap().get(&c.idx) {
         return Ok(f.clone());
     }
-    let f = crate::stack::unwind_core(&sh.handle, c.idx).map_err(|e| (ERR_OTHER, e))?;
+    let f = crate::stack::unwind_core(sh, c.idx).map_err(|e| (ERR_OTHER, e))?;
     sh.stacks.lock().unwrap().insert(c.idx, f.clone());
     Ok(f)
 }
@@ -147,17 +147,22 @@ fn scope_for(sh: &Shared, ctx: &str) -> Res<Scope> {
     Ok(s)
 }
 
-fn read_mem(sh: &Shared, addr: u32, len: usize) -> Result<Vec<u8>, String> {
+/// Reads memory as core `t` sees it (HSM-private addresses through its debug window).
+fn read_mem(sh: &Shared, t: usize, addr: u32, len: usize) -> Result<Vec<u8>, String> {
     if len > MAX_VALUE_SIZE * 16 {
         return Err(format!("{len} bytes are too many to read"));
     }
     sh.handle
-        .call(move |cx| ops::read_memory(cx, addr, len).map_err(|e| e.to_string()))
+        .call(move |cx| ops::read_memory_as(cx, t, addr, len).map_err(|e| e.to_string()))
         .unwrap_or_else(|| Err("server stopped".into()))
 }
 
 struct TcfTarget<'a> {
     sh: &'a Shared,
+    /// Target index of the scope's core.
+    core: usize,
+    /// ELF the expression is evaluated with.
+    elf: usize,
     pc: Option<u32>,
     regs: [Option<u32>; PC_REGISTER as usize + 1],
 }
@@ -170,19 +175,40 @@ impl Target for TcfTarget<'_> {
         self.regs.get(r as usize).copied().flatten()
     }
     fn read(&mut self, addr: u32, len: usize) -> Result<Vec<u8>, String> {
-        read_mem(self.sh, addr, len)
+        read_mem(self.sh, self.core, addr, len)
     }
     fn symbol(&mut self, id: &str) -> Option<SymbolRef> {
-        parse_symbol(id)
+        // Symbols of another ELF do not exist in this one.
+        match split_elf_id(id) {
+            Some((n, rest)) if n == self.elf => parse_symbol(rest),
+            Some(_) => None,
+            None => parse_symbol(id),
+        }
     }
 }
 
-fn target<'a>(sh: &'a Shared, s: &Scope) -> TcfTarget<'a> {
-    TcfTarget { sh, pc: s.pc, regs: s.regs }
+fn target<'a>(sh: &'a Shared, elf: usize, s: &Scope) -> TcfTarget<'a> {
+    TcfTarget { sh, core: s.core.idx, elf, pc: s.pc, regs: s.regs }
 }
 
-fn syms(sh: &Shared) -> Res<Arc<Symbols>> {
-    sh.active_symbols().ok_or((ERR_SYM_NOT_FOUND, "No symbols loaded".into()))
+/// ELF files to evaluate an expression of `ctx` with, in lookup order: an ELF named by a
+/// `${E<n>/...}` reference, then the ELF of the scope's PC, then the others.
+fn elfs_for(sh: &Shared, ctx: &str, pc: Option<u32>, text: &str) -> Res<Vec<Elf>> {
+    let set = sh.symbols_for(ctx).ok_or((ERR_SYM_NOT_FOUND, "No symbols loaded".to_string()))?;
+    let mut elfs = set.ordered(pc);
+    let named = text.find("${").and_then(|p| split_elf_id(&text[p + 2..])).map(|(n, _)| n);
+    if let Some(i) = named.and_then(|n| elfs.iter().position(|e| e.0 == n)) {
+        let e = elfs.remove(i);
+        elfs.insert(0, e);
+    }
+    Ok(elfs)
+}
+
+/// The ELF a symbol ID belongs to and the ID within it.
+fn elf_of<'i>(sh: &Shared, id: &'i str) -> Res<(Elf, &'i str)> {
+    let (n, rest) = split_elf_id(id).ok_or_else(|| (ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {id}")))?;
+    let syms = sh.elf(n).ok_or_else(|| (ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {id}")))?;
+    Ok(((n, syms), rest))
 }
 
 // --- Symbol IDs ----------------------------------------------------------------------------
@@ -213,8 +239,8 @@ fn parse_symbol(id: &str) -> Option<SymbolRef> {
     None
 }
 
-fn symbol_id(v: &Value, s: &Scope) -> Option<String> {
-    match &v.symbol {
+fn symbol_id(elf: usize, v: &Value, s: &Scope) -> Option<String> {
+    let id = match &v.symbol {
         Some(SymbolRef::Local(d)) => s.frame_id.as_ref().map(|f| format!("LV:{}@{f}", die_id(*d))),
         Some(SymbolRef::Global(i)) => Some(format!("GV:{i}")),
         Some(SymbolRef::Function(i)) => Some(format!("FN:{i}")),
@@ -223,10 +249,11 @@ fn symbol_id(v: &Value, s: &Scope) -> Option<String> {
             (Place::Memory(a), None) => Some(format!("OB:{a:x}:{}", v.ty.to_id())),
             _ => None,
         },
-    }
+    };
+    id.map(|id| elf_id(elf, &id))
 }
 
-/// The type an ID stands for, or of the symbol it names.
+/// The type an ID (within its ELF) stands for, or of the symbol it names.
 fn type_of_id(syms: &Symbols, id: &str) -> Option<TypeId> {
     if let Some(t) = TypeId::parse(id) {
         return Some(t);
@@ -242,26 +269,26 @@ fn type_of_id(syms: &Symbols, id: &str) -> Option<TypeId> {
     }
 }
 
-fn type_fields(syms: &Symbols, t: &TypeId, ctx: &mut Json) {
+fn type_fields(elf: usize, syms: &Symbols, t: &TypeId, ctx: &mut Json) {
     let info = syms.type_info(t);
-    ctx["TypeID"] = json!(t.to_id());
+    ctx["TypeID"] = json!(elf_id(elf, &t.to_id()));
     ctx["TypeClass"] = json!(info.class as u8);
     ctx["Size"] = json!(info.size);
 }
 
-pub fn symbol_context(sh: &Shared, id: &str) -> Res<Json> {
-    let syms = syms(sh)?;
-    let not_found = || (ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {id}"));
+pub fn symbol_context(sh: &Shared, full_id: &str) -> Res<Json> {
+    let ((n, syms), id) = elf_of(sh, full_id)?;
+    let not_found = || (ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {full_id}"));
 
     if let Some(t) = TypeId::parse(id) {
         let info = syms.type_info(&t);
-        let mut ctx = json!({ "ID": id, "OwnerID": CONTAINER, "Class": 4, "TypeClass": info.class as u8,
-                              "Size": info.size, "TypeID": id, "Flags": 0 });
-        if let Some(n) = &info.name {
-            ctx["Name"] = json!(n);
+        let mut ctx = json!({ "ID": full_id, "OwnerID": CONTAINER, "Class": 4, "TypeClass": info.class as u8,
+                              "Size": info.size, "TypeID": full_id, "Flags": 0 });
+        if let Some(name) = &info.name {
+            ctx["Name"] = json!(name);
         }
         if let Some(b) = &info.base {
-            ctx["BaseTypeID"] = json!(b.to_id());
+            ctx["BaseTypeID"] = json!(elf_id(n, &b.to_id()));
         }
         if let Some(l) = info.length {
             ctx["Length"] = json!(l);
@@ -270,11 +297,11 @@ pub fn symbol_context(sh: &Shared, id: &str) -> Res<Json> {
     }
     if let Some(m) = id.strip_prefix("MB:").and_then(parse_die) {
         let mi = syms.member_info(m).ok_or_else(not_found)?;
-        let mut ctx = json!({ "ID": id, "OwnerID": CONTAINER, "Class": 2, "Offset": mi.offset, "Flags": 0 });
-        type_fields(&syms, &mi.ty, &mut ctx);
+        let mut ctx = json!({ "ID": full_id, "OwnerID": CONTAINER, "Class": 2, "Offset": mi.offset, "Flags": 0 });
+        type_fields(n, &syms, &mi.ty, &mut ctx);
         ctx["Size"] = json!(mi.size);
-        if let Some(n) = mi.name {
-            ctx["Name"] = json!(n);
+        if let Some(name) = mi.name {
+            ctx["Name"] = json!(name);
         }
         return Ok(ctx);
     }
@@ -284,7 +311,7 @@ pub fn symbol_context(sh: &Shared, id: &str) -> Res<Json> {
         let size: usize = size.parse().map_err(|_| not_found())?;
         let (name, value) = syms.enumerator(d).ok_or_else(not_found)?;
         let bytes = &value.to_le_bytes()[..size.clamp(1, 8)];
-        return Ok(json!({ "ID": id, "OwnerID": CONTAINER, "Class": 1, "Name": name, "Size": size,
+        return Ok(json!({ "ID": full_id, "OwnerID": CONTAINER, "Class": 1, "Name": name, "Size": size,
                           "TypeClass": TypeClass::Enumeration as u8, "Value": B64.encode(bytes), "Flags": 0 }));
     }
 
@@ -292,29 +319,29 @@ pub fn symbol_context(sh: &Shared, id: &str) -> Res<Json> {
     match &sym {
         SymbolRef::Function(i) => {
             let f = syms.functions.get(*i).ok_or_else(not_found)?;
-            Ok(json!({ "ID": id, "OwnerID": CONTAINER, "Name": f.name, "Class": 3, "TypeClass": TypeClass::Function as u8,
-                       "TypeID": TypeId::Die(f.die_ref()).to_id(), "Address": f.low, "Size": f.high - f.low, "Flags": 0 }))
+            Ok(json!({ "ID": full_id, "OwnerID": CONTAINER, "Name": f.name, "Class": 3, "TypeClass": TypeClass::Function as u8,
+                       "TypeID": elf_id(n, &TypeId::Die(f.die_ref()).to_id()), "Address": f.low, "Size": f.high - f.low, "Flags": 0 }))
         }
         SymbolRef::Global(i) => {
             let g = syms.globals.get(*i).ok_or_else(not_found)?;
-            let mut ctx = json!({ "ID": id, "OwnerID": CONTAINER, "Name": g.name, "Class": 2, "Address": g.addr, "Flags": 0 });
-            type_fields(&syms, &syms.var_type(g.die_ref()), &mut ctx);
+            let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n), "Name": g.name, "Class": 2, "Address": g.addr, "Flags": 0 });
+            type_fields(n, &syms, &syms.var_type(g.die_ref()), &mut ctx);
             Ok(ctx)
         }
         SymbolRef::Object(t, a) => {
-            let mut ctx = json!({ "ID": id, "OwnerID": CONTAINER, "Class": 2, "Address": a, "Flags": 0 });
-            type_fields(&syms, t, &mut ctx);
+            let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n), "Class": 2, "Address": a, "Flags": 0 });
+            type_fields(n, &syms, t, &mut ctx);
             Ok(ctx)
         }
         SymbolRef::Local(d) => {
             let frame = id.split_once('@').map(|x| x.1).unwrap_or_default();
             let scope = scope_for(sh, frame)?;
-            let mut ctx = json!({ "ID": id, "OwnerID": frame, "Class": 1, "Flags": 0 });
-            if let Some(n) = syms.die_name(*d) {
-                ctx["Name"] = json!(n);
+            let mut ctx = json!({ "ID": full_id, "OwnerID": frame, "Class": 1, "Flags": 0 });
+            if let Some(name) = syms.die_name(*d) {
+                ctx["Name"] = json!(name);
             }
-            type_fields(&syms, &syms.var_type(*d), &mut ctx);
-            let mut t = target(sh, &scope);
+            type_fields(n, &syms, &syms.var_type(*d), &mut ctx);
+            let mut t = target(sh, n, &scope);
             let mut ev = Eval::new(&syms, &mut t);
             // An unavailable location (optimized out) leaves the value out.
             if let Ok(v) = ev.value_of(&sym) {
@@ -335,13 +362,13 @@ pub fn symbol_context(sh: &Shared, id: &str) -> Res<Json> {
     }
 }
 
-pub fn symbol_children(sh: &Shared, id: &str) -> Res<Vec<String>> {
-    let syms = syms(sh)?;
-    let Some(t) = type_of_id(&syms, id) else { return fail(ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {id}")) };
+pub fn symbol_children(sh: &Shared, full_id: &str) -> Res<Vec<String>> {
+    let ((n, syms), id) = elf_of(sh, full_id)?;
+    let Some(t) = type_of_id(&syms, id) else { return fail(ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {full_id}")) };
     let info = syms.type_info(&t);
     Ok(match info.class {
-        TypeClass::Composite => syms.members(&t).iter().map(|m| format!("MB:{}", die_id(m.die))).collect(),
-        TypeClass::Enumeration => syms.enumerators(&t).iter().map(|(d, _, _)| format!("EN:{}:{}", die_id(*d), info.size)).collect(),
+        TypeClass::Composite => syms.members(&t).iter().map(|m| elf_id(n, &format!("MB:{}", die_id(m.die)))).collect(),
+        TypeClass::Enumeration => syms.enumerators(&t).iter().map(|(d, _, _)| elf_id(n, &format!("EN:{}:{}", die_id(*d), info.size))).collect(),
         _ => Vec::new(),
     })
 }
@@ -354,30 +381,69 @@ fn entry(sh: &Shared, id: &str) -> Res<(String, String, Option<String>)> {
     Ok((e.parent.clone(), e.text.clone(), e.symbol.clone()))
 }
 
-fn evaluate_entry(sh: &Shared, syms: &Symbols, parent: &str, text: &str, symbol: &Option<String>) -> Res<(Scope, Value)> {
+/// Evaluates an expression entry. Returns the scope, the ELF that evaluated it and the value.
+fn evaluate_entry(sh: &Shared, parent: &str, text: &str, symbol: &Option<String>) -> Res<(Scope, Elf, Value)> {
     let scope = scope_for(sh, parent)?;
-    let mut t = target(sh, &scope);
-    let mut ev = Eval::new(syms, &mut t);
-    let v = match symbol {
-        Some(sid) => {
-            let s = parse_symbol(sid).ok_or_else(|| (ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {sid}")))?;
-            ev.value_of(&s)
-        }
-        None => ev.evaluate(text),
+    if let Some(sid) = symbol {
+        let (elf, id) = elf_of(sh, sid)?;
+        let s = parse_symbol(id).ok_or_else(|| (ERR_SYM_NOT_FOUND, format!("Invalid symbol ID: {sid}")))?;
+        let mut t = target(sh, elf.0, &scope);
+        let v = Eval::new(&elf.1, &mut t).value_of(&s).map_err(|e| (ERR_INV_EXPRESSION, e))?;
+        return Ok((scope, elf, v));
     }
-    .map_err(|e| (ERR_INV_EXPRESSION, e))?;
-    Ok((scope, v))
+    let mut first_err = None;
+    let own = elfs_for(sh, parent, scope.pc, text);
+    for elf in own.iter().flatten() {
+        let mut t = target(sh, elf.0, &scope);
+        match Eval::new(&elf.1, &mut t).evaluate(text) {
+            Ok(v) => return Ok((scope, elf.clone(), v)),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    // Globals of another core's ELF files (e.g. an HSM variable in a live watch evaluated for a
+    // TriCore core): evaluated in that core's global scope, so its memory view applies.
+    let own_elfs: Vec<usize> = own.iter().flatten().map(|e| e.0).collect();
+    for core in cores(&sh.handle).into_iter().filter(|c| c.idx != scope.core.idx) {
+        let Some(set) = sh.symbols_for(&core.id) else { continue };
+        let other = Scope { core, frame_id: None, frame_index: None, pc: None, regs: [None; PC_REGISTER as usize + 1] };
+        for elf in set.ordered(None).into_iter().filter(|e| !own_elfs.contains(&e.0)) {
+            let mut t = target(sh, elf.0, &other);
+            if let Ok(v) = Eval::new(&elf.1, &mut t).evaluate(text) {
+                return Ok((other, elf, v));
+            }
+        }
+    }
+    match own {
+        Err(e) if first_err.is_none() => Err(e),
+        _ => fail(ERR_INV_EXPRESSION, first_err.unwrap_or_default()),
+    }
 }
 
-fn expression_context(sh: &Shared, syms: &Symbols, id: &str, parent: &str, text: &str, symbol: &Option<String>) -> Json {
+/// Owner of a symbol of ELF `n`: the core context if the ELF belongs to exactly one core (its
+/// memory view applies, e.g. HSM RAM), otherwise the chip.
+fn owner_of(sh: &Shared, n: usize) -> String {
+    let owners: Vec<String> = cores(&sh.handle)
+        .into_iter()
+        .filter(|c| sh.symbols_for(&c.id).is_some_and(|s| s.elfs.iter().any(|e| e.0 == n)))
+        .map(|c| c.id)
+        .collect();
+    match owners.as_slice() {
+        [one] => one.clone(),
+        _ => CONTAINER.to_string(),
+    }
+}
+
+fn expression_context(sh: &Shared, id: &str, parent: &str, text: &str, symbol: &Option<String>) -> Json {
     let mut ctx = json!({ "ID": id, "ParentID": parent, "Expression": text, "CanAssign": false, "HasFuncCall": false });
-    if let Ok((scope, v)) = evaluate_entry(sh, syms, parent, text, symbol) {
+    if let Ok((scope, (n, syms), v)) = evaluate_entry(sh, parent, text, symbol) {
         let info = syms.type_info(&v.ty);
         ctx["CanAssign"] = json!(v.can_assign());
         ctx["Class"] = json!(if v.can_assign() { 2 } else { 1 });
-        ctx["Type"] = json!(v.ty.to_id());
+        ctx["Type"] = json!(elf_id(n, &v.ty.to_id()));
         ctx["Size"] = json!(info.size);
-        if let Some(sid) = symbol_id(&v, &scope) {
+        if let Some(sid) = symbol_id(n, &v, &scope) {
             ctx["SymbolID"] = json!(sid);
         }
     }
@@ -385,18 +451,26 @@ fn expression_context(sh: &Shared, syms: &Symbols, id: &str, parent: &str, text:
 }
 
 fn create(sh: &Shared, parent: String, text: String) -> Res<Json> {
-    let syms = syms(sh)?;
     let text = text.trim().to_string();
-    symbols::expr::parse(&text, &|n| Eval::<TcfTarget>::resolve_type(&syms, n)).map_err(|e| (ERR_INV_EXPRESSION, e))?;
+    // Syntax check: the expression must parse with the types of one of the ELF files.
+    let pc = scope_for(sh, &parent).ok().and_then(|s| s.pc);
+    let mut parsed = Err(String::new());
+    for (_, syms) in elfs_for(sh, &parent, pc, &text)? {
+        parsed = symbols::expr::parse(&text, &|name| Eval::<TcfTarget>::resolve_type(&syms, name)).map(|_| ());
+        if parsed.is_ok() {
+            break;
+        }
+    }
+    parsed.map_err(|e| (ERR_INV_EXPRESSION, e))?;
     let id = sh.exprs.lock().unwrap().add(ExprEntry { parent: parent.clone(), text: text.clone(), symbol: None });
-    Ok(expression_context(sh, &syms, &id, &parent, &text, &None))
+    Ok(expression_context(sh, &id, &parent, &text, &None))
 }
 
 /// Local variables of a frame (or of a suspended core's top frame).
 fn children(sh: &Shared, parent: &str) -> Res<Vec<String>> {
-    let syms = syms(sh)?;
     let scope = scope_for(sh, parent)?;
     let (Some(pc), Some(frame)) = (scope.pc, scope.frame_id.clone()) else { return Ok(Vec::new()) };
+    let Some((n, syms)) = sh.symbols_for(parent).and_then(|s| s.for_addr(pc).cloned()) else { return Ok(Vec::new()) };
     let locals = syms.locals_at(pc);
     let mut table = sh.exprs.lock().unwrap();
     let mut ids = Vec::new();
@@ -408,22 +482,21 @@ fn children(sh: &Shared, parent: &str) -> Res<Vec<String>> {
         ids.push(table.add(ExprEntry {
             parent: parent.to_string(),
             text: l.name.clone(),
-            symbol: Some(format!("LV:{}@{frame}", die_id(l.die))),
+            symbol: Some(elf_id(n, &format!("LV:{}@{frame}", die_id(l.die)))),
         }));
     }
     Ok(ids)
 }
 
 fn evaluate(sh: &Shared, id: &str) -> Res<(Vec<u8>, Json)> {
-    let syms = syms(sh)?;
     let (parent, text, symbol) = entry(sh, id)?;
-    let (scope, v) = evaluate_entry(sh, &syms, &parent, &text, &symbol)?;
+    let (scope, (n, syms), v) = evaluate_entry(sh, &parent, &text, &symbol)?;
     let info = syms.type_info(&v.ty);
     if info.size as usize > MAX_VALUE_SIZE {
         return fail(ERR_INV_DATA_SIZE, format!("value of {} bytes is too large", info.size));
     }
-    let mut props = json!({ "Class": if v.can_assign() { 2 } else { 1 }, "Type": v.ty.to_id(), "BigEndian": false });
-    if let Some(sid) = symbol_id(&v, &scope) {
+    let mut props = json!({ "Class": if v.can_assign() { 2 } else { 1 }, "Type": elf_id(n, &v.ty.to_id()), "BigEndian": false });
+    if let Some(sid) = symbol_id(n, &v, &scope) {
         props["Symbol"] = json!(sid);
     }
     if let (Place::Memory(a), None) = (&v.place, &v.bytes) {
@@ -432,18 +505,17 @@ fn evaluate(sh: &Shared, id: &str) -> Res<(Vec<u8>, Json)> {
     let bytes = if info.size == 0 {
         Vec::new()
     } else {
-        let mut t = target(sh, &scope);
+        let mut t = target(sh, n, &scope);
         Eval::new(&syms, &mut t).load(&v).map_err(|e| (ERR_INV_EXPRESSION, e))?
     };
     Ok((bytes, props))
 }
 
 fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
-    let syms = syms(sh)?;
     let (parent, text, symbol) = entry(sh, id)?;
-    let (scope, v) = evaluate_entry(sh, &syms, &parent, &text, &symbol)?;
+    let (scope, (n, syms), v) = evaluate_entry(sh, &parent, &text, &symbol)?;
     let write = {
-        let mut t = target(sh, &scope);
+        let mut t = target(sh, n, &scope);
         Eval::new(&syms, &mut t).assign(&v, data).map_err(|e| (ERR_INV_EXPRESSION, e))?
     };
     let idx = scope.core.idx;
@@ -451,14 +523,14 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
         Write::Memory(addr, bytes) => {
             let expect = bytes.clone();
             sh.handle
-                .call(move |cx| ops::write_memory(cx, addr, &bytes).map_err(|e| e.to_string()))
+                .call(move |cx| ops::write_memory_as(cx, idx, addr, &bytes).map_err(|e| e.to_string()))
                 .unwrap_or_else(|| Err("server stopped".into()))
                 .map_err(|e| (ERR_OTHER, e))?;
             // The debug interface reports no error for writes the chip drops (e.g. memory
             // write-protected for the debugger by the application's SMPU regions): verify RAM
             // writes while halted. Peripheral registers and running cores may legitimately differ.
             if scope.core.suspended() && addr < PERIPHERAL_BASE {
-                let back = read_mem(sh, addr, expect.len()).map_err(|e| (ERR_OTHER, e))?;
+                let back = read_mem(sh, idx, addr, expect.len()).map_err(|e| (ERR_OTHER, e))?;
                 if back != expect {
                     return fail(
                         ERR_OTHER,
@@ -471,10 +543,11 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
             if scope.frame_index != Some(0) {
                 return fail(ERR_OTHER, "Register variables can only be modified in the top stack frame");
             }
+            let arch = scope.core.arch;
             let reg = if r == PC_REGISTER {
-                REG_PC
+                arch.pc
             } else {
-                REGS.iter().position(|x| x.dwarf.map(|d| d as u16) == Some(r)).ok_or_else(|| (ERR_OTHER, format!("No register for DWARF number {r}")))?
+                arch.regs.iter().position(|x| x.dwarf.map(|d| d as u16) == Some(r)).ok_or_else(|| (ERR_OTHER, format!("No register for DWARF number {r}")))?
             };
             sh.handle
                 .call(move |cx| ops::write_reg(cx, idx, reg, value).map_err(|e| e.to_string()))
@@ -494,9 +567,8 @@ pub fn dispatch(sh: &Shared, service: &str, command: &str, args: &[String]) -> R
         ("Expressions", "create") => Ok(vec![String::new(), create(sh, arg_str(args, 0)?, arg_str(args, 2)?)?.to_string()]),
         ("Expressions", "getContext") => {
             let id = arg_str(args, 0)?;
-            let syms = syms(sh)?;
             let (parent, text, symbol) = entry(sh, &id)?;
-            Ok(vec![String::new(), expression_context(sh, &syms, &id, &parent, &text, &symbol).to_string()])
+            Ok(vec![String::new(), expression_context(sh, &id, &parent, &text, &symbol).to_string()])
         }
         ("Expressions", "getChildren") => Ok(vec![String::new(), json!(children(sh, &arg_str(args, 0)?)?).to_string()]),
         ("Expressions", "evaluate") => {

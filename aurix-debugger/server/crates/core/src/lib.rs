@@ -11,6 +11,7 @@ pub mod log;
 pub mod adapter;
 pub mod arch;
 pub mod commands;
+pub mod cortex_m;
 pub mod ctx;
 pub mod error;
 pub mod events;
@@ -24,6 +25,7 @@ pub mod tas_adapter;
 pub mod telnet;
 pub mod tricore;
 pub mod unwind;
+pub mod unwind_arm;
 pub mod util;
 
 pub use ctx::{Ctx, Cx, Shared};

@@ -22,14 +22,17 @@ pub struct Frame {
     pub pcxi: u32,
     pub psw: Option<u32>,
     pub regs: [Option<u32>; 32],
+    /// Cortex-M frame: `regs` holds r0-r15 (DWARF numbering), `pcxi` the SP and `psw` xPSR
+    /// (see [`crate::unwind_arm`]).
+    pub arm: bool,
 }
 
 impl Frame {
     pub fn sp(&self) -> Option<u32> {
-        self.regs[A10]
+        self.regs[if self.arm { crate::unwind_arm::R_SP } else { A10 }]
     }
     pub fn ra(&self) -> Option<u32> {
-        self.regs[A11]
+        self.regs[if self.arm { crate::unwind_arm::R_LR } else { A11 }]
     }
 }
 
@@ -91,7 +94,7 @@ pub fn unwind(top: Frame, max_frames: usize, read_csa: &mut dyn FnMut(u32) -> Op
         for a in [16usize, 17, 24, 25] {
             caller[a] = regs[a];
         }
-        let f = Frame { pc: ra, pcxi: w[0], psw: Some(w[1]), regs: caller };
+        let f = Frame { pc: ra, pcxi: w[0], psw: Some(w[1]), regs: caller, arm: false };
         if frames.iter().any(|x| x.pc == f.pc && x.pcxi == f.pcxi) {
             break;
         }
@@ -137,7 +140,7 @@ mod tests {
 
         let mut regs = [None; 32];
         regs[A11] = Some(0xDEAD_BEEE); // overwritten by the lower context
-        let top = Frame { pc: 0x8000_3000, pcxi: lower_link, psw: None, regs };
+        let top = Frame { pc: 0x8000_3000, pcxi: lower_link, psw: None, regs, arm: false };
         let frames = unwind(top, 16, &mut |a| mem.get(&a).copied());
         let pcs: Vec<u32> = frames.iter().map(|f| f.pc).collect();
         assert_eq!(pcs, vec![0x8000_3000, 0x8000_2004, 0x8000_1008]);

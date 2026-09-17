@@ -50,7 +50,8 @@ fn pos(w: &[(u32, u32)], item: (u32, u32)) -> usize {
 fn loads_real_cfg_and_inits() {
     let s = server();
     let i = &s.interp;
-    assert_eq!(i.eval("target names").unwrap(), "tc37x.cpu0 tc37x.cpu1 tc37x.cpu2");
+    assert_eq!(i.eval("target names").unwrap(), "tc37x.cpu0 tc37x.cpu1 tc37x.cpu2 tc37x.hsm");
+    assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
     // pfls0/1 from the target cfg, dfls0/1 from tc37x_ocds_init.cfg.
     assert_eq!(i.eval("flash banks").unwrap().lines().count(), 4);
     assert_eq!(i.eval("tc37x.cpu1 cget -dbgbase").unwrap(), "0xf8820000");
@@ -307,8 +308,9 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched after reset halt");
     assert!(ocs < latch, "TL1 must be latched after the STM suspend setup: {w:08x?}");
     // After the TL1 latch (whose edge would halt the HSM again) the boot ROM's HSM breakpoint is
-    // deleted and the HSM runs.
-    let dbgbase = pos(&w, (0xF004_1010, 0xE000_0000));
+    // deleted and the HSM runs. (The HSM target also accesses DBGBASE earlier, when it is examined
+    // after the reset.)
+    let dbgbase = latch + pos(&w[latch..], (0xF004_1010, 0xE000_0000));
     let bp = pos(&w, (0xF005_2008, 0));
     let run = pos(&w, (0xF005_EDF0, 0xA05F_0001));
     assert!(latch < dbgbase && dbgbase < bp && bp < run, "HSM release order: {w:08x?}");
@@ -318,4 +320,170 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset run: {w:08x?}");
     assert!(!w.contains(&(CBS_TLC, 0x30)), "TL1 latched after reset run: {w:08x?}");
+}
+
+// --- HSM (Cortex-M3) --------------------------------------------------------------------------
+
+const HSM: usize = 3;
+const HSM_DBGBASE: u32 = 0xF004_1010;
+const HSM_DHCSR: u32 = 0xF005_EDF0;
+
+#[test]
+fn hsm_is_examined_through_the_debug_window() {
+    let s = server();
+    let i = &s.interp;
+    assert_eq!(i.eval("tc37x.hsm cget -type").unwrap(), "cortex_m");
+    assert_eq!(i.eval("tc37x.hsm cget -coreid").unwrap(), "6");
+    i.eval("init").unwrap();
+    assert_eq!(i.eval("tc37x.hsm was_examined").unwrap(), "1");
+    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "running");
+    assert_eq!(i.eval("tc37x.hsm cortex_m tl1_halt").unwrap(), "tl1_halt on");
+    // Debugging enabled (C_DEBUGEN) and DWT on (DEMCR.TRCENA), through DBGBASE + window.
+    let w = take_writes(&s);
+    let base = pos(&w, (HSM_DBGBASE, 0xE000_0000));
+    assert!(base < pos(&w, (HSM_DHCSR, 0xA05F_0001)), "{w:08x?}");
+    assert!(with_sim(&s, |sim| sim.hsm.writes.contains(&(0xE000_EDFC, 1 << 24))));
+    assert!(i.eval("tc37x.hsm cortex_m triggers").unwrap().contains("FP_COMP5: off"));
+}
+
+#[test]
+fn hsm_without_debug_access_stays_unexamined_and_is_retried() {
+    let s = server();
+    with_sim(&s, |sim| sim.hsm.debug_enabled = false);
+    s.interp.eval("init").unwrap();
+    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "0");
+    assert_eq!(s.interp.eval("tc37x.cpu0 was_examined").unwrap(), "1");
+    // The HSM firmware enables debugging later: the background poll examines it.
+    with_sim(&s, |sim| sim.hsm.debug_enabled = true);
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
+}
+
+#[test]
+fn hsm_halt_registers_step_and_resume() {
+    let s = server();
+    let i = &s.interp;
+    i.eval("init").unwrap();
+    i.eval("targets tc37x.hsm").unwrap();
+    take_writes(&s);
+    i.eval("halt 1000").unwrap();
+    let w = take_writes(&s);
+    // tl1_halt: TL1 is pulsed before the HSM halt request, so the TriCore cores stop too.
+    assert!(pos(&w, (CBS_TLC, 0x30)) < pos(&w, (HSM_DHCSR, 0xA05F_0003)), "{w:08x?}");
+    assert_eq!(ops::state(&s.cx(), HSM).1.name(), "debug-request");
+
+    let pc = with_sim(&s, |sim| sim.hsm.regs[15]);
+    assert_eq!(i.eval("reg pc").unwrap(), format!("pc (/32): 0x{pc:08x}"));
+    i.eval("reg r4 0x1234").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.hsm.regs[4]), 0x1234);
+    assert_eq!(i.eval("reg r4").unwrap(), "r4 (/32): 0x00001234");
+    with_sim(&s, |sim| sim.hsm.regs[20] = 0x0200_8001);
+    assert_eq!(i.eval("reg basepri").unwrap(), "basepri (/32): 0x00000080");
+    assert!(i.eval("reg").unwrap().starts_with("===== cortex_m registers"));
+
+    i.eval("step").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.hsm.regs[15]), pc + 2);
+    assert_eq!(ops::state(&s.cx(), HSM).1.name(), "single-step");
+    // Interrupts masked for the step, C_STEP cleared again afterwards.
+    let w = with_sim(&s, |sim| std::mem::take(&mut sim.hsm.writes));
+    let step = pos(&w, (0xE000_EDF0, 0xA05F_000D));
+    let clear = w.iter().rposition(|x| *x == (0xE000_EDF0, 0xA05F_000B)).unwrap();
+    assert!(step < clear, "{w:08x?}");
+
+    take_writes(&s);
+    i.eval("resume").unwrap();
+    let w = take_writes(&s);
+    // resume-start releases the TriCore cores, the HSM runs (DFSR cleared, C_MASKINTS dropped),
+    // resume-end clears the TL1 hold.
+    let others = pos(&w, (DBGSR[0], 0x4));
+    let run = pos(&w, (HSM_DHCSR, 0xA05F_0001));
+    let hold = pos(&w, (CBS_TLCHS, 2));
+    assert!(others < run && run < hold, "{w:08x?}");
+    assert!(with_sim(&s, |sim| sim.hsm.writes.contains(&(0xE000_ED30, 0x1F))));
+    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "running");
+}
+
+#[test]
+fn hsm_breakpoint_above_512_mb_and_watchpoint() {
+    let s = server();
+    let i = &s.interp;
+    i.eval("init").unwrap();
+    i.eval("targets tc37x.hsm").unwrap();
+    i.eval("halt 1000").unwrap();
+    i.eval("bp 0x80028602 2").unwrap();
+    // Highest comparator first (the boot ROM uses FP_COMP0); upper half-word, COMPH = 4.
+    let w = with_sim(&s, |sim| std::mem::take(&mut sim.hsm.writes));
+    assert!(w.contains(&(0xE000_203C, 4)), "FP_COMPH5: {w:08x?}");
+    assert!(w.contains(&(0xE000_201C, 0x0002_8600 | 2 << 30 | 1)), "FP_COMP5: {w:08x?}");
+    i.eval("resume").unwrap();
+    i.eval("wait_halt 1000").unwrap();
+    assert_eq!(ops::state(&s.cx(), HSM).1.name(), "breakpoint");
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x80028602");
+    i.eval("rbp all").unwrap();
+    assert!(with_sim(&s, |sim| sim.hsm.writes.contains(&(0xE000_201C, 0))));
+
+    i.eval("wp 0x20001000 4 w").unwrap();
+    let w = with_sim(&s, |sim| std::mem::take(&mut sim.hsm.writes));
+    assert!(w.contains(&(0xE000_1020, 0x2000_1000)) && w.contains(&(0xE000_1024, 2)) && w.contains(&(0xE000_1028, 6)), "{w:08x?}");
+    i.eval("rwp all").unwrap();
+    assert!(with_sim(&s, |sim| sim.hsm.writes.contains(&(0xE000_1028, 0))));
+}
+
+#[test]
+fn hsm_memory_goes_through_the_window_after_a_cache_clean() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    let cx = s.cx();
+    with_sim(&s, |sim| sim.hsm.mem.insert(0x2000_1000, 0x4433_2211));
+    // Local RAM while the HSM runs: refused (no cache clean while running).
+    let e = ops::read_memory_as(&cx, HSM, 0x2000_1000, 4).unwrap_err().to_string();
+    assert!(e.contains("halted"), "{e}");
+    s.interp.eval("tc37x.hsm arp_halt").unwrap();
+    ops::poll_all(&cx);
+    assert_eq!(ops::read_memory_as(&cx, HSM, 0x2000_1001, 2).unwrap(), vec![0x22, 0x33]);
+    assert_eq!(with_sim(&s, |sim| (sim.hsm.cache_cleans, sim.hsm.uncleaned_reads)), (64, 0));
+    ops::write_memory_as(&cx, HSM, 0x2000_1002, &[0xAA]).unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.hsm.mem[&0x2000_1000]), 0x44AA_2211);
+    // Host memory has the same address for the HSM: never through the window.
+    s.interp.eval("mww 0x70000000 0x12345678").unwrap();
+    take_writes(&s);
+    assert_eq!(ops::read_memory_as(&cx, HSM, 0x7000_0000, 4).unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+    assert!(take_writes(&s).is_empty());
+    // A TriCore core reads host memory at the same address.
+    assert!(ops::read_memory_as(&cx, 0, 0x2000_1000, 4).unwrap() != vec![0x11, 0x22, 0xAA, 0x44]);
+}
+
+#[test]
+fn tricore_resume_releases_a_halted_hsm() {
+    let s = server();
+    let i = &s.interp;
+    i.eval("init").unwrap();
+    i.eval("tc37x.hsm arp_halt").unwrap();
+    i.eval("halt 1000").unwrap();
+    ops::poll_all(&s.cx());
+    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "halted");
+    take_writes(&s);
+    i.eval("resume").unwrap();
+    let w = take_writes(&s);
+    assert!(pos(&w, (HSM_DHCSR, 0xA05F_0001)) < pos(&w, (CBS_TLCHS, 2)), "{w:08x?}");
+    ops::poll_all(&s.cx());
+    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "running");
+}
+
+#[test]
+fn reset_halt_keeps_the_hsm_breakpoints_after_the_release() {
+    let s = server();
+    let i = &s.interp;
+    i.eval("init").unwrap();
+    i.eval("targets tc37x.hsm").unwrap();
+    i.eval("halt 1000").unwrap();
+    i.eval("bp 0x80028700 2").unwrap();
+    i.eval("targets tc37x.cpu0").unwrap();
+    with_sim(&s, |sim| sim.hsm.writes.clear());
+    i.eval("reset halt").unwrap();
+    let w = with_sim(&s, |sim| std::mem::take(&mut sim.hsm.writes));
+    // Restored in FP_COMP5 while the boot ROM breakpoint (FP_COMP0) is deleted by the release.
+    assert!(w.contains(&(0xE000_201C, 0x0002_8700 | 1 << 30 | 1)), "{w:08x?}");
+    assert!(w.contains(&(0xE000_2008, 0)), "{w:08x?}");
+    assert_eq!(i.eval("tc37x.cpu0 curstate").unwrap(), "halted");
 }

@@ -27,7 +27,7 @@ use aurix_core::{log_info, log_warn, ServerHandle};
 use breakpoints::BpTable;
 use channel::Writer;
 use expressions::ExprTable;
-use symstore::SymbolStore;
+use symstore::{SymbolSet, SymbolStore};
 
 /// Services announced in `Locator.Hello`.
 pub const SERVICES: &[&str] = &[
@@ -71,8 +71,23 @@ impl Shared {
         }
     }
 
-    pub fn active_symbols(&self) -> Option<Arc<symbols::Symbols>> {
-        self.symbols.lock().unwrap().active()
+    /// Symbol set of the core a context ID belongs to (frames, registers, ...). The chip
+    /// context or an empty ID use the first core with symbols.
+    pub fn symbols_for(&self, ctx: &str) -> Option<Arc<SymbolSet>> {
+        let store = self.symbols.lock().unwrap();
+        match contexts::owning_core(ctx) {
+            Some(core) => store.set(&core),
+            None => {
+                let mut ctxs = store.contexts();
+                ctxs.sort_by_key(|c| contexts::owning_core(c).and_then(|c| c.rsplit_once(".C").and_then(|(_, n)| n.parse::<u32>().ok())));
+                ctxs.iter().find_map(|c| store.set(c))
+            }
+        }
+    }
+
+    /// A loaded ELF by its number (symbol IDs `E<n>/...`).
+    pub fn elf(&self, n: usize) -> Option<Arc<symbols::Symbols>> {
+        self.symbols.lock().unwrap().elf(n)
     }
 
     pub fn is_stepping(&self, target: usize) -> bool {

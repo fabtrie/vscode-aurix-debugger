@@ -177,16 +177,100 @@ pub const REG_A10: usize = 26;
 pub const REG_A11: usize = 27;
 
 pub fn reg_index(name: &str) -> Option<usize> {
-    let n = name.to_ascii_lowercase();
-    let n = match n.as_str() {
-        "pcx" => "pcxi",
-        "sp" => "a10",
-        "ra" => "a11",
-        "fpc" => "fcx",
-        other => other,
-    };
-    REGS.iter().position(|r| r.name == n).or_else(|| n.parse::<usize>().ok().filter(|&i| i < REGS.len()))
+    TRICORE.reg_index(name)
 }
+
+/// Register set and register roles of a core architecture.
+#[derive(Debug)]
+pub struct ArchInfo {
+    /// Target type name (`target create <name> <type>`).
+    pub name: &'static str,
+    pub regs: &'static [RegDef],
+    pub pc: usize,
+    pub sp: usize,
+    /// Return address register.
+    pub ra: usize,
+    /// Alternative register names.
+    pub aliases: &'static [(&'static str, &'static str)],
+    pub description: &'static str,
+}
+
+impl ArchInfo {
+    /// Register index by name, alias or number.
+    pub fn reg_index(&self, name: &str) -> Option<usize> {
+        let n = name.to_ascii_lowercase();
+        let n = self.aliases.iter().find(|(a, _)| *a == n).map(|(_, r)| r.to_string()).unwrap_or(n);
+        self.regs.iter().position(|r| r.name == n).or_else(|| n.parse::<usize>().ok().filter(|&i| i < self.regs.len()))
+    }
+}
+
+pub static TRICORE: ArchInfo = ArchInfo {
+    name: "tricore",
+    regs: REGS,
+    pc: REG_PC,
+    sp: REG_A10,
+    ra: REG_A11,
+    aliases: &[("pcx", "pcxi"), ("sp", "a10"), ("ra", "a11"), ("fpc", "fcx")],
+    description: "TriCore general purpose and system registers",
+};
+
+// --- Cortex-M3 (TC3xx HSM) ---------------------------------------------------------------
+
+/// DCRSR selector of a Cortex-M core register. Byte fields of the combined
+/// CONTROL/FAULTMASK/BASEPRI/PRIMASK register (selector 20) carry the byte
+/// number plus one in the high byte.
+const fn cm(name: &'static str, sel: u16, dwarf: Option<u16>, group: RegGroup, description: &'static str) -> RegDef {
+    RegDef { name, offset: sel, gdb: None, dwarf, group, description }
+}
+
+/// Offset of a memory-mapped Cortex-M debug register: its address is `0xE000_0000 | offset`.
+const fn cm_dbg(name: &'static str, offset: u16, description: &'static str) -> RegDef {
+    RegDef { name, offset, gdb: None, dwarf: None, group: RegGroup::Debug, description }
+}
+
+/// Cortex-M register table (DWARF numbering: r0-r15 = 0-15).
+pub static CM_REGS: &[RegDef] = &[
+    cm("r0", 0, Some(0), RegGroup::General, "Register 0 (argument, return value)"),
+    cm("r1", 1, Some(1), RegGroup::General, "Register 1 (argument, return value)"),
+    cm("r2", 2, Some(2), RegGroup::General, "Register 2 (argument)"),
+    cm("r3", 3, Some(3), RegGroup::General, "Register 3 (argument)"),
+    cm("r4", 4, Some(4), RegGroup::General, "Register 4"),
+    cm("r5", 5, Some(5), RegGroup::General, "Register 5"),
+    cm("r6", 6, Some(6), RegGroup::General, "Register 6"),
+    cm("r7", 7, Some(7), RegGroup::General, "Register 7"),
+    cm("r8", 8, Some(8), RegGroup::General, "Register 8"),
+    cm("r9", 9, Some(9), RegGroup::General, "Register 9"),
+    cm("r10", 10, Some(10), RegGroup::General, "Register 10"),
+    cm("r11", 11, Some(11), RegGroup::General, "Register 11"),
+    cm("r12", 12, Some(12), RegGroup::General, "Register 12"),
+    cm("sp", 13, Some(13), RegGroup::General, "Stack pointer (r13)"),
+    cm("lr", 14, Some(14), RegGroup::General, "Link register (r14)"),
+    cm("pc", 15, Some(15), RegGroup::General, "Program counter (r15)"),
+    cm("xpsr", 16, None, RegGroup::System, "Program status register"),
+    cm("msp", 17, None, RegGroup::System, "Main stack pointer"),
+    cm("psp", 18, None, RegGroup::System, "Process stack pointer"),
+    cm("primask", 20 | 1 << 8, None, RegGroup::System, "Priority mask"),
+    cm("basepri", 20 | 2 << 8, None, RegGroup::System, "Base priority"),
+    cm("faultmask", 20 | 3 << 8, None, RegGroup::System, "Fault mask"),
+    cm("control", 20 | 4 << 8, None, RegGroup::System, "Control register"),
+    cm_dbg("dhcsr", 0xEDF0, "Debug halting control and status"),
+    cm_dbg("dfsr", 0xED30, "Debug fault status"),
+    cm_dbg("demcr", 0xEDFC, "Debug exception and monitor control"),
+];
+
+pub const CM_REG_SP: usize = 13;
+pub const CM_REG_LR: usize = 14;
+pub const CM_REG_PC: usize = 15;
+
+pub static CORTEX_M: ArchInfo = ArchInfo {
+    name: "cortex_m",
+    regs: CM_REGS,
+    pc: CM_REG_PC,
+    sp: CM_REG_SP,
+    ra: CM_REG_LR,
+    aliases: &[("r13", "sp"), ("r14", "lr"), ("r15", "pc"), ("cpsr", "xpsr")],
+    description: "Cortex-M general purpose and system registers",
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Version {

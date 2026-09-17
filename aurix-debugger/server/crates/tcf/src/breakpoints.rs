@@ -7,9 +7,8 @@ use serde_json::{json, Map, Value};
 
 use aurix_core::target::BpKind;
 use aurix_core::{ops, ServerHandle};
-use symbols::Symbols;
-
 use crate::contexts::{cores, CoreInfo, CONTAINER};
+use crate::symstore::SymbolSet;
 
 /// Hardware triggers are scarce (8 per core): a source line that maps to many
 /// places (e.g. an inline header function) is limited to this many addresses.
@@ -67,7 +66,7 @@ fn parse_addr(v: &Value) -> Option<u32> {
 
 /// Addresses of a breakpoint (and the actual line for File/Line), or why it
 /// cannot be resolved.
-fn resolve(props: &Map<String, Value>, syms: Option<&Symbols>) -> Result<(Vec<u32>, Option<u32>), String> {
+fn resolve(props: &Map<String, Value>, syms: Option<&SymbolSet>) -> Result<(Vec<u32>, Option<u32>), String> {
     if let Some(a) = props.get("Address") {
         return parse_addr(a).map(|x| (vec![x], None)).ok_or_else(|| format!("Invalid address: {a}"));
     }
@@ -89,6 +88,14 @@ fn resolve(props: &Map<String, Value>, syms: Option<&Symbols>) -> Result<(Vec<u3
         return Ok((addrs, Some(actual)));
     }
     Err("Breakpoint has no location".into())
+}
+
+/// Symbol set of a core, by context ID.
+pub type SymbolsFor<'a> = &'a dyn Fn(&str) -> Option<std::sync::Arc<SymbolSet>>;
+
+/// Whether the breakpoint's addresses depend on symbols.
+fn symbolic(props: &Map<String, Value>) -> bool {
+    !props.contains_key("Address") && props.get("Location").is_none_or(|l| parse_addr(l).is_none())
 }
 
 fn target_cores(props: &Map<String, Value>, all: &[CoreInfo]) -> Vec<CoreInfo> {
@@ -123,27 +130,37 @@ impl BpTable {
         }
     }
 
-    fn plant(&mut self, h: &ServerHandle, props: Map<String, Value>, owner: u64, hits: u32, syms: Option<&Symbols>) -> Bp {
+    /// Resolves the breakpoint per core with that core's symbols and plants it where it
+    /// resolves: a source line of the HSM ELF only lands on the HSM.
+    fn plant(&mut self, h: &ServerHandle, props: Map<String, Value>, owner: u64, hits: u32, syms: SymbolsFor) -> Bp {
         let mut bp = Bp { props, owner, instances: Vec::new(), hits, error: None, line: None };
         if !bp.enabled() {
             return bp;
         }
-        match resolve(&bp.props, syms) {
-            Err(e) => bp.error = Some(e),
-            Ok((addrs, line)) => {
-                bp.line = line;
-                let all = cores(h);
-                let targets = target_cores(&bp.props, &all);
-                if targets.is_empty() {
-                    bp.error = Some("No matching context for breakpoint".into());
+        let all = cores(h);
+        let targets = target_cores(&bp.props, &all);
+        if targets.is_empty() {
+            bp.error = Some("No matching context for breakpoint".into());
+            return bp;
+        }
+        let mut first_err = None;
+        for c in targets {
+            let set = syms(&c.id);
+            match resolve(&bp.props, set.as_deref()) {
+                Err(e) => {
+                    first_err.get_or_insert(e);
                 }
-                for c in targets {
+                Ok((addrs, line)) => {
+                    bp.line = bp.line.or(line);
                     for &addr in &addrs {
                         let error = self.plant_one(h, c.idx, addr).err();
                         bp.instances.push(Instance { target: c.idx, ctx: c.id.clone(), addr, error });
                     }
                 }
             }
+        }
+        if bp.instances.is_empty() {
+            bp.error = first_err;
         }
         bp
     }
@@ -157,7 +174,7 @@ impl BpTable {
     }
 
     /// Adds or replaces a breakpoint. Returns (id, existed before).
-    pub fn insert(&mut self, h: &ServerHandle, props: Map<String, Value>, owner: u64, syms: Option<&Symbols>) -> Result<(String, bool), String> {
+    pub fn insert(&mut self, h: &ServerHandle, props: Map<String, Value>, owner: u64, syms: SymbolsFor) -> Result<(String, bool), String> {
         let id = props.get("ID").and_then(Value::as_str).ok_or("Breakpoint ID missing")?.to_string();
         let (existed, hits) = match self.bps.remove(&id) {
             Some(old) => {
@@ -171,19 +188,20 @@ impl BpTable {
         Ok((id, existed))
     }
 
-    /// Re-plants breakpoints that could not be resolved (e.g. before symbols
-    /// were loaded). Returns their IDs.
-    pub fn reresolve(&mut self, h: &ServerHandle, syms: &Symbols) -> Vec<String> {
+    /// Re-plants breakpoints after symbol files changed: those that could not be resolved
+    /// and those resolved from symbols (another ELF may add or move addresses). Returns
+    /// their IDs.
+    pub fn reresolve(&mut self, h: &ServerHandle, syms: SymbolsFor) -> Vec<String> {
         let pending: Vec<String> = self
             .bps
             .iter()
-            .filter(|(_, b)| b.enabled() && (b.error.is_some() || b.instances.iter().any(|i| i.error.is_some())))
+            .filter(|(_, b)| b.enabled() && (symbolic(&b.props) || b.error.is_some() || b.instances.iter().any(|i| i.error.is_some())))
             .map(|(id, _)| id.clone())
             .collect();
         for id in &pending {
             if let Some(old) = self.bps.remove(id) {
                 self.unplant(h, &old);
-                let bp = self.plant(h, old.props, old.owner, old.hits, Some(syms));
+                let bp = self.plant(h, old.props, old.owner, old.hits, syms);
                 self.bps.insert(id.clone(), bp);
             }
         }

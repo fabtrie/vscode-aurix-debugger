@@ -338,7 +338,7 @@ pub fn find_bank(cx: &Cx, spec: &str) -> Result<FlashBank> {
 /// Halts all examined cores.
 pub fn halt_all(cx: &Cx) -> Result<()> {
     let n = cx.with(|c| c.targets.len());
-    let examined = |t: usize| cx.with(|c| c.targets[t].core.examined);
+    let examined = |t: usize| cx.with(|c| c.targets[t].core.examined());
     for t in 0..n {
         if examined(t) && ops::state(cx, t).0 != TargetState::Halted {
             ops::halt(cx, t)?;

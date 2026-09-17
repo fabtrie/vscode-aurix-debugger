@@ -12,7 +12,7 @@ use crate::arch::*;
 use crate::ctx::{Cx, Mode};
 use crate::error::{other, usage, Error, Result};
 use crate::events::{emit, Event};
-use crate::target::{BpKind, Breakpoint, DebugReason, RunMode, TargetState, Transition, WatchAccess, Watchpoint};
+use crate::target::{BpKind, Breakpoint, Core, DebugReason, RunMode, TargetState, Transition, WatchAccess, Watchpoint};
 use crate::{log_debug, log_error, log_info, log_warn};
 
 /// Runs a target event handler (`$t configure -event name body`).
@@ -81,7 +81,7 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
     });
     match res {
         Err(err) => {
-            cx.with(|c| c.targets[t].core.examined = false);
+            cx.with(|c| c.targets[t].core.set_examined(false));
             if !quiet {
                 log_error!("[{name}] Examination failed: {err}");
             }
@@ -106,9 +106,12 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
         Transition::None => {}
         Transition::Halted { debug, boot } => {
             let (name, reason, pc, trigger) = cx.with(|c| {
-                let reason = c.targets[t].core.reason;
+                let reason = c.targets[t].core.reason();
+                let pc = c.target_io(t).ok().and_then(|(mut io, e)| {
+                    let pc = e.core.arch().pc;
+                    e.core.read_reg(&mut io, pc).ok()
+                });
                 let trigger = c.targets[t].core.hit_trigger();
-                let pc = c.target_io(t).ok().and_then(|(mut io, e)| e.core.read_reg(&mut io, REG_PC).ok());
                 (c.targets[t].name.clone(), reason, pc, trigger)
             });
             let pc_s = pc.map(|pc| format!(", pc: 0x{pc:08x}")).unwrap_or_default();
@@ -154,9 +157,8 @@ pub fn poll_all(cx: &Cx) {
         let mut b = Batch::new();
         let mut handles = Vec::new();
         for (i, e) in c.targets.iter().enumerate() {
-            if e.core.examined && e.poll_failures == 0 {
-                let (d, s) = e.core.poll_queue(&mut b);
-                handles.push((i, d, s));
+            if e.core.examined() && e.poll_failures == 0 {
+                handles.push((i, e.core.poll_queue(&mut b)));
             }
         }
         let adapter = c.adapter.as_deref_mut().unwrap();
@@ -164,9 +166,10 @@ pub fn poll_all(cx: &Cx) {
         let resets = adapter.take_resets();
         let mut out = Vec::new();
         let mut failed = Vec::new();
-        for (i, d, s) in handles {
-            if r[d].ok() && r[s].ok() {
-                out.push((i, c.targets[i].core.poll_apply(r[d].u32(), r[s].u32())));
+        for (i, ops) in handles {
+            if ops.all.iter().all(|&h| r[h].ok()) {
+                let vals: Vec<u32> = ops.reads.iter().map(|&h| r[h].u32()).collect();
+                out.push((i, c.targets[i].core.poll_apply(&vals)));
             } else {
                 failed.push(i);
             }
@@ -208,7 +211,7 @@ pub fn poll_all(cx: &Cx) {
         c.targets
             .iter()
             .enumerate()
-            .filter(|(_, e)| (e.poll_failures > 0 || !e.core.examined) && !e.defer_examine)
+            .filter(|(_, e)| (e.poll_failures > 0 || !e.core.examined()) && !e.defer_examine)
             .map(|(i, _)| i)
             .collect()
     });
@@ -229,7 +232,7 @@ fn mark_poll_failed(cx: &Cx, t: usize, why: &str) {
         let e = &mut c.targets[t];
         let first = e.poll_failures == 0;
         e.poll_failures = e.poll_failures.max(1);
-        e.core.examined = false;
+        e.core.set_examined(false);
         first
     });
     if first {
@@ -240,7 +243,7 @@ fn mark_poll_failed(cx: &Cx, t: usize, why: &str) {
 fn require_examined(cx: &Cx, t: usize) -> Result<()> {
     cx.with(|c| {
         let e = c.targets.get(t).ok_or_else(|| usage(format!("invalid target {t}")))?;
-        if !e.core.examined {
+        if !e.core.examined() {
             return Err(Error::NotExamined(e.name.clone()));
         }
         Ok(())
@@ -259,7 +262,7 @@ pub fn wait_state(cx: &Cx, t: usize, want: TargetState, ms: u64) -> Result<()> {
     let t0 = Instant::now();
     loop {
         poll_all(cx);
-        if cx.with(|c| c.targets[t].core.state) == want {
+        if cx.with(|c| c.targets[t].core.state()) == want {
             return Ok(());
         }
         if t0.elapsed() >= Duration::from_millis(ms) {
@@ -310,6 +313,15 @@ fn unmask_irq_except(cx: &Cx, t: usize) {
     }
 }
 
+/// `tl1_step`: makes sure TL1 is latched before the step-start handler
+/// releases the other cores, so they stay suspended until the step starts.
+fn ensure_tl1_hold(io: &mut Io) -> Result<()> {
+    if io.read32(CBS_TLS)? & CBS_TLS_TL1 == 0 {
+        io.write32_seq(&[(CBS_TLC, 0x30), (CBS_TLC, 0x0)])?;
+    }
+    Ok(())
+}
+
 pub fn step(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
     step_as(cx, t, addr, RunMode::Step)
 }
@@ -318,18 +330,18 @@ pub fn step(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
 pub fn step_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()> {
     require_examined(cx, t)?;
     let name = target_name(cx, t);
-    if cx.with(|c| c.targets[t].core.state) != TargetState::Halted {
+    if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
         return Err(Error::NotHalted(name));
     }
-    let tl1_step = cx.with(|c| c.targets[t].core.tl1_step);
+    let tl1_step = cx.with(|c| c.targets[t].core.run().tl1_step);
     if tl1_step {
         // All cores run for the instruction: interrupts masked for an earlier
         // step of another core go back first, and TL1 must hold the cores
         // the step-start handler releases.
         unmask_irq_except(cx, t);
         cx.with(|c| {
-            let (mut io, e) = c.target_io(t)?;
-            e.core.ensure_tl1_hold(&mut io)
+            let mut io = c.io()?;
+            ensure_tl1_hold(&mut io)
         })?;
     }
     fire(cx, t, "step-start");
@@ -393,33 +405,57 @@ pub fn arp_reset_deassert(cx: &Cx, t: usize, halt: bool) -> Result<()> {
             c.srst_asserted = false;
         }
         let (mut io, e) = c.target_io(t)?;
-        if e.core.coreid == 0 {
-            // Boot-time debug lock lasts a few tens of ms after a reset.
-            let t0 = Instant::now();
-            loop {
-                match enable_ocds(&mut io) {
-                    Ok(_) => break,
-                    Err(err) if t0.elapsed() > Duration::from_millis(1000) => return Err(err),
-                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        let name = e.name.clone();
+        match &mut e.core {
+            Core::Tricore(core) => {
+                if core.coreid == 0 {
+                    // Boot-time debug lock lasts a few tens of ms after a reset.
+                    let t0 = Instant::now();
+                    loop {
+                        match enable_ocds(&mut io) {
+                            Ok(_) => break,
+                            Err(err) if t0.elapsed() > Duration::from_millis(1000) => return Err(err),
+                            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    if halt {
+                        // Clear the halt-after-reset trigger left in TR0.
+                        io.write32_seq(&[(core.csfr(trxevt(0)), 0), (core.csfr(trxadr(0)), 0)])?;
+                    }
+                }
+                if !core.examined {
+                    return Ok(Transition::None);
+                }
+                io.write32(core.csfr(SWEVT), SWEVT_HALT_TC16)?;
+                let tr = core.poll(&mut io)?;
+                if halt && core.state != TargetState::Halted {
+                    crate::log_warn!("[{name}] ran after reset and before halt ...");
+                    core.halt(&mut io)?;
+                }
+                core.restore_triggers(&mut io)?;
+                Ok(tr)
+            }
+            Core::CortexM(core) => {
+                // The HSM starts when the host startup software releases it and is only
+                // accessible when its firmware enables HSM debugging: it is examined again
+                // (e.g. by the reset-end handler after the HSM release) instead of failing the reset.
+                if !core.examined {
+                    return Ok(Transition::None);
+                }
+                match core.examine(&mut io).and_then(|_| core.poll(&mut io)) {
+                    Ok(tr) => {
+                        core.restore_triggers(&mut io)?;
+                        Ok(tr)
+                    }
+                    Err(err) => {
+                        crate::log_debug!("[{name}] not accessible after reset: {err}");
+                        core.examined = false;
+                        Ok(Transition::None)
+                    }
                 }
             }
-            std::thread::sleep(Duration::from_millis(100));
-            if halt {
-                // Clear the halt-after-reset trigger left in TR0.
-                io.write32_seq(&[(e.core.csfr(trxevt(0)), 0), (e.core.csfr(trxadr(0)), 0)])?;
-            }
         }
-        if !e.core.examined {
-            return Ok(Transition::None);
-        }
-        io.write32(e.core.csfr(SWEVT), SWEVT_HALT_TC16)?;
-        let tr = e.core.poll(&mut io)?;
-        if halt && e.core.state != TargetState::Halted {
-            crate::log_warn!("[{}] ran after reset and before halt ...", e.name);
-            e.core.halt(&mut io)?;
-        }
-        e.core.restore_triggers(&mut io)?;
-        Ok(tr)
     })?;
     handle_transition(cx, t, tr);
     Ok(())
@@ -448,7 +484,7 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
         fire(cx, t, "reset-start");
     }
     for &t in &all {
-        if !cx.with(|c| c.targets[t].core.examined) {
+        if !cx.with(|c| c.targets[t].core.examined()) {
             let _ = examine_one(cx, t, false);
         }
     }
@@ -475,7 +511,10 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
 
     if halt {
         for &t in &all {
-            if !cx.with(|c| c.targets[t].core.examined) {
+            if !cx.with(|c| c.targets[t].core.halts_after_reset()) {
+                continue;
+            }
+            if !cx.with(|c| c.targets[t].core.examined()) {
                 if cx.with(|c| c.targets[t].defer_examine) {
                     continue;
                 }
@@ -491,7 +530,7 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     }
     if mode == "init" {
         for &t in &all {
-            if cx.with(|c| c.targets[t].core.state) == TargetState::Halted {
+            if cx.with(|c| c.targets[t].core.state()) == TargetState::Halted {
                 fire(cx, t, "reset-init");
             }
         }
@@ -631,6 +670,28 @@ pub fn write_memory(cx: &Cx, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| c.io()?.write(addr, data))
 }
 
+/// Memory as a core sees it: HSM-private addresses of a Cortex-M (HSM) target go
+/// through its debug window, everything else is host memory.
+pub fn read_memory_as(cx: &Cx, t: usize, addr: u32, len: usize) -> Result<Vec<u8>> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        match e.core.as_cortex_m_mut() {
+            Some(m) if crate::cortex_m::hsm_private(addr) => m.read_memory(&mut io, addr, len),
+            _ => io.read(addr, len),
+        }
+    })
+}
+
+pub fn write_memory_as(cx: &Cx, t: usize, addr: u32, data: &[u8]) -> Result<()> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        match e.core.as_cortex_m_mut() {
+            Some(m) if crate::cortex_m::hsm_private(addr) => m.write_memory(&mut io, addr, data),
+            _ => io.write(addr, data),
+        }
+    })
+}
+
 pub fn state(cx: &Cx, t: usize) -> (TargetState, DebugReason) {
-    cx.with(|c| (c.targets[t].core.state, c.targets[t].core.reason))
+    cx.with(|c| (c.targets[t].core.state(), c.targets[t].core.reason()))
 }

@@ -6,14 +6,13 @@ use std::time::Duration;
 use jim::{list, CmdResult, Interp};
 
 use crate::adapter;
-use crate::arch::{reg_index, REGS};
 use crate::ctx::{Cx, Mode, Ocmts, Shared, Tap};
 use crate::error::Error;
 use crate::events::{emit, Event};
 use crate::flash::{self, FlashBank};
 use crate::image::Image;
 use crate::ops;
-use crate::target::{BpKind, TargetEntry, TargetState, WatchAccess};
+use crate::target::{BpKind, Core, TargetEntry, TargetState, WatchAccess};
 use crate::util::{parse_bool, parse_u32, parse_u64};
 use crate::{log, log_info, log_user, log_warn};
 
@@ -145,6 +144,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "wp", cmd_wp);
     reg(interp, sh, "rwp", cmd_rwp);
     reg(interp, sh, "tricore", cmd_tricore);
+    reg(interp, sh, "cortex_m", cmd_tricore);
 }
 
 fn port_cmd(cx: &Cx, a: &[&str], field: fn(&mut crate::ctx::Ports) -> &mut Option<u16>) -> CmdResult {
@@ -343,8 +343,8 @@ fn cmd_target(cx: &Cx, a: &[&str]) -> CmdResult {
         Some("create") => {
             let name = a.get(2).ok_or("usage: target create <name> <type> [options]")?.to_string();
             let ty = a.get(3).ok_or("usage: target create <name> <type> [options]")?.to_string();
-            if ty != "tricore" {
-                return Err(format!("Unknown target type {ty}, try one of tricore"));
+            if !Core::TYPES.contains(&ty.as_str()) {
+                return Err(format!("Unknown target type {ty}, try one of {}", Core::TYPES.join(", ")));
             }
             if cx.with(|c| c.target_by_name(&name).is_some()) || cx.interp.command_exists(&name) {
                 return Err(format!("Command/target: {name} Exists"));
@@ -357,7 +357,7 @@ fn cmd_target(cx: &Cx, a: &[&str]) -> CmdResult {
                 cx.with(|c| c.targets.pop());
                 return Err(e);
             }
-            if cx.with(|c| c.targets[t].core.ocmts.is_none()) {
+            if cx.with(|c| c.targets[t].core.ocmts().is_none() && c.targets[t].core.as_tricore().is_some()) {
                 cx.with(|c| c.targets.pop());
                 return Err(format!("[{name}] OCMTS not configured for target (-ocmts)"));
             }
@@ -371,7 +371,7 @@ fn cmd_target(cx: &Cx, a: &[&str]) -> CmdResult {
             let t = current(cx)?;
             Ok(ops::target_name(cx, t))
         }
-        Some("types") => Ok("tricore".into()),
+        Some("types") => Ok(Core::TYPES.join(" ")),
         Some("count") => Ok(cx.with(|c| c.targets.len()).to_string()),
         Some("number") => {
             let n = num(a.get(2).ok_or("usage: target number <n>")?)? as usize;
@@ -400,12 +400,12 @@ fn configure_target(cx: &Cx, t: usize, a: &[&str]) -> Result<(), String> {
             }
             "-coreid" => {
                 let v = num32(arg(i + 1, opt)?)?;
-                cx.with(|c| c.targets[t].core.coreid = v);
+                cx.with(|c| c.targets[t].core.set_coreid(v));
                 i += 2;
             }
             "-dbgbase" => {
                 let v = num32(arg(i + 1, opt)?)?;
-                cx.with(|c| c.targets[t].core.dbgbase = Some(v));
+                cx.with(|c| c.targets[t].core.set_dbgbase(v));
                 i += 2;
             }
             "-ocmts" => {
@@ -413,10 +413,10 @@ fn configure_target(cx: &Cx, t: usize, a: &[&str]) -> Result<(), String> {
                 cx.with(|c| {
                     let tap = c.ocmts.iter().find(|x| x.name == o).map(|x| x.tap.clone()).ok_or("OCMTS name invalid!")?;
                     let e = &mut c.targets[t];
-                    if e.core.ocmts.as_deref().is_some_and(|cur| cur != o) {
+                    if e.core.ocmts().is_some_and(|cur| cur != o) {
                         return Err("OCMTS assignment cannot be changed!");
                     }
-                    e.core.ocmts = Some(o);
+                    e.core.set_ocmts(o);
                     e.chain_position = Some(tap);
                     Ok(())
                 })?;
@@ -451,9 +451,9 @@ fn cget_target(cx: &Cx, t: usize, a: &[&str]) -> CmdResult {
         Ok(match *opt {
             "-type" => e.type_name.clone(),
             "-event" => e.event(a.get(1).ok_or("usage: cget -event <name>")?).unwrap_or("").to_string(),
-            "-coreid" => e.core.coreid.to_string(),
-            "-dbgbase" => format!("0x{:08x}", e.core.dbgbase.unwrap_or(0)),
-            "-ocmts" => e.core.ocmts.clone().ok_or("OCMTS not configured")?,
+            "-coreid" => e.core.coreid().to_string(),
+            "-dbgbase" => format!("0x{:08x}", e.core.dbgbase().unwrap_or(0)),
+            "-ocmts" => e.core.ocmts().map(str::to_string).ok_or("OCMTS not configured")?,
             "-chain-position" => e.chain_position.clone().unwrap_or_default(),
             "-endian" => "little".into(),
             "-defer-examine" => (e.defer_examine as u8).to_string(),
@@ -469,8 +469,8 @@ fn target_object(cx: &Cx, t: usize, a: &[&str]) -> CmdResult {
     match sub {
         "configure" => configure_target(cx, t, rest).map(|_| String::new()),
         "cget" => cget_target(cx, t, rest),
-        "curstate" => Ok(cx.with(|c| c.targets[t].core.state.name().to_string())),
-        "was_examined" => Ok((cx.with(|c| c.targets[t].core.examined) as u8).to_string()),
+        "curstate" => Ok(cx.with(|c| c.targets[t].core.state().name().to_string())),
+        "was_examined" => Ok((cx.with(|c| c.targets[t].core.examined()) as u8).to_string()),
         "examine_deferred" => Ok((cx.with(|c| c.targets[t].defer_examine) as u8).to_string()),
         "invoke-event" => {
             ops::fire(cx, t, rest.first().ok_or("usage: invoke-event <event>")?);
@@ -548,7 +548,7 @@ fn cmd_targets(cx: &Cx, a: &[&str]) -> CmdResult {
                 t.type_name,
                 "little",
                 t.chain_position.as_deref().unwrap_or(""),
-                if t.core.examined { t.core.state.name() } else { "unexamined" }
+                if t.core.examined() { t.core.state().name() } else { "unexamined" }
             ));
         }
         out.trim_end().to_string()
@@ -862,7 +862,8 @@ fn cmd_poll(cx: &Cx, a: &[&str]) -> CmdResult {
             let mut out = format!("background polling: {}\n", if cx.with(|c| c.poll_enabled) { "on" } else { "off" });
             out.push_str(&format!("[{}] state: {}", ops::target_name(cx, t), state.name()));
             if state == TargetState::Halted {
-                let pc = ops::read_reg(cx, t, crate::arch::REG_PC).map_err(e2s)?;
+                let pc_idx = cx.with(|c| c.targets[t].core.arch().pc);
+                let pc = ops::read_reg(cx, t, pc_idx).map_err(e2s)?;
                 out.push_str(&format!(", halted due to {}, pc: 0x{pc:08x}", reason.name()));
             }
             Ok(out)
@@ -1006,28 +1007,29 @@ fn cmd_reset(cx: &Cx, a: &[&str]) -> CmdResult {
 fn cmd_reg(cx: &Cx, a: &[&str]) -> CmdResult {
     require_init(cx, "reg")?;
     let t = current(cx)?;
+    let arch = cx.with(|c| c.targets[t].core.arch());
     match a.len() {
         1 => {
-            let idxs: Vec<usize> = (0..REGS.len()).collect();
+            let idxs: Vec<usize> = (0..arch.regs.len()).collect();
             let vals = cx
                 .with(|c| {
                     let (mut io, e) = c.target_io(t)?;
                     e.core.read_regs(&mut io, &idxs)
                 })
                 .map_err(e2s)?;
-            let mut out = String::from("===== tricore registers\n");
+            let mut out = format!("===== {} registers\n", arch.name);
             for (i, v) in vals.iter().enumerate() {
-                out.push_str(&format!("({i}) {} (/32): 0x{v:08x}\n", REGS[i].name));
+                out.push_str(&format!("({i}) {} (/32): 0x{v:08x}\n", arch.regs[i].name));
             }
             Ok(out.trim_end().to_string())
         }
         2 | 3 => {
-            let idx = reg_index(a[1]).ok_or_else(|| format!("register {} not found in current target", a[1]))?;
+            let idx = arch.reg_index(a[1]).ok_or_else(|| format!("register {} not found in current target", a[1]))?;
             if let Some(v) = a.get(2) {
                 ops::write_reg(cx, t, idx, num32(v)?).map_err(e2s)?;
             }
             let v = ops::read_reg(cx, t, idx).map_err(e2s)?;
-            Ok(format!("{} (/32): 0x{v:08x}", REGS[idx].name))
+            Ok(format!("{} (/32): 0x{v:08x}", arch.regs[idx].name))
         }
         _ => Err("usage: reg [(register_number|register_name) [value]]".into()),
     }
@@ -1125,27 +1127,27 @@ fn cmd_tricore(cx: &Cx, a: &[&str]) -> CmdResult {
         Some("tl1_halt") => {
             if let Some(v) = a.get(2) {
                 let on = parse_bool(v)?;
-                cx.with(|c| c.targets[t].core.tl1_halt = on);
+                cx.with(|c| c.targets[t].core.run_mut().tl1_halt = on);
             }
-            Ok(format!("tl1_halt {}", if cx.with(|c| c.targets[t].core.tl1_halt) { "on" } else { "off" }))
+            Ok(format!("tl1_halt {}", if cx.with(|c| c.targets[t].core.run().tl1_halt) { "on" } else { "off" }))
         }
         Some("tl1_step") => {
             if let Some(v) = a.get(2) {
                 let on = parse_bool(v)?;
-                cx.with(|c| c.targets[t].core.tl1_step = on);
+                cx.with(|c| c.targets[t].core.run_mut().tl1_step = on);
             }
-            Ok(format!("tl1_step {}", if cx.with(|c| c.targets[t].core.tl1_step) { "on" } else { "off" }))
+            Ok(format!("tl1_step {}", if cx.with(|c| c.targets[t].core.run().tl1_step) { "on" } else { "off" }))
         }
         Some("irq_mask") => {
             if a.len() > 2 {
                 let m = crate::tricore::IrqMask::parse(&a[2..]).map_err(|e| format!("tricore irq_mask: {e}"))?;
-                cx.with(|c| c.targets[t].core.irq_mask = m);
+                cx.with(|c| c.targets[t].core.run_mut().irq_mask = m);
             }
-            Ok(format!("irq_mask {}", cx.with(|c| c.targets[t].core.irq_mask.describe())))
+            Ok(format!("irq_mask {}", cx.with(|c| c.targets[t].core.run().irq_mask.describe())))
         }
-        Some("triggers") => Ok(cx.with(|c| {
-            let core = &c.targets[t].core;
-            core.triggers
+        Some("triggers") => Ok(cx.with(|c| match &c.targets[t].core {
+            Core::Tricore(core) => core
+                .triggers
                 .iter()
                 .enumerate()
                 .map(|(i, tr)| {
@@ -1159,9 +1161,40 @@ fn cmd_tricore(cx: &Cx, a: &[&str]) -> CmdResult {
                     )
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            Core::CortexM(core) => {
+                let bps = core.fpb.iter().enumerate().map(|(i, b)| match b {
+                    Some(a) => format!("FP_COMP{i}: on  addr=0x{a:08x}"),
+                    None => format!("FP_COMP{i}: off"),
+                });
+                let wps = core.dwt.iter().enumerate().map(|(i, w)| match w {
+                    Some(w) => format!("DWT_COMP{i}: on  addr=0x{:08x} len={} access={}", w.addr, w.len, w.access),
+                    None => format!("DWT_COMP{i}: off"),
+                });
+                bps.chain(wps).collect::<Vec<_>>().join("\n")
+            }
         })),
-        _ => Err("usage: tricore tl1_halt [on|off] | tricore tl1_step [on|off] | tricore irq_mask [off|on|step step_over step_out] | tricore triggers".into()),
+        // Memory as the core sees it (HSM RAM, boot ROM and peripherals through the debug window).
+        Some("mdw") => {
+            let addr = num32(a.get(2).ok_or_else(|| format!("usage: {} mdw <address> [count]", a[0]))?)?;
+            let count = a.get(3).map(|c| num32(c)).transpose()?.unwrap_or(1) as usize;
+            let data = ops::read_memory_as(cx, t, addr, count * 4).map_err(e2s)?;
+            let mut out = String::new();
+            for (i, w) in data.chunks(4).enumerate() {
+                if i % 8 == 0 {
+                    if i > 0 {
+                        out.push('\n');
+                    }
+                    out.push_str(&format!("0x{:08x}:", addr + 4 * i as u32));
+                }
+                out.push_str(&format!(" {:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]])));
+            }
+            Ok(out)
+        }
+        _ => Err(format!(
+            "usage: {0} tl1_halt [on|off] | {0} tl1_step [on|off] | {0} irq_mask [off|on|step step_over step_out] | {0} triggers | {0} mdw <address> [count]",
+            a[0]
+        )),
     }
 }
 

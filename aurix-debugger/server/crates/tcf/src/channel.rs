@@ -2,23 +2,24 @@
 
 use std::io::Write;
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aurix_core::unwind::Frame;
-use symbols::{LineInfo, Symbols};
+use symbols::LineInfo;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde_json::{json, Map, Value};
 
-use aurix_core::arch::{RegGroup, REGS, REG_A10, REG_A11, REG_PC};
+use aurix_core::arch::RegGroup;
 use aurix_core::target::TargetState;
 use aurix_core::{log_debug, log_warn, ops};
 
 use crate::contexts::{chip_name, cores, find_core, owning_core, read_pc, reason_text, CoreInfo, CONTAINER};
+use crate::symstore::elf_id;
 use crate::wire::{self, Reader};
 use crate::{Shared, SERVICES};
 
@@ -238,17 +239,19 @@ impl Channel {
             ("StackTrace", "getContext") => self.st_context(a),
 
             ("LineNumbers", "mapToSource") => {
+                let ctx = a.opt_string(0)?.unwrap_or_default();
                 let (start, end) = (a.u64(1)? as u32, a.u64(2)? as u32);
-                let areas: Vec<Value> = match self.shared.active_symbols() {
+                let areas: Vec<Value> = match self.shared.symbols_for(&ctx) {
                     Some(s) => s.lines_in_range(start, end).iter().map(code_area).collect(),
                     None => vec![],
                 };
                 Ok(vec![String::new(), j(&areas)])
             }
             ("LineNumbers", "mapToMemory") => {
+                let ctx = a.opt_string(0)?.unwrap_or_default();
                 let file = a.string(1)?;
                 let line = a.u64(2)? as u32;
-                let s = self.shared.active_symbols().ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
+                let s = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
                 let (actual, addrs) = s.resolve_line(&file, line).map_err(|e| err(ERR_OTHER, e))?;
                 let areas: Vec<Value> = addrs
                     .iter()
@@ -261,19 +264,23 @@ impl Channel {
             }
 
             ("Symbols", "findByAddr") => {
+                let ctx = a.opt_string(0)?.unwrap_or_default();
                 let addr = a.u64(1)? as u32;
-                let s = self.shared.active_symbols().ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
-                let i = s.function_index_at(addr).ok_or_else(|| err(ERR_SYM_NOT_FOUND, format!("No symbol at 0x{addr:08x}")))?;
-                Ok(vec![String::new(), j(&format!("FN:{i}"))])
+                let s = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
+                let (e, i) = s.function_index_at(addr).ok_or_else(|| err(ERR_SYM_NOT_FOUND, format!("No symbol at 0x{addr:08x}")))?;
+                Ok(vec![String::new(), j(&elf_id(e, &format!("FN:{i}")))])
             }
             ("Symbols", "findByName") => {
+                let ctx = a.opt_string(0)?.unwrap_or_default();
                 let name = a.string(1)?;
-                let s = self.shared.active_symbols().ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
-                if let Some(i) = s.functions.iter().position(|f| f.name == name) {
-                    return Ok(vec![String::new(), j(&format!("FN:{i}"))]);
-                }
-                if let Some(i) = s.globals.iter().position(|g| g.name == name) {
-                    return Ok(vec![String::new(), j(&format!("GV:{i}"))]);
+                let s = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
+                for (e, s) in &s.elfs {
+                    if let Some(i) = s.functions.iter().position(|f| f.name == name) {
+                        return Ok(vec![String::new(), j(&elf_id(*e, &format!("FN:{i}")))]);
+                    }
+                    if let Some(i) = s.globals.iter().position(|g| g.name == name) {
+                        return Ok(vec![String::new(), j(&elf_id(*e, &format!("GV:{i}")))]);
+                    }
                 }
                 Err(err(ERR_SYM_NOT_FOUND, format!("Symbol not found: {name}")))
             }
@@ -285,14 +292,20 @@ impl Channel {
             ("MemoryMap", "set") => {
                 let ctx = a.string(0)?;
                 let map = a.value(1)?;
-                self.shared.memory_maps.lock().unwrap().insert(ctx, map.clone());
-                let files: Vec<String> = map
-                    .as_array()
-                    .map(|v| v.iter().filter_map(|m| m.get("FileName").and_then(Value::as_str).map(str::to_string)).collect())
-                    .unwrap_or_default();
-                if let Some(file) = files.first() {
-                    let syms = self.shared.symbols.lock().unwrap().load(Path::new(file)).map_err(|e| err(ERR_OTHER, e))?;
-                    self.reresolve_breakpoints(&syms);
+                self.shared.memory_maps.lock().unwrap().insert(ctx.clone(), map.clone());
+                // All files of the map: the first is the primary ELF, the others add symbols
+                // (bootmanager, FBL, ...).
+                let mut files: Vec<PathBuf> = Vec::new();
+                for f in map.as_array().into_iter().flatten().filter_map(|m| m.get("FileName").and_then(Value::as_str)) {
+                    if !files.iter().any(|x| x.as_path() == Path::new(f)) {
+                        files.push(PathBuf::from(f));
+                    }
+                }
+                if !files.is_empty() {
+                    let ctx = owning_core(&ctx).unwrap_or(ctx);
+                    self.shared.symbols.lock().unwrap().assign(&ctx, &files).map_err(|e| err(ERR_OTHER, e))?;
+                    self.shared.stacks.lock().unwrap().clear();
+                    self.reresolve_breakpoints();
                 }
                 Ok(vec![String::new()])
             }
@@ -373,7 +386,8 @@ impl Channel {
             json!({ "ID": c.id, "ParentID": CONTAINER, "ProcessID": CONTAINER, "Name": c.name,
                     "IsContainer": false, "HasState": true, "CanSuspend": true, "CanResume": 0x3F,
                     "CanCount": 0x3E, "CanTerminate": false, "RCGroup": CONTAINER, "SymbolsGroup": CONTAINER,
-                    "CPUGroup": CONTAINER, "WordSize": 4 })
+                    "CPUGroup": CONTAINER, "WordSize": 4,
+                    "Architecture": if c.arch.name == "cortex_m" { "arm" } else { "tricore" } })
             .to_string(),
         ])
     }
@@ -440,10 +454,31 @@ impl Channel {
 
     // --- Memory ----------------------------------------------------------------------
 
+    /// The HSM target for a memory access of a core context to HSM-private addresses.
+    fn hsm_access(&self, ctx: &str, addr: u32, size: usize) -> Option<usize> {
+        let c = find_core(self.h(), ctx)?;
+        let last = addr.wrapping_add(size.saturating_sub(1) as u32);
+        (c.arch.name == "cortex_m" && (aurix_core::cortex_m::hsm_private(addr) || aurix_core::cortex_m::hsm_private(last))).then_some(c.idx)
+    }
+
+    fn mem_error(addr: u32, size: usize, msg: String) -> String {
+        json!([{ "addr": addr as u64, "size": size, "stat": 0x300, "msg": { "Code": ERR_INV_ADDRESS, "Format": msg } }]).to_string()
+    }
+
     fn mem_get(&self, a: &Args) -> Reply {
-        let _ctx = a.string(0)?;
+        let ctx = a.string(0)?;
         let addr = a.u64(1)? as u32;
         let size = a.u64(3)? as usize;
+        if let Some(t) = self.hsm_access(&ctx, addr, size) {
+            let r = self
+                .h()
+                .call(move |cx| ops::read_memory_as(cx, t, addr, size).map_err(|e| e.to_string()))
+                .unwrap_or_else(|| Err("server stopped".into()));
+            return Ok(match r {
+                Ok(data) => vec![j(&B64.encode(&data)), String::new(), "null".into()],
+                Err(e) => vec![j(&B64.encode(vec![0u8; size])), String::new(), Self::mem_error(addr, size, e)],
+            });
+        }
         let res = self
             .h()
             .call(move |cx| {
@@ -468,12 +503,22 @@ impl Channel {
     }
 
     fn mem_set(&self, a: &Args) -> Reply {
-        let _ctx = a.string(0)?;
+        let ctx = a.string(0)?;
         let addr = a.u64(1)? as u32;
         let size = a.u64(3)? as usize;
         let data = B64.decode(a.string(5)?).map_err(|e| err(ERR_JSON_SYNTAX, format!("base64: {e}")))?;
         let data: Vec<u8> = data.into_iter().take(size).collect();
         let len = data.len();
+        if let Some(t) = self.hsm_access(&ctx, addr, len) {
+            let r = self
+                .h()
+                .call(move |cx| ops::write_memory_as(cx, t, addr, &data).map_err(|e| e.to_string()))
+                .unwrap_or_else(|| Err("server stopped".into()));
+            return Ok(match r {
+                Ok(()) => vec!["null".into(), String::new(), "null".into()],
+                Err(e) => vec!["null".into(), String::new(), Self::mem_error(addr, len, e)],
+            });
+        }
         let res = self
             .h()
             .call(move |cx| {
@@ -510,9 +555,9 @@ impl Channel {
         let ids: Vec<String> = if id == c.id {
             vec![format!("{}.RG.core", c.id), format!("{}.RG.debug", c.id)]
         } else if id == format!("{}.RG.core", c.id) {
-            REGS.iter().filter(|r| r.group != RegGroup::Debug).map(|r| format!("{}.R.{}", c.id, r.name)).collect()
+            c.arch.regs.iter().filter(|r| r.group != RegGroup::Debug).map(|r| format!("{}.R.{}", c.id, r.name)).collect()
         } else if id == format!("{}.RG.debug", c.id) {
-            REGS.iter().filter(|r| r.group == RegGroup::Debug).map(|r| format!("{}.R.{}", c.id, r.name)).collect()
+            c.arch.regs.iter().filter(|r| r.group == RegGroup::Debug).map(|r| format!("{}.R.{}", c.id, r.name)).collect()
         } else {
             vec![]
         };
@@ -522,7 +567,7 @@ impl Channel {
     fn reg_index(&self, id: &str) -> Result<(CoreInfo, usize), TcfError> {
         let c = self.core(id)?;
         let name = id.strip_prefix(&format!("{}.R.", c.id)).ok_or_else(|| err(ERR_INV_CONTEXT, format!("Invalid register: {id}")))?;
-        let idx = REGS.iter().position(|r| r.name == name).ok_or_else(|| err(ERR_INV_CONTEXT, format!("Invalid register: {id}")))?;
+        let idx = c.arch.regs.iter().position(|r| r.name == name).ok_or_else(|| err(ERR_INV_CONTEXT, format!("Invalid register: {id}")))?;
         Ok((c, idx))
     }
 
@@ -531,14 +576,14 @@ impl Channel {
         let c = self.core(&id)?;
         if let Some(group) = id.strip_prefix(&format!("{}.RG.", c.id)) {
             let (name, desc) = match group {
-                "core" => ("Core Registers", "TriCore general purpose and system registers"),
-                "debug" => ("Debug Registers", "OCDS debug registers"),
+                "core" => ("Core Registers", c.arch.description),
+                "debug" => ("Debug Registers", "Debug registers of the core"),
                 _ => return Err(err(ERR_INV_CONTEXT, format!("Invalid register group: {id}"))),
             };
             return Ok(vec![String::new(), json!({ "ID": id, "ParentID": c.id, "ProcessID": c.id, "Name": name, "Description": desc }).to_string()]);
         }
         let (c, idx) = self.reg_index(&id)?;
-        let r = &REGS[idx];
+        let r = &c.arch.regs[idx];
         let mut ctx = json!({
             "ID": id,
             "ParentID": format!("{}.RG.{}", c.id, if r.group == RegGroup::Debug { "debug" } else { "core" }),
@@ -563,9 +608,9 @@ impl Channel {
             ctx["DwarfID"] = json!(d);
         }
         let role = match idx {
-            REG_PC => Some("PC"),
-            REG_A10 => Some("SP"),
-            REG_A11 => Some("RET"),
+            i if i == c.arch.pc => Some("PC"),
+            i if i == c.arch.sp => Some("SP"),
+            i if i == c.arch.ra => Some("RET"),
             _ => None,
         };
         if let Some(role) = role {
@@ -587,7 +632,7 @@ impl Channel {
 
     fn reg_set(&self, a: &Args) -> Reply {
         let (c, idx) = self.reg_index(&a.string(0)?)?;
-        if REGS[idx].group != RegGroup::Debug && c.state != TargetState::Halted {
+        if c.arch.regs[idx].group != RegGroup::Debug && c.state != TargetState::Halted {
             return Err(err(ERR_IS_RUNNING, "Execution context is running"));
         }
         let bytes = B64.decode(a.string(1)?).map_err(|e| err(ERR_JSON_SYNTAX, format!("base64: {e}")))?;
@@ -617,12 +662,13 @@ impl Channel {
         }
     }
 
-    fn reresolve_breakpoints(&self, syms: &Symbols) {
+    fn reresolve_breakpoints(&self) {
         let mut added = Vec::new();
         let mut statuses = Vec::new();
         {
+            let syms = |ctx: &str| self.shared.symbols_for(ctx);
             let mut t = self.shared.bps.lock().unwrap();
-            for id in t.reresolve(self.h(), syms) {
+            for id in t.reresolve(self.h(), &syms) {
                 if t.bps[&id].planted() {
                     added.push(t.bps[&id].props.clone());
                 }
@@ -637,7 +683,7 @@ impl Channel {
         let mut changed = Vec::new();
         let mut statuses = Vec::new();
         let removed: Vec<String>;
-        let syms = self.shared.active_symbols();
+        let syms = |ctx: &str| self.shared.symbols_for(ctx);
         {
             let mut t = self.shared.bps.lock().unwrap();
             let new_ids: Vec<String> = list.iter().filter_map(|p| p.get("ID").and_then(Value::as_str).map(str::to_string)).collect();
@@ -658,7 +704,7 @@ impl Channel {
                 if unchanged {
                     continue;
                 }
-                let (id, existed) = t.insert(self.h(), props, self.id, syms.as_deref()).map_err(|e| err(ERR_JSON_SYNTAX, e))?;
+                let (id, existed) = t.insert(self.h(), props, self.id, &syms).map_err(|e| err(ERR_JSON_SYNTAX, e))?;
                 let bp = &t.bps[&id];
                 if bp.planted() || !bp.props.get("Enabled").and_then(Value::as_bool).unwrap_or(false) {
                     if existed {
@@ -737,7 +783,7 @@ impl Channel {
         if let Some(f) = self.shared.stacks.lock().unwrap().get(&c.idx) {
             return Ok(f.clone());
         }
-        let frames = crate::stack::unwind_core(self.h(), c.idx).map_err(|e| err(ERR_OTHER, e))?;
+        let frames = crate::stack::unwind_core(&self.shared, c.idx).map_err(|e| err(ERR_OTHER, e))?;
         self.shared.stacks.lock().unwrap().insert(c.idx, frames.clone());
         Ok(frames)
     }
@@ -763,10 +809,10 @@ impl Channel {
 
     fn st_context(&self, a: &Args) -> Reply {
         let ids: Vec<String> = serde_json::from_value(a.value(0)?).map_err(|e| err(ERR_JSON_SYNTAX, e.to_string()))?;
-        let syms = self.shared.active_symbols();
         let mut out = Vec::new();
         for fid in ids {
             let c = self.core(&fid)?;
+            let syms = self.shared.symbols_for(&c.id);
             let index: usize = fid
                 .rsplit_once(".F")
                 .and_then(|(_, n)| n.parse().ok())
@@ -784,9 +830,11 @@ impl Channel {
             if let Some(s) = &syms {
                 // Caller frames hold return addresses: look up the call instruction.
                 let look = if index == 0 { f.pc } else { f.pc.wrapping_sub(1) };
-                if let Some(fi) = s.function_index_at(look) {
-                    ctx["Name"] = json!(s.functions[fi].name);
-                    ctx["FuncID"] = json!(format!("FN:{fi}"));
+                if let Some((e, s)) = s.for_addr(look) {
+                    if let Some(fi) = s.function_index_at(look) {
+                        ctx["Name"] = json!(s.functions[fi].name);
+                        ctx["FuncID"] = json!(elf_id(*e, &format!("FN:{fi}")));
+                    }
                 }
                 if let Some(li) = s.line_at(look) {
                     ctx["CodeArea"] = code_area(&li);

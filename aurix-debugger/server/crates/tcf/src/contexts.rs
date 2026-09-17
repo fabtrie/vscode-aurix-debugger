@@ -3,7 +3,7 @@
 //! `S0.D0` is the chip (container), `S0.D0.C<coreid>` the cores - the
 //! extension derives thread numbers from the `C<n>` part.
 
-use aurix_core::arch::REG_PC;
+use aurix_core::arch::ArchInfo;
 use aurix_core::target::{DebugReason, TargetState};
 use aurix_core::{ops, ServerHandle};
 
@@ -17,6 +17,7 @@ pub struct CoreInfo {
     pub examined: bool,
     pub state: TargetState,
     pub reason: DebugReason,
+    pub arch: &'static ArchInfo,
 }
 
 impl CoreInfo {
@@ -37,16 +38,22 @@ pub fn cores(h: &ServerHandle) -> Vec<CoreInfo> {
                 .enumerate()
                 .map(|(i, t)| CoreInfo {
                     idx: i,
-                    id: core_id(t.core.coreid),
+                    id: core_id(t.core.coreid()),
                     name: t.name.clone(),
-                    examined: t.core.examined,
-                    state: t.core.state,
-                    reason: t.core.reason,
+                    examined: t.core.examined(),
+                    state: t.core.state(),
+                    reason: t.core.reason(),
+                    arch: t.core.arch(),
                 })
                 .collect()
         })
     })
     .unwrap_or_default()
+}
+
+/// Context ID of the target with index `idx` (empty if there is none).
+pub fn core_id_of(h: &ServerHandle, idx: usize) -> String {
+    cores(h).into_iter().find(|c| c.idx == idx).map(|c| c.id).unwrap_or_default()
 }
 
 pub fn chip_name(cores: &[CoreInfo]) -> String {
@@ -69,7 +76,11 @@ pub fn find_core(h: &ServerHandle, id: &str) -> Option<CoreInfo> {
 }
 
 pub fn read_pc(h: &ServerHandle, idx: usize) -> Option<u32> {
-    h.call(move |cx| ops::read_reg(cx, idx, REG_PC).ok()).flatten()
+    h.call(move |cx| {
+        let pc = cx.with(|c| c.targets.get(idx).map(|t| t.core.arch().pc))?;
+        ops::read_reg(cx, idx, pc).ok()
+    })
+    .flatten()
 }
 
 /// TCF suspend reason string for a core halt reason.

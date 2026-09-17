@@ -12,7 +12,7 @@ use crate::adapter::Io;
 use crate::arch::*;
 use crate::error::{other, Error, Result};
 use crate::log_info;
-use crate::target::{DebugReason, RunMode, TargetState, Transition};
+use crate::target::{DebugReason, PollOps, RunCfg, RunMode, TargetState, Transition};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Trigger {
@@ -38,15 +38,8 @@ pub struct Tricore {
     pub dbgsr: u32,
     pub triggers: [Trigger; NUM_TRIGGERS],
     cache: Vec<Option<u32>>,
-    /// `tricore tl1_halt on`: halt requests also pulse OTGS trigger line 1.
-    pub tl1_halt: bool,
-    /// `tricore tl1_step on`: a single step lets all TL1 suspend targets run for
-    /// the instruction. The step releases this core while TL1 still holds it and
-    /// then clears the TL1 hold, so all cores start in the same cycle; the step
-    /// trigger's BRKOUT latches TL1 and stops them in the same cycle.
-    pub tl1_step: bool,
-    /// `tricore irq_mask`: run modes executed with interrupts masked.
-    pub irq_mask: IrqMask,
+    /// `tricore tl1_halt`, `tl1_step`, `irq_mask` settings.
+    pub run: RunCfg,
     /// The application's ICR.IE while the debugger holds it cleared.
     irq_saved_ie: Option<bool>,
     /// PCXI and application IE when the first masked run started.
@@ -72,9 +65,7 @@ impl Tricore {
             dbgsr: 0,
             triggers: [Trigger::default(); NUM_TRIGGERS],
             cache: vec![None; REGS.len()],
-            tl1_halt: false,
-            tl1_step: false,
-            irq_mask: IrqMask::default(),
+            run: RunCfg::default(),
             irq_saved_ie: None,
             irq_run: None,
             examined: false,
@@ -120,19 +111,20 @@ impl Tricore {
     }
 
     /// Queues the reads needed for a poll.
-    pub fn poll_queue(&self, b: &mut Batch) -> (usize, usize) {
+    pub fn poll_queue(&self, b: &mut Batch) -> PollOps {
         let d = b.read32(self.csfr(DBGSR) as u64);
         let s = b.read32(self.csfr(SYSCON) as u64);
-        (d.0, s.0)
+        PollOps { all: vec![d.0, s.0], reads: vec![d.0, s.0] }
     }
 
     pub fn poll(&mut self, io: &mut Io) -> Result<Transition> {
         let v = io.read32_many(&[self.csfr(DBGSR), self.csfr(SYSCON)])?;
-        Ok(self.poll_apply(v[0], v[1]))
+        Ok(self.poll_apply(&v))
     }
 
     /// Updates the run state from DBGSR and SYSCON (boot halt).
-    pub fn poll_apply(&mut self, dbgsr: u32, syscon: u32) -> Transition {
+    pub fn poll_apply(&mut self, vals: &[u32]) -> Transition {
+        let (dbgsr, syscon) = (vals[0], vals[1]);
         self.dbgsr = dbgsr;
         let debug_halted = dbgsr & DBGSR_HALTED != 0;
         let boot = !debug_halted && syscon & SYSCON_BHALT != 0;
@@ -205,7 +197,7 @@ impl Tricore {
         if self.state == TargetState::Halted {
             return Ok(());
         }
-        if self.tl1_halt && !self.is_v18() {
+        if self.run.tl1_halt && !self.is_v18() {
             // A DBGSR halt is not a debug event and pulses no BRKOUT: force TL1
             // directly so TL1 capture-and-hold stops all TL1 suspend targets.
             io.write32_seq(&[(CBS_TLC, 0x30), (CBS_TLC, 0x0)])?;
@@ -280,7 +272,7 @@ impl Tricore {
             (self.csfr(trxevt(slot)), self.trigger_value(&step_trigger) | susp),
             (self.csfr(DBGSR), resume),
         ];
-        if self.tl1_step && !self.is_v18() {
+        if self.run.tl1_step && !self.is_v18() {
             // This core is released but still suspended by the held TL1:
             // clearing the hold starts all TL1 suspend targets in the same cycle.
             w.push((CBS_TLCHS, 0x2));
@@ -342,7 +334,7 @@ impl Tricore {
     /// Masks interrupts for a run in `mode` if `irq_mask` selects it, or
     /// gives the application its interrupt enable back otherwise.
     pub fn prepare_irq(&mut self, io: &mut Io, mode: RunMode) -> Result<()> {
-        if !self.irq_mask.applies(mode) {
+        if !self.run.irq_mask.applies(mode) {
             return self.unmask_irq(io);
         }
         let icr = io.read32(self.csfr(ICR))?;
@@ -721,9 +713,9 @@ mod tests {
         let halted_tr0 = DBGSR_DE | DBGSR_HALTED | (EVTSRC_TRIGGER0 << 8);
         // Pause after a halting reset: EVTSRC still names the cleared halt-after-reset trigger (TR0).
         let mut c = Tricore::new();
-        let _ = c.poll_apply(DBGSR_DE, 0);
+        let _ = c.poll_apply(&[DBGSR_DE, 0]);
         c.reason = DebugReason::NotHalted;
-        let _ = c.poll_apply(halted_tr0, 0);
+        let _ = c.poll_apply(&[halted_tr0, 0]);
         assert_eq!(c.reason, DebugReason::DbgRq);
         assert_eq!(c.hit_trigger(), None);
 
@@ -731,9 +723,9 @@ mod tests {
         let mut c = Tricore::new();
         c.triggers[0].enable = true;
         c.triggers[0].pc = true;
-        let _ = c.poll_apply(DBGSR_DE, 0);
+        let _ = c.poll_apply(&[DBGSR_DE, 0]);
         c.reason = DebugReason::NotHalted;
-        let _ = c.poll_apply(halted_tr0, 0);
+        let _ = c.poll_apply(&[halted_tr0, 0]);
         assert_eq!(c.reason, DebugReason::Breakpoint);
         assert_eq!(c.hit_trigger(), Some(0));
     }

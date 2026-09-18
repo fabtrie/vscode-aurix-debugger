@@ -581,6 +581,11 @@ export abstract class TCFClient extends AbstractTCFClient {
         }
     }
 
+    /** Memory or registers were written by another client of the debug server (e.g. its REST/MCP API). */
+    protected onTargetDataChanged(service: string, event: string): void {
+        this.console.log(`${service}.${event}`);
+    }
+
     //TODO: This design should be changed. Services should register their own event handler somehow then provide a way for the client to be notified...
     protected onEvent(service: string, event: string, datas: Buffer[]): void {
         switch (service) {
@@ -592,6 +597,10 @@ export abstract class TCFClient extends AbstractTCFClient {
                 break;
             case "Locator":
                 this.onLocatorEvent(event, datas);
+                break;
+            case "Memory": // memoryChanged
+            case "Registers": // registerChanged
+                this.onTargetDataChanged(service, event);
                 break;
             default:
                 this.console.log(`Unknown service event: ${service}.${event}`);

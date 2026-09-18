@@ -433,6 +433,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			protected onRunControlContextResumed(contextID: string) {
 				outer.onContextResumed(contextID);
 			}
+			protected onTargetDataChanged(): void {
+				outer.onTargetDataChanged();
+			}
 			protected onRunControlContextAdded(contextIDs: string[]) {
 				void outer.onContextsAdded(contextIDs);
 			}
@@ -3604,6 +3607,23 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.sendEvent(new ThreadEvent('exited', threadId));
 			}
 		}
+	}
+
+	private targetDataChangedTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/**
+	 * Memory or registers were written by another client of the debug server (its REST/MCP API):
+	 * the variable, watch and register views and the call stacks re-read. Bursts of writes are
+	 * coalesced into one refresh.
+	 */
+	private onTargetDataChanged() {
+		if (this.targetDataChangedTimer) {
+			return;
+		}
+		this.targetDataChangedTimer = setTimeout(() => {
+			this.targetDataChangedTimer = undefined;
+			this.sendEvent(new InvalidatedEvent(['variables', 'stacks']));
+		}, 100);
 	}
 
 	private onContextResumed(contextId: string) {

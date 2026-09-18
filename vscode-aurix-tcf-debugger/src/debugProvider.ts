@@ -187,7 +187,9 @@ class DebugLogger implements TCFLogger {
 }
 
 type BreakpointTuple = { id: number; file: string; line: number; verified: boolean };
-type InstructionBreakpointTuple = { id: number; address: number; verified: boolean };
+/** `contextId` is the core whose disassembly the breakpoint was set in: an MCS program address
+ *  means nothing to a TriCore, so the breakpoint has to be planted on that core only. */
+type InstructionBreakpointTuple = { id: number; address: number; verified: boolean; contextId?: string };
 type WatchExpressionState = { result: string; liveRefreshable: boolean };
 
 class BreakpointsManager {
@@ -275,7 +277,7 @@ class InstructionBreakpointsManager {
 		this.byAddress.delete(b.address);
 	}
 
-	updateAddresses(addresses: number[], allocateId: () => number): InstructionBreakpointTuple[] {
+	updateAddresses(addresses: number[], allocateId: () => number, contextId?: string): InstructionBreakpointTuple[] {
 		const next = new Set(addresses);
 		// Remove deleted addresses
 		for (const [addr, tuple] of Array.from(this.byAddress.entries())) {
@@ -287,7 +289,7 @@ class InstructionBreakpointsManager {
 		// Add new addresses
 		for (const addr of addresses) {
 			if (!this.byAddress.has(addr)) {
-				const tuple: InstructionBreakpointTuple = { id: allocateId(), address: addr, verified: false };
+				const tuple: InstructionBreakpointTuple = { id: allocateId(), address: addr, verified: false, contextId };
 				this.byAddress.set(addr, tuple);
 				this.byId.set(tuple.id, tuple);
 			}
@@ -323,6 +325,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private stackTraceDepth: number = -1;
 	private instructionSteppingEnabled = false;
 	private execRanges: Array<{ start: number; end: number }> = [];
+	/** Architecture per RunControl context, filled by initMemoryMap (see contextMachine). */
+	private contextMachines = new Map<string, number>();
 	private breakpointPrefix = DEFAULT_BREAKPOINTS_PREFIX;
 	private pathMapper: (p: string) => string = (p) => p;
 	private sourceResolverBaseDir: string | undefined;
@@ -492,10 +496,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// Query all threads/contexts and pause any that are running.
 		// Retries a second time to catch any cores that were still starting up.
 		// Used for pauseOnEntry and reset+halt scenarios.
+		//
+		// Only the cores that break together anyway (the TriCores and the HSM, through TL1) are
+		// paused. A GTM MCS channel is left running: disabling it stops the sequencer the
+		// application drives its PWM with, which changes the machine's behaviour rather than just
+		// observing it. Pausing a single channel stays possible from its own thread.
 		try {
 			for (let attempt = 0; attempt < 2; attempt++) {
 				const infos = await this.tcfClient.getThreads();
-				const running = infos.filter(t => !t.state?.suspended).map(t => t.info.ID);
+				this.noteContextMachines(infos);
+				const running = infos
+					.filter(t => !t.state?.suspended && this.stopsAllCores(t.info.ID))
+					.map(t => t.info.ID);
 				const suspended = infos.filter(t => Boolean(t.state?.suspended)).map(t => t.info.ID);
 				this.startupLog(
 					`pauseAllCoresBestEffort(${tag}) attempt=${attempt + 1}: running=${running.length ? running.join(', ') : '(none)'} suspended=${suspended.length ? suspended.join(', ') : '(none)'}`
@@ -601,7 +613,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.tcfLogger.log(
 			`[dap] Refocus: from=${from} requestedThreadId=${requested.threadId} requestedCtx=${requested.ctx} -> breakpointThreadId=${p.threadId} breakpointCtx=${p.ctx}`
 		);
-		this.sendStoppedEvent(StoppedEventReason.breakpoint, p.threadId, { allThreadsStopped: true });
+		this.sendStoppedEvent(StoppedEventReason.breakpoint, p.threadId, { allThreadsStopped: p.ctx ? this.stopsAllCores(p.ctx) : true });
 	}
 
 	private tryResolveFrame(frameId: number): { threadId?: number; ctx?: string; stack?: string } {
@@ -1041,6 +1053,27 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
+	/** Whether a stop of this context also stops the other cores.
+	 *
+	 *  The TriCores (and the HSM) break together through the OTGS trigger line TL1, so reporting
+	 *  allThreadsStopped keeps the UI in step with the hardware. A GTM MCS breakpoint stops only its
+	 *  own channel - claiming all threads stopped would make VS Code show the still running TriCores
+	 *  as paused and ask the user to resume each of them by hand.
+	 */
+	private stopsAllCores(contextId: string): boolean {
+		return this.contextMachines.get(contextId) !== AurixTCFDebugSession.MACHINE_MCS_ASM;
+	}
+
+	/** Records each context's architecture, so stopsAllCores() also knows contexts that appeared
+	 *  after initMemoryMap ran (or when no symbol files are configured at all). */
+	private noteContextMachines(infos: Array<{ info: any }>): void {
+		for (const t of infos) {
+			if (typeof t.info?.ID === 'string') {
+				this.contextMachines.set(t.info.ID, AurixTCFDebugSession.contextMachine(t.info));
+			}
+		}
+	}
+
 	/** Whether a "cores" entry names the context: ID, name or name without the chip prefix, `*` and `?` as wildcards. */
 	private static coreMatches(pattern: string, contextId: string, contextName: string): boolean {
 		const re = new RegExp('^' + pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
@@ -1086,6 +1119,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				const coreInfo = AurixTCFDebugSession.extractCoreType(contextId)
 					?? AurixTCFDebugSession.extractCoreType(contextName);
 				const machine = AurixTCFDebugSession.contextMachine(thread.info);
+				this.contextMachines.set(contextId, machine);
 
 				// Primary ELF first, then the matching symbol files. A file of another
 				// architecture (e.g. the TriCore program on the HSM) is left out.
@@ -1247,6 +1281,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	): Promise<void> {
 		try {
 			const infos = await this.tcfClient.getThreads();
+			this.noteContextMachines(infos);
 			const suspended = infos.filter(t => Boolean(t.state?.suspended)).map(t => t.info.ID);
 			this.startupLog(`emitStoppedForAllSuspendedAtStartup: suspended=${suspended.length ? suspended.join(', ') : '(none)'}`);
 			const targetReason = opts?.targetReason ?? StoppedEventReason.entry;
@@ -1264,10 +1299,23 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (!focusCtx || !suspended.includes(focusCtx)) {
 				focusCtx = suspended.length > 0 ? suspended[0] : undefined;
 			}
+			// allThreadsStopped is only true when nothing is left running - a GTM MCS channel keeps
+			// going while the TriCores are halted, and claiming otherwise makes VS Code show it as
+			// paused and demand a resume for it. With a channel still running, the other suspended
+			// cores get their own (focus preserving) event instead.
+			const allStopped = infos.every(t => Boolean(t.state?.suspended));
 			if (focusCtx) {
 				const threadId = this.getOrAssignThreadId(focusCtx);
-				this.sendStoppedEvent(targetReason, threadId, { allThreadsStopped: true, preserveFocus: false });
-				this.startupLog(`emitStoppedForAllSuspendedAtStartup: emitted ${targetReason} for ${focusCtx} (threadId=${threadId}) allThreadsStopped=true`);
+				this.sendStoppedEvent(targetReason, threadId, { allThreadsStopped: allStopped, preserveFocus: false });
+				this.startupLog(`emitStoppedForAllSuspendedAtStartup: emitted ${targetReason} for ${focusCtx} (threadId=${threadId}) allThreadsStopped=${String(allStopped)}`);
+				if (!allStopped) {
+					const otherReason = opts?.otherReason ?? targetReason;
+					for (const ctx of suspended) {
+						if (ctx !== focusCtx) {
+							this.sendStoppedEvent(otherReason, this.getOrAssignThreadId(ctx), { preserveFocus: true });
+						}
+					}
+				}
 			}
 		} catch (e) {
 			this.startupLog(`emitStoppedForAllSuspendedAtStartup: failed: ${String(e)}`);
@@ -3068,6 +3116,24 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		//  - pause button of a core in the Call Stack view: that core;
 		//  - toolbar pause button (VS Code sends the focused thread): the launch core (core 0).
 		const requested = this.threadIdToContext.get(args.threadId);
+
+		// A GTM MCS channel is not part of the TL1 group: pausing it stops that channel alone, and
+		// pausing anything else must leave it running.
+		if (requested && !this.stopsAllCores(requested)) {
+			this.focusLog(`pauseRequest threadId=${args.threadId} ctx=${requested}: channel-local pause`);
+			this.cancelPendingPauseStoppedTimers('pauseRequest');
+			try {
+				await this.tcfClient.pause(requested);
+			} catch (e) {
+				this.tcfLogger.error(`pause ${requested} failed: ${String(e)}`);
+			}
+			this.onThreadSuspended(args.threadId);
+			this.sendStoppedEvent(StoppedEventReason.pause, args.threadId, { allThreadsStopped: false });
+			void this.emitSourceLocation(requested);
+			this.sendResponse(response);
+			return;
+		}
+
 		const fromToolbar = this.activeThreadId === undefined || args.threadId === this.activeThreadId;
 		const focusCtx = fromToolbar ? (await this.pickContextIdForCore(this.launchCore ?? 0)) ?? requested : requested;
 		this.focusLog(`pauseRequest threadId=${args.threadId} active=${String(this.activeThreadId)} toolbar=${fromToolbar} focus=${String(focusCtx)}`);
@@ -3151,7 +3217,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.tcfLogger.log(`[dap] SetInstructionBreakpointsRequest count=${requestAddrs.length} addrs=${refs.join(', ')}`);
 		}
 
-		const tuples = this.instructionBreakpointsManager.updateAddresses(addrs, () => this.breakpointsManager.allocateId());
+		// The disassembly view belongs to one core, and its addresses only make sense there
+		// (MCS program addresses start at 0). Remember which core the breakpoint came from.
+		const owner = this.focusedCoreContext
+			?? (this.activeThreadId !== undefined ? this.threadIdToContext.get(this.activeThreadId) : undefined);
+		const tuples = this.instructionBreakpointsManager.updateAddresses(addrs, () => this.breakpointsManager.allocateId(), owner);
 		if (this.breakpointsManager.configured) {
 			await this.syncAllBreakpoints();
 		}
@@ -3235,13 +3305,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 		for (const b of instr) {
 			const location = `0x${b.address.toString(16)}`;
+			// A breakpoint set in a core's disassembly belongs to that core; only fall back to the
+			// launch core for breakpoints whose origin we do not know.
+			const contextIds = b.contextId ? [b.contextId] : instrContextIds;
 			data.push({
 				ID: this.breakpointIdToTcfId(b.id),
 				Enabled: true,
 				Address: location,
 				Location: location,
 				BreakpointType: BreakpointType.Hardware,
-				ContextIds: instrContextIds && instrContextIds.length > 0 ? instrContextIds : undefined,
+				ContextIds: contextIds && contextIds.length > 0 ? contextIds : undefined,
 			});
 		}
 		await this.tcfClient.setBreakpointsList(data);
@@ -3318,7 +3391,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const threadId = this.getOrAssignThreadId(contextId);
 			this.onThreadSuspended(threadId);
 			this.notePrimaryBreakpointStop(threadId, contextId);
-			this.sendStoppedEvent(StoppedEventReason.breakpoint, threadId, { allThreadsStopped: true });
+			this.sendStoppedEvent(StoppedEventReason.breakpoint, threadId, { allThreadsStopped: this.stopsAllCores(contextId) });
 			void this.emitSourceLocation(contextId);
 		}, this.breakpointStopDelayMs);
 		this.pendingBreakpointStoppedTimers.set(contextId, timer);
@@ -3423,7 +3496,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.cancelPendingPauseStoppedTimers('runcontrolBreakpoint');
 			this.suppressPauseStoppedUntilMs = Date.now() + Math.max(150, this.stopStormPauseDelayMs * 4);
 			this.notePrimaryBreakpointStop(threadId, contextId);
-			this.sendStoppedEvent(reason, threadId, { allThreadsStopped: true });
+			this.sendStoppedEvent(reason, threadId, { allThreadsStopped: this.stopsAllCores(contextId) });
 			void this.emitSourceLocation(contextId);
 			return;
 		}

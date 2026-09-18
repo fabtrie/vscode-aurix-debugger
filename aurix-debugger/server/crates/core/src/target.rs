@@ -387,6 +387,19 @@ pub struct Watchpoint {
     pub slot: u8,
 }
 
+/// Re-examination interval of a target whose poll fails right after each re-examination (e.g. the
+/// HSM while the device is in reset).
+pub const FLAP_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long the polls of a target must fail without interruption before it counts as failed. The
+/// HSM debug window rejects single accesses now and then while the host software has not started
+/// yet (e.g. after a halting reset).
+pub const POLL_FAIL_TIME: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long a target must be inaccessible before the frontends show it as such. Shorter outages
+/// (a reset) are not shown.
+pub const UNREACHABLE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub struct TargetEntry {
     pub name: String,
     pub type_name: String,
@@ -405,6 +418,18 @@ pub struct TargetEntry {
     pub reset_halt: bool,
     /// Last examination attempt of the background poll.
     pub last_examine: Option<std::time::Instant>,
+    /// First poll of the current run of failed polls (see [`POLL_FAIL_TIME`]).
+    pub failing_since: Option<std::time::Instant>,
+    /// The current failure was logged as an error, so its recovery is logged too.
+    pub failure_logged: bool,
+    /// Re-examined after this many failed attempts; reported once a poll succeeds.
+    pub recovering: Option<u32>,
+    /// Failed again right after a re-examination: re-examined at most every [`FLAP_RETRY`].
+    pub flapping: bool,
+    /// Not accessible since (unexamined or polls failing).
+    pub down_since: Option<std::time::Instant>,
+    /// Inaccessible for [`UNREACHABLE_TIME`]: shown as such by the frontends.
+    pub unreachable: bool,
 }
 
 impl TargetEntry {
@@ -423,6 +448,12 @@ impl TargetEntry {
             watchpoints: Vec::new(),
             reset_halt: false,
             last_examine: None,
+            failing_since: None,
+            failure_logged: false,
+            recovering: None,
+            flapping: false,
+            down_since: None,
+            unreachable: false,
         }
     }
 

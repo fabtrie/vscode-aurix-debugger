@@ -14,6 +14,9 @@ pub enum Event {
     /// `reset` command finished.
     ResetDone,
     Examined { target: usize, name: String },
+    /// A target has not been accessible for [`crate::target::UNREACHABLE_TIME`] (e.g. target not
+    /// powered); it is accessible again with the next `Examined`.
+    Unreachable { target: usize },
     Log { text: String },
     Shutdown,
 }

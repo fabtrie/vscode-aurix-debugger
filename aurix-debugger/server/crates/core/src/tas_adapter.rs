@@ -1,7 +1,7 @@
 //! `adapter driver tas_client`: Infineon TasServer (miniWiggler, DAP).
 
 use std::any::Any;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tas::{Batch, ConnectMode, OpResult, TasClient};
 
@@ -48,6 +48,14 @@ pub struct TasAdapter {
     identifier: String,
     /// `tas-client device_type`: JTAG ID the TasServer should operate the device as (0 = auto).
     device_type: u32,
+    /// Settings of `init`, applied when the device is connected.
+    settings: AdapterSettings,
+    /// Session started on the access hardware.
+    session: bool,
+    /// Device connected.
+    device: bool,
+    /// Last device connect attempt.
+    last_try: Option<Instant>,
 }
 
 impl Default for TasAdapter {
@@ -59,6 +67,10 @@ impl Default for TasAdapter {
             srst_asserted: false,
             identifier: String::new(),
             device_type: 0,
+            settings: AdapterSettings::default(),
+            session: false,
+            device: false,
+            last_try: None,
         }
     }
 }
@@ -120,7 +132,66 @@ impl TasAdapter {
         let r = self.client()?.execute(&b)?;
         check(&r[0], addr, true)
     }
+
+    /// Starts the session on the access hardware (once) and connects the device.
+    fn connect_device(&mut self) -> Result<DeviceInfo> {
+        let s = self.settings.clone();
+        if !self.session {
+            let c = self.client()?;
+            let targets = c.get_targets()?;
+            let target = targets
+                .iter()
+                .find(|t| match &s.serial {
+                    Some(serial) => t.identifier.contains(serial.as_str()),
+                    None => t.device_type != 0,
+                })
+                .or_else(|| if s.serial.is_none() { targets.first() } else { None })
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Adapter(format!(
+                        "TAS: no matching target (found: {})",
+                        targets.iter().map(|t| t.identifier.as_str()).collect::<Vec<_>>().join(", ")
+                    ))
+                })?;
+            c.session_start(&target.identifier, "aurix-dbg", "")?;
+            c.set_timeout(Duration::from_millis(3000))?;
+            self.identifier = target.identifier;
+            self.session = true;
+            // Operate the device as this JTAG ID instead of the one the access hardware read (e.g.
+            // the SCR, which only appears once the application started it in its OCDS SoC DAP mode).
+            if self.device_type != 0 {
+                let dt = self.device_type;
+                self.am15_write(AM15_RW_DEVICE_TYPE_SET, &dt.to_le_bytes())?;
+                log_info!("TAS: operating the device as type 0x{dt:08x}");
+            }
+        }
+        let mode = if s.connect_under_srst { ConnectMode::ResetAndHalt } else { ConnectMode::HotAttach };
+        let device_id = self.client()?.device_connect(mode)?;
+        self.device = true;
+        log_info!("TAS: {} (device 0x{device_id:08x})", self.identifier);
+        if let Some(khz) = s.speed_khz {
+            if let Err(e) = self.set_speed_khz(khz) {
+                log_warn!("TAS: failed to set adapter speed {khz} kHz: {e}");
+            }
+        }
+        Ok(DeviceInfo { device_id, description: self.identifier.clone() })
+    }
+
+    /// Connects the device if it is not yet, at most every [`CONNECT_RETRY`].
+    fn ensure_device(&mut self) -> Result<()> {
+        if self.device {
+            return Ok(());
+        }
+        if self.last_try.is_some_and(|t| t.elapsed() < CONNECT_RETRY) {
+            return Err(Error::Adapter("TAS: no device connected (target not powered?)".into()));
+        }
+        self.last_try = Some(Instant::now());
+        self.connect_device().map(|_| ())
+    }
 }
+
+/// Interval of device connect attempts while no device is connected.
+const CONNECT_RETRY: Duration = Duration::from_millis(500);
 
 impl Adapter for TasAdapter {
     fn driver_name(&self) -> &'static str {
@@ -185,43 +256,22 @@ impl Adapter for TasAdapter {
         }
     }
 
+    /// Connects to the TasServer. The device may be missing (target not powered): the server then
+    /// starts anyway and every access tries to connect it again (see [`Self::connect_device`]).
     fn init(&mut self, s: &AdapterSettings) -> Result<DeviceInfo> {
-        let (mut c, info) = TasClient::connect(&self.host, self.port, "aurix-dbg")
+        let (c, info) = TasClient::connect(&self.host, self.port, "aurix-dbg")
             .map_err(|e| Error::Adapter(format!("TAS: cannot connect to TasServer at {}:{}: {e}", self.host, self.port)))?;
-        let targets = c.get_targets()?;
-        let target = targets
-            .iter()
-            .find(|t| match &s.serial {
-                Some(serial) => t.identifier.contains(serial.as_str()),
-                None => t.device_type != 0,
-            })
-            .or_else(|| if s.serial.is_none() { targets.first() } else { None })
-            .cloned()
-            .ok_or_else(|| Error::Adapter(format!("TAS: no matching target (found: {})", targets.iter().map(|t| t.identifier.as_str()).collect::<Vec<_>>().join(", "))))?;
-        c.session_start(&target.identifier, "aurix-dbg", "")?;
-        c.set_timeout(Duration::from_millis(3000))?;
+        log_info!("TAS: {} v{}.{}", info.name, info.v_major, info.v_minor);
         self.client = Some(c);
-        // Operate the device as this JTAG ID instead of the one the access hardware read (e.g. the
-        // SCR, which only appears once the application started it in its OCDS SoC DAP mode).
-        if self.device_type != 0 {
-            let dt = self.device_type;
-            self.am15_write(AM15_RW_DEVICE_TYPE_SET, &dt.to_le_bytes())?;
-            log_info!("TAS: operating the device as type 0x{dt:08x}");
-        }
-        let c = self.client.as_mut().unwrap();
-        let mode = if s.connect_under_srst { ConnectMode::ResetAndHalt } else { ConnectMode::HotAttach };
-        let device_id = c.device_connect(mode)?;
-        log_info!(
-            "TAS: {} v{}.{}, {} (device 0x{:08x})",
-            info.name, info.v_major, info.v_minor, target.identifier, device_id
-        );
-        self.identifier = target.identifier.clone();
-        if let Some(khz) = s.speed_khz {
-            if let Err(e) = self.set_speed_khz(khz) {
-                log_warn!("TAS: failed to set adapter speed {khz} kHz: {e}");
+        self.settings = s.clone();
+        self.last_try = Some(Instant::now());
+        match self.connect_device() {
+            Ok(info) => Ok(info),
+            Err(e) => {
+                log_warn!("TAS: no device ({e}) - target not powered? Waiting for it");
+                Ok(DeviceInfo { device_id: 0, description: "not connected".into() })
             }
         }
-        Ok(DeviceInfo { device_id, description: target.identifier })
     }
 
     fn initialized(&self) -> bool {
@@ -229,6 +279,7 @@ impl Adapter for TasAdapter {
     }
 
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        self.ensure_device()?;
         Ok(self.client()?.execute(batch)?)
     }
 
@@ -261,11 +312,18 @@ impl Adapter for TasAdapter {
     }
 
     fn set_speed_khz(&mut self, khz: u32) -> Result<()> {
+        // Applied when the device is connected.
+        self.settings.speed_khz = Some(khz);
+        if !self.device {
+            return Ok(());
+        }
         self.am15_write(AM15_RW_ACC_HW_FREQUENCY, &(khz.saturating_mul(1000)).to_le_bytes())
     }
 
     fn quit(&mut self) {
         self.client = None;
+        self.session = false;
+        self.device = false;
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

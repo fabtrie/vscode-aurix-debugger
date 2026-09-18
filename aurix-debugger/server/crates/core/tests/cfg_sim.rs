@@ -361,6 +361,75 @@ fn hsm_without_debug_access_stays_unexamined_and_is_retried() {
     assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
 }
 
+/// A target whose poll fails right after every successful re-examination (the HSM while the device
+/// is in reset) counts as one failure: it is not reported as recovered and is retried less often.
+#[test]
+fn target_failing_after_each_reexamination_is_retried_slowly() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    let hsm = s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x.hsm").unwrap());
+    let entry = |s: &Server| s.cx().with(|c| (c.targets[hsm].poll_failures, c.targets[hsm].recovering, c.targets[hsm].flapping));
+    let access = |s: &Server, on: bool| with_sim(s, |sim| sim.hsm.debug_enabled = on);
+    let poll_until_failed = |s: &Server| {
+        let t0 = std::time::Instant::now();
+        while entry(s).0 == 0 {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(2), "poll failure not detected");
+            ops::poll_all(&s.cx());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+
+    // A single failed poll is ignored.
+    access(&s, false);
+    ops::poll_all(&s.cx());
+    access(&s, true);
+    ops::poll_all(&s.cx());
+    assert_eq!(entry(&s), (0, None, false));
+    access(&s, false);
+    poll_until_failed(&s);
+    // Examined again, but the polls fail again: still the same failure.
+    access(&s, true);
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
+    assert!(entry(&s).1.is_some());
+    access(&s, false);
+    poll_until_failed(&s);
+    let (failures, recovering, flapping) = entry(&s);
+    assert!(failures > 1 && recovering.is_none() && flapping, "{:?}", entry(&s));
+    // Not re-examined before FLAP_RETRY.
+    access(&s, true);
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "0");
+    // Recovered once a poll after the re-examination succeeds.
+    s.cx().with(|c| c.targets[hsm].last_examine = None);
+    ops::poll_all(&s.cx());
+    ops::poll_all(&s.cx());
+    assert_eq!(entry(&s), (0, None, false));
+    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
+}
+
+/// A target inaccessible for UNREACHABLE_TIME is flagged for the frontends until it is examined
+/// again.
+#[test]
+fn inaccessible_target_is_flagged_unreachable() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    let hsm = s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x.hsm").unwrap());
+    let unreachable = |s: &Server| s.cx().with(|c| c.targets[hsm].unreachable);
+    with_sim(&s, |sim| sim.hsm.debug_enabled = false);
+    let t0 = std::time::Instant::now();
+    while !unreachable(&s) {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(3), "not flagged unreachable");
+        ops::poll_all(&s.cx());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(t0.elapsed() >= aurix_core::target::UNREACHABLE_TIME);
+    with_sim(&s, |sim| sim.hsm.debug_enabled = true);
+    s.cx().with(|c| c.targets[hsm].last_examine = None);
+    ops::poll_all(&s.cx());
+    assert!(!unreachable(&s));
+}
+
 #[test]
 fn hsm_halt_registers_step_and_resume() {
     let s = server();

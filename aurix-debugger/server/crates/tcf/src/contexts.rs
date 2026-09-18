@@ -17,6 +17,8 @@ pub struct CoreInfo {
     pub examined: bool,
     /// Listed as a thread (e.g. MCS channels only once they ran).
     pub visible: bool,
+    /// False while the core has not been accessible for a while (e.g. target not powered).
+    pub reachable: bool,
     pub state: TargetState,
     pub reason: DebugReason,
     pub arch: &'static ArchInfo,
@@ -40,7 +42,9 @@ pub fn tcf_arch(arch: &ArchInfo) -> &'static str {
 /// RunControl context of a core (resume modes: 0 resume, 1 step over, 2 step into, 3 step over
 /// line, 4 step into line, 5 step out).
 pub fn context_json(c: &CoreInfo) -> serde_json::Value {
-    serde_json::json!({ "ID": c.id, "ParentID": CONTAINER, "ProcessID": CONTAINER, "Name": c.name,
+    // An inaccessible core keeps running in the frontend (TCF has no such state): its name says it.
+    let name = if c.reachable { c.name.clone() } else { format!("{} (not accessible)", c.name) };
+    serde_json::json!({ "ID": c.id, "ParentID": CONTAINER, "ProcessID": CONTAINER, "Name": name,
             "IsContainer": false, "HasState": true, "CanSuspend": true, "CanResume": 0x3F,
             "CanCount": 0x3E, "CanTerminate": false, "RCGroup": CONTAINER, "SymbolsGroup": CONTAINER,
             "CPUGroup": CONTAINER, "WordSize": 4, "Architecture": tcf_arch(c.arch) })
@@ -62,6 +66,7 @@ pub fn cores(h: &ServerHandle) -> Vec<CoreInfo> {
                     name: t.name.clone(),
                     examined: t.core.examined(),
                     visible: t.core.visible(),
+                    reachable: !t.unreachable,
                     state: t.core.state(),
                     reason: t.core.reason(),
                     arch: t.core.arch(),

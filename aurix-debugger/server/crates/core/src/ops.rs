@@ -12,7 +12,7 @@ use crate::arch::*;
 use crate::ctx::{Cx, Mode};
 use crate::error::{other, usage, Error, Result};
 use crate::events::{emit, Event};
-use crate::target::{BpKind, Breakpoint, Core, DebugReason, RunMode, TargetState, Transition, WatchAccess, Watchpoint};
+use crate::target::{BpKind, Breakpoint, Core, DebugReason, RunMode, TargetState, Transition, WatchAccess, Watchpoint, FLAP_RETRY, POLL_FAIL_TIME, UNREACHABLE_TIME};
 use crate::{log_debug, log_error, log_info, log_warn};
 
 /// Runs a target event handler (`$t configure -event name body`).
@@ -89,6 +89,12 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
             Err(err)
         }
         Ok(tr) => {
+            // Accessible again before the halt is reported, so frontends list the core first.
+            cx.with(|c| {
+                let e = &mut c.targets[t];
+                e.down_since = None;
+                e.unreachable = false;
+            });
             handle_transition(cx, t, tr);
             fire(cx, t, "examine-end");
             if !quiet {
@@ -169,15 +175,28 @@ pub fn poll_all(cx: &Cx) {
         for (i, ops) in handles {
             if ops.all.iter().all(|&h| r[h].ok()) {
                 let vals: Vec<u32> = ops.reads.iter().map(|&h| r[h].u32()).collect();
-                out.push((i, c.targets[i].core.poll_apply(&vals)));
+                let e = &mut c.targets[i];
+                out.push((i, e.core.poll_apply(&vals)));
+                e.failing_since = None;
+                e.flapping = false;
+                if let Some(n) = e.recovering.take() {
+                    if std::mem::take(&mut e.failure_logged) {
+                        log_info!("[{}] Reexamined after {n} attempt(s)", e.name);
+                    }
+                }
             } else if ops.all.iter().all(|&h| r[h].ok() || r[h].err == tas::PL0_ERR_CONSEQUENTIAL) {
                 // Not executed because an access of another target failed before: polled again
                 // next period.
             } else {
-                if let Some(&h) = ops.all.iter().find(|&&h| !r[h].ok()) {
-                    log_debug!("[{}] poll access {h} failed: {}", c.targets[i].name, tas::pl_err_name(r[h].err));
+                let e = &mut c.targets[i];
+                if let Some(&h) = ops.all.iter().find(|&&h| !r[h].ok() && r[h].err != tas::PL0_ERR_CONSEQUENTIAL) {
+                    log_debug!("[{}] poll access {h} failed: {}", e.name, tas::pl_err_name(r[h].err));
                 }
-                failed.push(i);
+                // A single failed poll keeps the state; only failures lasting POLL_FAIL_TIME count.
+                let now = Instant::now();
+                if now.duration_since(*e.failing_since.get_or_insert(now)) >= POLL_FAIL_TIME {
+                    failed.push(i);
+                }
             }
         }
         // Follow-ups needing target access (e.g. MCS breakpoints overwritten by a program reload).
@@ -230,7 +249,8 @@ pub fn poll_all(cx: &Cx) {
             .enumerate()
             .filter(|(_, e)| (e.poll_failures > 0 || !e.core.examined()) && !e.defer_examine)
             .filter_map(|(i, e)| {
-                let due = e.last_examine.is_none_or(|t| now.duration_since(t) >= e.core.examine_interval());
+                let interval = if e.flapping { FLAP_RETRY.max(e.core.examine_interval()) } else { e.core.examine_interval() };
+                let due = e.last_examine.is_none_or(|t| now.duration_since(t) >= interval);
                 due.then(|| {
                     e.last_examine = Some(now);
                     i
@@ -241,20 +261,52 @@ pub fn poll_all(cx: &Cx) {
     for t in pending {
         let attempts = cx.with(|c| c.targets[t].poll_failures);
         match examine_one(cx, t, true) {
-            Ok(()) => {
-                cx.with(|c| c.targets[t].poll_failures = 0);
-                log_info!("[{}] Reexamined after {} attempt(s)", target_name(cx, t), attempts.max(1));
-            }
+            // Recovered once the next background poll succeeds.
+            Ok(()) => cx.with(|c| {
+                let e = &mut c.targets[t];
+                e.poll_failures = 0;
+                e.recovering = Some(attempts.max(1));
+            }),
             Err(_) => cx.with(|c| c.targets[t].poll_failures = attempts.saturating_add(1).max(1)),
         }
+    }
+
+    // Targets inaccessible for UNREACHABLE_TIME (e.g. not powered) are shown as such.
+    let unreachable: Vec<usize> = cx.with(|c| {
+        let now = Instant::now();
+        c.targets
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                if (e.core.examined() && e.poll_failures == 0) || e.defer_examine {
+                    e.down_since = None;
+                    return None;
+                }
+                let since = *e.down_since.get_or_insert(now);
+                (!e.unreachable && now.duration_since(since) >= UNREACHABLE_TIME).then(|| {
+                    e.unreachable = true;
+                    i
+                })
+            })
+            .collect()
+    });
+    for target in unreachable {
+        emit(Event::Unreachable { target });
     }
 }
 
 fn mark_poll_failed(cx: &Cx, t: usize, why: &str) {
     let first = cx.with(|c| {
         let e = &mut c.targets[t];
-        let first = e.poll_failures == 0;
+        let first = e.poll_failures == 0 && e.recovering.is_none();
+        // Failed again before a poll succeeded: still the same failure, retried less often.
+        if let Some(n) = e.recovering.take() {
+            e.poll_failures = n;
+            e.flapping = true;
+        }
         e.poll_failures = e.poll_failures.max(1);
+        e.failing_since = None;
+        e.failure_logged |= first;
         e.core.set_examined(false);
         first
     });
@@ -512,7 +564,13 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
         if !cx.with(|c| c.targets[t].core.examined()) {
             // Cores that are only accessible after the startup software ran fail quietly.
             let quiet = cx.with(|c| !c.targets[t].core.examine_interval().is_zero());
-            let _ = examine_one(cx, t, quiet);
+            // Failed targets are examined again by the background poll; their recovery is logged.
+            if examine_one(cx, t, quiet).is_err() && !quiet {
+                cx.with(|c| {
+                    c.targets[t].failure_logged = true;
+                    c.targets[t].unreachable = true;
+                });
+            }
         }
     }
     for &t in &all {
@@ -589,7 +647,8 @@ pub fn init(cx: &Cx) -> Result<()> {
         let settings = c.adapter_settings.clone();
         let info = c.adapter.as_deref_mut().unwrap().init(&settings)?;
         for tap in &c.taps {
-            if !tap.expected_ids.is_empty() && !tap.expected_ids.contains(&info.device_id) {
+            // Device ID 0: not connected yet (target not powered), checked by the examination.
+            if info.device_id != 0 && !tap.expected_ids.is_empty() && !tap.expected_ids.contains(&info.device_id) {
                 return Err(other(format!(
                     "{}: device reports ID 0x{:08x}, expected {} - wrong target configuration?",
                     tap.name,
@@ -609,7 +668,13 @@ pub fn init(cx: &Cx) -> Result<()> {
     for t in 0..n {
         if !cx.with(|c| c.targets[t].defer_examine) {
             let quiet = cx.with(|c| !c.targets[t].core.examine_interval().is_zero());
-            let _ = examine_one(cx, t, quiet);
+            // Failed targets are examined again by the background poll; their recovery is logged.
+            if examine_one(cx, t, quiet).is_err() && !quiet {
+                cx.with(|c| {
+                    c.targets[t].failure_logged = true;
+                    c.targets[t].unreachable = true;
+                });
+            }
         }
     }
     // A reset that happened before we attached is not a "detected" reset.

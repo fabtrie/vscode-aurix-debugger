@@ -1,6 +1,6 @@
 //! Turns core events into TCF events for all connected clients.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
 
@@ -16,7 +16,7 @@ use crate::Shared;
 pub fn start(shared: Arc<Shared>) {
     let rx = shared.handle.subscribe();
     thread::spawn(move || {
-        let mut listed: BTreeSet<String> = cores(&shared.handle).into_iter().filter(|c| c.visible).map(|c| c.id).collect();
+        let mut listed: BTreeMap<String, bool> = cores(&shared.handle).into_iter().filter(|c| c.visible).map(|c| (c.id, c.reachable)).collect();
         for ev in rx {
             if !matches!(ev, Event::Shutdown) {
                 sync_listed(&shared, &mut listed);
@@ -61,18 +61,25 @@ pub fn start(shared: Arc<Shared>) {
 }
 
 /// Announces cores that became visible (e.g. an MCS channel that started running) or were hidden
-/// again (a reset) as RunControl contextAdded / contextRemoved.
-fn sync_listed(shared: &Shared, listed: &mut BTreeSet<String>) {
-    let all = cores(&shared.handle);
-    let added: Vec<Value> = all.iter().filter(|c| c.visible && !listed.contains(&c.id)).map(context_json).collect();
-    let removed: Vec<String> = listed.iter().filter(|id| !all.iter().any(|c| c.visible && &c.id == *id)).cloned().collect();
-    if !added.is_empty() {
-        shared.broadcast(&wire::event("RunControl", "contextAdded", &[Value::from(added.clone()).to_string()]));
-    }
+/// again (a reset) as RunControl contextAdded / contextRemoved. A core whose accessibility changed
+/// is removed and added again, so the frontend shows its new name.
+fn sync_listed(shared: &Shared, listed: &mut BTreeMap<String, bool>) {
+    let all: Vec<CoreInfo> = cores(&shared.handle).into_iter().filter(|c| c.visible).collect();
+    let changed = |c: &CoreInfo| listed.get(&c.id).is_some_and(|&r| r != c.reachable);
+    let added: Vec<Value> = all.iter().filter(|c| !listed.contains_key(&c.id) || changed(c)).map(context_json).collect();
+    let removed: Vec<String> = listed
+        .keys()
+        .filter(|id| !all.iter().any(|c| &c.id == *id))
+        .cloned()
+        .chain(all.iter().filter(|c| changed(c)).map(|c| c.id.clone()))
+        .collect();
     if !removed.is_empty() {
         shared.broadcast(&wire::event("RunControl", "contextRemoved", &[json!(removed).to_string()]));
     }
-    *listed = all.into_iter().filter(|c| c.visible).map(|c| c.id).collect();
+    if !added.is_empty() {
+        shared.broadcast(&wire::event("RunControl", "contextAdded", &[Value::from(added.clone()).to_string()]));
+    }
+    *listed = all.into_iter().map(|c| (c.id, c.reachable)).collect();
 }
 
 fn core_by_index(shared: &Shared, idx: usize) -> Option<CoreInfo> {

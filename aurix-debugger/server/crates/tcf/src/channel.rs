@@ -107,18 +107,7 @@ pub fn run(shared: Arc<Shared>, id: u64, stream: TcpStream) {
     }
 
     shared.channels.lock().unwrap().remove(&id);
-    // Breakpoints of a closed channel must not stay armed.
-    let removed: Vec<String> = {
-        let mut table = shared.bps.lock().unwrap();
-        let ids = table.owned_by(id);
-        for bid in &ids {
-            table.remove(&shared.handle, bid);
-        }
-        ids
-    };
-    if !removed.is_empty() {
-        shared.broadcast(&wire::event("Breakpoints", "contextRemoved", &[j(&removed)]));
-    }
+    shared.remove_owned(id);
 }
 
 struct Channel {
@@ -305,7 +294,7 @@ impl Channel {
                     let ctx = owning_core(&ctx).unwrap_or(ctx);
                     self.shared.symbols.lock().unwrap().assign(&ctx, &files).map_err(|e| err(ERR_OTHER, e))?;
                     self.shared.stacks.lock().unwrap().clear();
-                    self.reresolve_breakpoints();
+                    self.shared.reresolve_breakpoints();
                 }
                 Ok(vec![String::new()])
             }
@@ -645,79 +634,6 @@ impl Channel {
 
     // --- Breakpoints -----------------------------------------------------------------
 
-    fn announce(&self, added: &[Map<String, Value>], changed: &[Map<String, Value>], statuses: &[(String, Value)]) {
-        if !added.is_empty() {
-            self.shared.broadcast(&wire::event("Breakpoints", "contextAdded", &[j(added)]));
-        }
-        if !changed.is_empty() {
-            self.shared.broadcast(&wire::event("Breakpoints", "contextChanged", &[j(changed)]));
-        }
-        for (id, st) in statuses {
-            self.shared.broadcast(&wire::event("Breakpoints", "status", &[j(id), st.to_string()]));
-        }
-    }
-
-    fn reresolve_breakpoints(&self) {
-        let mut added = Vec::new();
-        let mut statuses = Vec::new();
-        {
-            let syms = |ctx: &str| self.shared.symbols_for(ctx);
-            let mut t = self.shared.bps.lock().unwrap();
-            for id in t.reresolve(self.h(), &syms) {
-                if t.bps[&id].planted() {
-                    added.push(t.bps[&id].props.clone());
-                }
-                statuses.push((id.clone(), t.status(&id)));
-            }
-        }
-        self.announce(&added, &[], &statuses);
-    }
-
-    fn apply(&self, list: Vec<Map<String, Value>>, replace_all: bool) -> Reply {
-        let mut added = Vec::new();
-        let mut changed = Vec::new();
-        let mut statuses = Vec::new();
-        let removed: Vec<String>;
-        let syms = |ctx: &str| self.shared.symbols_for(ctx);
-        {
-            let mut t = self.shared.bps.lock().unwrap();
-            let new_ids: Vec<String> = list.iter().filter_map(|p| p.get("ID").and_then(Value::as_str).map(str::to_string)).collect();
-            removed = if replace_all {
-                t.bps.keys().filter(|id| !new_ids.contains(id)).cloned().collect()
-            } else {
-                vec![]
-            };
-            for id in &removed {
-                t.remove(self.h(), id);
-            }
-            for props in list {
-                let unchanged = props
-                    .get("ID")
-                    .and_then(Value::as_str)
-                    .and_then(|id| t.bps.get(id))
-                    .is_some_and(|old| old.props == props);
-                if unchanged {
-                    continue;
-                }
-                let (id, existed) = t.insert(self.h(), props, self.id, &syms).map_err(|e| err(ERR_JSON_SYNTAX, e))?;
-                let bp = &t.bps[&id];
-                if bp.planted() || !bp.props.get("Enabled").and_then(Value::as_bool).unwrap_or(false) {
-                    if existed {
-                        changed.push(bp.props.clone());
-                    } else {
-                        added.push(bp.props.clone());
-                    }
-                }
-                statuses.push((id.clone(), t.status(&id)));
-            }
-        }
-        if !removed.is_empty() {
-            self.shared.broadcast(&wire::event("Breakpoints", "contextRemoved", &[j(&removed)]));
-        }
-        self.announce(&added, &changed, &statuses);
-        Ok(vec![String::new()])
-    }
-
     fn bp_list(v: Value) -> Result<Vec<Map<String, Value>>, TcfError> {
         match v {
             Value::Null => Ok(vec![]),
@@ -730,6 +646,11 @@ impl Channel {
                 .collect(),
             other => Err(err(ERR_JSON_SYNTAX, format!("expected breakpoint list, got {other}"))),
         }
+    }
+
+    fn apply(&self, list: Vec<Map<String, Value>>, replace_all: bool) -> Reply {
+        self.shared.apply_breakpoints(list, replace_all, self.id).map_err(|e| err(ERR_JSON_SYNTAX, e))?;
+        Ok(vec![String::new()])
     }
 
     fn bp_set(&self, a: &Args) -> Reply {
@@ -746,13 +667,7 @@ impl Channel {
 
     fn bp_remove(&self, a: &Args) -> Reply {
         let ids: Vec<String> = serde_json::from_value(a.value(0)?).map_err(|e| err(ERR_JSON_SYNTAX, e.to_string()))?;
-        let removed: Vec<String> = {
-            let mut t = self.shared.bps.lock().unwrap();
-            ids.into_iter().filter(|id| t.remove(self.h(), id)).collect()
-        };
-        if !removed.is_empty() {
-            self.shared.broadcast(&wire::event("Breakpoints", "contextRemoved", &[j(&removed)]));
-        }
+        self.shared.remove_breakpoints(ids);
         Ok(vec![String::new()])
     }
 

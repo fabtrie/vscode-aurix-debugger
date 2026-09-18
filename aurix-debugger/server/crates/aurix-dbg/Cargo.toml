@@ -10,3 +10,9 @@ publish = false
 aurix-core.workspace = true
 jim.workspace = true
 tcf.workspace = true
+api = { workspace = true, optional = true }
+
+[features]
+default = ["api"]
+# REST / MCP / Swagger server (`api_port`, default 8080).
+api = ["dep:api"]

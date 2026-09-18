@@ -138,19 +138,30 @@ fn main() {
         }
     }
 
-    let (bind, telnet_port, tcf_port) = cx.with(|c| (c.ports.bind.clone(), c.ports.telnet, c.ports.tcf));
+    let (bind, telnet_port, tcf_port, api_port) = cx.with(|c| (c.ports.bind.clone(), c.ports.telnet, c.ports.tcf, c.ports.api));
     if let Some(port) = telnet_port {
         match telnet::start(server.handle(), &bind, port) {
             Ok(p) => log_info!("Listening on port {p} for telnet connections"),
             Err(e) => log_error!("cannot listen on telnet port {port}: {e}"),
         }
     }
+    // One session for the TCF and API frontends: they share breakpoints and stepping state.
+    let session = tcf::session(server.handle());
     if let Some(port) = tcf_port {
-        match tcf::start(server.handle(), &bind, port) {
+        match tcf::listen(&session, &bind, port) {
             Ok(p) => log_info!("Listening on port {p} for TCF connections"),
             Err(e) => log_error!("cannot listen on TCF port {port}: {e}"),
         }
     }
+    #[cfg(feature = "api")]
+    if let Some(port) = api_port {
+        match api::start(server.handle(), session.clone(), &bind, port) {
+            Ok(p) => log_info!("Listening on port {p} for REST/MCP connections (API docs: http://{bind}:{p}/docs, MCP: http://{bind}:{p}/mcp)"),
+            Err(e) => log_error!("cannot listen on API port {port}: {e}"),
+        }
+    }
+    #[cfg(not(feature = "api"))]
+    let _ = (api_port, &session);
     server.run();
 }
 

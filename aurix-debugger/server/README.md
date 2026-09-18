@@ -39,6 +39,7 @@ cd C:\workspace\test\aurix-debugger
 Ports:
 - **Telnet Tcl console:** 4444 (`telnet_port`).
 - **TCF:** 1534 (`tcf_port`).
+- **REST / MCP / Swagger:** 8080 (`api_port`, `api_port disabled` turns it off). See [REST, MCP and Python API](#rest-mcp-and-python-api).
 - **Bind address:** 127.0.0.1 by default (`bindto`).
 
 Send console commands from a script:
@@ -60,6 +61,45 @@ Use a launch configuration of type `aurix-tcf` with `"agentFlavor": "aurix-dbg"`
 
 Debug console: `monitor <tcl command>`, for example `monitor tc3xx_stm_status`.
 
+## REST, MCP and Python API
+
+One HTTP port (`api_port`, default 8080) serves:
+
+| Path | Content |
+|---|---|
+| `/api/v1/...` | REST API: targets, run control, registers, memory, breakpoints, watchpoints, flash, Tcl. |
+| `/docs` | Swagger UI; `/openapi.json` is the OpenAPI 3.1 document. |
+| `/mcp` | MCP server (Streamable HTTP). Register it with `claude mcp add --transport http aurix http://127.0.0.1:8080/mcp`. |
+| `/api/v1/events` | Server-sent events: halts, resumes, resets, breakpoint changes and log lines of all clients. |
+
+**One source of truth.** The operations are declared once in [crates/api-spec/src/ops.rs](crates/api-spec/src/ops.rs), with their request and response types in [types.rs](crates/api-spec/src/types.rs). The `///` comments there are the documentation of all outputs. `cargo build` generates the rest from them:
+- the REST routes, the MCP tools and their JSON schemas, and the `DebuggerApi` trait that [crates/api](crates/api) implements;
+- [openapi/openapi.json](openapi/openapi.json);
+- the Python client's [_generated.py](../python/aurix_dbg/_generated.py).
+
+The generated files are checked in, and a file is only written when its content changes. To add an operation, add a line to `ops.rs` and implement the new trait method; the compiler reports what is missing.
+
+**Shared session.** REST, MCP and VS Code (TCF) share one session:
+- Run control goes through the same core operations and events. A halt from the API shows up in VS Code, and a resume in VS Code shows up in `wait_state` and on the event stream.
+- Breakpoints live in one table. API breakpoints appear to VS Code as those of another TCF client. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
+- Memory and register writes from the API send `Memory.memoryChanged` / `Registers.registerChanged`. The extension then refreshes its variable, watch and register views.
+- During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
+
+**Performance.** Every operation is one short job on the core thread. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
+
+**Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger.
+
+Python ([python/](../python)): `pip install -e python`, then:
+
+```python
+from aurix_dbg import Client
+dbg = Client("http://127.0.0.1:8080")
+dbg.halt("tc37x.cpu0")
+print(hex(dbg.read_register("tc37x.cpu0", "pc").value))
+data = dbg.read_bytes(0x70000000, 256)   # any length, split into 64 KB calls
+for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients
+```
+
 ## Architecture
 
 | Crate | Responsibility |
@@ -68,8 +108,10 @@ Debug console: `monitor <tcl command>`, for example `monitor tc3xx_stm_status`.
 | `jim` | Jim Tcl 0.83 (OpenOCD's copy) built with `cc`, with a safe `Interp` API. |
 | `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, CSA unwinder, flash driver and image loader. |
 | `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
-| `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). |
-| `aurix-dbg` | The executable: OpenOCD-style CLI, telnet console, TCF listener. |
+| `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
+| `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
+| `api` | REST, MCP, Swagger UI and event stream (axum on its own thread); its build script writes the generated files. |
+| `aurix-dbg` | The executable: OpenOCD-style CLI, telnet console, TCF and API listeners. |
 
 Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures run on the core thread) and subscribe to core events.
 
@@ -93,7 +135,7 @@ TriCore 1.8 (TC4x) is rejected.
 
 The commands the cfg scripts use behave as in OpenOCD. Multi-core policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc3xx_ocds.cfg`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
 
-- **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `bindto`. Target types: `tricore`, `cortex_m` (HSM), `gtm_mcs` (`-module` 0..9, `-channel` 0..7, `-ramsize <bytes>`: MCS RAM per module, default 12 KB as on the TC37x; it applies to all channels of the module).
+- **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `api_port`, `bindto`. Target types: `tricore`, `cortex_m` (HSM), `gtm_mcs` (`-module` 0..9, `-channel` 0..7, `-ramsize <bytes>`: MCS RAM per module, default 12 KB as on the TC37x; it applies to all channels of the module).
 - **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore tl1_step on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`.
 
 ## Multi-core stepping (`tricore tl1_step`)
@@ -149,7 +191,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 
 ## Tests
 
-- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on the GHS ELF, image and flash layout, and Capstone decoding.
+- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on the GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP and a TCF client on one simulated session (`api/tests/sim_http.rs`).
 - **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD):
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.
   - `node tools/dap_m5.js`: source breakpoint, call stack, step over/into/out.

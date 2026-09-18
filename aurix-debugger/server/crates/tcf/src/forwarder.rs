@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use aurix_core::target::DebugReason;
 use aurix_core::Event;
 
-use crate::contexts::{context_json, cores, read_pc, reason_text, CoreInfo};
+use crate::contexts::{context_json, cores, read_pc, reason_text, CoreInfo, CONTAINER};
 use crate::wire;
 use crate::Shared;
 
@@ -18,10 +18,23 @@ pub fn start(shared: Arc<Shared>) {
     thread::spawn(move || {
         let mut listed: BTreeMap<String, bool> = cores(&shared.handle).into_iter().filter(|c| c.visible).map(|c| (c.id, c.reachable)).collect();
         for ev in rx {
-            if !matches!(ev, Event::Shutdown) {
+            if !matches!(ev, Event::Shutdown | Event::MemoryChanged { .. } | Event::RegisterChanged { .. }) {
                 sync_listed(&shared, &mut listed);
             }
             match ev {
+                // Writes of other frontends: the call stacks may have changed, clients re-read.
+                Event::MemoryChanged { target, addr, len } => {
+                    shared.stacks.lock().unwrap().clear();
+                    let ctx = target.and_then(|t| core_by_index(&shared, t)).map_or_else(|| CONTAINER.to_string(), |c| c.id);
+                    let ranges = json!([{ "addr": addr, "size": len }]);
+                    shared.broadcast(&wire::event("Memory", "memoryChanged", &[json!(ctx).to_string(), ranges.to_string()]));
+                }
+                Event::RegisterChanged { target, name } => {
+                    shared.invalidate_stack(target);
+                    if let Some(c) = core_by_index(&shared, target) {
+                        shared.broadcast(&wire::event("Registers", "registerChanged", &[json!(format!("{}.R.{name}", c.id)).to_string()]));
+                    }
+                }
                 // A source-level step reports once, when it is done. Its
                 // instruction steps also release and re-halt the other cores
                 // (cfg step-start / TL1), which is not reported either.

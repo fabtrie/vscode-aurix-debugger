@@ -17,6 +17,11 @@ pub enum Event {
     /// A target has not been accessible for [`crate::target::UNREACHABLE_TIME`] (e.g. target not
     /// powered); it is accessible again with the next `Examined`.
     Unreachable { target: usize },
+    /// Memory written by a frontend (REST/MCP) the other frontends do not know about;
+    /// `target` is the core whose view of memory was used.
+    MemoryChanged { target: Option<usize>, addr: u32, len: u32 },
+    /// A core register written by a frontend (REST/MCP) the other frontends do not know about.
+    RegisterChanged { target: usize, name: String },
     Log { text: String },
     Shutdown,
 }

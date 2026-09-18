@@ -109,6 +109,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "telnet_port", |cx, a| port_cmd(cx, a, |p| &mut p.telnet));
     reg(interp, sh, "gdb_port", |cx, a| port_cmd(cx, a, |p| &mut p.gdb));
     reg(interp, sh, "tcl_port", |cx, a| port_cmd(cx, a, |p| &mut p.tcl));
+    reg(interp, sh, "api_port", |cx, a| port_cmd(cx, a, |p| &mut p.api));
     reg(interp, sh, "bindto", |cx, a| {
         if let Some(b) = a.get(1) {
             cx.with(|c| c.ports.bind = b.to_string());

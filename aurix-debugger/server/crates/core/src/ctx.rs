@@ -38,6 +38,8 @@ pub struct Ports {
     pub tcf: Option<u16>,
     pub gdb: Option<u16>,
     pub tcl: Option<u16>,
+    /// REST / MCP / Swagger server.
+    pub api: Option<u16>,
 }
 
 pub struct Ctx {
@@ -95,7 +97,7 @@ impl Ctx {
             search_dirs: Vec::new(),
             poll_enabled: true,
             poll_period_ms: 10,
-            ports: Ports { bind: "127.0.0.1".into(), telnet: Some(4444), tcf: Some(1534), gdb: None, tcl: None },
+            ports: Ports { bind: "127.0.0.1".into(), telnet: Some(4444), tcf: Some(1534), gdb: None, tcl: None, api: Some(8080) },
             next_bp_id: 1,
             initialized: false,
             noinit: false,

@@ -15,3 +15,6 @@ serde = "1"
 serde_json.workspace = true
 base64.workspace = true
 capstone = { version = "0.14", default-features = false, features = ["full", "std", "arch_tricore", "arch_arm"] }
+
+[dev-dependencies]
+jim.workspace = true

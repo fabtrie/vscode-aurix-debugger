@@ -340,6 +340,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private disassemblyCapabilities = new Map<string, string[]>();
 	// Core context of the frame focused last (scopes request): disassembly decodes with its ISA.
 	private focusedCoreContext: string | undefined;
+	/** A core paused on its own (MCS channel) whose coming suspend event should take the focus. */
+	private pendingFocusContext: string | undefined;
 	/**
 	 * Address picked with "Go to Address or Symbol". VS Code's Disassembly view can only be moved by
 	 * focusing a stack frame, so the target is shown as an extra frame at the bottom of the suspended
@@ -546,6 +548,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.tcfLogger.log(
 				`[dap] StoppedEvent reason=${reason} threadId=${threadId} ctx=${String(ctx ?? '')} allThreadsStopped=${String(Boolean(opts?.allThreadsStopped))}`
 			);
+		}
+		// A stop that takes the focus makes its core the focused one right away. VS Code may ask for
+		// the disassembly before it asks for the frame's scopes (where the focus used to be updated),
+		// and a request for the old core would decode e.g. an MCS address as TriCore code.
+		if (!opts?.preserveFocus && ctx) {
+			this.focusedCoreContext = /^(.*?\.C\d+)/.exec(ctx)?.[1] ?? ctx;
 		}
 		const ev = new StoppedEvent(reason, threadId);
 		if (opts?.allThreadsStopped) {
@@ -1042,6 +1050,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	/** Symbol file kind of GTM MCS assembler sources (no ELF: the server assembles them). */
 	private static readonly MACHINE_MCS_ASM = -1;
+	/** Size of a GTM MCS module RAM, the whole MCS program space (3072 words, TC3xx UM MCS chapter). */
+	private static readonly MCS_RAM_BYTES = 3072 * 4;
 
 	/** ELF e_machine of a RunControl context's architecture ("Architecture" property; default TriCore). */
 	private static contextMachine(info: any): number {
@@ -1942,6 +1952,19 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.sendResponse(response);
 				return;
 			}
+			if (isa === 'MCS') {
+				// MCS instructions are 4 bytes and the program is the module RAM, 0..MCS_RAM_BYTES.
+				// VS Code also asks for the instructions before the PC, which reaches below 0 near
+				// the start of the RAM (and past its end near the top); the server refuses those.
+				startAddress = Math.max(0, startAddress);
+				startAddress -= startAddress % 4;
+				byteBudget = Math.min(byteBudget, AurixTCFDebugSession.MCS_RAM_BYTES - startAddress);
+				if (byteBudget <= 0) {
+					response.body = { instructions: [] };
+					this.sendResponse(response);
+					return;
+				}
+			}
 			if (execRange) {
 				const maxBytesNeeded = instructionCount * maxInstrBytes;
 				let maxStart = execRange.end - maxBytesNeeded;
@@ -1958,8 +1981,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 			}
 			const disassembleAt = async (addr: number) => {
+				// The retry at the base address must not run past the end of the MCS RAM either.
+				const size = isa === 'MCS' ? Math.min(byteBudget, AurixTCFDebugSession.MCS_RAM_BYTES - addr) : byteBudget;
 				return await this.tcfClient.sendCommand(
-					new DisassembleDisassemblyCommand(ctx, addr, byteBudget, {
+					new DisassembleDisassemblyCommand(ctx, addr, size, {
 						ISA: isa,
 						Simplified: true,
 						PseudoInstructions: true,
@@ -2019,7 +2044,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			response.body = { instructions: await this.withDisassemblySource(ctx, instructions) };
 			this.sendResponse(response);
 		} catch (e) {
-			this.sendErrorResponse(response, 0, 'Disassemble error {message}', { message: String(e) });
+			this.sendErrorResponse(response, 0, 'Disassemble error {message}', { message: AurixTCFDebugSession.formatError(e) });
 		}
 	}
 
@@ -3120,16 +3145,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// A GTM MCS channel is not part of the TL1 group: pausing it stops that channel alone, and
 		// pausing anything else must leave it running.
 		if (requested && !this.stopsAllCores(requested)) {
+			// No stopped event from here: a channel inside a WURM/ARU wait only halts once the wait
+			// ends, so its location is not final yet. The suspend event that follows reports the
+			// stop, and takes the focus because this pause asked for it.
 			this.focusLog(`pauseRequest threadId=${args.threadId} ctx=${requested}: channel-local pause`);
 			this.cancelPendingPauseStoppedTimers('pauseRequest');
+			this.pendingFocusContext = requested;
 			try {
 				await this.tcfClient.pause(requested);
 			} catch (e) {
+				this.pendingFocusContext = undefined;
 				this.tcfLogger.error(`pause ${requested} failed: ${String(e)}`);
 			}
-			this.onThreadSuspended(args.threadId);
-			this.sendStoppedEvent(StoppedEventReason.pause, args.threadId, { allThreadsStopped: false });
-			void this.emitSourceLocation(requested);
 			this.sendResponse(response);
 			return;
 		}
@@ -3518,7 +3545,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.invalidateLiveWatchContext();
 			return;
 		}
-		const takesFocus = this.isLaunchCoreContext(contextId);
+		// The launch core takes the focus for a TL1 stop; a core the user paused on its own (an MCS
+		// channel) takes it when its stop finally arrives.
+		const takesFocus = this.isLaunchCoreContext(contextId) || this.pendingFocusContext === contextId;
+		if (this.pendingFocusContext === contextId) {
+			this.pendingFocusContext = undefined;
+		}
 
 		// Delay pause-type stops slightly. This helps ensure a breakpoint stop becomes the primary
 		// UI context when multiple cores suspend nearly simultaneously.

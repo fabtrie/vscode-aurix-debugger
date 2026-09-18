@@ -1,4 +1,4 @@
-//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg (with tc3xx_ocds.tcl) against the
+//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg (with tc3xx_ocds.cfg) against the
 //! simulated TC37x and checks the event-driven register sequences.
 
 use std::path::PathBuf;
@@ -728,7 +728,7 @@ fn mcs_halt_all_handler_pulses_tl1_only_for_breakpoints() {
     assert!(take_writes(&s).contains(&(CBS_TLC, 0x30)));
 }
 
-/// tc3xx_ocds.tcl takes the cores and their registers from the target cfg: TC39x with six cores,
+/// tc3xx_ocds.cfg takes the cores and their registers from the target cfg: TC39x with six cores,
 /// CPU5 at dbgbase 0xF88C0000, and an MCS RAM size for the module.
 #[test]
 fn generic_setup_follows_the_target_cfg() {
@@ -738,7 +738,7 @@ fn generic_setup_follows_the_target_cfg() {
     let i = &s.interp;
     i.eval_global("adapter driver sim; script target/infineon/tc39x.cfg").unwrap();
     i.eval_global("set tc3xx_mcs_modules {0 9}; set tc3xx_mcs_ramsize 0x1800").unwrap();
-    i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc3xx_ocds.tcl"))))).unwrap();
+    i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc3xx_ocds.cfg"))))).unwrap();
     i.eval_global("tc3xx_ocds_setup tc39x").unwrap();
     assert_eq!(i.eval("set tc3xx_cores").unwrap(), "tc39x.cpu0 tc39x.cpu1 tc39x.cpu2 tc39x.cpu3 tc39x.cpu4 tc39x.cpu5");
     assert_eq!(i.eval("set tc3xx_dbgsr(tc39x.cpu5)").unwrap(), "0xF88DFD00");

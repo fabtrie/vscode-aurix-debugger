@@ -58,8 +58,12 @@ impl SymbolSet {
         }
     }
 
+    /// Line entries overlapping `start..end`, from every file. A disassembly window often starts
+    /// in data or a gap (MCS `.var` areas between the tasks), so asking only the file that owns
+    /// `start` would leave the whole window without source. The owner of `start` comes first, so
+    /// its entry wins where two files describe the same address.
     pub fn lines_in_range(&self, start: u32, end: u32) -> Vec<LineInfo> {
-        self.for_addr(start).map(|(_, s)| s.lines_in_range(start, end)).unwrap_or_default()
+        self.ordered(Some(start)).iter().flat_map(|(_, s)| s.lines_in_range(start, end)).collect()
     }
 
     /// Addresses for a source line in all ELF files: the nearest line with code
@@ -187,6 +191,23 @@ mod tests {
         assert_eq!(split_elf_id("E10/LV:21.3803@S0.D0.C0.F2"), Some((10, "LV:21.3803@S0.D0.C0.F2")));
         assert_eq!(split_elf_id("GV:12"), None);
         assert_eq!(split_elf_id("EX/GV:1"), None);
+    }
+
+    /// A disassembly window that starts in data (an MCS `.var`) still gets the source lines of the
+    /// code in it: asking only the file that owns the window start used to return nothing at all.
+    #[test]
+    fn lines_in_range_from_data() {
+        let dir = std::env::temp_dir().join(format!("aurix-symstore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("t.asm");
+        std::fs::write(&src, ".org 0x10\nvar1: .var 7\n.org 0x20\nstart:\n  movl R0, 1\n  jmp start\n").unwrap();
+        let prog = symbols::mcs_asm::assemble(&src, &[]).unwrap();
+        let set = SymbolSet { elfs: vec![(0, Arc::new(prog.symbols(&src)))] };
+
+        assert!(set.for_addr(0x10).is_none(), "0x10 is data, owned by no code");
+        let lines: Vec<(u32, u32)> = set.lines_in_range(0x10, 0x28).iter().map(|l| (l.start, l.line)).collect();
+        assert_eq!(lines, vec![(0x20, 5), (0x24, 6)]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Application plus bootmanager: addresses map to their ELF, lines resolve in both.

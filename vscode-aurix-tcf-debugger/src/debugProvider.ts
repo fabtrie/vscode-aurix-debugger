@@ -34,9 +34,14 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 import { LifetimeDebugSession } from './lifetimeDebugSession';
 import { TCFClient } from './tcfclient';
 import {
+	AddBreakpointsCommand,
 	BreakpointData,
 	BreakpointType,
 	ContextSuspendedData,
+	GetIDsBreakpointsCommand,
+	GetPropertiesBreakpointsCommand,
+	GetStatusBreakpointsCommand,
+	RemoveBreakpointsCommand,
 	DebugCommandStamper,
 	InstanceStatusData,
 	NEVER_CANCELLED,
@@ -54,6 +59,7 @@ import { DisassembleDisassemblyCommand, GetCapabilitiesDisassemblyCommand } from
 import { GetMemoryCommand, MemoryErrorAddress, SetMemoryCommand } from './tcf/memory';
 import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/linenumbers';
 import { LiveWatchEvaluator, LiveWatchRequestItem } from './liveWatchEvaluator';
+import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
 
 type ElfSymbol = { name: string; address: number; size: number };
 
@@ -399,10 +405,22 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private cachedCoreContextId: string | undefined;
 	private cachedCoreContextKey: number | undefined | null = null; // null = not yet cached
 
-	constructor(enablePathMapper: boolean, disassemblyOpcodeBytes: DisassemblyOpcodeBytes = 'left') {
+	/**
+	 * Breakpoints of other clients of the debug server (e.g. its REST/MCP API) shown in VS Code,
+	 * by TCF ID; `id` is their DAP breakpoint ID.
+	 */
+	private externalBreakpoints = new Map<string, { shown: ExternalBreakpoint; props: BreakpointData; id: number }>();
+	/** External breakpoints being looked up before they are shown (a removal cancels them). */
+	private externalPending = new Set<string>();
+	/** Function breakpoints set in VS Code: name (symbol, address or file:line) -> DAP ID. */
+	private functionBreakpoints = new Map<string, number>();
+
+	/** `breakpointUi`: shows the breakpoints of other clients in VS Code (none outside VS Code). */
+	constructor(enablePathMapper: boolean, disassemblyOpcodeBytes: DisassemblyOpcodeBytes = 'left', private breakpointUi?: BreakpointUi) {
 		super();
 		this.enabledPathMapper = enablePathMapper;
 		this.disassemblyOpcodeBytes = disassemblyOpcodeBytes;
+		breakpointUi?.onUserChange(c => void this.onExternalBreakpointUserChange(c));
 		this.tcfLogger = new DebugLogger(this);
 
 		const outer = this;
@@ -426,6 +444,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 			protected onBreakpointChanged(breakpointIDs: string[]): void {
 				outer.onBreakpointAddedOrChanged(breakpointIDs);
+			}
+			protected onBreakpointProperties(breakpoints: BreakpointData[]): void {
+				outer.onExternalBreakpoints(breakpoints);
 			}
 			protected onRunControlContextSuspended(info: ContextSuspendedData) {
 				outer.onContextSuspended(info);
@@ -1633,6 +1654,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		response.body.supportSuspendDebuggee = true;
 		response.body.supportTerminateDebuggee = true;
 		response.body.supportsInstructionBreakpoints = true;
+		response.body.supportsFunctionBreakpoints = true;
 		response.body.supportsReadMemoryRequest = true;
 		response.body.supportsWriteMemoryRequest = true;
 		(response.body as any).supportsDisassembleRequest = true;
@@ -2304,6 +2326,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async disconnectRequestAsync(response: DebugProtocol.DisconnectResponse): Promise<void> {
+		// Breakpoints of other clients are not VS Code's: they must not stay in the workspace.
+		this.breakpointUi?.dispose();
+		this.externalBreakpoints.clear();
 		this.tcfClient.disconnect();
 		this.sendResponse(response);
 		this.sendEvent(new TerminatedEvent());
@@ -2313,6 +2338,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.breakpointsManager.setConfigured();
 		await this.syncAllBreakpoints();
 		this.sendResponse(response);
+		void this.showExistingExternalBreakpoints();
 	}
 
 	protected override async threadsRequestAsync(response: DebugProtocol.ThreadsResponse): Promise<void> {
@@ -3206,17 +3232,26 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// 2) Update local state (add/remove as needed) and assign IDs.
 		// 3) If already configured, sync all breakpoints to TCF agent.
 		// 4) Respond to VS Code with the actual breakpoint states so UI updates.
+		// Lines of breakpoints of other clients shown in VS Code stay theirs (no second breakpoint).
 		const file = args.source.path || '';
-		const lines = (args.breakpoints || []).map(b => b.line);
+		const requested = (args.breakpoints || []).map(b => b.line);
+		const external = this.externalSourceLines(file);
+		const lines = requested.filter(l => !external.has(l));
 		const tuples = this.breakpointsManager.updateFile(file, lines);
 
 		if (this.breakpointsManager.configured) {
 			await this.syncAllBreakpoints();
 		}
 
-		const bps = tuples.map(t => {
-			const bp = new Breakpoint(t.verified, t.line);
-			(bp as any).id = t.id;
+		const byLine = new Map(tuples.map(t => [t.line, t]));
+		const bps = requested.map(line => {
+			const ext = external.get(line);
+			const t = byLine.get(line);
+			const bp = new Breakpoint(ext !== undefined || (t?.verified ?? false), line);
+			const id = ext?.id ?? t?.id;
+			if (id !== undefined) {
+				(bp as any).id = id;
+			}
 			return bp;
 		});
 		response.body = { breakpoints: bps };
@@ -3278,6 +3313,188 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		response.body = { breakpoints: bps };
 		this.sendResponse(response);
+	}
+
+	protected override async setFunctionBreakPointsRequestAsync(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments): Promise<void> {
+		const names = (args.breakpoints || []).map(b => b.name.trim());
+		const external = new Map<string, number>();
+		for (const e of this.externalBreakpoints.values()) {
+			if (e.shown.kind === 'function') {
+				external.set(e.shown.name, e.id);
+			}
+		}
+		const own = new Set(names.filter(n => n !== '' && !external.has(n)));
+		for (const n of Array.from(this.functionBreakpoints.keys())) {
+			if (!own.has(n)) {
+				this.functionBreakpoints.delete(n);
+			}
+		}
+		for (const n of own) {
+			if (!this.functionBreakpoints.has(n)) {
+				this.functionBreakpoints.set(n, this.breakpointsManager.allocateId());
+			}
+		}
+		if (this.breakpointsManager.configured) {
+			await this.syncAllBreakpoints();
+		}
+		response.body = {
+			breakpoints: names.map(n => {
+				const ext = external.get(n);
+				const bp = new Breakpoint(ext !== undefined);
+				const id = ext ?? this.functionBreakpoints.get(n);
+				if (id !== undefined) {
+					(bp as any).id = id;
+				}
+				return bp;
+			}),
+		};
+		this.sendResponse(response);
+	}
+
+	/** TCF properties of a function breakpoint: a symbol, an address or `file:line`. */
+	/* eslint-disable @typescript-eslint/naming-convention */
+	private functionBreakpointData(id: number, name: string): BreakpointData {
+		const fileLine = /^(.+):(\d+)$/.exec(name);
+		const where = fileLine
+			? { File: this.convertClientPathToDebugger(fileLine[1]), Line: Number(fileLine[2]) }
+			: { Location: name };
+		return { ID: this.breakpointIdToTcfId(id), Enabled: true, BreakpointType: BreakpointType.Hardware, ...where };
+	}
+	/* eslint-enable */
+
+	private isOwnBreakpoint(tcfId: string): boolean {
+		return tcfId.startsWith(this.breakpointPrefix);
+	}
+
+	/** A source file path as compared between VS Code and the line tables. */
+	private static sourceKey(file: string): string {
+		return process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+	}
+
+	/** External source breakpoints in `file` by line. */
+	private externalSourceLines(file: string): Map<number, { id: number }> {
+		const key = AurixTCFDebugSession.sourceKey;
+		const k = key(file);
+		const out = new Map<number, { id: number }>();
+		for (const e of this.externalBreakpoints.values()) {
+			if (e.shown.kind === 'source' && key(e.shown.file) === k) {
+				out.set(e.shown.line, { id: e.id });
+			}
+		}
+		return out;
+	}
+
+	/** Shows the breakpoints other clients set before this session started. */
+	private async showExistingExternalBreakpoints(): Promise<void> {
+		if (!this.breakpointUi) {
+			return;
+		}
+		try {
+			const ids = (await this.tcfClient.sendCommand(new GetIDsBreakpointsCommand())) ?? [];
+			for (const id of ids.filter(i => !this.isOwnBreakpoint(i))) {
+				const props = await this.tcfClient.sendCommand(new GetPropertiesBreakpointsCommand(id));
+				if (props) {
+					await this.showExternalBreakpoint(props);
+				}
+			}
+		} catch (e) {
+			this.tcfLogger.log(`[breakpoints] cannot list external breakpoints: ${String(e)}`);
+		}
+	}
+
+	private onExternalBreakpoints(list: BreakpointData[]) {
+		for (const props of list) {
+			if (!this.isOwnBreakpoint(props.ID)) {
+				this.showExternalBreakpoint(props).catch(e => this.tcfLogger.log(`[breakpoints] cannot show ${props.ID}: ${String(e)}`));
+			}
+		}
+	}
+
+	/** Shows (or updates) a breakpoint of another client in VS Code. */
+	private async showExternalBreakpoint(props: BreakpointData): Promise<void> {
+		const ui = this.breakpointUi;
+		// Before configurationDone, showExistingExternalBreakpoints picks them up.
+		if (!ui || !this.breakpointsManager.configured) {
+			return;
+		}
+		const known = this.externalBreakpoints.get(props.ID);
+		if (known) {
+			known.props = props;
+			if (known.shown.enabled !== props.Enabled) {
+				known.shown = { ...known.shown, enabled: props.Enabled };
+				ui.show(known.shown);
+			}
+			return;
+		}
+		if (this.externalPending.has(props.ID)) {
+			return;
+		}
+		this.externalPending.add(props.ID);
+		const where = await this.externalBreakpointLocation(props);
+		if (!this.externalPending.delete(props.ID)) {
+			return; // removed meanwhile
+		}
+		if (where.kind === 'source') {
+			const k = AurixTCFDebugSession.sourceKey(where.file);
+			if (this.breakpointsManager.getAll().some(b => b.line === where.line && AurixTCFDebugSession.sourceKey(b.file) === k)) {
+				return; // the line already has a VS Code breakpoint
+			}
+		}
+		const shown = { id: props.ID, enabled: props.Enabled, ...where } as ExternalBreakpoint;
+		this.externalBreakpoints.set(props.ID, { shown, props, id: this.breakpointsManager.allocateId() });
+		ui.show(shown);
+	}
+
+	/**
+	 * Where VS Code shows an external breakpoint: at its source line when it is planted at the
+	 * start of one, else as a function breakpoint named by symbol, address or file:line.
+	 */
+	private async externalBreakpointLocation(props: BreakpointData): Promise<{ kind: 'source'; file: string; line: number } | { kind: 'function'; name: string }> {
+		const status = await this.tcfClient.sendCommand(new GetStatusBreakpointsCommand(props.ID)).catch(() => undefined);
+		const inst = (status?.Instances ?? []).find(i => !i.Error && i.Address !== undefined && i.LocationContext);
+		const planted = inst ? Number(inst.Address) : undefined;
+		if (inst && planted !== undefined && Number.isFinite(planted)) {
+			const areas = (await this.tcfClient.sendCommand(new MapToSourceLineNumbersCommand(inst.LocationContext!, planted, planted + 1)).catch(() => null)) ?? [];
+			const area = areas.find(a => a.SAddr === planted) ?? (props.File !== undefined ? areas[0] : undefined);
+			const file = area ? this.resolveMappedSourcePath(area) : undefined;
+			if (area?.SLine && file) {
+				return { kind: 'source', file, line: area.SLine };
+			}
+		}
+		const location = typeof props.Location === 'string' ? props.Location.trim() : '';
+		if (location !== '' && this.parseMemoryReference(location) === undefined) {
+			return { kind: 'function', name: location };
+		}
+		const addr = props.Address !== undefined ? this.parseMemoryReference(String(props.Address)) : (location !== '' ? this.parseMemoryReference(location) : planted);
+		if (addr !== undefined) {
+			return { kind: 'function', name: `0x${addr.toString(16)}` };
+		}
+		if (props.File && props.Line) {
+			return { kind: 'function', name: `${path.basename(props.File)}:${props.Line}` };
+		}
+		return { kind: 'function', name: props.ID };
+	}
+
+	/** The user removed, enabled or disabled an external breakpoint in VS Code. */
+	private async onExternalBreakpointUserChange(c: ExternalBreakpointChange): Promise<void> {
+		const ext = this.externalBreakpoints.get(c.id);
+		if (!ext) {
+			return;
+		}
+		try {
+			if (c.removed) {
+				this.externalBreakpoints.delete(c.id);
+				await this.tcfClient.sendCommand(new RemoveBreakpointsCommand([c.id]));
+			} else {
+				// The server keeps the breakpoint with the client that set it.
+				ext.shown = { ...ext.shown, enabled: c.enabled };
+				// eslint-disable-next-line @typescript-eslint/naming-convention
+				ext.props = { ...ext.props, Enabled: c.enabled };
+				await this.tcfClient.sendCommand(new AddBreakpointsCommand(ext.props));
+			}
+		} catch (e) {
+			this.tcfLogger.log(`[breakpoints] cannot change ${c.id}: ${String(e)}`);
+		}
 	}
 
 	private breakpointIdToTcfId(id: number): string {
@@ -3346,6 +3563,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				BreakpointType: BreakpointType.Hardware,
 				ContextIds: contextIds && contextIds.length > 0 ? contextIds : undefined,
 			});
+		}
+		for (const [name, id] of this.functionBreakpoints) {
+			data.push(this.functionBreakpointData(id, name));
 		}
 		await this.tcfClient.setBreakpointsList(data);
 	}
@@ -3429,12 +3649,24 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	private onBreakpointRemoved(tcfIds: string[]) {
 		for (const tcfId of tcfIds) {
+			if (!this.isOwnBreakpoint(tcfId)) {
+				this.externalPending.delete(tcfId);
+				if (this.externalBreakpoints.delete(tcfId)) {
+					this.breakpointUi?.hide([tcfId]);
+				}
+				continue;
+			}
 			const id = this.breakpointTcfIdToId(tcfId);
 			if (id === BREAKPOINT_INVALID) {
 				continue;
 			}
 			this.breakpointsManager.deleteById(id);
 			this.instructionBreakpointsManager.deleteById(id);
+			for (const [name, fid] of this.functionBreakpoints) {
+				if (fid === id) {
+					this.functionBreakpoints.delete(name);
+				}
+			}
 			this.sendEvent(new BreakpointEvent(BreakpointEventReason.removed, { id, verified: false }));
 		}
 	}

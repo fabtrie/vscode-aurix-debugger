@@ -19,6 +19,7 @@ import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
 import { getSvdOptionsForDevice } from './svdCatalog';
 import { registerDebuggerActions } from './debuggerActions';
+import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 
 let tcfAgentProcess: ChildProcess | undefined;
 let extensionContext: vscode.ExtensionContext;
@@ -722,7 +723,7 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 
 		const enablePathMapper = vscode.workspace.isTrusted && pathMapperConfig === true;
 		
-		return new vscode.DebugAdapterInlineImplementation(new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes()));
+		return new vscode.DebugAdapterInlineImplementation(new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes(), new VsCodeBreakpointUi()));
 		} finally {
 			startingAurixSessions = Math.max(0, startingAurixSessions - 1);
 		}

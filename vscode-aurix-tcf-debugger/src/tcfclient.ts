@@ -555,10 +555,12 @@ export abstract class TCFClient extends AbstractTCFClient {
             case "contextAdded":
                 const breakpointsAdded = asNullableArray(JSON.parse(datas[0].toString()), asBreakpointData) || [];
                 this.onBreakpointAdded(breakpointsAdded.map(b => b.ID));
+                this.onBreakpointProperties(breakpointsAdded);
                 break;
             case "contextChanged":
                 const breakpointsChanged = asNullableArray(JSON.parse(datas[0].toString()), asBreakpointData) || [];
                 this.onBreakpointChanged(breakpointsChanged.map(b => b.ID));
+                this.onBreakpointProperties(breakpointsChanged);
                 break;
             case "contextRemoved":
                 const breakpointsRemoved = asStringArray(JSON.parse(datas[0].toString()));
@@ -579,6 +581,10 @@ export abstract class TCFClient extends AbstractTCFClient {
                 this.console.log(`Unknown Locator event: ${event}`);
                 break;
         }
+    }
+
+    /** Properties of added or changed breakpoints, of all clients of the debug server. */
+    protected onBreakpointProperties(breakpoints: BreakpointData[]): void {
     }
 
     /** Memory or registers were written by another client of the debug server (e.g. its REST/MCP API). */

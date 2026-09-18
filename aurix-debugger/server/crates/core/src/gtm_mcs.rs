@@ -64,8 +64,13 @@ pub fn arp_range(ctrl: u32) -> (u32, u32) {
     (start, start + len)
 }
 
-/// 3072 words of RAM per module.
-pub const RAM_SIZE: u32 = 3072 * 4;
+/// MCS RAM per module unless configured with `-ramsize`: 3072 words (TC37x). The size differs between
+/// derivatives.
+pub const DEFAULT_RAM_SIZE: u32 = 3072 * 4;
+/// Largest MCS RAM: the module RAMs are 32 KB apart.
+pub const MAX_RAM_SIZE: u32 = 0x8000;
+/// Most MCS modules of a TC3xx GTM (one per cluster).
+pub const MAX_MODULES: u32 = 10;
 pub const CHANNELS: u32 = 8;
 
 const CTRL: u32 = 0x20;
@@ -84,11 +89,19 @@ struct Planted {
 }
 
 /// Program RAM state shared by the channels of one MCS module.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct McsRam {
+    /// RAM size in bytes (`-ramsize`).
+    pub size: u32,
     bps: BTreeMap<u32, Planted>,
     /// Temporary step traps: address -> (instruction replaced, channel stepping).
     traps: BTreeMap<u32, (u32, u32)>,
+}
+
+impl Default for McsRam {
+    fn default() -> Self {
+        McsRam { size: DEFAULT_RAM_SIZE, bps: BTreeMap::new(), traps: BTreeMap::new() }
+    }
 }
 
 pub struct McsChannel {
@@ -161,14 +174,39 @@ impl McsChannel {
     }
 
     fn ram_addr(&self, addr: u32) -> Result<u32> {
-        if addr & 3 != 0 || addr >= RAM_SIZE {
-            return Err(other(format!("0x{addr:x} is no MCS instruction address (0..0x{:x}, word aligned)", RAM_SIZE - 4)));
+        if addr & 3 != 0 || addr >= self.ram_size() {
+            return Err(other(format!("0x{addr:x} is no MCS instruction address (0..0x{:x}, word aligned)", self.ram_size() - 4)));
         }
         Ok(self.ram_base() + addr)
     }
 
     fn reset_pc(&self) -> u32 {
         4 * self.channel
+    }
+
+    /// MCS RAM size of the module in bytes.
+    pub fn ram_size(&self) -> u32 {
+        self.shared().size
+    }
+
+    /// Sets the MCS RAM size (`-ramsize`) for all channels of the module.
+    pub fn set_ram_size(&self, size: u32) -> Result<()> {
+        if size == 0 || size % 4 != 0 || size > MAX_RAM_SIZE {
+            return Err(Error::Usage(format!("invalid MCS RAM size 0x{size:x} (a multiple of 4 up to 0x{MAX_RAM_SIZE:x})")));
+        }
+        self.shared().size = size;
+        Ok(())
+    }
+
+    /// Checks `-module` and `-channel` against the TC3xx GTM.
+    pub fn check_config(&self) -> Result<()> {
+        if self.module >= MAX_MODULES {
+            return Err(Error::Usage(format!("MCS module {} does not exist (0..{})", self.module, MAX_MODULES - 1)));
+        }
+        if self.channel >= CHANNELS {
+            return Err(Error::Usage(format!("MCS channel {} does not exist (0..{})", self.channel, CHANNELS - 1)));
+        }
+        Ok(())
     }
 
     fn shared(&self) -> std::sync::MutexGuard<'_, McsRam> {
@@ -182,7 +220,7 @@ impl McsChannel {
 
     /// MCS program addresses (the RAM) are accessed through the module RAM.
     pub fn owns_address(&self, addr: u32) -> bool {
-        addr < RAM_SIZE
+        addr < self.ram_size()
     }
 
     fn read_word(&self, io: &mut Io, addr: u32) -> Result<u32> {
@@ -243,7 +281,7 @@ impl McsChannel {
         }
         let start = addr & !3;
         let end = addr.checked_add(len as u32 - 1).ok_or_else(|| other("address range overflow"))? | 3;
-        if end >= RAM_SIZE {
+        if end >= self.ram_size() {
             return Err(Error::Memory { addr: addr as u64, write: false, detail: "outside the MCS RAM".into() });
         }
         let words: Vec<u32> = (start..=end).step_by(4).map(|a| self.ram_base() + a).collect();
@@ -300,9 +338,7 @@ impl McsChannel {
 
     /// Checks that the GTM is enabled and the channel registers are accessible.
     pub fn examine(&mut self, io: &mut Io) -> Result<()> {
-        if self.channel >= CHANNELS {
-            return Err(other(format!("MCS channel {} does not exist (0..{})", self.channel, CHANNELS - 1)));
-        }
+        self.check_config()?;
         let clc = io.read32(GTM_CLC)?;
         if clc & 2 != 0 {
             return Err(other("GTM is disabled (GTM_CLC.DISS)"));
@@ -489,8 +525,9 @@ impl McsChannel {
             return Err(other(format!("cannot determine the instruction after 0x{pc:x} ({})", op.name)));
         }
         // Traps on the successors (breakpoints already are self-jumps), the instruction restored.
+        let size = self.ram_size();
         let mut traps = Vec::new();
-        for &s in succ.iter().filter(|&&s| s != pc && s < RAM_SIZE) {
+        for &s in succ.iter().filter(|&&s| s != pc && s < size) {
             let known = {
                 let ram = self.shared();
                 ram.bps.contains_key(&s) || ram.traps.contains_key(&s)
@@ -759,6 +796,26 @@ mod tests {
         assert_eq!(c.reg_addr(&MCS_REGS[GTM_MCS.reg_index("ctrl_stat").unwrap()]), 0xF01F_1064);
         assert_eq!(c.ram_addr(0x200).unwrap(), 0xF014_0200);
         assert!(c.ram_addr(0x201).is_err());
+    }
+
+    #[test]
+    fn ram_size_and_config() {
+        let mut c = McsChannel::new();
+        assert_eq!(c.ram_size(), DEFAULT_RAM_SIZE);
+        assert!(c.ram_addr(DEFAULT_RAM_SIZE - 4).is_ok() && c.ram_addr(DEFAULT_RAM_SIZE).is_err());
+        c.set_ram_size(0x2000).unwrap();
+        assert!(c.owns_address(0x1FFC) && !c.owns_address(0x2000));
+        assert!(c.ram_addr(0x2000).is_err());
+        assert!(c.set_ram_size(0x2002).is_err() && c.set_ram_size(0).is_err() && c.set_ram_size(MAX_RAM_SIZE + 4).is_err());
+        c.set_ram_size(MAX_RAM_SIZE).unwrap();
+        c.module = MAX_MODULES - 1;
+        c.channel = CHANNELS - 1;
+        assert!(c.check_config().is_ok());
+        c.module = MAX_MODULES;
+        assert!(c.check_config().is_err());
+        c.module = 0;
+        c.channel = CHANNELS;
+        assert!(c.check_config().is_err());
     }
 
     #[test]

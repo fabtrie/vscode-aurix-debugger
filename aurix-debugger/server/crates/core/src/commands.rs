@@ -10,6 +10,7 @@ use crate::ctx::{Cx, Mode, Ocmts, Shared, Tap};
 use crate::error::Error;
 use crate::events::{emit, Event};
 use crate::flash::{self, FlashBank};
+use crate::gtm_mcs::DEFAULT_RAM_SIZE;
 use crate::image::Image;
 use crate::ops;
 use crate::target::{BpKind, Core, TargetEntry, TargetState, WatchAccess};
@@ -362,10 +363,11 @@ fn cmd_target(cx: &Cx, a: &[&str]) -> CmdResult {
                 cx.with(|c| c.targets.pop());
                 return Err(format!("[{name}] OCMTS not configured for target (-ocmts)"));
             }
-            // Channels of one MCS module share the program RAM with its breakpoints.
+            // Channels of one MCS module share the program RAM with its breakpoints and size; a
+            // -ramsize given here applies to the whole module.
             cx.with(|c| {
                 let Some(m) = c.targets[t].core.as_mcs() else { return };
-                let (module, rambase) = (m.module, m.rambase);
+                let (module, rambase, size) = (m.module, m.rambase, m.ram_size());
                 let shared = c.targets[..t]
                     .iter()
                     .filter_map(|e| e.core.as_mcs())
@@ -373,6 +375,9 @@ fn cmd_target(cx: &Cx, a: &[&str]) -> CmdResult {
                     .map(|o| o.ram.clone());
                 if let (Some(ram), Some(m)) = (shared, c.targets[t].core.as_mcs_mut()) {
                     m.ram = ram;
+                    if size != DEFAULT_RAM_SIZE {
+                        let _ = m.set_ram_size(size);
+                    }
                 }
             });
             cx.with(|c| c.current = Some(t));
@@ -441,16 +446,17 @@ fn configure_target(cx: &Cx, t: usize, a: &[&str]) -> Result<(), String> {
                 cx.with(|c| c.targets[t].chain_position = Some(v));
                 i += 2;
             }
-            "-module" | "-channel" | "-rambase" => {
+            "-module" | "-channel" | "-rambase" | "-ramsize" => {
                 let v = num32(arg(i + 1, opt)?)?;
                 cx.with(|c| {
                     let m = c.targets[t].core.as_mcs_mut().ok_or_else(|| format!("{opt} is only valid for gtm_mcs targets"))?;
                     match opt {
                         "-module" => m.module = v,
                         "-channel" => m.channel = v,
+                        "-ramsize" => m.set_ram_size(v).map_err(e2s)?,
                         _ => m.rambase = Some(v),
                     }
-                    Ok::<(), String>(())
+                    m.check_config().map_err(e2s)
                 })?;
                 i += 2;
             }
@@ -482,6 +488,7 @@ fn cget_target(cx: &Cx, t: usize, a: &[&str]) -> CmdResult {
             "-dbgbase" => format!("0x{:08x}", e.core.dbgbase().unwrap_or(0)),
             "-module" => e.core.as_mcs().map(|m| m.module.to_string()).ok_or("not a gtm_mcs target")?,
             "-channel" => e.core.as_mcs().map(|m| m.channel.to_string()).ok_or("not a gtm_mcs target")?,
+            "-ramsize" => e.core.as_mcs().map(|m| format!("0x{:x}", m.ram_size())).ok_or("not a gtm_mcs target")?,
             "-ocmts" => e.core.ocmts().map(str::to_string).ok_or("OCMTS not configured")?,
             "-chain-position" => e.chain_position.clone().unwrap_or_default(),
             "-endian" => "little".into(),

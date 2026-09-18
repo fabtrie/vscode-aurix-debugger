@@ -1,4 +1,4 @@
-//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg against the
+//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg (with tc3xx_ocds.tcl) against the
 //! simulated TC37x and checks the event-driven register sequences.
 
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ fn server() -> Server {
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
     // The simulated HSM never reports ready: don't wait for it after halting resets.
-    s.interp.eval_global("set tc37x_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
     s
 }
 
@@ -57,7 +57,7 @@ fn loads_real_cfg_and_inits() {
     // pfls0/1 from the target cfg, dfls0/1 from tc37x_ocds_init.cfg.
     assert_eq!(i.eval("flash banks").unwrap().lines().count(), 4);
     assert_eq!(i.eval("tc37x.cpu1 cget -dbgbase").unwrap(), "0xf8820000");
-    assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap().trim(), "tc37x_on_examine");
+    assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap().trim(), "tc3xx_on_examine");
     i.eval("init").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "CBS_TL1ST not written: {w:08x?}");
@@ -104,7 +104,7 @@ fn halt_and_resume_follow_cfg_event_order() {
 fn frozen_step_timers_keep_suspend_out_while_halted_and_stepping() {
     let s = server();
     s.interp.eval("init").unwrap();
-    assert_eq!(s.interp.eval("tc37x_step_timers frozen").unwrap(), "frozen");
+    assert_eq!(s.interp.eval("tc3xx_step_timers frozen").unwrap(), "frozen");
     s.interp.eval("halt 1000").unwrap();
     let w = take_writes(&s);
     for d in DBGSR {
@@ -123,7 +123,7 @@ fn frozen_step_timers_keep_suspend_out_while_halted_and_stepping() {
     let p_clear = pos(&w, (DBGSR[0], 0));
     let pend = pos(&w, (CBS_TLCHS, 2));
     assert!(p_clear < pend, "suspend-out cleared after the TL1 hold was dropped: {w:08x?}");
-    assert!(s.interp.eval("catch {tc37x_step_timers slow}").unwrap() == "1");
+    assert!(s.interp.eval("catch {tc3xx_step_timers slow}").unwrap() == "1");
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn boot_halted_core_does_not_fire_halted_handler() {
     let (_, reason) = ops::state(&s.cx(), 2);
     assert_eq!(reason.name(), "boot-halt");
     // A real debug halt of cpu0 still runs the handler (visible through its SUSP writes in "frozen").
-    s.interp.eval("tc37x_step_timers frozen").unwrap();
+    s.interp.eval("tc3xx_step_timers frozen").unwrap();
     s.interp.eval("halt 1000").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(DBGSR[2], 0x10)));
@@ -291,7 +291,7 @@ fn connect_reset_halt_leaves_cores_halted_with_setup() {
     let s = server();
     s.interp.eval("init").unwrap();
     take_writes(&s);
-    s.interp.eval("tc37x_connect_reset_halt").unwrap();
+    s.interp.eval("tc3xx_connect_reset_halt").unwrap();
     let w = take_writes(&s);
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
     assert!(w.contains(&(0xF000_10E8, 0x1200_0000)), "STM suspend not applied: {w:08x?}");
@@ -715,7 +715,7 @@ fn mcs_breakpoint_opens_the_ram_write_protection_and_restores_it() {
 fn mcs_halt_all_handler_pulses_tl1_only_for_breakpoints() {
     let s = mcs_server();
     let i = &s.interp;
-    i.eval("tc37x.mcs0.ch0 configure -event halted {tc37x_mcs_halt_all tc37x.mcs0.ch0}").unwrap();
+    i.eval("tc37x.mcs0.ch0 configure -event halted {tc3xx_mcs_halt_all tc37x.mcs0.ch0}").unwrap();
     take_writes(&s);
     i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
     ops::poll_all(&s.cx());
@@ -726,4 +726,28 @@ fn mcs_halt_all_handler_pulses_tl1_only_for_breakpoints() {
     take_writes(&s);
     poll_until(&s, "breakpoint", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
     assert!(take_writes(&s).contains(&(CBS_TLC, 0x30)));
+}
+
+/// tc3xx_ocds.tcl takes the cores and their registers from the target cfg: TC39x with six cores,
+/// CPU5 at dbgbase 0xF88C0000, and an MCS RAM size for the module.
+#[test]
+fn generic_setup_follows_the_target_cfg() {
+    aurix_core::log::set_debug_level(1);
+    let s = Server::new();
+    s.cx().with(|c| c.search_dirs.push(repo().join("third_party/openocd/tcl")));
+    let i = &s.interp;
+    i.eval_global("adapter driver sim; script target/infineon/tc39x.cfg").unwrap();
+    i.eval_global("set tc3xx_mcs_modules {0 9}; set tc3xx_mcs_ramsize 0x1800").unwrap();
+    i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc3xx_ocds.tcl"))))).unwrap();
+    i.eval_global("tc3xx_ocds_setup tc39x").unwrap();
+    assert_eq!(i.eval("set tc3xx_cores").unwrap(), "tc39x.cpu0 tc39x.cpu1 tc39x.cpu2 tc39x.cpu3 tc39x.cpu4 tc39x.cpu5");
+    assert_eq!(i.eval("set tc3xx_dbgsr(tc39x.cpu5)").unwrap(), "0xF88DFD00");
+    assert_eq!(i.eval("set tc3xx_coreid(tc39x.cpu5)").unwrap(), "5");
+    assert_eq!(i.eval("format 0x%08X [tc3xx_cbs_trc 5]").unwrap(), "0xF0000434");
+    assert_eq!(i.eval("tc39x.cpu5 cget -event step-start").unwrap(), "tc3xx_on_step_start tc39x.cpu5");
+    assert_eq!(i.eval("tc39x.hsm cget -type").unwrap(), "cortex_m");
+    assert_eq!(i.eval("tc39x.mcs9.ch7 cget -ramsize").unwrap(), "0x1800");
+    assert_eq!(i.eval("target current").unwrap(), "tc39x.cpu0");
+    assert!(i.eval("catch {target create x gtm_mcs -module 10}").unwrap() == "1");
+    assert!(i.eval("catch {tc3xx_ocds_setup tc27x}").unwrap() == "1");
 }

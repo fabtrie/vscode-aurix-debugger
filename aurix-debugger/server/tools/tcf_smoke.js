@@ -211,9 +211,9 @@ async function main() {
     ok(`instruction step: ${hex(st0.pc)} -> ${hex(stepEv.info.pc)} reason=${stepEv.info.reason}`);
 
     // Tcl console through TCF
-    const tcl = await c.sendCommand(new RawCommand('Tcl', 'eval', ['tc37x_stm_status'], jsonParser));
+    const tcl = await c.sendCommand(new RawCommand('Tcl', 'eval', ['tc3xx_stm_status'], jsonParser));
     console.log(tcl.split('\n').map((l) => '       ' + l).join('\n'));
-    ok('Tcl.eval tc37x_stm_status');
+    ok('Tcl.eval tc3xx_stm_status');
 
     // Resume and leave the target running
     c.events = [];

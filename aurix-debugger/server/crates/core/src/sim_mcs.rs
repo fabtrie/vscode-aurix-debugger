@@ -8,7 +8,7 @@
 
 use isa::mcs;
 
-use crate::gtm_mcs::{arp_range, ccm_base, module_ram, module_regs, ARP_DIS_PROT, ARP_WPROT_AEI, CTRL_EN, GTM_CLC, RAM_SIZE};
+use crate::gtm_mcs::{arp_range, ccm_base, module_ram, module_regs, ARP_DIS_PROT, ARP_WPROT_AEI, CTRL_EN, GTM_CLC, DEFAULT_RAM_SIZE};
 
 pub const MODULES: usize = 5;
 
@@ -41,7 +41,7 @@ impl SimModule {
         for (x, c) in ch.iter_mut().enumerate() {
             c.pc = 4 * x as u32;
         }
-        SimModule { ram: vec![0; (RAM_SIZE / 4) as usize], arp: [0; 10], cls_prot: false, ch, strg: 0 }
+        SimModule { ram: vec![0; (DEFAULT_RAM_SIZE / 4) as usize], arp: [0; 10], cls_prot: false, ch, strg: 0 }
     }
 }
 
@@ -87,7 +87,7 @@ impl SimGtm {
                 Some(Loc::Ccm { m, off: addr - ccm })
             } else if (regs..regs + 0x400).contains(&addr) {
                 Some(Loc::Reg { m, off: addr - regs })
-            } else if (ram..ram + RAM_SIZE).contains(&addr) {
+            } else if (ram..ram + DEFAULT_RAM_SIZE).contains(&addr) {
                 Some(Loc::Ram { m, idx: ((addr - ram) / 4) as usize })
             } else {
                 None

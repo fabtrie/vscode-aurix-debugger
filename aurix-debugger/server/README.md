@@ -58,7 +58,7 @@ Use a launch configuration of type `aurix-tcf` with `"agentFlavor": "aurix-dbg"`
 | `program` | ELF with debug information (symbols, source breakpoints, variables). |
 | `enableFlashing`, `flashFile` | Run `program {flashFile} preverify verify reset` before the session. `flashFile` defaults to `program`. |
 
-Debug console: `monitor <tcl command>`, for example `monitor tc37x_stm_status`.
+Debug console: `monitor <tcl command>`, for example `monitor tc3xx_stm_status`.
 
 ## Architecture
 
@@ -73,16 +73,32 @@ Debug console: `monitor <tcl command>`, for example `monitor tc37x_stm_status`.
 
 Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures run on the core thread) and subscribe to core events.
 
+## Cfg scripts and other derivatives
+
+The server itself holds no board or application settings. The cfg scripts come in three layers:
+
+| File | Content |
+|---|---|
+| OpenOCD target cfg (`target/infineon/tc3?x.cfg`, via the board cfg) | TriCore cores with `-coreid`/`-dbgbase`, PFLASH banks. |
+| [`tc3xx_ocds.tcl`](../tc3xx_ocds.tcl) | Generic TC3xx multi-core setup: TL1 break/step/continue, STM suspend, HSM and MCS targets, HSM start after a halting reset, `tc3xx_connect_reset_halt`, diagnostics. It takes DBGSR (`-dbgbase` + 0x1FD00) and the per-core CBS_TRCx/STMx/WDTCPUx registers (`-coreid`) from the target cfg. |
+| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | This project (TC377 TRB board, app): adapter speed, DFLASH banks, MCS modules used, notes on the application. |
+
+For another board or derivative, copy `tc37x_ocds_init.cfg`, pass the target cfg's chip name to `tc3xx_ocds_setup` and adjust its settings. Options of `tc3xx_ocds.tcl` (set before `tc3xx_ocds_setup`) are listed at the top of the file: `tc3xx_hsm_target`, `tc3xx_mcs_modules`, `tc3xx_mcs_ramsize`, `tc3xx_irq_mask`, `tc3xx_tl1_step`, `tc3xx_hsm_autostart`, `tc3xx_hsm_ready_ms`, `tc3xx_gtm_suspend`, `tc3xx_step_timers`.
+
+Console procs: `tc3xx_step_timers run|frozen`, `tc3xx_connect_reset_halt ?tries? ?delay_ms?`, `tc3xx_stm_status`, `tc3xx_wdt_status`.
+
+TriCore 1.8 (TC4x) is rejected.
+
 ## Tcl commands
 
-The commands the cfg scripts use behave as in OpenOCD. Board policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc37x_ocds_init.cfg`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
+The commands the cfg scripts use behave as in OpenOCD. Multi-core policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc3xx_ocds.tcl`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
 
-- **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `bindto`.
+- **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `bindto`. Target types: `tricore`, `cortex_m` (HSM), `gtm_mcs` (`-module` 0..9, `-channel` 0..7, `-ramsize <bytes>`: MCS RAM per module, default 12 KB as on the TC37x; it applies to all channels of the module).
 - **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore tl1_step on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`.
 
 ## Multi-core stepping (`tricore tl1_step`)
 
-With `<target> tricore tl1_step on` (set by `tc37x_ocds_init.cfg`), an instruction step runs **all** cores for the stepped instruction, not only the stepping one:
+With `<target> tricore tl1_step on` (set by `tc3xx_ocds.tcl`), an instruction step runs **all** cores for the stepped instruction, not only the stepping one:
 
 1. The core makes sure TL1 is latched (capture-and-hold), pulsing it if needed.
 2. The cfg's `step-start` releases the other cores' debug halt; TL1 still suspends them.
@@ -93,14 +109,14 @@ Without `tl1_step` (OpenOCD), the other cores stay in debug halt and only the st
 
 **STMs.** On the TC377 an STM with `OCS.SUS=2` stops while its CPU is suspended by TL1 *or* has `DBGSR.SUSP` set (measured with raw register writes). A trigger event loads `DBGSR.SUSP` from `TRxEVT.SUSP`; the core carries the current SUSP into the step release and the step trigger, so the cfg decides:
 
-- `tc37x_step_timers run` (default): SUSP stays clear. TL1 stops and restarts the STMs in the same cycle as the cores, so they stop at halt, run with continue, and advance together while the cores execute a step.
-- `tc37x_step_timers frozen`: SUSP is set on every core while halted, so the STMs also stay stopped during steps.
+- `tc3xx_step_timers run` (default): SUSP stays clear. TL1 stops and restarts the STMs in the same cycle as the cores, so they stop at halt, run with continue, and advance together while the cores execute a step.
+- `tc3xx_step_timers frozen`: SUSP is set on every core while halted, so the STMs also stay stopped during steps.
 
-Switch at runtime with `monitor tc37x_step_timers frozen` or `run`.
+Switch at runtime with `monitor tc3xx_step_timers frozen` or `run`.
 
 ## Interrupts while stepping (`tricore irq_mask`)
 
-`<target> tricore irq_mask step step_over step_out` makes steps run with interrupts masked, like winIDEA's `DisableIRQ_Step`, `DisableIRQ_StepOver` and `DisableIRQ_RunUntilReturn`. `tc37x_ocds_init.cfg` enables all three for every core. `tricore irq_mask off` (cfg, `configCommands` or `monitor`) turns it off.
+`<target> tricore irq_mask step step_over step_out` makes steps run with interrupts masked, like winIDEA's `DisableIRQ_Step`, `DisableIRQ_StepOver` and `DisableIRQ_RunUntilReturn`. `tc3xx_ocds.tcl` enables all three for every core (`tc3xx_irq_mask`). `tricore irq_mask off` (cfg, `configCommands` or `monitor`) turns it off.
 
 - **When:** a step of a selected kind (instruction step or step into = `step`, source step over = `step_over`, step out = `step_out`) clears ICR.IE on that core. ICR.IE stays cleared while halted between steps. Continue restores it on every core before the cfg releases them.
 - **What the application sees:** reading ICR (Registers view, `reg icr`) shows the application's IE, not the masked value. Writing ICR while masked sets the application's IE. `mdw` on the CSFR address shows the real chip value.
@@ -128,7 +144,8 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 - **`flash write_images [erase] [incremental] [unlock] [verify] <file> ...`:** Merges the files into one image (where they overlap, later files win) and writes it like `flash write_image`. Writing the files one by one would erase data of earlier files in shared 16 KB sectors, and incremental writes would reprogram those sectors every time. With `incremental`, `verify` reads back only the programmed sectors, since the unchanged ones were just compared; otherwise the whole image. Reading runs at about 470 KB/s at `adapter speed 5000` and about 2 MB/s at 30000 (set by `tc37x_ocds_init.cfg`), so comparing large images dominates. The VS Code extension flashes `flashFiles` with this command (`verifyFlash` selects `verify`).
 - **`verify_image`:** reads only the image bytes. Flash is read through the non-cached 0xA segment.
 - **`program … preverify`:** leaves flash untouched when the image already matches.
-- **Supported images:** ELF (load segments), Intel HEX, raw binary. Banks: TC36x/37x/38x/39x/3Ex PFLASH; DFLASH and UCB are not supported.
+- **Supported images:** ELF (load segments), Intel HEX, raw binary. UCB banks are not supported.
+- **Banks:** the bank layout (busy bit, physical sectors) is looked up by `SCU_CHIPID.CHID`. TC36x/37x/38x/39x/3Ex use a table, like OpenOCD's `aurix_eflash`. Other TC3xx variants (e.g. TC33x, TC35x) use the common scheme with a warning: PFn at 0x80000000 + n × 3 MB, up to 3 MB, busy bit 2 + n. A `flash bank` may be smaller than its table entry, for devices with less flash than the largest one in their family. DFLASH0 (0xAF000000, up to 1 MB) and DFLASH1 (0xAFC00000, 128 KB) are the same on all variants.
 
 ## Tests
 

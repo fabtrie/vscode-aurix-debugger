@@ -119,7 +119,7 @@ const TC39X: &[Pflash] = &[
 ];
 const TC3EX: &[Pflash] = &[pf(0x8000_0000, 3 * MB, 2), pf(0x8030_0000, 3 * MB, 3), pf(0x8060_0000, 3 * MB, 4), pf(0x8090_0000, 3 * MB, 5)];
 
-/// PFLASH banks per TC3xx variant (SCU_CHIPID.CHID).
+/// PFLASH banks per TC3xx variant (SCU_CHIPID.CHID), as in OpenOCD's `aurix_eflash`.
 fn pflash_banks(variant: u32) -> &'static [Pflash] {
     match variant {
         0x6 => TC36X,
@@ -129,6 +129,35 @@ fn pflash_banks(variant: u32) -> &'static [Pflash] {
         0xE => TC3EX,
         _ => &[],
     }
+}
+
+/// PFLASH bank spacing of the TC3xx: PFn starts at 0x80000000 + n * 3 MB (smaller banks leave a gap).
+const PF_STRIDE: u32 = 3 * MB;
+/// Most PFLASH banks of a TC3xx (TC39x: PF0..PF5).
+const MAX_PF_BANKS: u32 = 6;
+
+/// PFn of the common TC3xx scheme, for variants without a table entry: base 0x80000000 + n * 3 MB,
+/// up to 3 MB, busy bit 2 + n in DMU_HF_STATUS, 1 MB physical sectors.
+fn generic_pflash(base: u32) -> Option<Pflash> {
+    let off = base & 0x0FFF_FFFF;
+    let n = off / PF_STRIDE;
+    (is_flash_address(base) && off % PF_STRIDE == 0 && n < MAX_PF_BANKS).then(|| pf(0x8000_0000 + n * PF_STRIDE, PF_STRIDE, 2 + n))
+}
+
+/// Layout of the bank at `base` with `size` on TC3xx variant `variant`, and whether it comes from the
+/// generic scheme instead of the variant's table. A bank may be smaller than its table entry (devices
+/// with less flash than the largest of their family); DFLASH0/1 are the same on all variants, their
+/// size depends on the device (256 KB DFLASH0 on the TC377 board, up to 1 MB is accepted).
+fn bank_layout(variant: u32, base: u32, size: u32) -> Option<(Pflash, bool)> {
+    let table = pflash_banks(variant);
+    let generic = table.is_empty();
+    let fits = |p: &Pflash| p.base & 0x0FFF_FFFF == base & 0x0FFF_FFFF && size > 0 && size <= p.size && size % p.sector_size == 0;
+    let found = if generic { generic_pflash(base).filter(fits) } else { table.iter().copied().find(fits) };
+    let (p, generic) = match found {
+        Some(p) => (p, generic),
+        None => ([DF0, DF1].into_iter().find(fits)?, false),
+    };
+    Some((Pflash { base, size, ..p }, generic))
 }
 
 /// Non-cached address (segment 0xA) of a flash address.
@@ -163,22 +192,22 @@ pub fn probe(io: &mut Io, bank: &FlashBank) -> Result<Pflash> {
         return Err(other(format!("SCU_CHIPID 0x{chipid:08x} is not an AURIX TC3xx device")));
     }
     let variant = (chipid >> 12) & 0xF;
-    let banks = pflash_banks(variant);
-    banks
-        .iter()
-        .chain(if banks.is_empty() { &[][..] } else { &[DF0, DF1][..] })
-        // The DFLASH size depends on the device (256 KB on the TC377 board): up to 1 MB is accepted.
-        .find(|p| {
-            let size_ok = if p.dflash { bank.size > 0 && bank.size <= p.size && bank.size % p.sector_size == 0 } else { p.size == bank.size };
-            p.base & 0x0FFF_FFFF == bank.base & 0x0FFF_FFFF && size_ok
-        })
-        .map(|p| Pflash { base: bank.base, size: bank.size, ..*p })
-        .ok_or_else(|| {
-            other(format!(
-                "{}: no TC3{variant:X}x PFLASH or DFLASH bank at 0x{:08x} with size 0x{:x} (UCB banks are not supported)",
-                bank.name, bank.base, bank.size
-            ))
-        })
+    let (layout, generic) = bank_layout(variant, bank.base, bank.size).ok_or_else(|| {
+        other(format!(
+            "{}: no TC3{variant:X}x PFLASH or DFLASH bank at 0x{:08x} with size 0x{:x} (UCB banks are not supported)",
+            bank.name, bank.base, bank.size
+        ))
+    })?;
+    if generic {
+        log_warn!(
+            "{}: TC3{variant:X}x is not in the PFLASH table, using the common TC3xx layout (PF{} at 0x{:08x}, busy bit {})",
+            bank.name,
+            layout.busy_bit - 2,
+            layout.base,
+            layout.busy_bit
+        );
+    }
+    Ok(layout)
 }
 
 /// DMU command sequences on one PFLASH bank.
@@ -606,5 +635,28 @@ mod tests {
         let df = Driver::new(d.io, DF0);
         assert_eq!((df.chunk(0xAF00_0000, 300), df.chunk(0xAF0F_F000, 300)), (64, 1));
         assert_eq!(err_text(ERR_PROER | ERR_PVER), "protection error, program verify error");
+    }
+
+    #[test]
+    fn bank_layouts() {
+        let busy = |v, base, size| bank_layout(v, base, size).map(|(p, g)| (p.busy_bit, p.dflash, g));
+        // Table variants: full or smaller banks, also through the non-cached segment.
+        assert_eq!(busy(0x7, 0x8030_0000, 3 * MB), Some((3, false, false)));
+        assert_eq!(busy(0x7, 0xA000_0000, 2 * MB), Some((2, false, false)));
+        assert_eq!(busy(0x9, 0x80F0_0000, MB), Some((7, false, false)));
+        assert_eq!(busy(0x8, 0x80C0_0000, MB), None);
+        assert_eq!(busy(0x6, 0x8000_0000, 3 * MB), None);
+        assert_eq!(busy(0x7, 0x8000_0000, 3 * MB + SECTOR_SIZE), None);
+        // Variants without a table entry use the common scheme.
+        assert_eq!(busy(0x3, 0x8000_0000, 2 * MB), Some((2, false, true)));
+        assert_eq!(busy(0x5, 0x8030_0000, 2 * MB), Some((3, false, true)));
+        assert_eq!(busy(0x5, 0x8010_0000, MB), None);
+        assert_eq!(busy(0x5, 0x8120_0000, MB), None);
+        // DFLASH on every variant.
+        assert_eq!(busy(0x7, 0xAF00_0000, 0x4_0000), Some((0, true, false)));
+        assert_eq!(busy(0x3, 0xAFC0_0000, 0x2_0000), Some((1, true, false)));
+        assert_eq!(busy(0x3, 0xAFC0_0000, 0x4_0000), None);
+        let (p, _) = bank_layout(0x7, 0xA030_0000, MB).unwrap();
+        assert_eq!((p.base, p.size, p.sector_size, p.phys_sector), (0xA030_0000, MB, SECTOR_SIZE, MB));
     }
 }

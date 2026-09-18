@@ -138,7 +138,7 @@ fn addr_prop(v: &Value) -> Option<u32> {
     }
 }
 
-fn breakpoint_info(id: &str, bp: &tcf::Bp, names: &HashMap<usize, String>) -> BreakpointInfo {
+fn breakpoint_info(id: &str, bp: &tcf::Bp, names: &HashMap<usize, String>, session: &tcf::Shared) -> BreakpointInfo {
     let p = &bp.props;
     let location = p.get("Location");
     let address = p.get("Address").and_then(addr_prop).or_else(|| location.and_then(addr_prop));
@@ -146,7 +146,10 @@ fn breakpoint_info(id: &str, bp: &tcf::Bp, names: &HashMap<usize, String>) -> Br
     let instances = bp
         .instances
         .iter()
-        .map(|i| BreakpointInstance { target: names.get(&i.target).cloned().unwrap_or_else(|| i.target.to_string()), address: i.addr, error: i.error.clone() })
+        .map(|i| {
+            let (file, line) = session.source_line(&i.ctx, i.addr).unzip();
+            BreakpointInstance { target: names.get(&i.target).cloned().unwrap_or_else(|| i.target.to_string()), address: i.addr, file, line, error: i.error.clone() }
+        })
         .collect();
     BreakpointInfo {
         id: id.to_string(),
@@ -210,7 +213,7 @@ impl CoreApi {
 
     fn breakpoint_list(&self) -> Result<BreakpointList, ApiError> {
         let names = self.names()?;
-        Ok(BreakpointList { breakpoints: self.session.breakpoints().iter().map(|(id, bp)| breakpoint_info(id, bp, &names)).collect() })
+        Ok(BreakpointList { breakpoints: self.session.breakpoints().iter().map(|(id, bp)| breakpoint_info(id, bp, &names, &self.session)).collect() })
     }
 
     fn tcl_command(&self, command: &str) -> Result<CommandOutput, ApiError> {
@@ -409,7 +412,7 @@ impl DebuggerApi for CoreApi {
             let why = bp.error.clone().or_else(|| bp.instances.iter().find_map(|i| i.error.clone())).unwrap_or_else(|| "not planted".into());
             return Err(ApiError::new(ErrorCode::Resource, why));
         }
-        Ok(breakpoint_info(&id, &bp, &self.names()?))
+        Ok(breakpoint_info(&id, &bp, &self.names()?, &self.session))
     }
 
     fn remove_breakpoint(&self, req: BreakpointRef) -> Result<BreakpointList, ApiError> {

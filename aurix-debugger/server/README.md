@@ -81,7 +81,8 @@ The generated files are checked in, and a file is only written when its content 
 
 **Shared session.** REST, MCP and VS Code (TCF) share one session:
 - Run control goes through the same core operations and events. A halt from the API shows up in VS Code, and a resume in VS Code shows up in `wait_state` and on the event stream.
-- Breakpoints live in one table. API breakpoints appear to VS Code as those of another TCF client. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
+- Breakpoints live in one table. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
+- VS Code shows API breakpoints in its Breakpoints view. A breakpoint at the start of a source line is shown as a source breakpoint; any other is shown as a function breakpoint named by symbol or address, e.g. `0x8021a9de`. Removing, disabling or enabling it in VS Code changes it on the server, and removing it through the API removes it from the view. When the debug session ends, the extension takes them out of the view again, so they are not saved with the workspace. VS Code's own function breakpoints accept a symbol, an address or `file:line`.
 - Memory and register writes from the API send `Memory.memoryChanged` / `Registers.registerChanged`. The extension then refreshes its variable, watch and register views.
 - During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
 
@@ -198,6 +199,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
   - `node tools/dap_m6.js`: locals, register/global/struct writes, enum names, live watch.
   - `node tools/dap_m8.js`: disassembly and reset.
   - `node tools/tcf_smoke.js`: raw TCF services.
+  - `node tools/dap_external_bp.js [tcf_port] [api_port]`: API breakpoints in VS Code's Breakpoints view (also runs against the simulator).
 
 ## Not yet implemented
 

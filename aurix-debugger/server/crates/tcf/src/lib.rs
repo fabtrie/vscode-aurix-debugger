@@ -252,6 +252,11 @@ impl Shared {
         }
     }
 
+    /// Source file and line of `addr` on the core of context `ctx`, if its symbols are loaded.
+    pub fn source_line(&self, ctx: &str, addr: u32) -> Option<(String, u32)> {
+        self.symbols_for(ctx)?.line_at(addr).map(|li| (li.file, li.line))
+    }
+
     /// A loaded ELF by its number (symbol IDs `E<n>/...`).
     pub fn elf(&self, n: usize) -> Option<Arc<symbols::Symbols>> {
         self.symbols.lock().unwrap().elf(n)

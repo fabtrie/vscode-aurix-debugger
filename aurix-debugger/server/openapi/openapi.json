@@ -461,6 +461,22 @@
               "null"
             ]
           },
+          "file": {
+            "description": "Source file of the address, when the symbols are loaded (by a VS Code debug session).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "description": "Source line of the address in `file`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "target": {
             "description": "Target name.",
             "type": "string"

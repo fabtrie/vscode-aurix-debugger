@@ -376,6 +376,12 @@ pub struct BreakpointInstance {
     /// Target name.
     pub target: String,
     pub address: u32,
+    /// Source file of the address, when the symbols are loaded (by a VS Code debug session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Source line of the address in `file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
     /// Why it could not be planted (e.g. no free hardware breakpoint).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

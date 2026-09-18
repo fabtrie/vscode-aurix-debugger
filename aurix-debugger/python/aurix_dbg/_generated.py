@@ -118,6 +118,10 @@ class BreakpointInstance:
     """Target name."""
     error: str | None = None
     """Why it could not be planted (e.g. no free hardware breakpoint)."""
+    file: str | None = None
+    """Source file of the address, when the symbols are loaded (by a VS Code debug session)."""
+    line: int | None = None
+    """Source line of the address in `file`."""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BreakpointInstance:
@@ -125,6 +129,8 @@ class BreakpointInstance:
             address=d.get("address"),
             target=d.get("target"),
             error=d.get("error"),
+            file=d.get("file"),
+            line=d.get("line"),
         )
 
 

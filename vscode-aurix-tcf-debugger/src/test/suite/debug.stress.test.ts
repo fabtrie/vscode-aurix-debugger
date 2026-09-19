@@ -12,6 +12,10 @@ function getEnv(name: string): string | undefined {
 	return v && v.trim() !== '' ? v.trim() : undefined;
 }
 
+function getEnvList(name: string): string[] {
+	return (getEnv(name) ?? '').split(';').map((x) => x.trim()).filter((x) => x !== '');
+}
+
 function getEnvNumber(name: string, fallback: number): number {
 	const v = getEnv(name);
 	if (!v) {
@@ -25,18 +29,17 @@ function getDebugConfig(): vscode.DebugConfiguration | undefined {
 	// For quick local runs you can hardcode defaults here.
 	// Env vars (if set) override the defaults.
 	const program = getEnv('AURIX_TEST_ELF') || 'c:\\Users\\ZhangZehu\\Documents\\ADS\\Testing\\tcf-agent\\temp\\TC375_CE';
-	const targetDevice =
-		getEnv('AURIX_TEST_DEVICE') || 'DAS JDS AURIX LITE KIT V2.0 (TC375) LK8PIMU6';
 	const config: vscode.DebugConfiguration = {
-		type: 'aurix-tcf',
+		type: 'aurixdbg',
 		request: 'launch',
 		name: 'AURIX Stress',
-		program,
-		targetDevice,
+		symbolFiles: [program],
+		// aurix-dbg scripts, ';'-separated (OpenOCD -s / -f).
+		searchDirs: getEnvList('AURIX_TEST_SEARCH_DIRS'),
+		configFiles: getEnvList('AURIX_TEST_CONFIG_FILES'),
 		host: '127.0.0.1',
 		port: 1534,
 		stopOnEntry: true,
-		entryFunction: 'core0_main',
 		svdFile: '',
 		workspace: getEnv('AURIX_TEST_WORKSPACE')
 	};
@@ -123,15 +126,12 @@ suite('AURIX debug stress', () => {
 
 		// In the VS Code test host, activation events don't always fire in the order we expect.
 		// Explicitly activate the extension so the debug adapter descriptor factory is registered.
-		const ext = vscode.extensions.getExtension('zehuazhang.vscode-aurix-tcf-debug');
-		assert.ok(ext, 'AURIX TCF extension not found in test host');
+		const ext = vscode.extensions.getExtension('fabtrie.aurix-debugger');
+		assert.ok(ext, 'AURIX debugger extension not found in test host');
 		await ext.activate();
 
 		if (!config.autoStartAgent) {
 			config.autoStartAgent = true;
-		}
-		if (!config.agentPath) {
-			config.agentPath = path.join(ext.extensionPath, 'bin', 'aurix-debugger.exe');
 		}
 		// If auto-start is disabled, require an already-running agent to avoid a blocked dialog.
 		if (!config.autoStartAgent) {

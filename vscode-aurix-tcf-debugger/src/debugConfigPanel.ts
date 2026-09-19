@@ -3,9 +3,6 @@
  */
 
 import * as vscode from 'vscode';
-import { execFile } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
 import { getSvdOptionsForDevice } from './svdCatalog';
 
 function esc(s: string): string {
@@ -20,8 +17,8 @@ function esc(s: string): string {
 // Show the configuration panel.
 export async function showDebugConfigPanel(context: vscode.ExtensionContext): Promise<void> {
 	const panel = vscode.window.createWebviewPanel(
-		'aurixTcfDebugConfig',
-		'AURIX™ TCF Debug Configuration',
+		'aurixDebugConfig',
+		'AURIX™ Debug Configuration',
 		vscode.ViewColumn.Active,
 		{
 			enableScripts: true,
@@ -31,18 +28,15 @@ export async function showDebugConfigPanel(context: vscode.ExtensionContext): Pr
 
 	const folder = vscode.workspace.workspaceFolders?.[0];
 	const workspaceFolder = folder?.uri.fsPath || '';
-	const legacyKey = 'aurix-tcf.debugConfigPanel.values';
 
 	// Use launch.json ("launch" configuration) as defaults.
 	const launchConfigurations = vscode.workspace.getConfiguration('launch', folder?.uri).get<any[]>('configurations') ?? [];
-	const launchDefault = launchConfigurations.find((c) => c && typeof c === 'object' && c.type === 'aurix-tcf') ?? {};
+	const launchDefault = launchConfigurations.find((c) => c && typeof c === 'object' && c.type === 'aurixdbg') ?? {};
 
-	const targetDeviceForDefaults = typeof launchDefault.targetDevice === 'string' ? launchDefault.targetDevice : '';
 	const initialSvdOptions = await getSvdOptionsForDevice(context.extensionPath);
-	const scopedKey = targetDeviceForDefaults.trim() ? `${legacyKey}:${targetDeviceForDefaults}` : legacyKey;
-	const savedScoped = (context.globalState.get(scopedKey) as Partial<AurixPanelValues> | undefined) ?? {};
-	const savedLegacy = (context.globalState.get(legacyKey) as Partial<AurixPanelValues> | undefined) ?? {};
-	const saved = Object.keys(savedScoped).length > 0 ? savedScoped : savedLegacy;
+	const saved = (context.globalState.get(valuesKey) as Partial<AurixPanelValues> | undefined) ?? {};
+	const stringList = (v: unknown): string[] | undefined =>
+		Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined;
 
 	const defaults: AurixPanelDefaults = {
 		workspaceFolder,
@@ -50,17 +44,17 @@ export async function showDebugConfigPanel(context: vscode.ExtensionContext): Pr
 		// launch.json values are the defaults; saved values are fallback.
 		values: {
 			workspace: (launchDefault.workspace ?? saved.workspace ?? workspaceFolder) as string,
-			program: (launchDefault.program ?? saved.program ?? '') as string,
+			symbolFiles: stringList(launchDefault.symbolFiles) ?? stringList(saved.symbolFiles) ?? [],
+			flashFiles: stringList(launchDefault.flashFiles) ?? stringList(saved.flashFiles) ?? [],
 			ppuElfPath: ((launchDefault as any).ppuElfPath ?? saved.ppuElfPath ?? '') as string,
 			cdspElfPaths: (Array.isArray((saved as any).cdspElfPaths)
 				? (saved as any).cdspElfPaths
 				: (Array.isArray((launchDefault as any).cdspElfPaths) ? (launchDefault as any).cdspElfPaths : new Array(12).fill(''))) as string[],
-			ppuFlashHex: Boolean((launchDefault as any).ppuFlashHex ?? (saved as any).ppuFlashHex ?? false),
-			cdspFlashHex: Boolean((launchDefault as any).cdspFlashHex ?? (saved as any).cdspFlashHex ?? false),
 			scrElfPath: ((launchDefault as any).scrElfPath ?? saved.scrElfPath ?? '') as string,
 			enableFlashing: Boolean((launchDefault as any).enableFlashing ?? (saved as any).enableFlashing ?? false),
-			entryFunction: (launchDefault.entryFunction ?? saved.entryFunction ?? '') as string,
-			targetDevice: (launchDefault.targetDevice ?? saved.targetDevice ?? '') as string,
+			searchDirs: stringList(launchDefault.searchDirs) ?? stringList(saved.searchDirs) ?? [],
+			configFiles: stringList(launchDefault.configFiles) ?? stringList(saved.configFiles) ?? [],
+			configCommands: stringList(launchDefault.configCommands) ?? stringList(saved.configCommands) ?? [],
 			svdFile: (launchDefault.svdFile ?? saved.svdFile ?? '') as string,
 			// Default to false: only enable if explicitly requested.
 			enableConsoleLog: Boolean(
@@ -107,6 +101,7 @@ export async function showDebugConfigPanel(context: vscode.ExtensionContext): Pr
 				openLabel: 'Select ELF',
 				filters: {
 					'ELF files': ['elf'],
+					'HEX / MCS assembler files': ['hex', 'asm'],
 					'All files': ['*'],
 				},
 				defaultUri: folder?.uri,
@@ -132,20 +127,6 @@ export async function showDebugConfigPanel(context: vscode.ExtensionContext): Pr
 			return;
 		}
 
-		if (msg.type === 'pickDevice') {
-			try {
-				const devices = await listConnectedDevices(context);
-				if (devices.length === 0) {
-					void vscode.window.showInformationMessage('No connected devices detected.');
-				}
-				void panel.webview.postMessage({ type: 'deviceList', devices });
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				void vscode.window.showErrorMessage(`Failed to list devices: ${message}`);
-			}
-			return;
-		}
-
 		if (msg.type === 'requestSvdOptions') {
 			const options = await getSvdOptionsForDevice(context.extensionPath);
 			void panel.webview.postMessage({ type: 'svdOptions', options });
@@ -161,30 +142,25 @@ export async function showDebugConfigPanel(context: vscode.ExtensionContext): Pr
 			// Save last-used values so reopening the panel keeps them.
 			await savePanelValues(context, msg.config);
 
-			// Validate Flash Hex: check HEX file existence before launching.
-			const flashHexErrors = validateFlashHexFiles(msg.config);
-			if (flashHexErrors.length > 0) {
-				void panel.webview.postMessage({ type: 'flashHexValidationErrors', errors: flashHexErrors });
-				return;
-			}
-
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			await vscode.debug.startDebugging(folder, msg.config as vscode.DebugConfiguration);
 		}
 	}, undefined, context.subscriptions);
 }
 
+const valuesKey = 'aurix-debugger.debugConfigPanel.values';
+
 type AurixPanelValues = {
 	workspace: string;
-	program: string;
+	symbolFiles: string[];
+	flashFiles: string[];
 	ppuElfPath: string;
-	ppuFlashHex: boolean;
 	cdspElfPaths: string[];
-	cdspFlashHex: boolean;
 	scrElfPath: string;
 	enableFlashing: boolean;
-	entryFunction: string;
-	targetDevice: string;
+	searchDirs: string[];
+	configFiles: string[];
+	configCommands: string[];
 	svdFile: string;
 	enableConsoleLog: boolean;
 	additionalAgentOptions: string;
@@ -196,106 +172,6 @@ type AurixPanelDefaults = {
 	values: AurixPanelValues;
 };
 
-function parseCsvLine(line: string): string[] {
-	const fields: string[] = [];
-	let current = '';
-	let inQuotes = false;
-	for (let i = 0; i < line.length; i++) {
-		const ch = line[i];
-		if (ch === '"') {
-			if (inQuotes && line[i + 1] === '"') {
-				current += '"';
-				i++;
-				continue;
-			}
-			inQuotes = !inQuotes;
-			continue;
-		}
-		if (ch === ',' && !inQuotes) {
-			fields.push(current.trim());
-			current = '';
-			continue;
-		}
-		current += ch;
-	}
-	fields.push(current.trim());
-	return fields;
-}
-
-// Extract device names from lsmcdd.exe output.
-function parseDeviceNames(output: string): string[] {
-	const names = new Set<string>();
-	for (const rawLine of output.split(/\r?\n/)) {
-		const line = rawLine.trim();
-		if (!line) {
-			continue;
-		}
-		const fields = parseCsvLine(line);
-		const name = (fields[1] ?? '').trim();
-		if (name) {
-			names.add(name);
-		}
-	}
-	return Array.from(names);
-}
-
-// Run lsmcdd.exe to list connected devices.
-async function listConnectedDevices(context: vscode.ExtensionContext): Promise<string[]> {
-	const exePath = path.join(context.extensionPath, 'bin', 'lsmcdd.exe');
-	if (!fs.existsSync(exePath)) {
-		throw new Error(`lsmcdd.exe not found at ${exePath}`);
-	}
-	const output = await new Promise<string>((resolve, reject) => {
-		execFile(exePath, { windowsHide: true }, (err, stdout, stderr) => {
-			const combined = (stdout && stdout.trim().length > 0) ? stdout : (stderr ?? '');
-			if (err && (!combined || combined.trim().length === 0)) {
-				reject(new Error((stderr || err.message || 'Unknown error').trim()));
-				return;
-			}
-			resolve(combined ?? '');
-		});
-	});
-	return parseDeviceNames(output);
-}
-
-function elfPathToHex(elfPath: string): string {
-	return elfPath.replace(/\.elf$/i, '.hex');
-}
-
-// Validate Flash Hex settings: check ELF paths and HEX file existence.
-function validateFlashHexFiles(config: any): string[] {
-	const errors: string[] = [];
-	if (config.ppuFlashHex === true) {
-		const ppuElf = typeof config.ppuElfPath === 'string' ? config.ppuElfPath.trim() : '';
-		if (!ppuElf) {
-			errors.push('PPU: Flash Hex is enabled but no ELF file is specified.');
-		} else {
-			const hexPath = elfPathToHex(ppuElf);
-			if (!fs.existsSync(hexPath)) {
-				errors.push(`PPU: HEX file not found: ${hexPath}`);
-			}
-		}
-	}
-	if (config.cdspFlashHex === true) {
-		const cdspPaths: string[] = Array.isArray(config.cdspElfPaths) ? config.cdspElfPaths : [];
-		let anyCdsp = false;
-		for (let i = 0; i < cdspPaths.length; i++) {
-			const elf = typeof cdspPaths[i] === 'string' ? cdspPaths[i].trim() : '';
-			if (elf) {
-				anyCdsp = true;
-				const hexPath = elfPathToHex(elf);
-				if (!fs.existsSync(hexPath)) {
-					errors.push(`CDSP${i}: HEX file not found: ${hexPath}`);
-				}
-			}
-		}
-		if (!anyCdsp) {
-			errors.push('CDSP: Flash Hex is enabled but no ELF files are specified.');
-		}
-	}
-	return errors;
-}
-
 // Persist the last-used panel values.
 async function savePanelValues(context: vscode.ExtensionContext, config: any): Promise<void> {
 	const cfg = config as any;
@@ -305,39 +181,37 @@ async function savePanelValues(context: vscode.ExtensionContext, config: any): P
 	);
 	const toSave: AurixPanelValues = {
 		workspace: typeof cfg.workspace === 'string' ? cfg.workspace : '',
-		program: typeof cfg.program === 'string' ? cfg.program : '',
+		symbolFiles: Array.isArray(cfg.symbolFiles) ? cfg.symbolFiles.filter((v: any) => typeof v === 'string') : [],
+		flashFiles: Array.isArray(cfg.flashFiles) ? cfg.flashFiles.filter((v: any) => typeof v === 'string') : [],
 		ppuElfPath: typeof (cfg as any).ppuElfPath === 'string' ? (cfg as any).ppuElfPath : '',
 		cdspElfPaths: Array.isArray((cfg as any).cdspElfPaths)
 			? (cfg as any).cdspElfPaths.map((v: any) => typeof v === 'string' ? v : '')
 			: new Array(12).fill(''),
-		ppuFlashHex: Boolean((cfg as any).ppuFlashHex),
-		cdspFlashHex: Boolean((cfg as any).cdspFlashHex),
 		scrElfPath: typeof (cfg as any).scrElfPath === 'string' ? (cfg as any).scrElfPath : '',
 		enableFlashing: Boolean((cfg as any).enableFlashing),
-		entryFunction: typeof cfg.entryFunction === 'string' ? cfg.entryFunction : '',
-		targetDevice: typeof cfg.targetDevice === 'string' ? cfg.targetDevice : '',
+		searchDirs: Array.isArray(cfg.searchDirs) ? cfg.searchDirs.filter((v: any) => typeof v === 'string') : [],
+		configFiles: Array.isArray(cfg.configFiles) ? cfg.configFiles.filter((v: any) => typeof v === 'string') : [],
+		configCommands: Array.isArray(cfg.configCommands) ? cfg.configCommands.filter((v: any) => typeof v === 'string') : [],
 		svdFile: typeof cfg.svdFile === 'string' ? cfg.svdFile : '',
 		enableConsoleLog,
 		additionalAgentOptions: typeof cfg.additionalAgentOptions === 'string' ? cfg.additionalAgentOptions : '',
 	};
-	const legacyKey = 'aurix-tcf.debugConfigPanel.values';
-	const td = typeof toSave.targetDevice === 'string' ? toSave.targetDevice.trim() : '';
-	const scopedKey = td ? `${legacyKey}:${td}` : legacyKey;
-	await context.globalState.update(scopedKey, toSave);
+	await context.globalState.update(valuesKey, toSave);
 }
 
 // Build the HTML content for the webview.
 function getHtml(defaults: AurixPanelDefaults): string {
 	const projectValue = esc(defaults.values.workspace || defaults.workspaceFolder || '');
-	const programValue = esc(defaults.values.program || '');
 	const ppuElfValue = esc(defaults.values.ppuElfPath || '');
 	const scrElfValue = esc(defaults.values.scrElfPath || '');
 	const cdspElfValues = Array.isArray(defaults.values.cdspElfPaths) ? defaults.values.cdspElfPaths : new Array(12).fill('');
 	const enableFlashingChecked = defaults.values.enableFlashing ? 'checked' : '';
-	const ppuFlashHexChecked = defaults.values.ppuFlashHex ? 'checked' : '';
-	const cdspFlashHexChecked = defaults.values.cdspFlashHex ? 'checked' : '';
-	const entryFunctionValue = esc(defaults.values.entryFunction || '');
-	const targetDeviceValue = esc(defaults.values.targetDevice || '');
+	const lines = (v: string[] | undefined) => esc((Array.isArray(v) ? v : []).join('\n'));
+	const symbolFilesValue = lines(defaults.values.symbolFiles);
+	const flashFilesValue = lines(defaults.values.flashFiles);
+	const searchDirsValue = lines(defaults.values.searchDirs);
+	const configFilesValue = lines(defaults.values.configFiles);
+	const configCommandsValue = lines(defaults.values.configCommands);
 	const svdValue = esc(defaults.values.svdFile || '');
 	const enableConsoleLogChecked = defaults.values.enableConsoleLog ? 'checked' : '';
 	const additionalAgentOptionsValue = esc(defaults.values.additionalAgentOptions || '');
@@ -351,9 +225,6 @@ function getHtml(defaults: AurixPanelDefaults): string {
 		}),
 		`<option value="__custom__" ${svdRawValue && !hasSvdPresetMatch ? 'selected' : ''}>Custom path...</option>`,
 	].join('');
-	const targetDeviceOptions = targetDeviceValue
-		? `<option value="${targetDeviceValue}" selected>${targetDeviceValue}</option>`
-		: `<option value="" selected disabled>Detect to load devices</option>`;
 
 	const cdspRows = new Array(12).fill(0).map((_, i) => {
 		const value = esc(String(cdspElfValues[i] ?? ''));
@@ -370,7 +241,7 @@ function getHtml(defaults: AurixPanelDefaults): string {
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width,initial-scale=1" />
-	<title>AURIX™ TCF Debug Configuration</title>
+	<title>AURIX™ Debug Configuration</title>
 	<style>
 		:root { color-scheme: light dark; }
 		body {
@@ -480,15 +351,10 @@ function getHtml(defaults: AurixPanelDefaults): string {
 			align-items: center;
 		}
 		.checkbox input { width: auto; }
-		.errorMsg {
-			color: var(--vscode-errorForeground);
-			margin-top: 4px;
-			font-size: 0.9em;
-		}
 	</style>
 </head>
 <body>
-	<h2>AURIX™ TCF Debug Configuration</h2>
+	<h2>AURIX™ Debug Configuration</h2>
 	<div class="small">Starts a debug session without editing launch.json.</div>
 
 	<div class="tabs" role="tablist">
@@ -504,24 +370,30 @@ function getHtml(defaults: AurixPanelDefaults): string {
 				<button type="button" class="browseFolder" data-key="project">Browse...</button>
 			</div>
 
-			<label for="program">Debug binary</label>
+			<label for="symbolFiles">Symbol files</label>
 			<div class="inlineRow">
-				<div class="checkbox" title="Runs aurixflasher.exe before starting the debug session">
+				<textarea id="symbolFiles" placeholder="One ELF file per line: the application, bootloader, HSM, ...">${symbolFilesValue}</textarea>
+				<button type="button" class="browseElf" data-key="symbolFiles">Add...</button>
+			</div>
+
+			<label for="flashFiles">Flash files</label>
+			<div class="inlineRow">
+				<div class="checkbox" title="Programs the flash files with aurix-dbg before starting the debug session">
 					<input type="checkbox" id="enableFlashing" ${enableFlashingChecked} />
 					<span class="small">Enable flashing</span>
 				</div>
-				<input id="program" placeholder="C:\\path\\to\\program.elf" value="${programValue}" />
-				<button type="button" class="browseElf" data-key="program">Browse...</button>
+				<textarea id="flashFiles" placeholder="One ELF, HEX or binary file per line">${flashFilesValue}</textarea>
+				<button type="button" class="browseElf" data-key="flashFiles">Add...</button>
 			</div>
 
-			<label for="entryFunction">Stop at function</label>
-			<input id="entryFunction" placeholder="core0_main" value="${entryFunctionValue}" />
+			<label for="searchDirs">Script search directories</label>
+			<textarea id="searchDirs" placeholder="One directory per line (OpenOCD -s)">${searchDirsValue}</textarea>
 
-			<label for="targetDevice">Device name</label>
-			<div class="inlineRow">
-				<select id="targetDevice">${targetDeviceOptions}</select>
-				<button type="button" id="pickDevice">Detect...</button>
-			</div>
+			<label for="configFiles">Configuration scripts</label>
+			<textarea id="configFiles" placeholder="One file per line, e.g. board/infineon/kit_a2g_tc377tx_3v3_trb.cfg (OpenOCD -f)">${configFilesValue}</textarea>
+
+			<label for="configCommands">Tcl commands</label>
+			<textarea id="configCommands" placeholder="One command per line, run after the scripts (OpenOCD -c)">${configCommandsValue}</textarea>
 
 			<label for="svdPreset">SVD selection</label>
 			<div class="inlineRow">
@@ -537,7 +409,7 @@ function getHtml(defaults: AurixPanelDefaults): string {
 			<label for="enableConsoleLog">Enable console log</label>
 			<div class="checkbox">
 				<input type="checkbox" id="enableConsoleLog" ${enableConsoleLogChecked} />
-				<span class="small">Show TCF protocol messages in the debug console</span>
+				<span class="small">Show debug server protocol messages in the Debug Console</span>
 			</div>
 		</div>
 	</div>
@@ -550,23 +422,11 @@ function getHtml(defaults: AurixPanelDefaults): string {
 				<input id="ppuElfPath" placeholder="C:\\path\\to\\ppu.elf" value="${ppuElfValue}" />
 				<button type="button" class="browseElf" data-key="ppuElfPath">Browse...</button>
 			</div>
-			<div class="checkbox" style="margin-top: 8px;">
-				<input type="checkbox" id="ppuFlashHex" ${ppuFlashHexChecked} />
-				<span>Flash Hex</span>
-			</div>
-			<div class="small" style="margin-top: 4px;">AurixFlasher will use the HEX file corresponding to the selected ELF for flashing. Please ensure the HEX file exists.</div>
-			<div id="ppuFlashHexError" class="errorMsg" style="display:none;"></div>
 		</div>
 
 		<div class="group">
 			<div class="groupTitle">CDSP (Converter Digital Signal Processor) - 12 cores</div>
 			${cdspRows}
-			<div class="checkbox" style="margin-top: 8px;">
-				<input type="checkbox" id="cdspFlashHex" ${cdspFlashHexChecked} />
-				<span>Flash Hex</span>
-			</div>
-			<div class="small" style="margin-top: 4px;">AurixFlasher will use the HEX file corresponding to the selected ELF for flashing. Please ensure the HEX file exists.</div>
-			<div id="cdspFlashHexError" class="errorMsg" style="display:none;"></div>
 		</div>
 
 		<div class="group">
@@ -579,8 +439,8 @@ function getHtml(defaults: AurixPanelDefaults): string {
 		</div>
 
 		<div class="group">
-			<div class="groupTitle">Additional Agent Options</div>
-			<div class="small" style="margin-bottom: 8px;">Custom parameters (appended as-is)</div>
+			<div class="groupTitle">Additional aurix-dbg Options</div>
+			<div class="small" style="margin-bottom: 8px;">Command-line options appended as-is, e.g. -d3 -l aurix-dbg.log</div>
 			<textarea id="additionalAgentOptions" placeholder="Custom parameters">${additionalAgentOptionsValue}</textarea>
 		</div>
 	</div>
@@ -597,6 +457,7 @@ function getHtml(defaults: AurixPanelDefaults): string {
 		function v(id) { return document.getElementById(id); }
 		function bool(id) { return v(id).checked === true; }
 		function str(id) { return String(v(id).value || '').trim(); }
+		function list(id) { return String(v(id).value || '').split(/\\r?\\n/).map((x) => x.trim()).filter((x) => x); }
 		const SVD_CUSTOM = '__custom__';
 
 		function upsertSvdPresetOptions(options) {
@@ -654,7 +515,7 @@ function getHtml(defaults: AurixPanelDefaults): string {
 		}
 		function buildConfig() {
 			const config = {
-				type: 'aurix-tcf',
+				type: 'aurixdbg',
 				request: 'launch',
 				name: 'Launch (GUI)',
 				host: '127.0.0.1',
@@ -664,18 +525,12 @@ function getHtml(defaults: AurixPanelDefaults): string {
 				resumeOtherCoresOnEntry: false,
 			};
 
-			const program = str('program');
-			if (program) config.program = program;
+			config.symbolFiles = list('symbolFiles');
+			config.flashFiles = list('flashFiles');
 			config.enableFlashing = bool('enableFlashing');
-			const entryFunction = str('entryFunction');
-			if (entryFunction) {
-				config.entryFunction = entryFunction;
-				// When stop-at-function is provided, the agent performs reset/breakpoint/resume.
-				// Forcing stopOnEntry here can stop too early and prevent hitting the requested function.
-				config.stopOnEntry = false;
-			}
-			const targetDevice = str('targetDevice');
-			if (targetDevice) config.targetDevice = targetDevice;
+			config.searchDirs = list('searchDirs');
+			config.configFiles = list('configFiles');
+			config.configCommands = list('configCommands');
 			const svdFile = str('svdFile');
 			if (svdFile) config.svdFile = svdFile;
 			const project = str('project');
@@ -685,8 +540,6 @@ function getHtml(defaults: AurixPanelDefaults): string {
 
 			const ppuElfPath = str('ppuElfPath');
 			if (ppuElfPath) config.ppuElfPath = ppuElfPath;
-			config.ppuFlashHex = bool('ppuFlashHex');
-			config.cdspFlashHex = bool('cdspFlashHex');
 			const scrElfPath = str('scrElfPath');
 			if (scrElfPath) config.scrElfPath = scrElfPath;
 			const cdspElfPaths = [];
@@ -736,13 +589,6 @@ function getHtml(defaults: AurixPanelDefaults): string {
 			});
 		}
 
-		const pickDevice = v('pickDevice');
-		if (pickDevice) {
-			pickDevice.addEventListener('click', () => {
-				vscode.postMessage({ type: 'pickDevice' });
-			});
-		}
-
 		const svdPresetSelect = v('svdPreset');
 		if (svdPresetSelect) {
 			svdPresetSelect.addEventListener('change', () => {
@@ -756,8 +602,16 @@ function getHtml(defaults: AurixPanelDefaults): string {
 			if (!msg || typeof msg !== 'object') return;
 			if (msg.type === 'browseElfResult' && typeof msg.key === 'string') {
 				const el = document.getElementById(msg.key);
-				if (el && 'value' in el) {
-					el.value = String(msg.path || '');
+				const picked = String(msg.path || '');
+				if (el && el.tagName === 'TEXTAREA') {
+					// File lists: add the picked file as a new line.
+					if (picked) {
+						const current = String(el.value || '').replace(/\\s+$/, '');
+						el.value = current ? current + '\\n' + picked : picked;
+						scheduleAutosave();
+					}
+				} else if (el && 'value' in el) {
+					el.value = picked;
 					scheduleAutosave();
 				}
 			}
@@ -774,35 +628,6 @@ function getHtml(defaults: AurixPanelDefaults): string {
 					el.value = String(msg.path || '');
 					upsertSvdPresetOptions([]);
 					scheduleAutosave();
-				}
-			}
-			if (msg.type === 'deviceList' && Array.isArray(msg.devices)) {
-				const select = document.getElementById('targetDevice');
-				if (select && 'value' in select) {
-					const current = String(select.value || '');
-					select.innerHTML = '';
-					if (msg.devices.length === 0) {
-						const opt = document.createElement('option');
-						opt.value = '';
-						opt.textContent = 'No devices detected';
-						opt.disabled = true;
-						opt.selected = true;
-						select.appendChild(opt);
-					} else {
-						const selectedValue = msg.devices.includes(current) ? current : String(msg.devices[0] || '');
-						for (const name of msg.devices) {
-							if (!name) continue;
-							const opt = document.createElement('option');
-							opt.value = String(name);
-							opt.textContent = String(name);
-							if (opt.value === selectedValue) opt.selected = true;
-							select.appendChild(opt);
-						}
-						if (selectedValue !== current) {
-							scheduleAutosave();
-						}
-					}
-					select.focus();
 				}
 			}
 			if (msg.type === 'svdOptions') {
@@ -827,69 +652,12 @@ function getHtml(defaults: AurixPanelDefaults): string {
 			el.addEventListener('change', scheduleAutosave);
 		}
 
-		function clearFlashHexErrors() {
-			const ppuErr = v('ppuFlashHexError');
-			const cdspErr = v('cdspFlashHexError');
-			if (ppuErr) { ppuErr.style.display = 'none'; ppuErr.textContent = ''; }
-			if (cdspErr) { cdspErr.style.display = 'none'; cdspErr.textContent = ''; }
-		}
-
-		function showFlashHexError(id, msg) {
-			const el = v(id);
-			if (el) { el.textContent = msg; el.style.display = 'block'; }
-		}
-
-		function validateFlashHex() {
-			clearFlashHexErrors();
-			const errors = [];
-			if (bool('ppuFlashHex')) {
-				const ppuElf = str('ppuElfPath');
-				if (!ppuElf) {
-					const msg = 'PPU: Flash Hex is enabled but no ELF file is specified.';
-					showFlashHexError('ppuFlashHexError', msg);
-					errors.push(msg);
-				}
-			}
-			if (bool('cdspFlashHex')) {
-				let anyCdsp = false;
-				for (let i = 0; i < 12; i++) {
-					if (str('cdspElf' + i)) { anyCdsp = true; break; }
-				}
-				if (!anyCdsp) {
-					const msg = 'CDSP: Flash Hex is enabled but no ELF files are specified.';
-					showFlashHexError('cdspFlashHexError', msg);
-					errors.push(msg);
-				}
-			}
-			return errors;
-		}
-
-		window.addEventListener('message', (event) => {
-			const msg = event.data;
-			if (!msg || typeof msg !== 'object') return;
-			if (msg.type === 'flashHexValidationErrors' && Array.isArray(msg.errors)) {
-				clearFlashHexErrors();
-				for (const err of msg.errors) {
-					if (typeof err === 'string') {
-						if (err.startsWith('PPU:')) {
-							showFlashHexError('ppuFlashHexError', err);
-						} else if (err.startsWith('CDSP')) {
-							showFlashHexError('cdspFlashHexError', err);
-						}
-					}
-				}
-			}
-		});
-
 		v('apply').addEventListener('click', () => {
-			clearFlashHexErrors();
 			const config = buildConfig();
 			vscode.postMessage({ type: 'apply', config });
 		});
 
 		v('start').addEventListener('click', () => {
-			const errors = validateFlashHex();
-			if (errors.length > 0) return;
 			const config = buildConfig();
 			vscode.postMessage({ type: 'start', config });
 		});

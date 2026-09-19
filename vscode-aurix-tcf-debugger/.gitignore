@@ -9,5 +9,5 @@ README_DEV.md
 # Local stress test env (do not commit)
 .env.test
 test-results/
-# Runtime log produced by the agent
-bin/AGENT_LOG.TXT
+# Copied from the aurix-debugger build by scripts/copy-agent.js
+bin/aurix-dbg.exe

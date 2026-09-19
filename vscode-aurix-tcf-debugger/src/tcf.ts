@@ -326,7 +326,7 @@ export abstract class AbstractTCFClient {
 
     sendCommand<T>(c: SimpleCommand<T>): Promise<T> {
         if (!this.supportedServices?.includes(c.service())){
-            return Promise.reject(new ServiceNotSupportedError(`Service ${c.service()} not supported by remote TCF`));
+            return Promise.reject(new ServiceNotSupportedError(`Service ${c.service()} not supported by the debug server`));
         }
 
         return this.sendCommandNow(c);

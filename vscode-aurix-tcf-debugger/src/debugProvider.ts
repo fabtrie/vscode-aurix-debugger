@@ -82,25 +82,20 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	internal?: InternalLaunchArguments;
 	stackTraceDepth?: number;
 	stopOnEntry?: boolean;
-	program?: string;
 	resumeOtherCoresOnEntry?: boolean;
 	globals?: string[];
 
-	// AURIX extras (accepted; mostly used by agent CLI layer)
-	targetDevice?: string;
+	// AURIX extras
 	core?: number;
-	entryFunction?: string;
 	svdFile?: string;
 	workspace?: string;
-	flashDownload?: boolean;
 	globalAccess?: boolean;
-	additionalAgentOptions?: string;
 
 	// Per-core ELF paths (PPU/CDSP/SCR) for multi-core memory mappings
 	ppuElfPath?: string;
 	cdspElfPaths?: string[];
 	scrElfPath?: string;
-	// Additional ELF files for symbols (bootmanager, FBL, HSM, ...). A file applies to the cores
+	// ELF files for symbols (application, bootmanager, FBL, HSM, ...). A file applies to the cores
 	// whose architecture matches the ELF, or to the cores listed in "cores".
 	symbolFiles?: Array<string | { path: string; cores?: string[] }>;
 
@@ -116,9 +111,6 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	liveWatchEnabled?: boolean;
 	liveWatchIntervalMs?: number;
 
-	// 'aurix-dbg': OpenOCD-compatible server over TAS (allows SFR memory access,
-	// register writes, monitor commands and flashing through Tcl).
-	agentFlavor?: 'infineon' | 'aurix-dbg';
 	enableFlashing?: boolean;
 	// Debugger Actions toolbar button; handled in the extension (debuggerActions.ts).
 	actions?: unknown[];
@@ -339,8 +331,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private workspaceBaseDir: string | undefined;
 	private projectRootDir: string | undefined;
 	private librariesBasenameIndex: Map<string, string> | undefined;
-	private programPath: string | undefined;
-	/** Additional ELF files ("symbolFiles"). */
+	/** ELF files ("symbolFiles"). */
 	private symbolFilePaths: string[] = [];
 	// Disassembly ISAs per core context (TriCore cores, Thumb for the HSM).
 	private disassemblyCapabilities = new Map<string, string[]>();
@@ -371,7 +362,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private configuredGlobals: string[] = [];
 	private liveWatchEnabled = false;
 	private liveWatchIntervalMs = 1000;
-	private agentFlavor: 'infineon' | 'aurix-dbg' = 'infineon';
 	private liveWatchEvaluator: LiveWatchEvaluator;
 	/** Context the Live Watch evaluates in; picked again after a core suspends or resumes. */
 	private liveWatchContextId: string | undefined;
@@ -388,7 +378,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private pendingBreakpointStoppedTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private breakpointStopDelayMs: number = 60;
 	private suppressPauseStoppedUntilMs: number = 0;
-	// Thread VS Code has focused (aurix-tcf/activeThread from the extension). VS Code's toolbar pause
+	// Thread VS Code has focused (aurix/activeThread from the extension). VS Code's toolbar pause
 	// button pauses the focused thread; a pause for any other thread comes from its Call Stack entry.
 	private activeThreadId: number | undefined;
 	// Explicit pause in progress: suspend events of the cores TL1 stopped with it must not take the
@@ -464,7 +454,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				outer.onContextsRemoved(contextIDs);
 			}
 			protected onSocketError(err: any) {
-				outer.tcfLogger.error(`TCF socket error: ${String(err)}`);
+				outer.tcfLogger.error(`Debug server connection error: ${String(err)}`);
 				outer.sendEvent(new TerminatedEvent());
 			}
 		}(this.tcfLogger);
@@ -481,7 +471,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.sendEvent(new OutputEvent(`[focus] ${message}\n`, 'console'));
 		try {
 			const dir = process.env.TEMP || process.env.TMPDIR || '/tmp';
-			fs.appendFileSync(path.join(dir, 'aurix-tcf-focus.log'), `${new Date().toISOString()} [adapter] ${message}\n`);
+			fs.appendFileSync(path.join(dir, 'aurix-debugger-focus.log'), `${new Date().toISOString()} [adapter] ${message}\n`);
 		} catch {
 			// diagnostics only
 		}
@@ -956,14 +946,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// "../Cpu0_Main.c" from the build directory (where the .elf lives). In that
 		// case, sending an absolute Windows path to TCF Breakpoints/LineNumbers will
 		// produce "No debug information for this source line" even when DWARF exists.
+		// The build directory is taken from the first ELF in "symbolFiles".
 		if (args.pathMapper && args.pathMapper.trim() !== '') {
 			return;
 		}
-		if (!args.program || args.program.trim() === '') {
+		const firstElf = AurixTCFDebugSession.getSymbolFiles(args).find(f => !/\.asm$/i.test(f.path));
+		if (!firstElf) {
 			return;
 		}
 
-		const programDir = path.dirname(args.program);
+		const programDir = path.dirname(firstElf.path);
 		this.sourceResolverBaseDir = programDir;
 
 		// Map client paths to paths relative to the .elf directory.
@@ -1012,7 +1004,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	/**
-	 * Resolve the ELF path for a given core type, falling back to the main program ELF.
+	 * Resolve the ELF path for a PPU, CDSP or SCR core. TriCore cores get their ELF files from "symbolFiles".
 	 */
 	private getElfPathForCore(
 		coreInfo: { type: 'PPU' | 'CDSP' | 'SCR'; index: number } | undefined,
@@ -1033,8 +1025,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 					break;
 			}
 		}
-		// Fallback to main TriCore ELF
-		return args.program && args.program.trim() !== '' ? args.program : undefined;
+		return undefined;
 	}
 
 	/** The "symbolFiles" launch option as paths with an optional core filter. */
@@ -1297,7 +1288,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				return;
 			}
 			this.focusLog(`sourceLocation ctx=${contextId} ${sourcePath}:${mapped.SLine}`);
-			this.sendEvent(new Event('aurix-tcf/sourceLocation', { path: sourcePath, line: mapped.SLine }));
+			this.sendEvent(new Event('aurix/sourceLocation', { path: sourcePath, line: mapped.SLine }));
 		} catch (e) {
 			if (this.startupDiagnosticsEnabled) {
 				this.tcfLogger.log(`[source] failed to resolve source location for ${contextId}: ${String(e)}`);
@@ -1575,15 +1566,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return typeof e === 'object' ? JSON.stringify(e) : String(e);
 	}
 
-	/** Images to flash: the "flashFiles" launch option, or the program if it is not set. */
+	/** Images to flash: the "flashFiles" launch option. */
 	private static getFlashFiles(args: any): string[] {
-		const files = Array.isArray(args?.flashFiles)
+		return Array.isArray(args?.flashFiles)
 			? args.flashFiles.filter((f: unknown): f is string => typeof f === 'string' && f.trim() !== '')
 			: [];
-		if (files.length > 0) {
-			return files;
-		}
-		return typeof args?.program === 'string' && args.program ? [args.program] : [];
 	}
 
 	/**
@@ -1700,18 +1687,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return 1;
 	}
 
-	private isPeripheralAddress(address: number): boolean {
-		if (!Number.isFinite(address)) {
-			return false;
-		}
-		// aurix-dbg accesses SFRs over TAS without problems: no special handling.
-		if (this.agentFlavor === 'aurix-dbg') {
-			return false;
-		}
-		// AURIX peripheral/SFR space lives in the 0xF000_0000+ region.
-		return (address >>> 0) >= 0xF0000000;
-	}
-
 	private async readMemoryBestEffort(
 		// Read memory in chunks to maximize the amount of data read even if some regions are unreadable.
 		// For example, read 1 KiB in 64-byte chunks.
@@ -1780,21 +1755,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.sendErrorResponse(response, 0, 'No suspended context for memory read');
 				return;
 			}
-			// AURIX DAS agents crash (ECONNRESET) when peripheral/SFR space (0xF000_0000+) is
-			// accessed via Memory.get — regardless of whether the core is suspended or running.
-			// ACS (AURIX Configuration Studio) never issues Memory.get on these addresses; it reads
-			// peripherals exclusively through the TCF Registers service.
-			// Block all peripheral Memory.get to prevent the crash. The peripheral-viewer will show
-			// "unreadable" until a Registers-service-based path is implemented.
-			if (this.isPeripheralAddress(address)) {
-				response.body = {
-					address: `0x${address.toString(16)}`,
-					data: Buffer.alloc(count).toString('base64'),
-					unreadableBytes: count,
-				};
-				this.sendResponse(response);
-				return;
-			}
 			try {
 				const result = await this.tcfClient.sendCommand(new GetMemoryCommand(ctx, address, 1, count, 0));
 				const unreadableBytes = this.sumErrorBytes(result?.errorAddresses);
@@ -1840,10 +1800,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const bytes = Buffer.from(dataBase64, 'base64');
 			const requestedLength = bytes.length;
 			const address = base + offset;
-			let targetAddress = address;
-			let writeBytes = bytes;
-			let wordSize = this.computeWriteWordSize(address, bytes.length);
-			let writeMode = bytes.length >= 4 && bytes.length % 4 === 0 ? 1 : 0;
+			const wordSize = this.computeWriteWordSize(address, bytes.length);
+			const writeMode = bytes.length >= 4 && bytes.length % 4 === 0 ? 1 : 0;
 
 			const ctx = (await this.pickContextIdForCore(this.launchCore)) ?? (await this.pickAnySuspendedContextId());
 			if (!ctx) {
@@ -1851,29 +1809,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				return;
 			}
 
-			// Peripheral registers often require 32-bit aligned writes.
-			// If the request is smaller than 4 bytes, attempt a read-modify-write on the aligned word.
-			if (requestedLength > 0 && requestedLength < 4 && this.isPeripheralAddress(address)) {
-				const aligned = address - (address % 4);
-				const byteOffset = address - aligned;
-				try {
-					const result = await this.tcfClient.sendCommand(new GetMemoryCommand(ctx, aligned, 1, 4, 0));
-					const existing = result?.base64 ? Buffer.from(result.base64, 'base64') : Buffer.alloc(0);
-					if (existing.length >= 4) {
-						const patched = Buffer.from(existing.subarray(0, 4));
-						bytes.copy(patched, byteOffset, 0, Math.min(requestedLength, 4 - byteOffset));
-						targetAddress = aligned;
-						writeBytes = patched;
-						wordSize = 4;
-						writeMode = 1;
-					}
-				} catch {
-					// If RMW fails, fall back to the original write request.
-				}
-			}
-
 			const errors = await this.tcfClient.sendCommand(
-				new SetMemoryCommand(ctx, targetAddress, wordSize, writeBytes.length, writeBytes.toString('base64'), writeMode)
+				new SetMemoryCommand(ctx, address, wordSize, bytes.length, bytes.toString('base64'), writeMode)
 			);
 			const errorBytes = this.sumErrorBytes(errors);
 			if (errorBytes > 0 && args?.allowPartial !== true) {
@@ -2139,7 +2076,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const args = rawArgs as AurixTCFLaunchRequestArguments;
 		this.launchArgs = args;
 		this.launchCore = args.core;
-		this.agentFlavor = args.agentFlavor === 'aurix-dbg' ? 'aurix-dbg' : 'infineon';
 		this.instructionSteppingEnabled = args.instructionStepping === true;
 		this.liveWatchEnabled = args.liveWatchEnabled === true;
 		this.liveWatchIntervalMs = this.normalizeLiveWatchIntervalMs(args.liveWatchIntervalMs);
@@ -2149,7 +2085,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const host = args.host || DEFAULT_TCF_HOST;
 		const port = args.port || DEFAULT_TCF_PORT;
 		this.breakpointPrefix = args.breakpointPrefix ?? DEFAULT_BREAKPOINTS_PREFIX;
-		this.programPath = args.program;
 		this.symbolFilePaths = AurixTCFDebugSession.getSymbolFiles(args).map(f => f.path);
 		this.execRanges = [];
 		for (const elf of this.elfPaths()) {
@@ -2249,7 +2184,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			Boolean(args.debugTCFMessages || args.internal?.debugTCFMessages || (args.internal as any)?.debugStartup) ||
 			this.uiFocusDiagnosticsEnabled;
 		this.startupLog(
-			`launch host=${host}:${port} core=${String(args.core)} stopOnEntry=${String(args.stopOnEntry)}(${typeof args.stopOnEntry}) resumeOtherCoresOnEntry=${String(args.resumeOtherCoresOnEntry)} entryFunction=${String(args.entryFunction ?? '')} resetType=${String(this.launchResetType ?? '')} resetSuspend=${String(this.launchResetSuspend)}`
+			`launch host=${host}:${port} core=${String(args.core)} stopOnEntry=${String(args.stopOnEntry)}(${typeof args.stopOnEntry}) resumeOtherCoresOnEntry=${String(args.resumeOtherCoresOnEntry)} resetType=${String(this.launchResetType ?? '')} resetSuspend=${String(this.launchResetSuspend)}`
 		);
 		this.startupLog(`stopStormPauseDelayMs=${this.stopStormPauseDelayMs}`);
 		this.startupLog(`refocusOnWrongContext=${String(this.refocusOnWrongContext)}`);
@@ -2260,7 +2195,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			await this.tcfClient.connect(host, port);
 			this.startupLog('connected');
 			const flashFiles = AurixTCFDebugSession.getFlashFiles(args);
-			if (this.agentFlavor === 'aurix-dbg' && args.enableFlashing === true && flashFiles.length > 0) {
+			if (args.enableFlashing === true) {
+				if (flashFiles.length === 0) {
+					this.sendErrorResponse(response, 1, '"enableFlashing" is set, but the launch configuration has no "flashFiles"');
+					return;
+				}
 				try {
 					await this.flashWithAurixDbg(flashFiles, args);
 				} catch (e) {
@@ -2284,9 +2223,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 			} catch {
 				// best-effort only
-			}
-			if (args.entryFunction && args.stopOnEntry) {
-				this.tcfLogger.log('stopOnEntry is true while entryFunction is set; will request a pause after launch so VS Code can show Call Stack/Variables.');
 			}
 
 			if (stopOnEntry) {
@@ -2676,7 +2612,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const monitor = /^(?:monitor|mon)\s+([\s\S]+)$/i.exec(expressionText);
 			if (args.context === 'repl' && monitor) {
 				if (!this.tcfClient.supportedServices?.includes(TCL_SERVICE)) {
-					this.sendErrorResponse(response, 0, 'This TCF agent has no Tcl console (monitor commands need aurix-dbg)');
+					this.sendErrorResponse(response, 0, 'The debug server has no Tcl console (monitor commands)');
 					return;
 				}
 				try {
@@ -2989,9 +2925,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return this.elfSymbols;
 	}
 
-	/** The program and the additional symbol files. */
+	/** The symbol files. */
 	private elfPaths(): string[] {
-		const paths = [this.programPath, ...this.symbolFilePaths].filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+		const paths = this.symbolFilePaths.filter((p): p is string => typeof p === 'string' && p.trim() !== '');
 		return [...new Set(paths)];
 	}
 
@@ -3875,13 +3811,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async customRequestAsync(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): Promise<void> {
-		if (command === 'aurix-tcf/activeThread') {
+		if (command === 'aurix/activeThread') {
 			this.activeThreadId = typeof args?.threadId === 'number' ? args.threadId : undefined;
 			this.sendResponse(response);
 			return;
 		}
 
-		if (command === 'aurix-tcf/setDisassemblyOptions') {
+		if (command === 'aurix/setDisassemblyOptions') {
 			if (isDisassemblyOpcodeBytes(args?.opcodeBytes)) {
 				this.disassemblyOpcodeBytes = args.opcodeBytes;
 			}
@@ -3889,7 +3825,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/variableSymbols') {
+		if (command === 'aurix/variableSymbols') {
 			response.body = {
 				symbols: this.getElfSymbols().variables.map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, size: s.size })),
 			};
@@ -3897,13 +3833,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/disassemblySymbols') {
+		if (command === 'aurix/disassemblySymbols') {
 			response.body = { symbols: this.getElfFunctionSymbols().map(s => ({ name: s.name, address: `0x${s.address.toString(16)}` })) };
 			this.sendResponse(response);
 			return;
 		}
 
-		if (command === 'aurix-tcf/disassemblyGoTo') {
+		if (command === 'aurix/disassemblyGoTo') {
 			try {
 				const ctx = await this.pickAnySuspendedContextId();
 				if (!ctx) {
@@ -3920,12 +3856,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/setInstructionStepping') {
+		if (command === 'aurix/setInstructionStepping') {
 			this.instructionSteppingEnabled = Boolean(args?.enabled);
 			this.sendResponse(response);
 			return;
 		}
-		if (command === 'aurix-tcf/halt') {
+		if (command === 'aurix/halt') {
 			try {
 				// Best-effort: suspend the selected core context first (faster than trying many contexts).
 				const ctx = await this.pickContextIdForCore(this.launchCore);
@@ -3947,14 +3883,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/flash') {
+		if (command === 'aurix/flash') {
 			try {
 				const files = AurixTCFDebugSession.getFlashFiles(this.launchArgs);
-				if (this.agentFlavor !== 'aurix-dbg') {
-					throw new Error('flashing from the debug toolbar needs agentFlavor "aurix-dbg"');
-				}
 				if (files.length === 0) {
-					throw new Error('no "flashFiles" or "program" in the launch configuration');
+					throw new Error('no "flashFiles" in the launch configuration');
 				}
 				await this.flashInSession(files);
 				this.sendResponse(response);
@@ -3965,14 +3898,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		// Tcl command from a launch configuration "actions" entry (Debugger Actions toolbar button).
-		if (command === 'aurix-tcf/tcl') {
+		if (command === 'aurix/tcl') {
 			const script = typeof args?.script === 'string' ? args.script.trim() : '';
 			if (!script) {
 				this.sendErrorResponse(response, 0, 'No Tcl command given');
 				return;
 			}
 			if (!this.tcfClient.supportedServices?.includes(TCL_SERVICE)) {
-				this.sendErrorResponse(response, 0, 'This TCF agent has no Tcl console (debugger actions need aurix-dbg)');
+				this.sendErrorResponse(response, 0, 'The debug server has no Tcl console (debugger actions)');
 				return;
 			}
 			const timeoutMs = typeof args?.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : undefined;
@@ -4000,7 +3933,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/reset') {
+		if (command === 'aurix/reset') {
 			try {
 				this.beginResetTransition();
 				// NOTE: ContextReset.getCapabilities is unreliable on some AURIX agents (can time out).
@@ -4078,7 +4011,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/resetCapabilities') {
+		if (command === 'aurix/resetCapabilities') {
 			// NOTE: ContextReset.getCapabilities is unreliable on some AURIX agents and can
 			// hang until the command timeout (see the reset handler above, which avoids it
 			// entirely). Use a short dedicated timeout here so this diagnostic fails fast
@@ -4105,7 +4038,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/addGlobal') {
+		if (command === 'aurix/addGlobal') {
 			const expression = typeof args?.expression === 'string' ? args.expression.trim() : '';
 			if (expression !== '' && !this.configuredGlobals.includes(expression)) {
 				this.configuredGlobals.push(expression);
@@ -4114,13 +4047,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/setLiveWatch') {
+		if (command === 'aurix/setLiveWatch') {
 			this.setLiveWatchState(Boolean(args?.enabled), args?.intervalMs);
 			this.sendResponse(response);
 			return;
 		}
 
-		if (command === 'aurix-tcf/liveWatchEvaluate') {
+		if (command === 'aurix/liveWatchEvaluate') {
 			// One result per item, in order: the view matches them by position.
 			const optionalNumber = (value: unknown) => (typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined);
 			const items: LiveWatchRequestItem[] = (Array.isArray(args?.items) ? args.items : []).map((item: any) => ({
@@ -4152,7 +4085,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix-tcf/liveWatchWrite') {
+		if (command === 'aurix/liveWatchWrite') {
 			const expression = typeof args?.expression === 'string' ? args.expression.trim() : '';
 			const value = typeof args?.value === 'string' ? args.value : String(args?.value ?? '');
 			if (!expression) {

@@ -1,5 +1,5 @@
 /*
- * Aurix TCF Debugger VSCode Extension
+ * AURIX Debugger VSCode Extension
  * Copyright (C) 2025 Infineon Technologies AG
  *
  * Debugger actions: user-defined Tcl commands from the launch configuration ("actions"),
@@ -30,7 +30,7 @@ export interface DebuggerActionNode {
 	timeout?: number;
 }
 
-const HAS_ACTIONS_CONTEXT_KEY = 'aurix-tcf.hasActions';
+const HAS_ACTIONS_CONTEXT_KEY = 'aurix-debugger.hasActions';
 const DEFAULT_ACTION_TIMEOUT_S = 900;
 
 let running = false;
@@ -39,7 +39,7 @@ type ActionPick = vscode.QuickPickItem & { node: DebuggerActionNode };
 
 export function registerDebuggerActions(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.showActions', async () => {
+		vscode.commands.registerCommand('aurix-debugger.showActions', async () => {
 			const session = getAurixSession();
 			if (!session) {
 				return;
@@ -49,18 +49,18 @@ export function registerDebuggerActions(context: vscode.ExtensionContext): void 
 				await runAction(session, action);
 			}
 		}),
-		vscode.commands.registerCommand('aurix-tcf.runAction', async (args?: { id?: string }) => {
+		vscode.commands.registerCommand('aurix-debugger.runAction', async (args?: { id?: string }) => {
 			const session = getAurixSession();
 			if (!session) {
 				return;
 			}
 			if (typeof args?.id !== 'string') {
-				await vscode.commands.executeCommand('aurix-tcf.showActions');
+				await vscode.commands.executeCommand('aurix-debugger.showActions');
 				return;
 			}
 			const action = findAction(getActions(session), args.id);
 			if (!action) {
-				void vscode.window.showErrorMessage(`AURIX™ TCF: no action with id "${args.id}" in the launch configuration.`);
+				void vscode.window.showErrorMessage(`AURIX™ Debugger: no action with id "${args.id}" in the launch configuration.`);
 				return;
 			}
 			await runAction(session, action);
@@ -73,14 +73,14 @@ export function registerDebuggerActions(context: vscode.ExtensionContext): void 
 
 function updateActionsContext(): void {
 	const session = vscode.debug.activeDebugSession;
-	const hasActions = !!session && session.type === 'aurix-tcf' && getActions(session).length > 0;
+	const hasActions = !!session && session.type === 'aurixdbg' && getActions(session).length > 0;
 	void vscode.commands.executeCommand('setContext', HAS_ACTIONS_CONTEXT_KEY, hasActions);
 }
 
 function getAurixSession(): vscode.DebugSession | undefined {
 	const s = vscode.debug.activeDebugSession;
-	if (!s || s.type !== 'aurix-tcf') {
-		void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+	if (!s || s.type !== 'aurixdbg') {
+		void vscode.window.showWarningMessage('No active AURIX™ debug session.');
 		return undefined;
 	}
 	return s;
@@ -113,7 +113,7 @@ function findAction(nodes: DebuggerActionNode[], id: string): DebuggerActionNode
 /** Walks the action tree with one QuickPick per level; groups open a sub level with a Back button. */
 async function pickAction(nodes: DebuggerActionNode[]): Promise<DebuggerActionNode | undefined> {
 	if (nodes.length === 0) {
-		void vscode.window.showInformationMessage('AURIX™ TCF: no "actions" in the launch configuration.');
+		void vscode.window.showInformationMessage('AURIX™ Debugger: no "actions" in the launch configuration.');
 		return undefined;
 	}
 	// A single top-level group opens directly.
@@ -176,7 +176,7 @@ async function runAction(session: vscode.DebugSession, action: DebuggerActionNod
 	const scripts = (Array.isArray(action.tcl) ? action.tcl : [action.tcl])
 		.filter((s): s is string => typeof s === 'string' && s.trim() !== '');
 	if (scripts.length === 0) {
-		void vscode.window.showErrorMessage(`AURIX™ TCF: action "${action.label}" has no "tcl" command.`);
+		void vscode.window.showErrorMessage(`AURIX™ Debugger: action "${action.label}" has no "tcl" command.`);
 		return;
 	}
 	if (action.confirm) {
@@ -186,7 +186,7 @@ async function runAction(session: vscode.DebugSession, action: DebuggerActionNod
 		}
 	}
 	if (running) {
-		void vscode.window.showWarningMessage('AURIX™ TCF: another debugger action is still running.');
+		void vscode.window.showWarningMessage('AURIX™ Debugger: another debugger action is still running.');
 		return;
 	}
 	running = true;
@@ -194,23 +194,23 @@ async function runAction(session: vscode.DebugSession, action: DebuggerActionNod
 		const timeoutMs = (typeof action.timeout === 'number' && action.timeout > 0 ? action.timeout : DEFAULT_ACTION_TIMEOUT_S) * 1000;
 		const outputs: string[] = [];
 		await vscode.window.withProgress(
-			{ location: vscode.ProgressLocation.Notification, title: `AURIX™ TCF: ${action.label} (see Debug Console)...` },
+			{ location: vscode.ProgressLocation.Notification, title: `AURIX™ Debugger: ${action.label} (see Debug Console)...` },
 			async () => {
 				for (const script of scripts) {
-					const res = await session.customRequest('aurix-tcf/tcl', { script, timeoutMs });
+					const res = await session.customRequest('aurix/tcl', { script, timeoutMs });
 					if (typeof res?.result === 'string' && res.result.trim() !== '') {
 						outputs.push(res.result.trim());
 					}
 				}
 				if (action.resetAfter) {
-					await session.customRequest('aurix-tcf/reset', {});
+					await session.customRequest('aurix/reset', {});
 				}
 			}
 		);
 		const output = action.showOutput && outputs.length > 0 ? `: ${outputs.join('\n')}` : ' done.';
-		void vscode.window.showInformationMessage(`AURIX™ TCF: ${action.label}${output}`);
+		void vscode.window.showInformationMessage(`AURIX™ Debugger: ${action.label}${output}`);
 	} catch (e) {
-		void vscode.window.showErrorMessage(`AURIX™ TCF: ${action.label} failed: ${e instanceof Error ? e.message : String(e)}`);
+		void vscode.window.showErrorMessage(`AURIX™ Debugger: ${action.label} failed: ${e instanceof Error ? e.message : String(e)}`);
 	} finally {
 		running = false;
 	}

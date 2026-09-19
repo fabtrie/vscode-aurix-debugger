@@ -1,5 +1,4 @@
 import * as assert from 'assert';
-import * as path from 'path';
 import * as net from 'net';
 import * as vscode from 'vscode';
 
@@ -10,6 +9,10 @@ function sleep(ms: number): Promise<void> {
 function getEnv(name: string): string | undefined {
 	const v = process.env[name];
 	return v && v.trim() !== '' ? v.trim() : undefined;
+}
+
+function getEnvList(name: string): string[] {
+	return (getEnv(name) ?? '').split(';').map((x) => x.trim()).filter((x) => x !== '');
 }
 
 function getEnvNumber(name: string): number | undefined {
@@ -26,19 +29,17 @@ function getDebugConfig(): vscode.DebugConfiguration | undefined {
 	if (!program) {
 		return undefined;
 	}
-	const targetDevice =
-		getEnv('AURIX_TEST_DEVICE') || 'DAS JDS AURIX LITE KIT V2.0 (TC375) LK8PIMU6';
-	const entryFunction = getEnv('AURIX_TEST_STOP_AT_FUNCTION') || 'test_main_loop';
 	const config: vscode.DebugConfiguration = {
-		type: 'aurix-tcf',
+		type: 'aurixdbg',
 		request: 'launch',
 		name: 'AURIX Breakpoint vs StopAtFunction',
-		program,
-		targetDevice,
+		symbolFiles: [program],
+		// aurix-dbg scripts, ';'-separated (OpenOCD -s / -f).
+		searchDirs: getEnvList('AURIX_TEST_SEARCH_DIRS'),
+		configFiles: getEnvList('AURIX_TEST_CONFIG_FILES'),
 		host: '127.0.0.1',
 		port: 1534,
 		stopOnEntry: false,
-		entryFunction,
 		svdFile: '',
 		workspace: getEnv('AURIX_TEST_WORKSPACE')
 	};
@@ -126,15 +127,12 @@ suite('AURIX breakpoint vs stop-at-function', () => {
 		const folder = vscode.workspace.workspaceFolders?.[0];
 		assert.ok(folder, 'No workspace folder open');
 
-		const ext = vscode.extensions.getExtension('zehuazhang.vscode-aurix-tcf-debug');
-		assert.ok(ext, 'AURIX TCF extension not found in test host');
+		const ext = vscode.extensions.getExtension('fabtrie.aurix-debugger');
+		assert.ok(ext, 'AURIX debugger extension not found in test host');
 		await ext.activate();
 
 		if (!config.autoStartAgent) {
 			config.autoStartAgent = true;
-		}
-		if (!config.agentPath) {
-			config.agentPath = path.join(ext.extensionPath, 'bin', 'aurix-debugger.exe');
 		}
 		if (!config.autoStartAgent) {
 			const host = String((config as any).host ?? '127.0.0.1');

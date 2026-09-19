@@ -1,1 +1,0 @@
-The executable tricore-objcopy has been downloaded from https://github.com/Cheb57/binutils-tricore/blob/master/x86_64/usr/local/bin/tricore-objcopy.exe

@@ -1,9 +1,9 @@
 {
-  "name": "vscode-aurix-tcf-debug",
-  "description": "AURIX™ Target Communication Framework (TCF) debugger",
-  "displayName": "AURIX™ TCF Debugger",
+  "name": "aurix-debugger",
+  "description": "AURIX™ debugger for VS Code, based on the aurix-dbg debug server (Infineon TAS, OpenOCD cfg scripts)",
+  "displayName": "AURIX™ Debugger",
   "icon": "media/debugger-icon.png",
-  "publisher": "zehuazhang",
+  "publisher": "fabtrie",
   "version": "0.1.0",
   "repository": {
     "type": "git",
@@ -21,19 +21,17 @@
     "Debuggers"
   ],
   "keywords": [
-    "aurix",
+    "aurixdbg",
     "tricore",
     "embedded",
     "debugger",
     "vscode",
-    "tcf",
-    "tcf-dap",
     "vscode-extension",
     "infineon"
   ],
   "activationEvents": [
     "onDebug",
-    "onDebugResolve:aurix-tcf"
+    "onDebugResolve:aurixdbg"
   ],
   "extensionDependencies": [
     "mcu-debug.peripheral-viewer",
@@ -47,7 +45,7 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run copy-agent",
     "compile": "tsc -p ./ && node ./scripts/copy-static-assets.js",
     "watch": "tsc -watch -p ./",
     "svd:compress": "node ./scripts/compress-svd.js --delete",
@@ -55,7 +53,8 @@
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
     "test:stress": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-stress.ps1",
-    "package": "npx vsce package --no-rewrite-relative-links -o vscode-aurix-tcf-debug.vsix"
+    "package": "npx vsce package --no-rewrite-relative-links -o aurix-debugger.vsix",
+    "copy-agent": "node ./scripts/copy-agent.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
@@ -77,159 +76,159 @@
   "contributes": {
     "commands": [
       {
-        "command": "aurix-tcf.openDebugConfig",
+        "command": "aurix-debugger.openDebugConfig",
         "title": "Open Debug Configuration",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.pickSvd",
+        "command": "aurix-debugger.pickSvd",
         "title": "Pick SVD File",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.resetTarget",
+        "command": "aurix-debugger.resetTarget",
         "title": "Reset",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": {
           "light": "media/reset-halt-light.svg",
           "dark": "media/reset-halt-dark.svg"
         }
       },
       {
-        "command": "aurix-tcf.flashTarget",
+        "command": "aurix-debugger.flashTarget",
         "title": "Flash Target",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(desktop-download)"
       },
       {
-        "command": "aurix-tcf.showActions",
+        "command": "aurix-debugger.showActions",
         "title": "Debugger Actions",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(tools)"
       },
       {
-        "command": "aurix-tcf.runAction",
+        "command": "aurix-debugger.runAction",
         "title": "Run Debugger Action",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.showResetCapabilities",
+        "command": "aurix-debugger.showResetCapabilities",
         "title": "Show Reset Capabilities",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.toggleInstructionStepping",
+        "command": "aurix-debugger.toggleInstructionStepping",
         "title": "Toggle Instruction Stepping",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.enableInstructionStepping",
+        "command": "aurix-debugger.enableInstructionStepping",
         "title": "Enable Instruction Stepping",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": {
           "light": "media/instr-step-on-light.svg",
           "dark": "media/instr-step-on-dark.svg"
         }
       },
       {
-        "command": "aurix-tcf.disableInstructionStepping",
+        "command": "aurix-debugger.disableInstructionStepping",
         "title": "Disable Instruction Stepping",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": {
           "light": "media/instr-step-off-light.svg",
           "dark": "media/instr-step-off-dark.svg"
         }
       },
       {
-        "command": "aurix-tcf.disassemblyGoTo",
+        "command": "aurix-debugger.disassemblyGoTo",
         "title": "Go to Address or Symbol in Disassembly",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(search)"
       },
       {
-        "command": "aurix-tcf.toggleLiveWatch",
+        "command": "aurix-debugger.toggleLiveWatch",
         "title": "Toggle Live Watch",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.configureLiveWatch",
+        "command": "aurix-debugger.configureLiveWatch",
         "title": "Configure Live Watch",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(gear)"
       },
       {
-        "command": "aurix-tcf.liveWatchAddExpression",
+        "command": "aurix-debugger.liveWatchAddExpression",
         "title": "Add Live Watch Expression",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(add)"
       },
       {
-        "command": "aurix-tcf.liveWatchRemoveExpression",
+        "command": "aurix-debugger.liveWatchRemoveExpression",
         "title": "Remove Live Watch Expression",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(close)"
       },
       {
-        "command": "aurix-tcf.liveWatchClearExpressions",
+        "command": "aurix-debugger.liveWatchClearExpressions",
         "title": "Clear Live Watch Expressions",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(clear-all)"
       },
       {
-        "command": "aurix-tcf.liveWatchRefresh",
+        "command": "aurix-debugger.liveWatchRefresh",
         "title": "Refresh Live Watch",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(refresh)"
       },
       {
-        "command": "aurix-tcf.liveWatchSetValue",
+        "command": "aurix-debugger.liveWatchSetValue",
         "title": "Set Live Watch Value",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(edit)"
       },
       {
-        "command": "aurix-tcf.liveWatchPauseExpression",
+        "command": "aurix-debugger.liveWatchPauseExpression",
         "title": "Pause Updates",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(debug-pause)"
       },
       {
-        "command": "aurix-tcf.liveWatchResumeExpression",
+        "command": "aurix-debugger.liveWatchResumeExpression",
         "title": "Resume Updates",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(debug-start)"
       },
       {
-        "command": "aurix-tcf.liveWatchDisableRefresh",
+        "command": "aurix-debugger.liveWatchDisableRefresh",
         "title": "Pause Live Watch Refresh",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(debug-pause)"
       },
       {
-        "command": "aurix-tcf.liveWatchEnableRefresh",
+        "command": "aurix-debugger.liveWatchEnableRefresh",
         "title": "Resume Live Watch Refresh",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(debug-start)"
       },
       {
-        "command": "aurix-tcf.liveWatchCopyValue",
+        "command": "aurix-debugger.liveWatchCopyValue",
         "title": "Copy Value",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.liveWatchCopyExpression",
+        "command": "aurix-debugger.liveWatchCopyExpression",
         "title": "Copy as Expression",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.liveWatchEditExpression",
+        "command": "aurix-debugger.liveWatchEditExpression",
         "title": "Edit Expression",
-        "category": "AURIX™ TCF"
+        "category": "AURIX™ Debugger"
       },
       {
-        "command": "aurix-tcf.liveWatchAddPeripheral",
+        "command": "aurix-debugger.liveWatchAddPeripheral",
         "title": "Add to Live Watch",
-        "category": "AURIX™ TCF",
+        "category": "AURIX™ Debugger",
         "icon": "$(eye)"
       }
     ],
@@ -237,201 +236,201 @@
       "debug": [
         {
           "type": "webview",
-          "id": "aurixTcfLiveWatch",
+          "id": "aurixLiveWatch",
           "name": "Live Watch",
           "icon": "media/debugger-icon.png",
-          "when": "debugType == aurix-tcf"
+          "when": "debugType == aurixdbg"
         }
       ]
     },
     "menus": {
       "debug/toolBar": [
         {
-          "command": "aurix-tcf.flashTarget",
-          "when": "debugType == aurix-tcf",
+          "command": "aurix-debugger.flashTarget",
+          "when": "debugType == aurixdbg",
           "group": "navigation"
         },
         {
-          "command": "aurix-tcf.resetTarget",
-          "when": "debugType == aurix-tcf",
+          "command": "aurix-debugger.resetTarget",
+          "when": "debugType == aurixdbg",
           "group": "navigation"
         },
         {
-          "command": "aurix-tcf.showActions",
-          "when": "debugType == aurix-tcf && aurix-tcf.hasActions",
+          "command": "aurix-debugger.showActions",
+          "when": "debugType == aurixdbg && aurix-debugger.hasActions",
           "group": "navigation"
         },
         {
-          "command": "aurix-tcf.enableInstructionStepping",
-          "when": "debugType == aurix-tcf && !aurix-tcf.instructionStepping",
+          "command": "aurix-debugger.enableInstructionStepping",
+          "when": "debugType == aurixdbg && !aurix-debugger.instructionStepping",
           "group": "navigation"
         },
         {
-          "command": "aurix-tcf.disableInstructionStepping",
-          "when": "debugType == aurix-tcf && aurix-tcf.instructionStepping",
+          "command": "aurix-debugger.disableInstructionStepping",
+          "when": "debugType == aurixdbg && aurix-debugger.instructionStepping",
           "group": "navigation"
         }
       ],
       "editor/title": [
         {
-          "command": "aurix-tcf.disassemblyGoTo",
-          "when": "debugType == aurix-tcf && debugState == stopped && activeEditor == workbench.debug.disassemblyView",
+          "command": "aurix-debugger.disassemblyGoTo",
+          "when": "debugType == aurixdbg && debugState == stopped && activeEditor == workbench.debug.disassemblyView",
           "group": "navigation"
         }
       ],
       "commandPalette": [
         {
-          "command": "aurix-tcf.disassemblyGoTo",
-          "when": "debugType == aurix-tcf && debugState == stopped"
+          "command": "aurix-debugger.disassemblyGoTo",
+          "when": "debugType == aurixdbg && debugState == stopped"
         },
         {
-          "command": "aurix-tcf.showActions",
-          "when": "debugType == aurix-tcf"
+          "command": "aurix-debugger.showActions",
+          "when": "debugType == aurixdbg"
         },
         {
-          "command": "aurix-tcf.runAction",
+          "command": "aurix-debugger.runAction",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchPauseExpression",
+          "command": "aurix-debugger.liveWatchPauseExpression",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchResumeExpression",
+          "command": "aurix-debugger.liveWatchResumeExpression",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchSetValue",
+          "command": "aurix-debugger.liveWatchSetValue",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchRemoveExpression",
+          "command": "aurix-debugger.liveWatchRemoveExpression",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchCopyValue",
+          "command": "aurix-debugger.liveWatchCopyValue",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchCopyExpression",
+          "command": "aurix-debugger.liveWatchCopyExpression",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchEditExpression",
+          "command": "aurix-debugger.liveWatchEditExpression",
           "when": "false"
         },
         {
-          "command": "aurix-tcf.liveWatchAddPeripheral",
+          "command": "aurix-debugger.liveWatchAddPeripheral",
           "when": "false"
         }
       ],
       "view/title": [
         {
-          "command": "aurix-tcf.liveWatchAddExpression",
-          "when": "view == aurixTcfLiveWatch",
+          "command": "aurix-debugger.liveWatchAddExpression",
+          "when": "view == aurixLiveWatch",
           "group": "navigation@1"
         },
         {
-          "command": "aurix-tcf.liveWatchDisableRefresh",
-          "when": "view == aurixTcfLiveWatch && aurix-tcf.liveWatchEnabled",
+          "command": "aurix-debugger.liveWatchDisableRefresh",
+          "when": "view == aurixLiveWatch && aurix-debugger.liveWatchEnabled",
           "group": "navigation@2"
         },
         {
-          "command": "aurix-tcf.liveWatchEnableRefresh",
-          "when": "view == aurixTcfLiveWatch && !aurix-tcf.liveWatchEnabled",
+          "command": "aurix-debugger.liveWatchEnableRefresh",
+          "when": "view == aurixLiveWatch && !aurix-debugger.liveWatchEnabled",
           "group": "navigation@2"
         },
         {
-          "command": "aurix-tcf.liveWatchRefresh",
-          "when": "view == aurixTcfLiveWatch",
+          "command": "aurix-debugger.liveWatchRefresh",
+          "when": "view == aurixLiveWatch",
           "group": "navigation@3"
         },
         {
-          "command": "aurix-tcf.configureLiveWatch",
-          "when": "view == aurixTcfLiveWatch",
+          "command": "aurix-debugger.configureLiveWatch",
+          "when": "view == aurixLiveWatch",
           "group": "navigation@4"
         },
         {
-          "command": "aurix-tcf.liveWatchClearExpressions",
-          "when": "view == aurixTcfLiveWatch",
+          "command": "aurix-debugger.liveWatchClearExpressions",
+          "when": "view == aurixLiveWatch",
           "group": "navigation@9"
         }
       ],
       "webview/context": [
         {
-          "command": "aurix-tcf.liveWatchEditExpression",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.(live|paused)$/",
+          "command": "aurix-debugger.liveWatchEditExpression",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.(live|paused)$/",
           "group": "1_edit@0"
         },
         {
-          "command": "aurix-tcf.liveWatchSetValue",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.(root\\.(live|paused)(\\.register)?|child)$/",
+          "command": "aurix-debugger.liveWatchSetValue",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.(root\\.(live|paused)(\\.register)?|child)$/",
           "group": "1_edit@1"
         },
         {
-          "command": "aurix-tcf.liveWatchCopyValue",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
+          "command": "aurix-debugger.liveWatchCopyValue",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
           "group": "2_copy@1"
         },
         {
-          "command": "aurix-tcf.liveWatchCopyExpression",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
+          "command": "aurix-debugger.liveWatchCopyExpression",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
           "group": "2_copy@2"
         },
         {
-          "command": "aurix-tcf.liveWatchPauseExpression",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.live/",
+          "command": "aurix-debugger.liveWatchPauseExpression",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.live/",
           "group": "3_updates@1"
         },
         {
-          "command": "aurix-tcf.liveWatchResumeExpression",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.paused/",
+          "command": "aurix-debugger.liveWatchResumeExpression",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.paused/",
           "group": "3_updates@1"
         },
         {
-          "command": "aurix-tcf.liveWatchRemoveExpression",
-          "when": "webviewId == 'aurixTcfLiveWatch' && webviewSection =~ /^liveWatch\\.root/",
+          "command": "aurix-debugger.liveWatchRemoveExpression",
+          "when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root/",
           "group": "4_remove@1"
         }
       ],
       "view/item/context": [
         {
-          "command": "aurix-tcf.liveWatchAddPeripheral",
-          "when": "view == mcu-debug.peripheral-viewer.svd && debugType == aurix-tcf && viewItem =~ /^(register|registerRW|registerRO|field|fieldRO)$/",
-          "group": "aurix-tcf@1"
+          "command": "aurix-debugger.liveWatchAddPeripheral",
+          "when": "view == mcu-debug.peripheral-viewer.svd && debugType == aurixdbg && viewItem =~ /^(register|registerRW|registerRO|field|fieldRO)$/",
+          "group": "aurix@1"
         }
       ]
     },
     "keybindings": [
       {
-        "command": "aurix-tcf.disassemblyGoTo",
+        "command": "aurix-debugger.disassemblyGoTo",
         "key": "ctrl+g",
-        "when": "debugType == aurix-tcf && debugState == stopped && disassemblyViewFocus"
+        "when": "debugType == aurixdbg && debugState == stopped && disassemblyViewFocus"
       }
     ],
     "configuration": {
-      "title": "AURIX™ TCF Debugger",
+      "title": "AURIX™ Debugger",
       "properties": {
-        "aurix-tcf.executePathMapper": {
+        "aurix-debugger.executePathMapper": {
           "type": "boolean",
           "default": true,
           "description": "Execute path mapper function, if defined in launch configuration."
         },
-        "aurix-tcf.agentPath": {
+        "aurix-debugger.agentPath": {
           "type": "string",
-          "description": "Path to the TCF agent executable. If not specified, assumes agent is already running."
+          "description": "Path to aurix-dbg.exe. Overrides the aurix-dbg bundled with the extension (launch configuration \"agentPath\" takes precedence)."
         },
-        "aurix-tcf.autoStartAgent": {
+        "aurix-debugger.autoStartAgent": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically start the TCF agent when debugging session starts."
+          "description": "Automatically start aurix-dbg when a debug session starts."
         },
-        "aurix-tcf.autoOpenDisassemblyView": {
+        "aurix-debugger.autoOpenDisassemblyView": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically open the VS Code Disassembly view when an AURIX TCF debug session starts."
+          "description": "Automatically open the VS Code Disassembly view when an AURIX debug session starts."
         },
-        "aurix-tcf.disassembly.opcodeBytes": {
+        "aurix-debugger.disassembly.opcodeBytes": {
           "type": "string",
           "enum": [
             "left",
@@ -446,27 +445,27 @@
           "default": "left",
           "description": "Where the Disassembly view shows the opcode bytes of each instruction. Applies to instructions loaded after the change (after the next stop)."
         },
-        "aurix-tcf.autoLockDisassemblyView": {
+        "aurix-debugger.autoLockDisassemblyView": {
           "type": "boolean",
           "default": true,
           "description": "Lock the Disassembly view editor group after opening it."
         },
-        "aurix-tcf.autoEvenEditorWidths": {
+        "aurix-debugger.autoEvenEditorWidths": {
           "type": "boolean",
           "default": true,
           "description": "Evenly size editor groups after opening the Disassembly view."
         },
-        "aurix-tcf.instructionSteppingDefault": {
+        "aurix-debugger.instructionSteppingDefault": {
           "type": "boolean",
           "default": false,
           "description": "Default state for instruction-level stepping when a debug session starts."
         },
-        "aurix-tcf.liveWatch.enabled": {
+        "aurix-debugger.liveWatch.enabled": {
           "type": "boolean",
           "default": false,
           "description": "Periodically refresh running global watch expressions. Local/frame-dependent watch expressions remain unchanged until the target stops."
         },
-        "aurix-tcf.liveWatch.intervalMs": {
+        "aurix-debugger.liveWatch.intervalMs": {
           "type": "number",
           "default": 1000,
           "minimum": 200,
@@ -498,66 +497,14 @@
     ],
     "debuggers": [
       {
-        "type": "aurix-tcf",
-        "label": "AURIX™ TCF Debugger",
+        "type": "aurixdbg",
+        "label": "AURIX™ Debugger",
         "configurationAttributes": {
           "launch": {
             "required": [],
             "properties": {
-              "program": {
-                "description": "Path to the ELF executable to debug",
-                "type": "string"
-              },
-              "workspace": {
-                "description": "Workspace or project path",
-                "type": "string"
-              },
-              "enableFlashing": {
-                "description": "If true, runs the bundled aurixflasher.exe with -elf <program> before starting the debug session (agentFlavor aurix-dbg: programs flashFiles with the server's 'flash write_images', then resets)",
-                "type": "boolean",
-                "default": false
-              },
-              "flashFiles": {
-                "description": "agentFlavor aurix-dbg: images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX or binary). The files are merged into one image first; where they overlap, later files win. Defaults to [program]. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "verifyFlash": {
-                "description": "agentFlavor aurix-dbg: read the programmed sectors back after flashing and compare them with the image (unchanged sectors are compared while flashing anyway).",
-                "type": "boolean",
-                "default": true
-              },
-              "targetDevice": {
-                "description": "Target device name (must match lsmcdd.exe output; numeric ids are not supported). Used for agent -p and to resolve aurixflasher -id when enableFlashing is true.",
-                "type": "string"
-              },
-              "entryFunction": {
-                "description": "Entry function name (e.g., core0_main)",
-                "type": "string"
-              },
-              "svdFile": {
-                "description": "Path to SVD (System View Description) file for register definitions. Supports ${command:aurix-tcf.pickSvd}.",
-                "type": "string"
-              },
-              "ppuElfPath": {
-                "description": "Path to the PPU ELF executable",
-                "type": "string"
-              },
-              "cdspElfPaths": {
-                "description": "List of CDSP ELF executables (12 cores)",
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "scrElfPath": {
-                "description": "Path to the SCR ELF executable",
-                "type": "string"
-              },
               "symbolFiles": {
-                "description": "Additional symbol files (e.g. bootmanager, FBL, HSM ELF files, GTM MCS assembler sources). Symbols only: they are never flashed. Without \"cores\", a file applies to every core of its architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM, a .asm file to the MCS channels); \"cores\" limits it to the named cores (context ID or target name, * and ? as wildcards, e.g. \"tc37x.cpu0\", \"cpu0\" or \"mcs0.*\").",
+                "description": "Symbol files: the application ELF plus e.g. bootmanager, FBL, HSM ELF files and GTM MCS assembler sources. Symbols only: they are never flashed (see flashFiles). Without \"cores\", a file applies to every core of its architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM, a .asm file to the MCS channels); \"cores\" limits it to the named cores (context ID or target name, * and ? as wildcards, e.g. \"tc37x.cpu0\", \"cpu0\" or \"mcs0.*\").",
                 "type": "array",
                 "items": {
                   "anyOf": [
@@ -586,8 +533,48 @@
                   ]
                 }
               },
+              "flashFiles": {
+                "description": "Images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX or binary). The files are merged into one image first; where they overlap, later files win. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "enableFlashing": {
+                "description": "If true, programs flashFiles with aurix-dbg's 'flash write_images' before the debug session, then resets the target",
+                "type": "boolean",
+                "default": false
+              },
+              "verifyFlash": {
+                "description": "Read the programmed sectors back after flashing and compare them with the image (unchanged sectors are compared while flashing anyway).",
+                "type": "boolean",
+                "default": true
+              },
+              "workspace": {
+                "description": "Workspace or project path",
+                "type": "string"
+              },
+              "svdFile": {
+                "description": "Path to SVD (System View Description) file for register definitions. Supports ${command:aurix-debugger.pickSvd}.",
+                "type": "string"
+              },
+              "ppuElfPath": {
+                "description": "Path to the PPU ELF executable",
+                "type": "string"
+              },
+              "cdspElfPaths": {
+                "description": "List of CDSP ELF executables (12 cores)",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "scrElfPath": {
+                "description": "Path to the SCR ELF executable",
+                "type": "string"
+              },
               "additionalAgentOptions": {
-                "description": "Additional agent command-line options (appended as-is; default empty)",
+                "description": "Additional aurix-dbg command-line options, appended after the generated ones (e.g. \"-d3 -l aurix-dbg.log\")",
                 "type": "string",
                 "default": ""
               },
@@ -603,61 +590,52 @@
                 "minimum": 200
               },
               "enableConsoleLog": {
-                "description": "Show TCF protocol messages in the debug console",
+                "description": "Show the messages exchanged with the debug server in the Debug Console",
                 "type": "boolean",
                 "default": false
               },
-              "agentFlavor": {
-                "description": "TCF agent type: 'infineon' (bundled DAS agent, default) or 'aurix-dbg' (OpenOCD-compatible server over Infineon TAS that runs OpenOCD cfg scripts)",
-                "type": "string",
-                "enum": [
-                  "infineon",
-                  "aurix-dbg"
-                ],
-                "default": "infineon"
-              },
               "autoStartAgent": {
-                "description": "Start the TCF agent process before connecting",
+                "description": "Start aurix-dbg before connecting (reuses an instance that is already running). If false, connects to an aurix-dbg that is already listening on host:port.",
                 "type": "boolean",
                 "default": false
               },
               "agentPath": {
-                "description": "Path to the agent executable (aurix-debugger.exe or aurix-dbg.exe)",
+                "description": "Path to aurix-dbg.exe. Defaults to the aurix-dbg bundled with the extension (or the aurix-debugger.agentPath setting).",
                 "type": "string"
               },
               "host": {
-                "description": "TCF host",
+                "description": "Host of the debug server",
                 "type": "string",
                 "default": "127.0.0.1"
               },
               "port": {
-                "description": "TCF port",
+                "description": "Port of the debug server",
                 "type": "number",
                 "default": 1534
               },
               "searchDirs": {
-                "description": "aurix-dbg: script search directories (OpenOCD -s), e.g. the OpenOCD tcl directory",
+                "description": "Script search directories (OpenOCD -s), e.g. the OpenOCD tcl directory",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
               },
               "configFiles": {
-                "description": "aurix-dbg: OpenOCD configuration scripts (OpenOCD -f), in order",
+                "description": "OpenOCD configuration scripts (OpenOCD -f), in order",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
               },
               "configCommands": {
-                "description": "aurix-dbg: additional Tcl commands (OpenOCD -c), run after the configuration files",
+                "description": "Additional Tcl commands (OpenOCD -c), run after the configuration files",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
               },
               "actions": {
-                "description": "aurix-dbg: custom Tcl commands offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu, an entry with 'tcl' is an action.",
+                "description": "Custom Tcl commands offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu, an entry with 'tcl' is an action.",
                 "type": "array",
                 "items": {
                   "type": "object",
@@ -667,7 +645,7 @@
                   "properties": {
                     "id": {
                       "type": "string",
-                      "description": "Identifier for the command 'aurix-tcf.runAction' (e.g. keybindings with args { \"id\": \"...\" })"
+                      "description": "Identifier for the command 'aurix-debugger.runAction' (e.g. keybindings with args { \"id\": \"...\" })"
                     },
                     "label": {
                       "type": "string",
@@ -696,7 +674,7 @@
                         "properties": {
                           "id": {
                             "type": "string",
-                            "description": "Identifier for the command 'aurix-tcf.runAction'"
+                            "description": "Identifier for the command 'aurix-debugger.runAction'"
                           },
                           "label": {
                             "type": "string",
@@ -796,42 +774,31 @@
         },
         "configurationSnippets": [
           {
-            "label": "AURIX™ TCF: Launch",
-            "description": "Launch an AURIX™ program with TCF debugger",
+            "label": "AURIX™ Debugger: Launch",
+            "description": "Debug an AURIX™ program with aurix-dbg over Infineon TAS using OpenOCD configuration scripts",
             "body": {
-              "type": "aurix-tcf",
+              "type": "aurixdbg",
               "request": "launch",
               "name": "Debug AURIX™ Program",
-              "workspace": "^\"\\${workspaceFolder}\"",
-              "program": "^\"\\${workspaceFolder}/build/program.elf\"",
-              "enableFlashing": false,
-              "liveWatchEnabled": true,
-              "liveWatchIntervalMs": 1000,
-              "enableConsoleLog": false
-            }
-          },
-          {
-            "label": "AURIX™ TCF: aurix-dbg (TAS, OpenOCD cfg)",
-            "description": "Debug with aurix-dbg over Infineon TAS using OpenOCD configuration scripts",
-            "body": {
-              "type": "aurix-tcf",
-              "request": "launch",
-              "name": "Debug AURIX™ Program (aurix-dbg)",
-              "agentFlavor": "aurix-dbg",
               "autoStartAgent": true,
-              "agentPath": "^\"\\${workspaceFolder}/aurix-dbg.exe\"",
               "searchDirs": [
                 "^\"\\${workspaceFolder}/tcl\""
               ],
               "configFiles": [
                 "board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"
               ],
-              "program": "^\"\\${workspaceFolder}/build/program.elf\"",
+              "symbolFiles": [
+                "^\"\\${workspaceFolder}/build/program.elf\""
+              ],
+              "flashFiles": [
+                "^\"\\${workspaceFolder}/build/program.elf\""
+              ],
               "host": "127.0.0.1",
               "port": 1534,
               "core": 0,
               "enableFlashing": false,
-              "liveWatchEnabled": true
+              "liveWatchEnabled": true,
+              "enableConsoleLog": false
             }
           }
         ]

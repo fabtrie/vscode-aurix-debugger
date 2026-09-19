@@ -1,5 +1,5 @@
 /*
- * Aurix TCF Debugger VSCode Extension
+ * AURIX Debugger VSCode Extension
  * Based on Intel's vscode-tcf-debug
  * Copyright (C) 2025 Infineon Technologies AG
  * 
@@ -24,25 +24,25 @@ import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 let tcfAgentProcess: ChildProcess | undefined;
 let extensionContext: vscode.ExtensionContext;
 let agentOutput: vscode.OutputChannel | undefined;
-let flasherOutput: vscode.OutputChannel | undefined;
 let activeAurixSessions = 0;
 let startingAurixSessions = 0;
 let pendingStopTimer: NodeJS.Timeout | undefined;
 let pendingStopToken = 0;
 let lastAgentHost: string | undefined;
 let lastAgentPort: number | undefined;
+let lastAgentPath: string | undefined;
 let enforcingMemoryInspectorSettings = false;
 const memoryInspectorExtensionId = 'eclipse-cdt.memory-inspector';
 const openedDisassemblySessions = new Set<string>();
 const aurixDebugSessions = new Set<vscode.DebugSession>();
 let resolvedDisassemblyOpenCommand: string | undefined;
 let instructionStepStatusItem: vscode.StatusBarItem | undefined;
-const instructionStepStateKey = 'aurix-tcf.instructionSteppingEnabled';
+const instructionStepStateKey = 'aurix-debugger.instructionSteppingEnabled';
 let lastInstructionSteppingEnabled = false;
 let liveWatchStatusItem: vscode.StatusBarItem | undefined;
 let liveWatchProvider: LiveWatchProvider | undefined;
-const liveWatchEnabledStateKey = 'aurix-tcf.liveWatch.enabled';
-const liveWatchIntervalStateKey = 'aurix-tcf.liveWatch.intervalMs';
+const liveWatchEnabledStateKey = 'aurix-debugger.liveWatch.enabled';
+const liveWatchIntervalStateKey = 'aurix-debugger.liveWatch.intervalMs';
 let lastLiveWatchEnabled = false;
 let lastLiveWatchIntervalMs = 1000;
 let preferredSourceViewColumn: vscode.ViewColumn | undefined;
@@ -56,9 +56,8 @@ const LIVE_WATCH_INTERVAL_OPTIONS = [200, 500, 1000, 2000] as const;
 export function activate(context: vscode.ExtensionContext) {
 	// This method is called when the extension is activated
 	extensionContext = context;
-	console.log('Aurix TCF debugging extension is activating...');
-	agentOutput = vscode.window.createOutputChannel('AURIX TCF Agent');
-	flasherOutput = vscode.window.createOutputChannel('AURIX Flasher');
+	console.log('AURIX debugger extension is activating...');
+	agentOutput = vscode.window.createOutputChannel('AURIX Debug Server');
 	liveWatchProvider = new LiveWatchProvider(context);
 	context.subscriptions.push(liveWatchProvider);
 
@@ -76,10 +75,10 @@ export function activate(context: vscode.ExtensionContext) {
 			) {
 				void ensureMemoryInspectorSettings();
 			}
-			if (event.affectsConfiguration('aurix-tcf.disassembly.opcodeBytes')) {
+			if (event.affectsConfiguration('aurix-debugger.disassembly.opcodeBytes')) {
 				const opcodeBytes = getDisassemblyOpcodeBytes();
 				for (const s of aurixDebugSessions) {
-					void Promise.resolve(s.customRequest('aurix-tcf/setDisassemblyOptions', { opcodeBytes })).catch(() => undefined);
+					void Promise.resolve(s.customRequest('aurix/setDisassemblyOptions', { opcodeBytes })).catch(() => undefined);
 				}
 			}
 		})
@@ -87,13 +86,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Commands (added): open the debug configuration webview panel
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.openDebugConfig', () => {
+		vscode.commands.registerCommand('aurix-debugger.openDebugConfig', () => {
 			void showDebugConfigPanel(context);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.pickSvd', async (args?: { targetDevice?: string }) => {
+		vscode.commands.registerCommand('aurix-debugger.pickSvd', async (args?: { targetDevice?: string }) => {
 			void args;
 			const options = await getSvdOptionsForDevice(context.extensionPath);
 			const items: Array<vscode.QuickPickItem & { value?: string; browse?: boolean }> = [
@@ -126,43 +125,43 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.resetTarget', async () => {
+		vscode.commands.registerCommand('aurix-debugger.resetTarget', async () => {
 			const s = vscode.debug.activeDebugSession;
-			if (!s || s.type !== 'aurix-tcf') {
-				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+			if (!s || s.type !== 'aurixdbg') {
+				void vscode.window.showWarningMessage('No active AURIX™ debug session.');
 				return;
 			}
 			// The launch configuration decides: "resetSuspend": true halts at the reset vector,
 			// otherwise the target runs after reset and is paused afterwards (pauseAll), since
 			// some firmware only relaxes its watchdog after a startup check that runs a short
 			// time after reset.
-			await s.customRequest('aurix-tcf/reset', {});
+			await s.customRequest('aurix/reset', {});
 		})
 	);
 
 	let flashing = false;
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.flashTarget', async () => {
+		vscode.commands.registerCommand('aurix-debugger.flashTarget', async () => {
 			const s = vscode.debug.activeDebugSession;
-			if (!s || s.type !== 'aurix-tcf') {
-				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+			if (!s || s.type !== 'aurixdbg') {
+				void vscode.window.showWarningMessage('No active AURIX™ debug session.');
 				return;
 			}
 			if (flashing) {
-				void vscode.window.showWarningMessage('AURIX™ TCF: flashing is already running.');
+				void vscode.window.showWarningMessage('AURIX™ Debugger: flashing is already running.');
 				return;
 			}
 			flashing = true;
 			try {
 				await vscode.window.withProgress(
-					{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ TCF: flashing target (see Debug Console)...' },
-					async () => { await s.customRequest('aurix-tcf/flash', {}); }
+					{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ Debugger: flashing target (see Debug Console)...' },
+					async () => { await s.customRequest('aurix/flash', {}); }
 				);
 				// Same as the Reset button: the launch configuration decides whether the target halts or runs.
-				await s.customRequest('aurix-tcf/reset', {});
-				void vscode.window.showInformationMessage('AURIX™ TCF: flashing done.');
+				await s.customRequest('aurix/reset', {});
+				void vscode.window.showInformationMessage('AURIX™ Debugger: flashing done.');
 			} catch (e) {
-				void vscode.window.showErrorMessage(`AURIX™ TCF: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
+				void vscode.window.showErrorMessage(`AURIX™ Debugger: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
 			} finally {
 				flashing = false;
 			}
@@ -172,21 +171,21 @@ export function activate(context: vscode.ExtensionContext) {
 	registerDebuggerActions(context);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.showResetCapabilities', async () => {
+		vscode.commands.registerCommand('aurix-debugger.showResetCapabilities', async () => {
 			const s = vscode.debug.activeDebugSession;
-			if (!s || s.type !== 'aurix-tcf') {
-				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+			if (!s || s.type !== 'aurixdbg') {
+				void vscode.window.showWarningMessage('No active AURIX™ debug session.');
 				return;
 			}
 			const result = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Querying ContextReset.getCapabilities...' },
-				() => s.customRequest('aurix-tcf/resetCapabilities')
+				() => s.customRequest('aurix/resetCapabilities')
 			);
 			const caps = Array.isArray(result?.capabilities) ? result.capabilities : [];
 			if (result?.error) {
 				void vscode.window.showErrorMessage(`ContextReset.getCapabilities failed: ${result.error}`);
 			} else if (caps.length === 0) {
-				void vscode.window.showInformationMessage('Agent reported no ContextReset reset types. See "TCF Agent" / debug console output.');
+				void vscode.window.showInformationMessage('The debug server reported no reset types. See the "AURIX Debug Server" output or the Debug Console.');
 			} else {
 				const summary = caps.map((c: { Type: string; Description?: string }) => c.Description ? `${c.Type} (${c.Description})` : c.Type).join(', ');
 				void vscode.window.showInformationMessage(`Supported reset types: ${summary}`);
@@ -195,17 +194,17 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.toggleInstructionStepping', async () => {
+		vscode.commands.registerCommand('aurix-debugger.toggleInstructionStepping', async () => {
 			const enabled = !(await getInstructionSteppingEnabled());
 			await setInstructionSteppingMode(enabled);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.disassemblyGoTo', async (target?: string) => {
+		vscode.commands.registerCommand('aurix-debugger.disassemblyGoTo', async (target?: string) => {
 			const s = vscode.debug.activeDebugSession;
-			if (!s || s.type !== 'aurix-tcf') {
-				void vscode.window.showWarningMessage('No active AURIX™ TCF debug session.');
+			if (!s || s.type !== 'aurixdbg') {
+				void vscode.window.showWarningMessage('No active AURIX™ debug session.');
 				return;
 			}
 			const picked = typeof target === 'string' ? target : await pickDisassemblyTarget(s);
@@ -217,14 +216,14 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.toggleLiveWatch', async () => {
+		vscode.commands.registerCommand('aurix-debugger.toggleLiveWatch', async () => {
 			const enabled = !(await getLiveWatchEnabled());
 			await setLiveWatchMode(enabled);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.configureLiveWatch', async () => {
+		vscode.commands.registerCommand('aurix-debugger.configureLiveWatch', async () => {
 			const currentEnabled = await getLiveWatchEnabled();
 			const currentInterval = await getLiveWatchIntervalMs();
 			const items: Array<vscode.QuickPickItem & { enabled: boolean; intervalMs?: number; custom?: boolean }> = [
@@ -279,31 +278,31 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchAddExpression', async () => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchAddExpression', async () => {
 			await liveWatchProvider?.addExpression(await pickLiveWatchExpression());
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchRemoveExpression', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchRemoveExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.removeExpression(item);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchSetValue', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchSetValue', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.setValue(item);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchPauseExpression', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPauseExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.setExpressionPaused(item, true);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchResumeExpression', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchResumeExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.setExpressionPaused(item, false);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchAddPeripheral', async (node?: unknown) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchAddPeripheral', async (node?: unknown) => {
 			const entry = peripheralWatchEntryFromNode(node);
 			if (!entry) {
 				void vscode.window.showWarningMessage('Select a register or field in the XPeripherals view to add it to the Live Watch.');
@@ -323,57 +322,57 @@ export function activate(context: vscode.ExtensionContext) {
 			await liveWatchProvider?.addPeripheral(entry);
 			await vscode.commands.executeCommand(`${LiveWatchProvider.viewType}.focus`);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchEditExpression', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchEditExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.editExpression(item);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchCopyValue', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchCopyValue', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.copyValue(item);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchCopyExpression', async (item?: LiveWatchCommandArgument) => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchCopyExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.copyExpression(item);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchDisableRefresh', async () => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchDisableRefresh', async () => {
 			await setLiveWatchMode(false);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.liveWatchEnableRefresh', async () => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchEnableRefresh', async () => {
 			await setLiveWatchMode(true);
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchClearExpressions', async () => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchClearExpressions', async () => {
 			await liveWatchProvider?.clearExpressions();
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.liveWatchRefresh', async () => {
+		vscode.commands.registerCommand('aurix-debugger.liveWatchRefresh', async () => {
 			await liveWatchProvider?.refreshNow();
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.enableInstructionStepping', async () => {
+		vscode.commands.registerCommand('aurix-debugger.enableInstructionStepping', async () => {
 			await setInstructionSteppingMode(true);
 		}),
-		vscode.commands.registerCommand('aurix-tcf.disableInstructionStepping', async () => {
+		vscode.commands.registerCommand('aurix-debugger.disableInstructionStepping', async () => {
 			await setInstructionSteppingMode(false);
 		})
 	);
 
 	instructionStepStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-	instructionStepStatusItem.command = 'aurix-tcf.toggleInstructionStepping';
+	instructionStepStatusItem.command = 'aurix-debugger.toggleInstructionStepping';
 	instructionStepStatusItem.tooltip = 'Toggle instruction-level stepping';
 	context.subscriptions.push(instructionStepStatusItem);
 	liveWatchStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
-	liveWatchStatusItem.command = 'aurix-tcf.configureLiveWatch';
+	liveWatchStatusItem.command = 'aurix-debugger.configureLiveWatch';
 	liveWatchStatusItem.tooltip = 'Configure live watch refresh for running global variables';
 	context.subscriptions.push(liveWatchStatusItem);
 	context.subscriptions.push(vscode.window.registerWebviewViewProvider(LiveWatchProvider.viewType, liveWatchProvider));
 	// Like the Watch view, the Live Watch updates on every break, also for paused expressions and when
 	// the periodic refresh is off. The adapter's stopped event also covers cores stopping without focus.
 	context.subscriptions.push(
-		vscode.debug.registerDebugAdapterTrackerFactory('aurix-tcf', {
+		vscode.debug.registerDebugAdapterTrackerFactory('aurixdbg', {
 			createDebugAdapterTracker: () => ({
 				onDidSendMessage: (message: { type?: string; event?: string }) => {
 					if (message?.type === 'event' && message.event === 'stopped') {
@@ -386,17 +385,17 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Register debug configuration provider
 	context.subscriptions.push(
-		vscode.debug.registerDebugConfigurationProvider('aurix-tcf', new AurixTCFConfigurationProvider())
+		vscode.debug.registerDebugConfigurationProvider('aurixdbg', new AurixTCFConfigurationProvider())
 	);
 
 	// Register debug adapter factory
 	context.subscriptions.push(
-		vscode.debug.registerDebugAdapterDescriptorFactory('aurix-tcf', new AurixTCFDebugAdapterFactory())
+		vscode.debug.registerDebugAdapterDescriptorFactory('aurixdbg', new AurixTCFDebugAdapterFactory())
 	);
 
 	// Register timestamp command (useful for recording TCF messages with timestamps)
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-tcf.timestamp', () => {
+		vscode.commands.registerCommand('aurix-debugger.timestamp', () => {
 			return new Date().toISOString().replaceAll(":", "-");
 		})
 	);
@@ -404,7 +403,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Ensure we clean up the agent when the debug session is terminated.
 	context.subscriptions.push(
 		vscode.debug.onDidStartDebugSession((session: vscode.DebugSession) => {
-			if (session.type === 'aurix-tcf') {
+			if (session.type === 'aurixdbg') {
 				activeAurixSessions++;
 				aurixDebugSessions.add(session);
 				if (pendingStopTimer) {
@@ -428,14 +427,14 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.debug.onDidChangeActiveStackItem((item) => {
 			const session = vscode.debug.activeDebugSession;
-			if (!session || session.type !== 'aurix-tcf') {
+			if (!session || session.type !== 'aurixdbg') {
 				return;
 			}
 			// The adapter needs the focused thread to tell the toolbar pause button (which pauses the
 			// focused thread) from a core's pause button in the Call Stack view.
 			const focused = item && item.session.id === session.id ? item.threadId : undefined;
 			focusFileLog(session, `activeStackItem thread=${String(focused)} frame=${String((item as vscode.DebugStackFrame | undefined)?.frameId)}`);
-			void Promise.resolve(session.customRequest('aurix-tcf/activeThread', { threadId: focused })).catch(() => undefined);
+			void Promise.resolve(session.customRequest('aurix/activeThread', { threadId: focused })).catch(() => undefined);
 			if (!item) {
 				return;
 			}
@@ -462,10 +461,10 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 	context.subscriptions.push(
 		vscode.debug.onDidReceiveDebugSessionCustomEvent((e) => {
-			if (e.session.type !== 'aurix-tcf') {
+			if (e.session.type !== 'aurixdbg') {
 				return;
 			}
-			if (e.event !== 'aurix-tcf/sourceLocation') {
+			if (e.event !== 'aurix/sourceLocation') {
 				return;
 			}
 			const body = e.body as { path?: string; line?: number } | undefined;
@@ -480,7 +479,7 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 	context.subscriptions.push(
 		vscode.debug.onDidTerminateDebugSession(async (session) => {
-			if (session.type !== 'aurix-tcf') {
+			if (session.type !== 'aurixdbg') {
 				return;
 			}
 			const openTimer = pendingDisassemblyOpenTimers.get(session.id);
@@ -525,7 +524,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	void vscode.window.showInformationMessage('Aurix TCF debugging extension is enabled.');
+	void vscode.window.showInformationMessage('AURIX debugger extension is enabled.');
 }
 
 export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
@@ -543,183 +542,13 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 		try {
 		const config = session.configuration;
 
-		// Pre-launch validation for Flash Hex (PPU / CDSP).
-		// AurixFlasher returns exit code 0 even when no HEX file is provided,
-		// so explicit validation is required to prevent silent failures.
-		{
-			const missingHexFiles: string[] = [];
-			if (config.ppuFlashHex === true) {
-				const ppuElf = resolveConfigPath(session, config.ppuElfPath);
-				if (!ppuElf) {
-					missingHexFiles.push('PPU: Flash Hex is enabled but no ELF file is specified.');
-				} else {
-					const hexPath = ppuElf.replace(/\.elf$/i, '.hex');
-					if (!fs.existsSync(hexPath)) {
-						missingHexFiles.push(`PPU: HEX file not found: ${hexPath}`);
-					}
-				}
-			}
-			if (config.cdspFlashHex === true) {
-				const cdspPaths: string[] = Array.isArray(config.cdspElfPaths) ? config.cdspElfPaths : [];
-				let anyCdsp = false;
-				for (let i = 0; i < cdspPaths.length; i++) {
-					const elfPath = resolveConfigPath(session, cdspPaths[i]);
-					if (elfPath) {
-						anyCdsp = true;
-						const hexPath = elfPath.replace(/\.elf$/i, '.hex');
-						if (!fs.existsSync(hexPath)) {
-							missingHexFiles.push(`CDSP${i}: HEX file not found: ${hexPath}`);
-						}
-					}
-				}
-				if (!anyCdsp) {
-					missingHexFiles.push('CDSP: Flash Hex is enabled but no ELF files are specified.');
-				}
-			}
-			if (missingHexFiles.length > 0) {
-				void vscode.window.showErrorMessage(
-					`Flash Hex validation failed:\n${missingHexFiles.join('\n')}`,
-					{ modal: true },
-				);
-				throw new Error('Flash Hex validation failed');
-			}
-		}
-
-		// Flash firmware via AurixFlasher (single invocation, matching Eclipse launcher).
-		// TriCore ELF uses -elf; PPU/CDSP HEX files use -hex.
-		// aurix-dbg programs the flash itself over TAS (Tcl 'program' after connect).
-		if (config.enableFlashing === true && config.agentFlavor !== 'aurix-dbg') {
-			const resolvedElf = resolveConfigPath(session, config.program);
-			if (!resolvedElf) {
-				void vscode.window.showErrorMessage('Enable flashing is set but no program/ELF path is configured.');
-				throw new Error('enableFlashing requires a valid program path');
-			}
-
-			// Collect all HEX files for PPU/CDSP.
-			const hexFiles: string[] = [];
-			if (config.ppuFlashHex === true) {
-				const ppuElf = resolveConfigPath(session, config.ppuElfPath);
-				if (ppuElf) {
-					hexFiles.push(ppuElf.replace(/\.elf$/i, '.hex'));
-				}
-			}
-			if (config.cdspFlashHex === true) {
-				const cdspPaths: string[] = Array.isArray(config.cdspElfPaths) ? config.cdspElfPaths : [];
-				for (let i = 0; i < cdspPaths.length; i++) {
-					const elfPath = resolveConfigPath(session, cdspPaths[i]);
-					if (elfPath) {
-						hexFiles.push(elfPath.replace(/\.elf$/i, '.hex'));
-					}
-				}
-			}
-
-			await runAurixFlasher(
-				resolvedElf,
-				typeof config.targetDevice === 'string' ? config.targetDevice : undefined,
-				hexFiles,
-			);
-		}
-
-		// Auto-start TCF agent if requested
-		if (config.autoStartAgent && config.agentFlavor === 'aurix-dbg') {
+		if (config.autoStartAgent) {
 			await startAurixDbg(session, config);
-		} else if (config.autoStartAgent) {
-			// Preflight: validate targetDevice early so typos fail fast.
-			if (typeof config.targetDevice === 'string' && config.targetDevice.trim() !== '') {
-				try {
-					await validateAgentTargetDevice(config.targetDevice);
-				} catch (e) {
-					const msg = e instanceof Error ? e.message : String(e);
-					void vscode.window.showErrorMessage(`Invalid targetDevice for agent: ${msg}`);
-					throw e;
-				}
-			}
-
-			// Use configured agent path, or fallback to bundled agent
-			const configuredPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration("aurix-tcf").get('agentPath'));
-			const agentPath = configuredPath || path.join(extensionContext.extensionPath, 'bin', 'aurix-debugger.exe');
-			
-			// Build agent arguments based on Eclipse log format
-			const agentArgs: string[] = [];
-			const userArgs: string[] = [];
-			
-			// -s TCP:host:port (server mode)
-			agentArgs.push('-s', `TCP:${config.host || '127.0.0.1'}:${config.port || 1534}`);
-			
-			// -p device_name (target device)
-			if (config.targetDevice) {
-				agentArgs.push('-p', config.targetDevice);
-			}
-			
-			// -e entry_function
-			if (config.entryFunction) {
-				agentArgs.push('-e', config.entryFunction);
-			}
-			
-			// -b core_number
-			if (config.core !== undefined) {
-				agentArgs.push('-b', String(config.core));
-			}
-			
-			// -r svd_file_path
-			if (config.svdFile) {
-				agentArgs.push('-r', config.svdFile);
-			}
-			
-			// -K workspace_path
-			if (config.workspace) {
-				agentArgs.push('-K', config.workspace);
-			}
-			
-			// -f and -G flags
-			if (config.flashDownload !== false) {
-				agentArgs.push('-f');
-			}
-
-			// Collect user-provided args first so they can override auto-generated flags.
-			// This is important for multi-core selection (-A) where the launcher may emit
-			// a mask that does not correspond 1:1 with the ELF-path fields in this extension.
-			if (typeof config.additionalAgentOptions === 'string' && config.additionalAgentOptions.trim() !== '') {
-				userArgs.push(...splitCommandLine(config.additionalAgentOptions));
-			}
-			if (config.agentArgs && Array.isArray(config.agentArgs)) {
-				userArgs.push(...config.agentArgs);
-			}
-
-			// Auto-generate -A core selection mask from PPU/CDSP/SCR ELF paths,
-			// unless the user already provided -A in additionalAgentOptions or agentArgs.
-			if (!userProvidedAParameter(userArgs)) {
-				const mask = buildCoreSelectionMask(config);
-				if (mask) {
-					agentArgs.push('-A', mask);
-				}
-			}
-
-			agentArgs.push(...userArgs);
-			
-			const host = config.host || '127.0.0.1';
-			const port = config.port || 1534;
-
-			// Keep this simple: if an agent is already running, reuse it.
-			// This makes VS Code Restart stable (no kill+start churn).
-			let reused = false;
-			if (tcfAgentProcess && tcfAgentProcess.exitCode === null) {
-				agentOutput?.appendLine('Reusing already running TCF agent for new session.');
-				try {
-					await waitForTcpPort(host, port, 15_000);
-					reused = true;
-				} catch (e) {
-					agentOutput?.appendLine(`Running TCF agent is not reachable (${e instanceof Error ? e.message : String(e)}); restarting it.`);
-				}
-			}
-			if (!reused) {
-				await startTCFAgent(agentPath, agentArgs, host, port);
-			}
 		}
 
 		// Enable path mapper based on workspace trust and configuration
-		const pathMapperConfigDefault = vscode.workspace.getConfiguration("aurix-tcf").inspect("executePathMapper")?.defaultValue ?? true;
-		const pathMapperConfig = vscode.workspace.getConfiguration("aurix-tcf").get('executePathMapper', pathMapperConfigDefault);
+		const pathMapperConfigDefault = vscode.workspace.getConfiguration("aurixdbg").inspect("executePathMapper")?.defaultValue ?? true;
+		const pathMapperConfig = vscode.workspace.getConfiguration("aurixdbg").get('executePathMapper', pathMapperConfigDefault);
 
 		const enablePathMapper = vscode.workspace.isTrusted && pathMapperConfig === true;
 		
@@ -749,234 +578,6 @@ function resolveConfigPath(session: vscode.DebugSession, p: unknown): string | u
 	return out;
 }
 
-
-function parseCsvLine(line: string): string[] {
-	// Minimal CSV parser supporting quoted fields.
-	const fields: string[] = [];
-	let current = '';
-	let inQuotes = false;
-	for (let i = 0; i < line.length; i++) {
-		const ch = line[i];
-		if (ch === '"') {
-			if (inQuotes && line[i + 1] === '"') {
-				current += '"';
-				i++;
-				continue;
-			}
-			inQuotes = !inQuotes;
-			continue;
-		}
-		if (ch === ',' && !inQuotes) {
-			fields.push(current.trim());
-			current = '';
-			continue;
-		}
-		current += ch;
-	}
-	fields.push(current.trim());
-	return fields;
-}
-
-type LsmcddDevice = {
-	id: string;
-	name: string;
-	family: string;
-};
-
-async function listLsmcddDevices(): Promise<LsmcddDevice[]> {
-	const exePath = path.join(extensionContext.extensionPath, 'bin', 'lsmcdd.exe');
-	if (!fs.existsSync(exePath)) {
-		throw new Error(`lsmcdd.exe not found: ${exePath}`);
-	}
-	const output = await new Promise<string>((resolve, reject) => {
-		execFile(
-			exePath,
-			{ cwd: path.dirname(exePath), windowsHide: true, maxBuffer: 5 * 1024 * 1024, timeout: 10_000 },
-			(err, stdout, stderr) => {
-			const combined = (stdout && stdout.trim().length > 0) ? stdout : (stderr ?? '');
-			if (err && (!combined || combined.trim().length === 0)) {
-				reject(new Error((stderr || err.message || 'Unknown error').trim()));
-				return;
-			}
-			resolve(combined ?? '');
-		}
-		);
-	});
-	const devices: LsmcddDevice[] = [];
-	for (const rawLine of output.split(/\r?\n/)) {
-		const line = rawLine.trim();
-		if (!line) {
-			continue;
-		}
-		const fields = parseCsvLine(line);
-		const id = (fields[0] ?? '').trim();
-		const name = (fields[1] ?? '').trim();
-		const family = (fields[3] ?? '').trim();
-		if (id !== '' && name !== '') {
-			devices.push({ id, name, family });
-		}
-	}
-	return devices;
-}
-
-async function validateAgentTargetDevice(targetDevice: string): Promise<void> {
-	const raw = targetDevice.trim();
-	if (raw === '') {
-		return;
-	}
-	if (/^\d+$/.test(raw)) {
-		throw new Error(`targetDevice must be a device name (not a numeric id).`);
-	}
-	try {
-		const devices = await listLsmcddDevices();
-		if (devices.length === 0) {
-			throw new Error('No devices detected by lsmcdd.exe');
-		}
-		const rawLower = raw.toLowerCase();
-		const ok = devices.some((d) => (d.name ?? '').trim() !== '' && d.name.toLowerCase() === rawLower);
-		if (!ok) {
-			const names = devices.map((d) => d.name).join('; ');
-			throw new Error(`Device '${raw}' not found. Available: ${names}`);
-		}
-	} catch (e) {
-		// If we cannot validate (tool missing/timeout), don't block debugging.
-		// But if we *did* get a device list and it doesn't match, we throw above.
-		const msg = e instanceof Error ? e.message : String(e);
-		agentOutput?.appendLine(`Warning: could not validate targetDevice via lsmcdd.exe: ${msg}`);
-		// Re-throw only for definite mismatch errors (which include 'Available:').
-		if (typeof msg === 'string' && msg.includes('Available:')) {
-			throw e;
-		}
-	}
-}
-
-async function resolveFlasherDeviceId(device: string | undefined): Promise<string> {
-	const raw = (device ?? '').trim();
-	if (raw !== '' && /^\d+$/.test(raw)) {
-		throw new Error(`targetDevice must be a device name (not a numeric id).`);
-	}
-
-	const devices = await listLsmcddDevices();
-	if (devices.length === 0) {
-		throw new Error('No devices detected by lsmcdd.exe');
-	}
-
-	// If the user did not specify a device and there is exactly one, pick it.
-	if (raw === '' && devices.length === 1) {
-		return devices[0].id;
-	}
-	if (raw === '') {
-		const names = devices.map((d) => d.name).join('; ');
-		throw new Error(`Multiple devices detected; please set targetDevice. Available: ${names}`);
-	}
-
-	const rawLower = raw.toLowerCase();
-	const exactName = devices.find((d) => d.name === raw) ?? devices.find((d) => d.name.toLowerCase() === rawLower);
-	if (exactName) {
-		return exactName.id;
-	}
-
-	// Accept matching by family (e.g., TC4Dx / TC37x) as a fallback, but only if unique.
-	const familyMatches = devices.filter((d) => (d.family ?? '').trim() !== '' && d.family.toLowerCase() === rawLower);
-	if (familyMatches.length === 1) {
-		return familyMatches[0].id;
-	}
-	if (familyMatches.length > 1) {
-		const names = familyMatches.map((d) => d.name).join('; ');
-		throw new Error(`Device '${raw}' matches multiple devices (by family). Matches: ${names}`);
-	}
-
-	const names = devices.map((d) => d.name).join('; ');
-	throw new Error(`Device '${raw}' not found. Available: ${names}`);
-}
-
-async function runAurixFlasher(elfPath: string, targetDevice: string | undefined, hexFiles: string[] = []): Promise<void> {
-	// Single invocation matching Eclipse launcher:
-	//   aurixflasher.exe -gui off -elf <tricore.elf> [-hex <ppu.hex> ...] -start off -ver on -id <deviceId>
-	// If first attempt fails, retry with -erase all.
-	const flasherExe = path.join(extensionContext.extensionPath, 'bin', 'aurixflasher', 'aurixflasher.exe');
-	const flasherCwd = path.dirname(flasherExe);
-
-	if (!fs.existsSync(flasherExe)) {
-		void vscode.window.showErrorMessage(`aurixflasher.exe not found: ${flasherExe}`);
-		throw new Error('aurixflasher.exe not found');
-	}
-	if (!fs.existsSync(elfPath)) {
-		void vscode.window.showErrorMessage(`ELF file not found: ${elfPath}`);
-		throw new Error('ELF file not found');
-	}
-	for (const hex of hexFiles) {
-		if (!fs.existsSync(hex)) {
-			void vscode.window.showErrorMessage(`HEX file not found: ${hex}`);
-			throw new Error(`HEX file not found: ${hex}`);
-		}
-	}
-
-	// Show output early so users see progress while we run lsmcdd.exe.
-	flasherOutput?.show(true);
-	flasherOutput?.appendLine(`Flashing ELF: ${elfPath}`);
-	for (const hex of hexFiles) {
-		flasherOutput?.appendLine(`Flashing HEX: ${hex}`);
-	}
-	flasherOutput?.appendLine(`Resolving device id via lsmcdd.exe (targetDevice='${targetDevice ?? ''}')...`);
-
-	let deviceId: string;
-	try {
-		deviceId = await resolveFlasherDeviceId(targetDevice);
-	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		flasherOutput?.appendLine(`Failed to resolve device id: ${msg}`);
-		void vscode.window.showErrorMessage(`Flashing failed: cannot resolve device id from lsmcdd.exe output. ${msg}`);
-		throw e;
-	}
-
-	// Build command: -gui off -elf <path> [-hex <path>]... -start off -ver on -id <deviceId>
-	const baseArgs: string[] = [
-		'-gui', 'off',
-		'-elf', elfPath,
-	];
-	for (const hex of hexFiles) {
-		baseArgs.push('-hex', hex);
-	}
-	baseArgs.push('-start', 'off', '-ver', 'on', '-id', deviceId);
-
-	flasherOutput?.appendLine(`Device: ${targetDevice ?? ''} (id ${deviceId})`);
-	flasherOutput?.appendLine(`Command: ${flasherExe} ${baseArgs.join(' ')}`);
-
-	const runFlasher = (args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
-		return new Promise((resolve) => {
-			execFile(flasherExe, args, { cwd: flasherCwd, windowsHide: true, maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
-				const exitCode = err && 'code' in err ? (err as any).code as number : (err ? 1 : 0);
-				resolve({ exitCode, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
-			});
-		});
-	};
-
-	// First attempt.
-	let result = await runFlasher(baseArgs);
-	if (result.stdout) { flasherOutput?.appendLine(result.stdout.trimEnd()); }
-	if (result.stderr) { flasherOutput?.appendLine(result.stderr.trimEnd()); }
-
-	if (result.exitCode !== 0) {
-		// Retry with -erase all (matching Eclipse launcher behaviour).
-		flasherOutput?.appendLine('Flashing failed, retrying with -erase all...');
-		const retryArgs = [...baseArgs, '-erase', 'all'];
-		flasherOutput?.appendLine(`Command: ${flasherExe} ${retryArgs.join(' ')}`);
-
-		result = await runFlasher(retryArgs);
-		if (result.stdout) { flasherOutput?.appendLine(result.stdout.trimEnd()); }
-		if (result.stderr) { flasherOutput?.appendLine(result.stderr.trimEnd()); }
-
-		if (result.exitCode !== 0) {
-			const msg = `Flashing failed even after erasing. Exit code: ${result.exitCode}`;
-			flasherOutput?.appendLine(msg);
-			void vscode.window.showErrorMessage(msg);
-			throw new Error(msg);
-		}
-	}
-
-	flasherOutput?.appendLine('Flashing completed successfully.');
-}
 
 function splitCommandLine(text: string): string[] {
 	// Simple quote-aware split for Additional Agent Options.
@@ -1011,38 +612,6 @@ function splitCommandLine(text: string): string[] {
 		out.push(cur);
 	}
 	return out;
-}
-
-function buildCoreSelectionMask(config: any): string | undefined {
-	const hasPath = (v: any) => typeof v === 'string' && v.trim() !== '';
-	const chars = new Array(14).fill('-');
-	if (hasPath(config.ppuElfPath)) {
-		chars[0] = 'p';
-	}
-	const cdsp = Array.isArray(config.cdspElfPaths) ? config.cdspElfPaths : [];
-	for (let i = 0; i < 12; i++) {
-		if (hasPath(cdsp[i])) {
-			chars[i + 1] = 'c';
-		}
-	}
-	if (hasPath(config.scrElfPath)) {
-		chars[13] = 's';
-	}
-	const mask = chars.join('');
-	return /[^-]/.test(mask) ? mask : undefined;
-}
-
-function userProvidedAParameter(args: string[]): boolean {
-	for (const a of args) {
-		if (a === '-A') {
-			return true;
-		}
-		// Allow combined form: -Apcc-----
-		if (a.startsWith('-A') && a.length > 2) {
-			return true;
-		}
-	}
-	return false;
 }
 
 function resolveConfigPathFromFolder(folder: vscode.WorkspaceFolder | undefined, p: unknown): string | undefined {
@@ -1101,7 +670,7 @@ async function materializeCompressedSvd(svdGzPath: string): Promise<string> {
 	await vscode.window.withProgress(
 		{
 			location: vscode.ProgressLocation.Notification,
-			title: 'AURIX™ TCF: preparing SVD definitions (first run)',
+			title: 'AURIX™ Debugger: preparing SVD definitions (first run)',
 			cancellable: false,
 		},
 		async (progress) => {
@@ -1145,11 +714,15 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 	): vscode.ProviderResult<vscode.DebugConfiguration[]> {
 		return [
 			{
-				type: 'aurix-tcf',
+				type: 'aurixdbg',
 				request: 'launch',
 				name: 'Debug Aurix Program',
 				workspace: '${workspaceFolder}',
-				program: '${workspaceFolder}/build/program.elf',
+				autoStartAgent: true,
+				searchDirs: ['${workspaceFolder}/tcl'],
+				configFiles: ['board/infineon/kit_a2g_tc377tx_3v3_trb.cfg'],
+				symbolFiles: ['${workspaceFolder}/build/program.elf'],
+				flashFiles: ['${workspaceFolder}/build/program.elf'],
 				enableFlashing: false,
 				enableConsoleLog: false
 			}
@@ -1167,7 +740,12 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 
 		// This extension does not support user-facing attach sessions.
 		if ((config as any).request === 'attach') {
-			void vscode.window.showErrorMessage('AURIX™ TCF Debugger: attach is not supported. Use a launch configuration (via the GUI panel).');
+			void vscode.window.showErrorMessage('AURIX™ Debugger: attach is not supported. Use a launch configuration (via the GUI panel).');
+			return undefined;
+		}
+
+		if ((config as any).program !== undefined) {
+			void vscode.window.showErrorMessage('AURIX™ Debugger: "program" is no longer supported. List the ELF files in "symbolFiles" (and in "flashFiles" to flash them).');
 			return undefined;
 		}
 
@@ -1175,7 +753,7 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 		if (!config.type && !config.request && !config.name) {
 			const editor = vscode.window.activeTextEditor;
 			if (editor && (editor.document.languageId === 'cpp' || editor.document.languageId === 'c')) {
-				config.type = 'aurix-tcf';
+				config.type = 'aurixdbg';
 				config.name = 'Launch Aurix Program';
 				config.request = 'launch';
 				config.host = 'localhost';
@@ -1247,12 +825,14 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
  * Starts aurix-dbg (OpenOCD-compatible debug server over Infineon TAS) with
  * OpenOCD-style arguments built from the launch configuration:
  * -s <searchDirs> -f <configFiles> -c <configCommands>.
+ * Uses the aurix-dbg.exe bundled with the extension unless "agentPath" overrides it.
  */
 async function startAurixDbg(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<void> {
-	const agentPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration('aurix-tcf').get('agentPath'));
-	if (!agentPath) {
-		void vscode.window.showErrorMessage('agentFlavor "aurix-dbg" requires "agentPath" (path to aurix-dbg.exe).');
-		throw new Error('aurix-dbg agentPath not configured');
+	const agentPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration('aurixdbg').get('agentPath'))
+		?? path.join(extensionContext.extensionPath, 'bin', 'aurix-dbg.exe');
+	if (!fs.existsSync(agentPath)) {
+		void vscode.window.showErrorMessage(`aurix-dbg not found: ${agentPath}`);
+		throw new Error(`aurix-dbg not found: ${agentPath}`);
 	}
 	const host = String(config.host || '127.0.0.1');
 	const port = Number(config.port || 1534);
@@ -1277,6 +857,9 @@ async function startAurixDbg(session: vscode.DebugSession, config: vscode.DebugC
 		args.push('-c', cmd);
 	}
 	args.push('-c', `bindto ${host === 'localhost' ? '127.0.0.1' : host}`, '-c', `tcf_port ${port}`);
+	if (typeof config.additionalAgentOptions === 'string') {
+		args.push(...splitCommandLine(config.additionalAgentOptions));
+	}
 	if (Array.isArray(config.agentArgs)) {
 		args.push(...asList(config.agentArgs));
 	}
@@ -1302,9 +885,10 @@ async function startTCFAgent(agentPath: string, args: string[], host: string, po
 
 	lastAgentHost = host;
 	lastAgentPort = port;
+	lastAgentPath = agentPath;
 
 	agentOutput?.show(true);
-	agentOutput?.appendLine(`Starting TCF agent: ${agentPath}`);
+	agentOutput?.appendLine(`Starting aurix-dbg: ${agentPath}`);
 	// Quoted, so the line can be pasted into a shell as-is. Unquoted, a single
 	// argument like "bindto 127.0.0.1" looks like two and the agent rejects it with
 	// "unknown option: 127.0.0.1" - spawn() itself passes it as one argument.
@@ -1357,7 +941,7 @@ async function startTCFAgent(agentPath: string, args: string[], host: string, po
 			if (tcfAgentProcess === proc) {
 				tcfAgentProcess = undefined;
 			}
-			reject(new Error(`Failed to start TCF agent '${agentPath}': ${err.message}`));
+			reject(new Error(`Failed to start aurix-dbg '${agentPath}': ${err.message}`));
 		});
 	});
 	spawnFailed.catch(() => { /* surfaced via Promise.race below */ });
@@ -1366,24 +950,24 @@ async function startTCFAgent(agentPath: string, args: string[], host: string, po
 	// delivered, and those chunks are the failure reason.
 	const closed = new Promise<number | null>((resolve) => proc.once('close', (code) => resolve(code)));
 	const exitedEarly = closed.then((code): never => {
-		throw new Error(`TCF agent exited with code ${code} before listening on ${host}:${port}`);
+		throw new Error(`aurix-dbg exited with code ${code} before listening on ${host}:${port}`);
 	});
 	exitedEarly.catch(() => { /* surfaced via Promise.race below */ });
 
 	proc.on('exit', (code, signal) => {
-		agentOutput?.appendLine(`TCF agent exited with code ${code}${signal ? ` (signal ${signal})` : ''}`);
+		agentOutput?.appendLine(`aurix-dbg exited with code ${code}${signal ? ` (signal ${signal})` : ''}`);
 		if (tcfAgentProcess === proc) {
 			tcfAgentProcess = undefined;
 		}
 	});
 
 	proc.on('error', (err) => {
-		agentOutput?.appendLine(`Failed to start TCF agent: ${err.message}`);
+		agentOutput?.appendLine(`Failed to start aurix-dbg: ${err.message}`);
 	});
 
 	// Avoid a race where the debug adapter tries to connect before the agent has
 	// started listening on the requested TCP port.
-	agentOutput?.appendLine(`Waiting for TCF agent to listen on ${host}:${port}...`);
+	agentOutput?.appendLine(`Waiting for aurix-dbg to listen on ${host}:${port}...`);
 	try {
 		await Promise.race([waitForTcpPort(host, port, 15_000), spawnFailed, exitedEarly]);
 	} catch (e) {
@@ -1393,13 +977,13 @@ async function startTCFAgent(agentPath: string, args: string[], host: string, po
 			await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 500))]);
 		}
 		const message = `${e instanceof Error ? e.message : String(e)}${formatAgentOutputTail(recentOutput)}`;
-		agentOutput?.appendLine(`TCF agent did not start listening: ${message}`);
+		agentOutput?.appendLine(`aurix-dbg did not start listening: ${message}`);
 		agentOutput?.show(true);
 		// Don't leave a hung agent behind: it keeps the probe locked and later launches would reuse it.
 		await stopTCFAgent('startup failed');
 		throw new Error(message);
 	}
-	agentOutput?.appendLine(`TCF agent is listening on ${host}:${port}`);
+	agentOutput?.appendLine(`aurix-dbg is listening on ${host}:${port}`);
 }
 
 /** Quotes an argument for display, so a logged command line can be pasted into a shell. */
@@ -1432,11 +1016,11 @@ async function stopTCFAgent(reason: string): Promise<void> {
 		return;
 	}
 
-	agentOutput?.appendLine(`Stopping TCF agent (pid ${pid}) - ${reason}`);
+	agentOutput?.appendLine(`Stopping aurix-dbg (pid ${pid}) - ${reason}`);
 
 	try {
 		if (process.platform === 'win32') {
-			// Kill the whole process tree; aurix-debugger.exe may spawn helper processes.
+			// Kill the whole process tree, including helper processes the agent may have spawned.
 			await new Promise<void>((resolve, reject) => {
 				execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (err, stdout, stderr) => {
 					if (stdout) {
@@ -1463,7 +1047,7 @@ async function stopTCFAgent(reason: string): Promise<void> {
 		} catch {
 			// ignore
 		}
-		agentOutput?.appendLine(`Failed to stop TCF agent cleanly: ${String(e)}`);
+		agentOutput?.appendLine(`Failed to stop aurix-dbg cleanly: ${String(e)}`);
 	}
 
 	// Give the OS a moment to release the port.
@@ -1481,10 +1065,11 @@ async function stopTCFAgent(reason: string): Promise<void> {
 					agentOutput?.appendLine('Port still open, but a session is active/starting; skipping taskkill by image name.');
 					return;
 				}
-				agentOutput?.appendLine('Port still open after taskkill by PID; forcing taskkill by image name aurix-debugger.exe');
+				const image = path.basename(lastAgentPath ?? 'aurix-dbg.exe');
+				agentOutput?.appendLine(`Port still open after taskkill by PID; forcing taskkill by image name ${image}`);
 				try {
 					await new Promise<void>((resolve, reject) => {
-						execFile('taskkill', ['/IM', 'aurix-debugger.exe', '/T', '/F'], { windowsHide: true }, (err, stdout, stderr) => {
+						execFile('taskkill', ['/IM', image, '/T', '/F'], { windowsHide: true }, (err, stdout, stderr) => {
 							if (stdout) {
 								agentOutput?.appendLine(String(stdout).trimEnd());
 							}
@@ -1499,7 +1084,7 @@ async function stopTCFAgent(reason: string): Promise<void> {
 						});
 					});
 				} catch (e) {
-					agentOutput?.appendLine(`Failed to taskkill aurix-debugger.exe by image name: ${String(e)}`);
+					agentOutput?.appendLine(`Failed to taskkill ${image} by image name: ${String(e)}`);
 				}
 			}
 		}
@@ -1547,11 +1132,11 @@ function waitForTcpPort(host: string, port: number, timeoutMs: number): Promise<
 		const tryOnce = () => {
 			// If the agent already exited, don't keep polling.
 			if (!tcfAgentProcess) {
-				reject(new Error('TCF agent process is not running'));
+				reject(new Error('aurix-dbg is not running'));
 				return;
 			}
 			if (tcfAgentProcess.exitCode !== null) {
-				reject(new Error(`TCF agent exited early (code ${tcfAgentProcess.exitCode})`));
+				reject(new Error(`aurix-dbg exited early (code ${tcfAgentProcess.exitCode})`));
 				return;
 			}
 			const socket = new net.Socket();
@@ -1586,7 +1171,7 @@ function waitForTcpPort(host: string, port: number, timeoutMs: number): Promise<
 
 async function ensureMemoryInspectorSettings(): Promise<void> {
 	const cfg = vscode.workspace.getConfiguration();
-	const desiredDebugger = 'aurix-tcf';
+	const desiredDebugger = 'aurixdbg';
 	const currentTypes = cfg.get<string[]>('memory-inspector.debugTypes') ?? [];
 	const typeList = Array.isArray(currentTypes) ? currentTypes.slice() : [];
 	const needsType = !typeList.includes(desiredDebugger);
@@ -1611,7 +1196,7 @@ function openDisassemblyLayoutOnce(session: vscode.DebugSession): void {
 		pendingDisassemblyOpenTimers.delete(session.id);
 	}
 	const activeSession = vscode.debug.activeDebugSession;
-	const alive = !!activeSession && activeSession.id === session.id && activeSession.type === 'aurix-tcf';
+	const alive = !!activeSession && activeSession.id === session.id && activeSession.type === 'aurixdbg';
 	if (!alive || openedDisassemblySessions.has(session.id)) {
 		return;
 	}
@@ -1620,10 +1205,10 @@ function openDisassemblyLayoutOnce(session: vscode.DebugSession): void {
 }
 
 async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promise<void> {
-	if (session.type !== 'aurix-tcf') {
+	if (session.type !== 'aurixdbg') {
 		return;
 	}
-	const cfg = vscode.workspace.getConfiguration('aurix-tcf');
+	const cfg = vscode.workspace.getConfiguration('aurixdbg');
 	const autoOpen = cfg.get<boolean>('autoOpenDisassemblyView', true);
 	if (!autoOpen) {
 		return;
@@ -1697,7 +1282,7 @@ function pickDisassemblyTarget(session: vscode.DebugSession): Promise<string | u
 		placeholder: 'Address (0x80001234) or symbol (main, main+0x10)',
 		typedDescription: 'Go to address or symbol',
 		session,
-		symbolsRequest: 'aurix-tcf/disassemblySymbols',
+		symbolsRequest: 'aurix/disassemblySymbols',
 	});
 }
 
@@ -1707,8 +1292,8 @@ function pickLiveWatchExpression(): Promise<string | undefined> {
 		title: 'Add Live Watch Expression',
 		placeholder: 'Pick a variable or type an expression, e.g. counter_6 or *(uint32_t*)0x70000044',
 		typedDescription: 'Add expression',
-		session: session?.type === 'aurix-tcf' ? session : undefined,
-		symbolsRequest: 'aurix-tcf/variableSymbols',
+		session: session?.type === 'aurixdbg' ? session : undefined,
+		symbolsRequest: 'aurix/variableSymbols',
 	});
 }
 
@@ -1783,7 +1368,7 @@ async function goToDisassemblyTarget(session: vscode.DebugSession, target: strin
 		quietTimer = setTimeout(() => settle(), 200);
 	});
 	try {
-		const result = await session.customRequest('aurix-tcf/disassemblyGoTo', { target });
+		const result = await session.customRequest('aurix/disassemblyGoTo', { target });
 		await settled;
 		await vscode.commands.executeCommand('workbench.action.debug.callStackBottom');
 		const cmd = await resolveDisassemblyOpenCommand();
@@ -1850,12 +1435,12 @@ async function getInstructionSteppingEnabled(): Promise<boolean> {
 	if (typeof stored === 'boolean') {
 		return stored;
 	}
-	const cfg = vscode.workspace.getConfiguration('aurix-tcf');
+	const cfg = vscode.workspace.getConfiguration('aurixdbg');
 	return cfg.get<boolean>('instructionSteppingDefault', false);
 }
 
 function getDisassemblyOpcodeBytes(): DisassemblyOpcodeBytes {
-	const value = vscode.workspace.getConfiguration('aurix-tcf').get('disassembly.opcodeBytes');
+	const value = vscode.workspace.getConfiguration('aurixdbg').get('disassembly.opcodeBytes');
 	return isDisassemblyOpcodeBytes(value) ? value : 'left';
 }
 
@@ -1872,7 +1457,7 @@ async function getLiveWatchEnabled(): Promise<boolean> {
 	if (typeof stored === 'boolean') {
 		return stored;
 	}
-	const cfg = vscode.workspace.getConfiguration('aurix-tcf');
+	const cfg = vscode.workspace.getConfiguration('aurixdbg');
 	return cfg.get<boolean>('liveWatch.enabled', false);
 }
 
@@ -1881,7 +1466,7 @@ async function getLiveWatchIntervalMs(): Promise<number> {
 	if (typeof stored === 'number' && Number.isFinite(stored)) {
 		return normalizeLiveWatchIntervalMs(stored);
 	}
-	const cfg = vscode.workspace.getConfiguration('aurix-tcf');
+	const cfg = vscode.workspace.getConfiguration('aurixdbg');
 	return normalizeLiveWatchIntervalMs(cfg.get<number>('liveWatch.intervalMs', 1000));
 }
 
@@ -1900,9 +1485,9 @@ async function setLiveWatchMode(enabled: boolean, intervalMs?: number, session?:
 	await setLiveWatchEnabled(enabled);
 	await setLiveWatchInterval(nextIntervalMs);
 	const targetSession = session ?? vscode.debug.activeDebugSession;
-	if (targetSession && targetSession.type === 'aurix-tcf') {
+	if (targetSession && targetSession.type === 'aurixdbg') {
 		try {
-			await targetSession.customRequest('aurix-tcf/setLiveWatch', { enabled, intervalMs: nextIntervalMs });
+			await targetSession.customRequest('aurix/setLiveWatch', { enabled, intervalMs: nextIntervalMs });
 		} catch (e) {
 			agentOutput?.appendLine(`Failed to set live watch: ${String(e)}`);
 		}
@@ -1917,7 +1502,7 @@ async function setLiveWatchMode(enabled: boolean, intervalMs?: number, session?:
 function updateLiveWatchStatus(enabled: boolean, intervalMs: number, visible: boolean): void {
 	lastLiveWatchEnabled = enabled;
 	lastLiveWatchIntervalMs = normalizeLiveWatchIntervalMs(intervalMs);
-	void vscode.commands.executeCommand('setContext', 'aurix-tcf.liveWatchEnabled', enabled);
+	void vscode.commands.executeCommand('setContext', 'aurix-debugger.liveWatchEnabled', enabled);
 	if (!liveWatchStatusItem) {
 		return;
 	}
@@ -1940,9 +1525,9 @@ async function setInstructionSteppingEnabled(value: boolean): Promise<void> {
 async function setInstructionSteppingMode(enabled: boolean, session?: vscode.DebugSession): Promise<void> {
 	await setInstructionSteppingEnabled(enabled);
 	const targetSession = session ?? vscode.debug.activeDebugSession;
-	if (targetSession && targetSession.type === 'aurix-tcf') {
+	if (targetSession && targetSession.type === 'aurixdbg') {
 		try {
-			await targetSession.customRequest('aurix-tcf/setInstructionStepping', { enabled });
+			await targetSession.customRequest('aurix/setInstructionStepping', { enabled });
 		} catch (e) {
 			agentOutput?.appendLine(`Failed to set instruction stepping: ${String(e)}`);
 		}
@@ -1952,7 +1537,7 @@ async function setInstructionSteppingMode(enabled: boolean, session?: vscode.Deb
 
 function updateInstructionSteppingStatus(enabled: boolean, visible: boolean): void {
 	lastInstructionSteppingEnabled = enabled;
-	void vscode.commands.executeCommand('setContext', 'aurix-tcf.instructionStepping', enabled);
+	void vscode.commands.executeCommand('setContext', 'aurix-debugger.instructionStepping', enabled);
 	if (!instructionStepStatusItem) {
 		return;
 	}
@@ -1968,7 +1553,7 @@ function updateInstructionSteppingStatus(enabled: boolean, visible: boolean): vo
 }
 
 async function syncInstructionSteppingOnSessionStart(session: vscode.DebugSession): Promise<void> {
-	if (session.type !== 'aurix-tcf') {
+	if (session.type !== 'aurixdbg') {
 		return;
 	}
 	const enabled = await getInstructionSteppingEnabled();
@@ -1976,7 +1561,7 @@ async function syncInstructionSteppingOnSessionStart(session: vscode.DebugSessio
 }
 
 async function syncLiveWatchOnSessionStart(session: vscode.DebugSession): Promise<void> {
-	if (session.type !== 'aurix-tcf') {
+	if (session.type !== 'aurixdbg') {
 		return;
 	}
 	const sessionConfig = session.configuration as { liveWatchEnabled?: boolean; liveWatchIntervalMs?: number } | undefined;
@@ -2079,14 +1664,14 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<bool
 	}
 }
 
-/** Appends to %TEMP%/aurix-tcf-focus.log when the session's launch configuration has "debugUIFocus": true. */
+/** Appends to %TEMP%/aurix-debugger-focus.log when the session's launch configuration has "debugUIFocus": true. */
 function focusFileLog(session: vscode.DebugSession | undefined, message: string): void {
-	if (session?.type !== 'aurix-tcf' || session.configuration?.debugUIFocus !== true) {
+	if (session?.type !== 'aurixdbg' || session.configuration?.debugUIFocus !== true) {
 		return;
 	}
 	try {
 		const dir = process.env.TEMP || process.env.TMPDIR || '/tmp';
-		fs.appendFileSync(path.join(dir, 'aurix-tcf-focus.log'), `${new Date().toISOString()} [extension] ${message}\n`);
+		fs.appendFileSync(path.join(dir, 'aurix-debugger-focus.log'), `${new Date().toISOString()} [extension] ${message}\n`);
 	} catch {
 		// diagnostics only
 	}
@@ -2102,6 +1687,4 @@ export function deactivate() {
 	void stopTCFAgent('extension deactivate');
 	agentOutput?.dispose();
 	agentOutput = undefined;
-	flasherOutput?.dispose();
-	flasherOutput = undefined;
 }

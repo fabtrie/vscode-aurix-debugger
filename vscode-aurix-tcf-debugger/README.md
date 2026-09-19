@@ -1,8 +1,8 @@
-# AURIX&trade; TCF Debugger for VS Code
+# AURIX&trade; Debugger for VS Code
 
 > **Disclaimer:** This is a personal project, built and maintained by one developer in my own time. It is not an official Infineon product and has nothing to do with Infineon Technologies AG. It comes with no warranty and no promise of support or future updates. Use it at your own risk.
 
-This extension brings the TCF Debugger from [AURIX&trade; Configuration Studio](https://www.infineon.com/design-resources/platforms/aurix-software-tools/aurix-tools/aurix-configuration-studio) to VS Code. It talks to the same backend tools &mdash; the TCF agent and the AURIX&trade; Flasher &mdash; and only the VS Code frontend (the debug adapter, UI, and views) is rewritten here.
+The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts. `aurix-dbg.exe` is bundled with the extension; the setting `aurix-debugger.agentPath` or the launch attribute `agentPath` point to a different build.
 
 VS Code extension for debugging Infineon AURIX&trade; devices. It supports all AURIX&trade; TC2x, TC3x, and TC4x microcontrollers, including their TriCore, PPU, and CDSP cores.
 
@@ -18,27 +18,22 @@ VS Code extension for debugging Infineon AURIX&trade; devices. It supports all A
 - Disassembly view
 - Instruction stepping mode 
 - Memory Inspector (read and write memeory)
-- Launch configuration with AURIX&trade; device detect button
-- Integrate AURIX&trade; Flasher
+- Flashing through aurix-dbg (`enableFlashing`, Flash Target toolbar button)
+- Custom Tcl debugger actions and `monitor` commands in the Debug Console
 - Debug the PPU and CDSP cores
 
 ## Requirements
 
 - Visual Studio Code 1.79.0 or higher
-- DAS 8.3.0.1
+- Infineon `tas_server` (TAS) and a miniWiggler/DAP probe
+- OpenOCD configuration scripts for the board (e.g. the OpenOCD `tcl` directory)
 - Peripheral Inspector extension (installed automatically as a dependency)
 - Memory Inspector extension (installed automatically as a dependency)
 
 ## Backend binaries (`bin/`)
 
-The backend tools live under `bin/` and are bundled with this repository:
-
-- `aurix-debugger.exe` — the TCF agent
-- `lsmcdd.exe`, `mcdxdas.dll` — DAS components
-- `aurixflasher/` — the AURIX&trade; Flasher
+- `aurix-dbg.exe` — the debug server. Not in the repository: `npm run copy-agent` (also run when packaging) copies it from the `aurix-debugger` build.
 - `svd/` — SVD files for the supported devices
-
-These tools come from [AURIX&trade; Configuration Studio](https://www.infineon.com/design-resources/platforms/aurix-software-tools/aurix-tools/aurix-configuration-studio). Each one keeps its own license; see the files under `bin/aurixflasher/license/` for details.
 
 ## Build
 
@@ -47,7 +42,9 @@ npm install
 npm run package
 ```
 
-`npm run package` compiles the TypeScript sources, copies the static assets, and produces `vscode-aurix-tcf-debug.vsix` in the project root.
+`npm run package` compiles the TypeScript sources, copies the static assets and `aurix-dbg.exe`, and produces `aurix-debugger.vsix` in the project root.
+
+`aurix-dbg.exe` is taken from the environment variable `AURIX_DBG_EXE` if set, otherwise from `../aurix-debugger/server/target/release/` or `../aurix-debugger/server/target/debug/`.
 
 ## Installation
 
@@ -63,7 +60,7 @@ npm run package
 
 ### Debug configuration (UI)
 
-1. Open Command Palette and run `AURIX™ TCF: Open Debug Configuration`
+1. Open Command Palette and run `AURIX™ Debugger: Open Debug Configuration`
 2. Fill in the fields and save the configuration
 3. Click `Debug` to start debugging
 
@@ -78,25 +75,31 @@ Create `.vscode/launch.json`:
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "aurix-tcf",
+      "type": "aurixdbg",
       "request": "launch",
-      "name": "AURIX TCF Debug",
+      "name": "AURIX Debug",
       "host": "127.0.0.1",
       "port": 1534,
       "autoStartAgent": true,
-      "program": "${workspaceFolder}\\temp\\TC375_CE\\TriCore Debug (GCC)\\TC375_CE.elf",
-      "targetDevice": "DAS JDS AURIX LITE KIT V2.0 (TC375) LK8PIMU6",
-      "entryFunction": "core0_main",
+      "searchDirs": ["${workspaceFolder}/tcl"],
+      "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
+      "symbolFiles": ["${workspaceFolder}/temp/TC375_CE/TriCore Debug (GCC)/TC375_CE.elf"],
+      "flashFiles": ["${workspaceFolder}/temp/TC375_CE/TriCore Debug (GCC)/TC375_CE.hex"],
       "svdFile": "",
-      "workspace": "${workspaceFolder}\\temp\\TC375_CE",
+      "workspace": "${workspaceFolder}\\temp\\TC375_CE"
     }
   ]
 }
 ```
 
+- `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is.
+- `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port`.
+- `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
+- `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list.
+
 ### Start debugging
 
-We suggest start debugging with `AURIX™ TCF: Open Debug Configuration`
+We suggest start debugging with `AURIX™ Debugger: Open Debug Configuration`
 
 ![how-to-start](media/how-to-start.gif)
 
@@ -149,13 +152,13 @@ Instruction breakpoints can be set in the same way as in the source code.
 
 If the disassembly view is closed, use the Command Palette and run `Open Disassembly View` to open the view
 
-The setting `aurix-tcf.disassembly.opcodeBytes` places the opcode bytes of each instruction `left` (between address and instruction, default), `right` (after the instruction) or `hidden`. A change applies to instructions loaded after the next stop.
+The setting `aurix-debugger.disassembly.opcodeBytes` places the opcode bytes of each instruction `left` (between address and instruction, default), `right` (after the instruction) or `hidden`. A change applies to instructions loaded after the next stop.
 
 To show any other code location while the target is halted, click the search icon in the disassembly view's title bar (or press `Ctrl+G` in the view) and pick a function or enter an address (`0x80001234`) or `symbol+offset`. VS Code's disassembly view can only follow the selected stack frame, so the target appears as a `[Disassembly] ...` frame at the bottom of the call stack; it disappears when the target resumes.
 
 ### PPU / CDSP Cores
 
-In addition to the TriCore cores, the debugger supports the cores: **PPU** and **CDSP**. Open `AURIX™ TCF: Open Debug Configuration` and switch to the **PPU/CDSP/SCR Cores** tab to assign an ELF file to each core:
+In addition to the TriCore cores, the debugger supports the cores: **PPU** and **CDSP**. Open `AURIX™ Debugger: Open Debug Configuration` and switch to the **PPU/CDSP/SCR Cores** tab to assign an ELF file to each core:
 
 - **PPU** — a single ELF file
 - **CDSP** — up to 12 ELF files (CDSP0 – CDSP11)
@@ -164,16 +167,9 @@ The assigned ELF files provide the debug symbols used for source-level debugging
 
 ![cores-configuration](media/cores-configuration.png)
 
-#### Flash Hex option
-
-Each of the PPU and CDSP sections has a **Flash Hex** checkbox. When checked, the HEX file located next to the configured ELF (same path and name, with the `.elf` extension replaced by `.hex`) is programmed into flash before the debug session starts:
-
-- **PPU Flash Hex** — flashes the HEX next to the PPU ELF.
-- **CDSP Flash Hex** — flashes the HEX next to every configured CDSP ELF.
-
 ### Debugger Actions
 
-With `agentFlavor` `aurix-dbg`, the launch configuration can define custom Tcl commands in `actions`. They are offered by the `Debugger Actions` toolbar button, which only appears when `actions` is set. An entry with `items` opens a submenu, an entry with `tcl` runs its command(s) in order on the debug server. The output is written to the Debug Console.
+The launch configuration can define custom Tcl commands in `actions`. They are offered by the `Debugger Actions` toolbar button, which only appears when `actions` is set. An entry with `items` opens a submenu, an entry with `tcl` runs its command(s) in order on the debug server. The output is written to the Debug Console.
 
 ```jsonc
 "actions": [
@@ -221,7 +217,7 @@ With `agentFlavor` `aurix-dbg`, the launch configuration can define custom Tcl c
 The action is responsible for the target state it needs (e.g. halting the cores first). To run an action from a keybinding:
 
 ```json
-{ "key": "ctrl+alt+e", "command": "aurix-tcf.runAction", "args": { "id": "erasePflash" }, "when": "debugType == aurix-tcf" }
+{ "key": "ctrl+alt+e", "command": "aurix-debugger.runAction", "args": { "id": "erasePflash" }, "when": "debugType == aurixdbg" }
 ```
 
 

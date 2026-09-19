@@ -44,7 +44,7 @@ type RowTarget = {
 /** Argument of the Live Watch commands when run from the view's context menu. */
 export type LiveWatchCommandArgument = { rowId?: string } | undefined;
 
-const LIVE_WATCH_EXPRESSIONS_KEY = 'aurix-tcf.liveWatch.expressions';
+const LIVE_WATCH_EXPRESSIONS_KEY = 'aurix-debugger.liveWatch.expressions';
 const PAUSED_GROUP_ID = 'pausedGroup';
 /** Minimum pause between two refreshes, so a slow target is not polled continuously. */
 const MIN_REFRESH_GAP_MS = 50;
@@ -52,7 +52,7 @@ const MIN_REFRESH_GAP_MS = 50;
 const BREAK_REFRESH_DEBOUNCE_MS = 100;
 
 export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Disposable {
-	static readonly viewType = 'aurixTcfLiveWatch';
+	static readonly viewType = 'aurixLiveWatch';
 
 	/** In the order they were added, like the Watch view. */
 	private readonly expressions = new Map<string, LiveWatchStoredExpression>();
@@ -360,12 +360,12 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 			return;
 		}
 		const session = vscode.debug.activeDebugSession;
-		if (!session || session.type !== 'aurix-tcf') {
-			void vscode.window.showWarningMessage('Live watch values can only be set during an AURIX TCF debug session.');
+		if (!session || session.type !== 'aurixdbg') {
+			void vscode.window.showWarningMessage('Live watch values can only be set during an AURIX debug session.');
 			return;
 		}
 		try {
-			await session.customRequest('aurix-tcf/liveWatchWrite', { expression: target.expression, value });
+			await session.customRequest('aurix/liveWatchWrite', { expression: target.expression, value });
 		} catch (e) {
 			void vscode.window.showErrorMessage(`Could not set ${target.expression}: ${e instanceof Error ? e.message : String(e)}`);
 		}
@@ -409,7 +409,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	private async evaluateRoots(roots: string[]): Promise<void> {
 		roots = roots.filter((root) => this.expressions.has(root));
 		const session = vscode.debug.activeDebugSession;
-		if (roots.length === 0 || !session || session.type !== 'aurix-tcf') {
+		if (roots.length === 0 || !session || session.type !== 'aurixdbg') {
 			return;
 		}
 		const items = roots.map((root) => {
@@ -420,7 +420,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		});
 		let values: LiveWatchRootResult[];
 		try {
-			const response = await session.customRequest('aurix-tcf/liveWatchEvaluate', { items }) as { values?: LiveWatchRootResult[] } | undefined;
+			const response = await session.customRequest('aurix/liveWatchEvaluate', { items }) as { values?: LiveWatchRootResult[] } | undefined;
 			values = response?.values ?? [];
 		} catch (e) {
 			const error = e instanceof Error ? e.message : String(e);

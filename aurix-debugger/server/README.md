@@ -39,7 +39,7 @@ cd C:\workspace\test\aurix-debugger
 Ports:
 - **Telnet Tcl console:** 4444 (`telnet_port`).
 - **TCF:** 1534 (`tcf_port`).
-- **REST / MCP / Swagger:** 8080 (`api_port`, `api_port disabled` turns it off). See [REST, MCP and Python API](#rest-mcp-and-python-api).
+- **REST / MCP / Swagger / DAQ:** 8080 (`api_port`, `api_port disabled` turns it off). See [REST, MCP and Python API](#rest-mcp-and-python-api).
 - **Bind address:** 127.0.0.1 by default (`bindto`).
 
 Send console commands from a script:
@@ -71,6 +71,7 @@ One HTTP port (`api_port`, default 8080) serves:
 | `/docs` | Swagger UI; `/openapi.json` is the OpenAPI 3.1 document. |
 | `/mcp` | MCP server (Streamable HTTP). Register it with `claude mcp add --transport http aurix http://127.0.0.1:8080/mcp`. |
 | `/api/v1/events` | Server-sent events: halts, resumes, resets, breakpoint changes and log lines of all clients. |
+| `/api/v1/daq` | WebSocket: [periodic sampling](#periodic-sampling-daq) of variables, each at its own rate. |
 
 **One source of truth.** The operations are declared once in [crates/api-spec/src/ops.rs](crates/api-spec/src/ops.rs), with their request and response types in [types.rs](crates/api-spec/src/types.rs). The `///` comments there are the documentation of all outputs. `cargo build` generates the rest from them:
 - the REST routes, the MCP tools and their JSON schemas, and the `DebuggerApi` trait that [crates/api](crates/api) implements;
@@ -79,16 +80,19 @@ One HTTP port (`api_port`, default 8080) serves:
 
 The generated files are checked in, and a file is only written when its content changes. To add an operation, add a line to `ops.rs` and implement the new trait method; the compiler reports what is missing.
 
+DAQ is deliberately *not* an operation: a streaming session is of no use as an MCP tool and would only hold a socket open, and putting its configuration on the WebSocket is what ties a session's lifetime to its connection. Its protocol is therefore hand-written and specified below instead of in the OpenAPI document.
+
 **Shared session.** REST, MCP and VS Code (TCF) share one session:
 - Run control goes through the same core operations and events. A halt from the API shows up in VS Code, and a resume in VS Code shows up in `wait_state` and on the event stream.
 - Breakpoints live in one table. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
 - VS Code shows API breakpoints in its Breakpoints view. A breakpoint at the start of a source line is shown as a source breakpoint; any other is shown as a function breakpoint named by symbol or address, e.g. `0x8021a9de`. Removing, disabling or enabling it in VS Code changes it on the server, and removing it through the API removes it from the view. When the debug session ends, the extension takes them out of the view again, so they are not saved with the workspace. VS Code's own function breakpoints accept a symbol, an address or `file:line`.
 - Memory and register writes from the API send `Memory.memoryChanged` / `Registers.registerChanged`. The extension then refreshes its variable, watch and register views.
 - During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
+- Symbols can be loaded from the API (`load_symbols`), not only by a VS Code debug session. There is one symbol set per core and the last writer wins: a VS Code session started afterwards replaces what the API loaded, and the other way round. `symbols` reports what is loaded.
 
-**Performance.** Every operation is one short job on the core thread. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
+**Performance.** Every operation is one short job on the core thread. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
 
-**Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger.
+**Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it.
 
 Python ([python/](../python)): `pip install -e python`, then:
 
@@ -101,17 +105,96 @@ data = dbg.read_bytes(0x70000000, 256)   # any length, split into 64 KB calls
 for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients
 ```
 
+### Periodic sampling (DAQ)
+
+`ws://127.0.0.1:8080/api/v1/daq` samples variables while the target runs, **each at its own rate**, and streams their decoded values. There is no hardware DAQ behind this: TAS offers only MCDS trace (which needs an ED device, not a miniWiggler) and a channel that the target firmware would have to serve. The sampler is host-side polled reads, merged into one batch per tick on the core thread.
+
+**Sampling runs only while the socket is open.** Configuration travels on the same socket, so a session cannot outlive its client: close the socket, or crash, and the session is removed and the target is left alone. There is no reaper and no idle timeout.
+
+Client frames (`id` correlates the reply):
+
+```json
+{"op":"subscribe","id":1,"mode":"every_tick","queue":256,"points":[
+    {"expression":"g_motor.speed_rpm","rate_hz":1000},
+    {"expression":"g_state","interval_us":100000,"name":"state",
+     "mode":"on_change","resend_after_us":1000000},
+    {"address":"0x70000100","size":4,"rate_hz":200,"name":"ticks"}]}
+{"op":"set_rate","id":2,"point":1,"rate_hz":500}
+{"op":"set_mode","id":3,"point":2,"mode":"every_tick"}
+{"op":"add","id":4,"points":[...]}    {"op":"remove","id":5,"points":[1,2]}
+{"op":"pause","id":6}                 {"op":"resume","id":7}   {"op":"status","id":8}
+```
+
+A point gives exactly one of `expression` or `address` (with `size`), and at most one of `rate_hz` or `interval_us`. `decode: false` streams raw hex. `target` reads through that core's view (HSM-private memory, MCS program RAM) instead of the system bus; those points cannot share the batch, so keep them slow.
+
+Server frames:
+
+```json
+{"type":"config","id":1,"start_wall_ms":1758280000000,"points":[
+  {"id":1,"name":"g_motor.speed_rpm","address":2147489344,"size":4,
+   "requested_interval_us":1000,"interval_us":1000,"rate_hz":1000.0,
+   "type_name":"float","encoding":"float","mode":"every_tick"},
+  {"name":"typo","requested_interval_us":1000,"interval_us":0,
+   "error":"`typo`: unknown symbol"}]}
+
+{"type":"samples","t_us":124000,"points":[1,3],"values":[1450.5,42]}
+{"type":"overrun","t_us":125000,"dropped":12}
+{"type":"gap","t_us":126000,"missed":98}
+{"type":"point_error","point":3,"message":"PL0_ERR_DATA","muted":false}
+{"type":"state","t_us":127000,"state":"stalled"}
+{"type":"changed","id":2,"point":1,"interval_us":2000,"rate_hz":500.0}
+{"type":"error","id":4,"code":"bad_request","message":"..."}
+```
+
+Samples are columnar: `points[i]` pairs with `values[i]`, and a tick carries only the points that were due. `t_us` is microseconds since `start_wall_ms`, taken after the batch returns.
+
+- **Rates** are rounded up to a 1 ms grid, so 1 kHz is the scheduler's ceiling and every point reports the period it was granted — ask for 400 Hz (2500 µs) and you get 333 Hz (3000 µs). `Server::new` raises the Windows timer resolution to 1 ms, without which nothing below ~15 ms would be honoured.
+- **What the probe actually sustains is lower.** A tick costs one round trip to the TasServer, about 1.4 ms on a miniWiggler at `adapter speed 30000`, *independent of how many points the tick carries* — 16 scattered points measured the same as one, which is the whole point of batching them. Measured on a TC377 TRB board with the application running:
+
+  | requested | delivered | missed |
+  |---|---|---|
+  | ≤ 200 Hz | exact | none |
+  | 500 Hz | ~460 Hz | some |
+  | 1 kHz | ~650 Hz | ~350/s |
+
+  So **~200 Hz per session is the rate you can count on, and ~700 Hz is the hard ceiling**. Asking for more is not silently downgraded: the ticks that could not be served are counted and reported as `gap`, and 649 delivered plus 353/s missed adds back up to the 1000 that was asked for. Sample several signals in one session rather than opening a session per signal — the second costs a round trip, the first is free.
+
+- **On a 20-target configuration** (3 cores, HSM, 16 MCS channels) the 10 ms run-state poll is *not* what limits DAQ: raising `polling_period` to 100 ms moved the achieved rate only from 695 to 743 Hz.
+- **`mode`** is `every_tick` (default) or `on_change`. **On-change saves stream bandwidth, not probe traffic** — the point is still read every period, because that is how a change is noticed. The first read is always delivered as a baseline, and the baseline is dropped on a device reset and on `resume`, so a client never keeps believing a stale value. A quiet `on_change` point sends nothing at all; set `resend_after_us` if a plot needs a floor on the gap. For a bit field the comparison is masked to the field's own bits, so a neighbour in the same storage word does not trigger it.
+- **Encodings** come from the DWARF type: `int`, `uint`, `float`, `bool`, `enum` (the enumerator name, or the number if it matches none) and `hex` for aggregates, unknown types and anything over 8 bytes. JSON has no NaN, so a non-finite float is the string `nan`, `inf` or `-inf` rather than `null`; a `uint` above 2^53 is exact in the frame but loses precision in `JSON.parse`, so use `decode: false` for 64-bit counters read by JavaScript.
+- **Only globals and statics.** A frame local lives in a register and exists only while the target is halted, so it is rejected at subscribe time. Names need symbols: `load_symbols`, or an open VS Code debug session. A point that fails to resolve gets an `error` and `interval_us: 0`; the rest of the session still runs.
+- **Backpressure and gaps.** Each session has a bounded queue (`queue`, default 256 ticks). A client that falls behind loses the newest messages and is told how many with `overrun`. Ticks the core thread could not serve at all — flashing, a long Tcl script — are reported once as `gap`, never replayed as a burst.
+- **Caps.** 8 sessions, 256 points per session, 1024 bytes per point, and per tick at most 8 KB and two response packets. A tick over budget is truncated and reports `state: stalled`; the skipped points keep their advanced deadline.
+
+```python
+from aurix_dbg import Client
+dbg = Client()
+dbg.load_symbols(files=[r"C:\build\app_dev.elf"])        # no VS Code needed
+
+with dbg.daq(("g_motor.speed_rpm", 1000),                # 1 kHz, every tick
+             {"expression": "g_state", "rate_hz": 10,    # polled at 10 Hz, sent when it changes
+              "mode": "on_change", "resend_after_us": 1_000_000},
+             {"address": 0x7000B400, "size": 4, "rate_hz": 200, "name": "ticks"}) as daq:
+    for p in daq.points:
+        print(p)
+    for b in daq:
+        print(b.t_us, b.values, "DROPPED" if b.dropped else "")
+        if b.t_us > 10_000_000:
+            break
+# leaving the `with` closes the socket, which stops the sampling
+```
+
 ## Architecture
 
 | Crate | Responsibility |
 |---|---|
 | `tas` | Pure-Rust TAS client: batched PL0 reads and writes, device connect/reset, user pins (SRST). |
 | `jim` | Jim Tcl 0.83 (OpenOCD's copy) built with `cc`, with a safe `Interp` API. |
-| `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, CSA unwinder, flash driver and image loader. |
+| `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, periodic sampling (DAQ), CSA unwinder, flash driver and image loader. |
 | `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
 | `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
 | `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
-| `api` | REST, MCP, Swagger UI and event stream (axum on its own thread); its build script writes the generated files. |
+| `api` | REST, MCP, Swagger UI, event stream and the DAQ WebSocket (axum on its own thread); its build script writes the generated files. |
 | `aurix-dbg` | The executable: OpenOCD-style CLI, telnet console, TCF and API listeners. |
 
 Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures run on the core thread) and subscribe to core events.
@@ -128,7 +211,7 @@ The server itself holds no board or application settings. The cfg scripts come i
 
 For another board or derivative, copy `tc37x_ocds_init.cfg`, pass the target cfg's chip name to `tc3xx_ocds_setup` and adjust its settings. Options of `tc3xx_ocds.cfg` (set before `tc3xx_ocds_setup`) are listed at the top of the file: `tc3xx_hsm_target`, `tc3xx_mcs_modules`, `tc3xx_mcs_ramsize`, `tc3xx_hsm_autostart`, `tc3xx_hsm_ready_ms`, `tc3xx_gtm_suspend`, `tc3xx_step_timers`.
 
-Console procs: `tc3xx_step_timers run|frozen`, `tc3xx_connect_reset_halt ?tries? ?delay_ms?`, `tc3xx_stm_status`, `tc3xx_wdt_status`.
+Console procs: `daq` (what the DAQ sessions are sampling, read-only), `tc3xx_step_timers run|frozen`, `tc3xx_connect_reset_halt ?tries? ?delay_ms?`, `tc3xx_stm_status`, `tc3xx_wdt_status`.
 
 TriCore 1.8 (TC4x) is rejected.
 
@@ -137,7 +220,7 @@ TriCore 1.8 (TC4x) is rejected.
 The commands the cfg scripts use behave as in OpenOCD. Multi-core policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc3xx_ocds.cfg`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
 
 - **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `api_port`, `bindto`. Target types: `tricore`, `cortex_m` (HSM), `gtm_mcs` (`-module` 0..9, `-channel` 0..7, `-ramsize <bytes>`: MCS RAM per module, default 12 KB as on the TC37x; it applies to all channels of the module).
-- **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore tl1_step on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`.
+- **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore tl1_step on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`, `daq` (read-only DAQ session status).
 
 ## Multi-core stepping (`tricore tl1_step`)
 
@@ -192,7 +275,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 
 ## Tests
 
-- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on the GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP and a TCF client on one simulated session (`api/tests/sim_http.rs`).
+- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on the GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
 - **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD):
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.
   - `node tools/dap_m5.js`: source breakpoint, call stack, step over/into/out.
@@ -200,6 +283,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
   - `node tools/dap_m8.js`: disassembly and reset.
   - `node tools/tcf_smoke.js`: raw TCF services.
   - `node tools/dap_external_bp.js [tcf_port] [api_port]`: API breakpoints in VS Code's Breakpoints view (also runs against the simulator).
+  - DAQ: `pip install -e python`, then sample a changing global by name and check the rate and jitter from the `t_us` deltas. Verified on a TC377 board with an application running: every increment of a 5 ms counter caught over 5 s at 1 kHz requested, `float32` and enum globals decoded, and a 1 kHz session left a concurrent REST `read_memory` unchanged (median 21.0 ms either way).
 
 ## Not yet implemented
 
@@ -209,3 +293,5 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 - A TCF Flash service; flashing goes through the Tcl `program` command.
 - Frame names for code without DWARF functions (the frame ID is shown).
 - Memory writes to SMPU-protected RAM.
+- Target-side DAQ timestamps. Sampling is timed on the host; reading the STM in the same batch would let a client correlate the two clocks and measure the read latency. Jitter-free sampling would need MCDS trace (an ED device) or an agent on the target.
+- A DAQ point that follows a pointer. Addresses are resolved once at subscribe time, so `p->x` samples wherever `p` pointed then.

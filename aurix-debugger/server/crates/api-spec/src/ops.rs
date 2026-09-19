@@ -94,6 +94,18 @@ api! {
     /// Compare flash contents with an image file (`verify_image`).
     op flash_verify [flash]: POST "/api/v1/flash/verify" (FlashVerifyRequest) -> CommandOutput;
 
+    /// Load symbol files (ELF) for the targets, as a VS Code debug session does.
+    ///
+    /// Makes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a
+    /// DAQ session work without VS Code. Breakpoints that were pending are planted.
+    ///
+    /// There is one symbol set per core, and the last writer wins: a VS Code debug session
+    /// started afterwards replaces what was loaded here, and the other way round.
+    op load_symbols [symbols]: POST "/api/v1/symbols" (LoadSymbolsRequest) -> SymbolsInfo;
+
+    /// The symbol files loaded per target (by this API or by a VS Code debug session).
+    op symbols [symbols]: GET "/api/v1/symbols" (NoArgs) -> SymbolsInfo;
+
     /// Run a command of the OpenOCD-compatible Tcl console (like the telnet console).
     op tcl [tcl]: POST "/api/v1/tcl" (TclRequest) -> CommandOutput;
 }

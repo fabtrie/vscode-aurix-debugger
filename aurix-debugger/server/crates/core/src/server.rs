@@ -11,6 +11,7 @@ use jim::{CmdResult, Interp};
 
 use crate::commands;
 use crate::ctx::{Ctx, Cx, Shared};
+use crate::daq;
 use crate::events::{self, Event};
 use crate::log;
 use crate::ops;
@@ -66,6 +67,25 @@ pub struct Server {
 }
 
 static LOG_TO_EVENTS: Once = Once::new();
+static TIMER_RESOLUTION: Once = Once::new();
+
+/// Windows schedules timers at ~15.6 ms by default, which would put a floor under both the run
+/// state poll and DAQ. This belongs to the server, not to the executable: an embedder that drives
+/// `Server::run` gets the same 1 ms resolution the sampler promises. The process keeps it until
+/// it exits.
+#[cfg(windows)]
+fn request_timer_resolution() {
+    #[link(name = "winmm")]
+    extern "system" {
+        fn timeBeginPeriod(period: u32) -> u32;
+    }
+    TIMER_RESOLUTION.call_once(|| unsafe {
+        timeBeginPeriod(1);
+    });
+}
+
+#[cfg(not(windows))]
+fn request_timer_resolution() {}
 
 impl Default for Server {
     fn default() -> Self {
@@ -75,6 +95,7 @@ impl Default for Server {
 
 impl Server {
     pub fn new() -> Server {
+        request_timer_resolution();
         LOG_TO_EVENTS.call_once(|| {
             log::add_sink(Box::new(|_lvl, line| events::emit(Event::Log { text: line.to_string() })));
         });
@@ -99,14 +120,21 @@ impl Server {
         let cx = self.cx();
         let mut next_poll = Instant::now();
         loop {
-            if cx.with(|c| c.shutdown) {
+            // One borrow for both: with no DAQ session this costs a single Option comparison.
+            let (stop, daq_due) = cx.with(|c| (c.shutdown, c.daq.next_due()));
+            if stop {
                 break;
             }
-            let wait = next_poll.saturating_duration_since(Instant::now());
+            let wait = deadline(next_poll, daq_due).saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(wait) {
                 Ok(job) => job(&cx),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
+            }
+            // DAQ first: its deadline must not be pushed out by the run-state poll's round trip.
+            let now = Instant::now();
+            if cx.with(|c| c.daq.next_due().is_some_and(|d| now >= d)) {
+                daq::tick(&cx, now);
             }
             if Instant::now() >= next_poll {
                 ops::poll_all(&cx);
@@ -115,10 +143,34 @@ impl Server {
             }
         }
         cx.with(|c| {
+            // Dropping the senders lets every DAQ consumer see the end of its stream.
+            c.daq = daq::Registry::default();
             if let Some(a) = c.adapter.as_deref_mut() {
                 a.quit();
             }
         });
         events::emit(Event::Shutdown);
+    }
+}
+
+/// When the server loop must wake next: the run-state poll, or a DAQ point if one is due sooner.
+fn deadline(next_poll: Instant, daq_due: Option<Instant>) -> Instant {
+    match daq_due {
+        Some(d) => d.min(next_poll),
+        None => next_poll,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_daq_leaves_the_poll_deadline_alone() {
+        let t = Instant::now();
+        assert_eq!(deadline(t, None), t);
+        assert_eq!(deadline(t, Some(t + Duration::from_millis(5))), t);
+        let sooner = t - Duration::from_millis(5);
+        assert_eq!(deadline(t, Some(sooner)), sooner);
     }
 }

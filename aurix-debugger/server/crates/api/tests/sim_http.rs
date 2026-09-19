@@ -177,6 +177,101 @@ impl Tcf {
     }
 }
 
+// --- A minimal WebSocket client (the DAQ side) -----------------------------------------------
+
+/// Text-frame-only RFC 6455 client. Outgoing frames are masked with an all-zero key, which is
+/// legal and makes the XOR a no-op.
+struct Ws(TcpStream);
+
+impl Ws {
+    fn connect(port: u16, extra: &[(&str, &str)]) -> Result<Ws, u16> {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut req = format!(
+            "GET /api/v1/daq HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        );
+        for (k, v) in extra {
+            req += &format!("{k}: {v}\r\n");
+        }
+        req += "\r\n";
+        s.write_all(req.as_bytes()).unwrap();
+        // Read just the status line and headers, byte by byte: the body must stay in the socket.
+        let mut head = Vec::new();
+        let mut b = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if s.read(&mut b).unwrap_or(0) == 0 {
+                break;
+            }
+            head.push(b[0]);
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        let status: u16 = head.split(' ').nth(1).unwrap_or("0").parse().unwrap_or(0);
+        if status != 101 {
+            return Err(status);
+        }
+        Ok(Ws(s))
+    }
+
+    fn send(&mut self, v: Value) {
+        let payload = v.to_string().into_bytes();
+        let mut f = vec![0x81u8];
+        match payload.len() {
+            n if n < 126 => f.push(0x80 | n as u8),
+            n if n < 65536 => {
+                f.push(0x80 | 126);
+                f.extend((n as u16).to_be_bytes());
+            }
+            n => {
+                f.push(0x80 | 127);
+                f.extend((n as u64).to_be_bytes());
+            }
+        }
+        f.extend([0u8; 4]); // masking key: zero, so the payload is unchanged
+        f.extend(&payload);
+        self.0.write_all(&f).unwrap();
+    }
+
+    /// The next text frame, or `None` on timeout or close.
+    fn recv(&mut self) -> Option<Value> {
+        loop {
+            let mut h = [0u8; 2];
+            self.0.read_exact(&mut h).ok()?;
+            let opcode = h[0] & 0x0f;
+            let mut len = (h[1] & 0x7f) as usize;
+            if len == 126 {
+                let mut e = [0u8; 2];
+                self.0.read_exact(&mut e).ok()?;
+                len = u16::from_be_bytes(e) as usize;
+            } else if len == 127 {
+                let mut e = [0u8; 8];
+                self.0.read_exact(&mut e).ok()?;
+                len = u64::from_be_bytes(e) as usize;
+            }
+            let mut payload = vec![0u8; len];
+            self.0.read_exact(&mut payload).ok()?;
+            match opcode {
+                0x1 => return serde_json::from_slice(&payload).ok(),
+                0x8 => return None,
+                _ => continue, // ping/pong
+            }
+        }
+    }
+
+    /// Frames of type `kind` until `n` of them arrived or the socket goes quiet.
+    fn collect(&mut self, kind: &str, n: usize) -> Vec<Value> {
+        let mut out = Vec::new();
+        while out.len() < n {
+            match self.recv() {
+                Some(v) if v["type"] == kind => out.push(v),
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        out
+    }
+}
+
 fn core_breakpoints(h: &ServerHandle) -> Vec<u32> {
     h.call(|cx| cx.with(|c| c.targets[0].breakpoints.iter().map(|b| b.addr).collect())).unwrap()
 }
@@ -303,6 +398,97 @@ fn rest_mcp_and_tcf_share_one_session() {
     // Tcl console.
     let out = http.ok("POST", "/api/v1/tcl", Some(json!({ "command": "targets" })));
     assert!(out["output"].as_str().unwrap().contains(CPU0));
+
+    // Symbols can be loaded from the API, without a VS Code debug session.
+    let (status, e) = http.request("POST", "/api/v1/symbols", Some(json!({ "files": ["/no/such/file.elf"] })), &[]);
+    assert_eq!(status, 404, "{e}");
+    assert!(e["message"].as_str().unwrap().contains("no such file"), "{e}");
+    assert_eq!(http.ok("GET", "/api/v1/symbols", None)["targets"].as_array().unwrap().len(), 0);
+
+    // --- DAQ over the WebSocket ---------------------------------------------------------------
+
+    // The upgrade goes through the same origin check as everything else. This matters more here
+    // than for REST: browsers exempt WebSocket from CORS, so this is the only defence.
+    assert_eq!(Ws::connect(http.0, &[("Origin", "http://evil.example")]).err(), Some(400));
+
+    let mut ws = Ws::connect(http.0, &[]).unwrap();
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000100", "data": "44332211" })));
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000200", "data": "aabbccdd" })));
+    ws.send(json!({
+        "op": "subscribe", "id": 1,
+        "points": [
+            { "address": "0x70000100", "size": 4, "rate_hz": 1000, "name": "fast" },
+            { "address": "0x70000200", "size": 4, "interval_us": 5000, "name": "slow" },
+            { "expression": "no_such_global", "rate_hz": 10 },
+        ]
+    }));
+    let cfg = ws.recv().expect("config frame");
+    assert_eq!(cfg["type"], "config", "{cfg}");
+    let pts = cfg["points"].as_array().unwrap();
+    assert_eq!(pts.len(), 3);
+    assert_eq!(pts[0]["name"], "fast");
+    assert_eq!(pts[0]["address"], 0x7000_0100u32);
+    assert_eq!(pts[0]["interval_us"], 1000);
+    assert_eq!(pts[1]["interval_us"], 5000);
+    assert_eq!(pts[0]["mode"], "every_tick");
+    // A point that does not resolve is reported and skipped; the others still run.
+    assert!(pts[2]["error"].as_str().unwrap().contains("no symbols loaded"), "{cfg}");
+    assert_eq!(pts[2]["interval_us"], 0);
+    assert!(pts[2]["id"].is_null());
+    let (fast, slow) = (pts[0]["id"].as_u64().unwrap(), pts[1]["id"].as_u64().unwrap());
+
+    let batches = ws.collect("samples", 20);
+    assert_eq!(batches.len(), 20, "the stream runs");
+    let mut t_prev = 0u64;
+    let (mut n_fast, mut n_slow) = (0, 0);
+    for b in &batches {
+        let t = b["t_us"].as_u64().unwrap();
+        assert!(t >= t_prev, "t_us goes forward: {t} after {t_prev}");
+        t_prev = t;
+        for (i, p) in b["points"].as_array().unwrap().iter().enumerate() {
+            let v = &b["values"][i];
+            if p.as_u64() == Some(fast) {
+                n_fast += 1;
+                // Raw points stream hex, little-endian as read.
+                assert_eq!(v, "44332211");
+            } else if p.as_u64() == Some(slow) {
+                n_slow += 1;
+                assert_eq!(v, "aabbccdd");
+            }
+        }
+    }
+    assert!(n_fast >= 3 * n_slow.max(1), "1 kHz vs 200 Hz: {n_fast} fast, {n_slow} slow");
+
+    // Retiming works on the open socket, without re-subscribing.
+    ws.send(json!({ "op": "set_rate", "id": 2, "point": fast, "rate_hz": 100 }));
+    let ch = ws.collect("changed", 1);
+    assert_eq!(ch[0]["interval_us"], 10000, "{:?}", ch[0]);
+    ws.send(json!({ "op": "set_mode", "id": 3, "point": slow, "mode": "on_change" }));
+    assert_eq!(ws.collect("changed", 1)[0]["mode"], "on_change");
+
+    // A second session on the same socket is refused rather than silently replacing the first.
+    ws.send(json!({ "op": "subscribe", "id": 4, "points": [] }));
+    let e = ws.collect("error", 1);
+    assert_eq!(e[0]["code"], "busy", "{:?}", e[0]);
+
+    // The console can see what is sampling, without an API operation (and so without an MCP tool).
+    let out = http.ok("POST", "/api/v1/tcl", Some(json!({ "command": "daq" })));
+    let out = out["output"].as_str().unwrap();
+    assert!(out.contains("session 1: 2 point(s)"), "{out}");
+    assert!(out.contains("0x70000100"), "{out}");
+    assert!(out.contains("on_change"), "{out}");
+    let (status, e) = http.request("POST", "/api/v1/tcl", Some(json!({ "command": "daq open" })), &[]);
+    assert_eq!(status, 500, "the console must not be able to open a session: {e}");
+
+    // The session must die with the socket: this is what keeps a crashed client from sampling
+    // the target forever, and it is the whole reason configuration lives on the WebSocket.
+    assert_eq!(h.call(|cx| cx.with(|c| c.daq.is_empty())), Some(false));
+    drop(ws);
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(5) && h.call(|cx| cx.with(|c| c.daq.is_empty())) != Some(true) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(h.call(|cx| cx.with(|c| c.daq.is_empty())), Some(true), "the DAQ session outlived its socket");
 
     // Web pages of other sites must not drive the debugger.
     let (status, _) = http.request("POST", &format!("/api/v1/targets/{CPU0}/halt"), None, &[("Origin", "http://evil.example")]);

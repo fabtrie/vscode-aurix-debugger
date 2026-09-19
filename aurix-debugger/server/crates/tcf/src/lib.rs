@@ -30,10 +30,10 @@ use aurix_core::{log_info, log_warn, ServerHandle};
 use breakpoints::BpTable;
 use channel::Writer;
 use expressions::ExprTable;
-use symstore::{SymbolSet, SymbolStore};
+pub use symstore::{SymbolSet, SymbolStore};
 
 pub use breakpoints::{Bp, Instance};
-pub use contexts::{cores, CoreInfo, CONTAINER};
+pub use contexts::{cores, owning_core, CoreInfo, CONTAINER};
 
 /// Owner of the breakpoints set through the REST/MCP API (TCF channel IDs start at 1). They
 /// stay armed when a TCF client disconnects.
@@ -195,7 +195,7 @@ impl Shared {
     }
 
     /// Re-plants the breakpoints that depend on symbols after symbol files changed.
-    fn reresolve_breakpoints(&self) {
+    pub fn reresolve_breakpoints(&self) {
         let mut added = Vec::new();
         let mut statuses = Vec::new();
         {

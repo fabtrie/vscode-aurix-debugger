@@ -8,6 +8,7 @@ from typing import Any, Iterator
 import requests
 
 from ._generated import MAX_TRANSFER, GeneratedClient
+from .daq import DaqStream
 
 
 class ApiError(Exception):
@@ -60,6 +61,38 @@ class Client(GeneratedClient):
         """Writes memory of any length (split into ``MAX_TRANSFER`` sized calls)."""
         for off in range(0, len(data), MAX_TRANSFER):
             self.write_memory(address=address + off, data=data[off:off + MAX_TRANSFER].hex(), target=target)
+
+    def daq(self, *points: Any, rate_hz: float = 100, mode: str = "every_tick",
+            queue: int | None = None, timeout: float | None = 10) -> DaqStream:
+        """Samples variables periodically and returns the open stream of their values.
+
+        Each point is a variable or C expression (``"g_speed"``), an ``(expression, rate_hz)``
+        pair, or a dict with the full specification: ``expression`` or ``address`` with ``size``,
+        plus ``rate_hz`` or ``interval_us``, and optionally ``name``, ``target``, ``decode``,
+        ``mode`` and ``resend_after_us``. Points without their own rate use ``rate_hz``.
+
+        Rates are rounded up to the server's 1 ms grid; each point reports what it was granted.
+        What the probe sustains is lower than the grid allows: a tick costs one round trip
+        (~1.4 ms on a miniWiggler at 30 MHz) however many points it carries, so count on ~200 Hz
+        per session and expect ~700 Hz at best. Ticks that could not be served are counted in
+        ``DaqStream.missed`` and ``DaqBatch.missed`` rather than hidden. Put several signals in
+        one session instead of opening a session each - extra points in a tick are nearly free.
+        Only globals and statics can be sampled - a frame local lives in a register and needs a
+        halted target. Names need symbols: call ``load_symbols`` first, or have a VS Code debug
+        session open.
+
+        ``mode="on_change"`` delivers a point only when its value changes. The point is still
+        read at its full rate, so this saves stream bandwidth, not target accesses; set
+        ``resend_after_us`` if a quiet signal should still produce a value now and then.
+
+        Sampling stops when the stream is closed, so use it as a context manager::
+
+            with dbg.daq(("g_speed", 1000), "g_state") as daq:
+                for batch in daq:
+                    print(batch.t_us, batch.values)
+        """
+        url = self.url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+        return DaqStream(url + "/api/v1/daq", points, rate_hz, mode, queue, timeout)
 
     def events(self) -> Iterator[dict[str, Any]]:
         """Yields the events of all clients (halts, resumes, breakpoint changes, log lines, ...)

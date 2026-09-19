@@ -21,6 +21,22 @@ pub struct DeviceInfo {
     pub description: String,
 }
 
+/// What one request/response packet of the connection can carry. The DAQ sampler uses it to bound
+/// how many round trips a single tick may cost.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchLimits {
+    /// Read/write transactions per packet.
+    pub max_num_rw: usize,
+    pub max_rq: usize,
+    pub max_rsp: usize,
+}
+
+impl Default for BatchLimits {
+    fn default() -> Self {
+        BatchLimits { max_num_rw: 16, max_rq: 0x1000, max_rsp: 0x1000 }
+    }
+}
+
 pub trait Adapter {
     fn driver_name(&self) -> &'static str;
     /// Driver-specific Tcl command groups, e.g. `tas-client`.
@@ -34,6 +50,10 @@ pub trait Adapter {
     fn init(&mut self, settings: &AdapterSettings) -> Result<DeviceInfo>;
     fn initialized(&self) -> bool;
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>>;
+    /// Packet limits of the connection; the default is a conservative guess.
+    fn limits(&self) -> BatchLimits {
+        BatchLimits::default()
+    }
     fn assert_srst(&mut self) -> Result<()>;
     /// Releases reset. `halt_after_reset` requests a halt at the reset vector.
     fn deassert_srst(&mut self, halt_after_reset: bool) -> Result<()>;

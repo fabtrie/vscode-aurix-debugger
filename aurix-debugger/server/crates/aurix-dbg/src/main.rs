@@ -13,12 +13,6 @@ use std::time::Duration;
 
 use aurix_core::{log, log_error, log_info, log_user, telnet, Server};
 
-#[cfg(windows)]
-#[link(name = "winmm")]
-extern "system" {
-    fn timeBeginPeriod(period: u32) -> u32;
-}
-
 const HELP: &str = "\
 aurix-dbg - OpenOCD-compatible AURIX debug server over Infineon TAS
 
@@ -44,11 +38,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("--remote") {
         exit(remote(&args[1..]));
     }
-    #[cfg(windows)]
-    unsafe {
-        timeBeginPeriod(1);
-    }
-
+    // Server::new asks for the 1 ms timer resolution the poll loop and DAQ need.
     let server = Server::new();
     let cx = server.cx();
     let mut actions = Vec::new();

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use tas::{Batch, BatchOp, OpResult, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
 
-use crate::adapter::{Adapter, AdapterSettings, DeviceInfo};
+use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo};
 use crate::arch::{OEC, OSTATE};
 use crate::cortex_m::*;
 use crate::error::Result;
@@ -154,6 +154,10 @@ impl SimHsm {
 pub struct SimAdapter {
     mem: HashMap<u32, u32>,
     pub writes: Vec<(u32, u32)>,
+    /// Host-space reads, as (address, length): lets tests assert how a batch was coalesced.
+    pub reads: Vec<(u32, usize)>,
+    /// Packet limits reported to the DAQ sampler; tests shrink this to force truncation.
+    pub limits: BatchLimits,
     pub halted: [bool; NUM_CORES],
     pub susp: [bool; NUM_CORES],
     /// SYSCON.BHALT: core not started yet.
@@ -180,6 +184,8 @@ impl SimAdapter {
         SimAdapter {
             mem: HashMap::new(),
             writes: Vec::new(),
+            reads: Vec::new(),
+            limits: BatchLimits::default(),
             halted: [false; NUM_CORES],
             susp: [false; NUM_CORES],
             bhalt: [false; NUM_CORES],
@@ -193,6 +199,11 @@ impl SimAdapter {
             initialized: false,
             srst: false,
         }
+    }
+
+    /// Seeds a memory word, for tests that need a known value at an address.
+    pub fn set_mem(&mut self, addr: u32, value: u32) {
+        self.mem.insert(addr & !3, value);
     }
 
     /// Simulates an external (watchdog) reset: OCDS disabled, cores running.
@@ -359,6 +370,10 @@ impl Adapter for SimAdapter {
         self.initialized
     }
 
+    fn limits(&self) -> BatchLimits {
+        self.limits
+    }
+
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         let mut out = Vec::with_capacity(batch.len());
         for op in batch.iter() {
@@ -370,6 +385,7 @@ impl Adapter for SimAdapter {
                 BatchOp::Read { addr, len, addr_map } => {
                     let mut data = vec![0u8; len];
                     if addr_map == 0 {
+                        self.reads.push((addr as u32, len));
                         // One register read per word, so side effects happen once.
                         let mut k = 0;
                         while k < len {

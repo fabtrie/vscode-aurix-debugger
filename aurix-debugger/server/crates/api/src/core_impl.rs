@@ -5,6 +5,7 @@
 //! here, never on the core thread.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -214,6 +215,27 @@ impl CoreApi {
     fn breakpoint_list(&self) -> Result<BreakpointList, ApiError> {
         let names = self.names()?;
         Ok(BreakpointList { breakpoints: self.session.breakpoints().iter().map(|(id, bp)| breakpoint_info(id, bp, &names, &self.session)).collect() })
+    }
+
+    /// The symbol set of every core that has one, primary ELF first.
+    fn symbols_info(&self) -> SymbolsInfo {
+        let cores = tcf::cores(&self.handle);
+        let store = self.session.symbols.lock().unwrap();
+        let targets = cores
+            .iter()
+            .filter_map(|c| {
+                let ctx = tcf::owning_core(&c.id).unwrap_or_else(|| c.id.clone());
+                let set = store.set(&ctx)?;
+                Some(SymbolsForTarget {
+                    target: c.name.clone(),
+                    files: set.elfs.iter().map(|(_, s)| s.path.to_string_lossy().into_owned()).collect(),
+                    functions: set.elfs.iter().map(|(_, s)| s.functions.len() as u32).sum(),
+                    globals: set.elfs.iter().map(|(_, s)| s.globals.len() as u32).sum(),
+                    source_files: set.elfs.iter().map(|(_, s)| s.source_files() as u32).sum(),
+                })
+            })
+            .collect();
+        SymbolsInfo { targets, load_seconds: 0.0 }
     }
 
     fn tcl_command(&self, command: &str) -> Result<CommandOutput, ApiError> {
@@ -473,5 +495,56 @@ impl DebuggerApi for CoreApi {
 
     fn tcl(&self, req: TclRequest) -> Result<CommandOutput, ApiError> {
         self.tcl_command(&req.command)
+    }
+
+    fn load_symbols(&self, req: LoadSymbolsRequest) -> Result<SymbolsInfo, ApiError> {
+        if req.files.is_empty() {
+            return Err(ApiError::bad_request("give at least one symbol file"));
+        }
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for f in &req.files {
+            let p = PathBuf::from(f);
+            if !p.is_file() {
+                return Err(ApiError::not_found(format!("no such file: {f}")));
+            }
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        let cores = tcf::cores(&self.handle);
+        let chosen: Vec<&tcf::CoreInfo> = match &req.targets {
+            Some(names) => names
+                .iter()
+                .map(|n| {
+                    cores
+                        .iter()
+                        .find(|c| &c.name == n || c.idx.to_string() == *n)
+                        .ok_or_else(|| ApiError::not_found(format!("unknown target '{n}' (see `targets`)")))
+                })
+                .collect::<Result<_, _>>()?,
+            None => cores.iter().collect(),
+        };
+        if chosen.is_empty() {
+            return Err(ApiError::new(ErrorCode::NotExamined, "no targets (run `init` first)"));
+        }
+        // This runs on an API thread, never on the core thread: loading a large ELF takes
+        // seconds and would otherwise freeze run control for everybody.
+        let t0 = Instant::now();
+        {
+            let mut store = self.session.symbols.lock().unwrap();
+            for c in &chosen {
+                let ctx = tcf::owning_core(&c.id).unwrap_or_else(|| c.id.clone());
+                store.assign(&ctx, &paths).map_err(ApiError::failed)?;
+            }
+        }
+        self.session.stacks.lock().unwrap().clear();
+        self.session.reresolve_breakpoints();
+        let mut info = self.symbols_info();
+        info.load_seconds = t0.elapsed().as_secs_f64();
+        Ok(info)
+    }
+
+    fn symbols(&self, _: NoArgs) -> Result<SymbolsInfo, ApiError> {
+        Ok(self.symbols_info())
     }
 }

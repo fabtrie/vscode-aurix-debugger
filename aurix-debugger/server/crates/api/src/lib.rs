@@ -9,6 +9,8 @@
 //! blocking threads that talk to the core thread through the [`ServerHandle`].
 
 mod core_impl;
+mod daq_resolve;
+mod daq_ws;
 mod events;
 mod http;
 mod mcp;

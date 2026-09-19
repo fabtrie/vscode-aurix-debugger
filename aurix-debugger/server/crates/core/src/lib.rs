@@ -12,6 +12,7 @@ pub mod adapter;
 pub mod arch;
 pub mod commands;
 pub mod cortex_m;
+pub mod daq;
 pub mod gtm_mcs;
 pub mod ctx;
 pub mod error;

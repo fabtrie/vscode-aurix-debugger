@@ -239,6 +239,11 @@ impl TasClient {
         n
     }
 
+    /// Connection limits negotiated at session start, once connected.
+    pub fn con_info(&self) -> Option<&ConInfo> {
+        self.con.as_ref()
+    }
+
     /// Executes a batch. Individual read/write failures are reported per op in
     /// the results; `Err` is returned only for connection/device level errors.
     pub fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {

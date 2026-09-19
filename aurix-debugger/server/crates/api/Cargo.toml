@@ -9,10 +9,11 @@ publish = false
 [dependencies]
 aurix-core.workspace = true
 tcf.workspace = true
+symbols.workspace = true
 jim.workspace = true
 api-spec.workspace = true
 serde_json.workspace = true
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
 futures-util = { version = "0.3", default-features = false }
 swagger-ui-dist = "5"

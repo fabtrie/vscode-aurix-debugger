@@ -205,8 +205,13 @@ pub fn router(api: Arc<CoreApi>) -> Router {
     let hub = api.hub.clone();
     let mcp = Arc::new(Mcp::new());
     let mcp_api = api.clone();
+    let daq_api = api.clone();
     router
         .route("/api/v1/events", get(move || events(hub)))
+        // A WebSocket upgrade is an ordinary GET, so it is added before `.layer(check_origin)`
+        // below and gets the same origin check. That matters more here than for REST: browsers
+        // exempt WebSocket from CORS entirely, so the Origin check is the only defence.
+        .route("/api/v1/daq", get(move |ws| crate::daq_ws::handler(daq_api, ws)))
         .route(
             "/mcp",
             axum::routing::post(move |headers: HeaderMap, body: Bytes| crate::mcp::handle(mcp_api, mcp, headers, body))

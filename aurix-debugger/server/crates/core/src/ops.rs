@@ -222,6 +222,9 @@ pub fn poll_all(cx: &Cx) {
             if resets > 0 {
                 log_warn!("Device reset detected");
                 emit(Event::ResetDetected);
+                // DAQ points keep their addresses, but their change-detection baselines are now
+                // pre-reset values: drop them and back off until the device answers again.
+                cx.with(|c| crate::daq::on_reset(c, Instant::now()));
                 failed_all = true;
             }
             for i in failed {
@@ -337,6 +340,12 @@ pub fn wait_state(cx: &Cx, t: usize, want: TargetState, ms: u64) -> Result<()> {
     let t0 = Instant::now();
     loop {
         poll_all(cx);
+        // This loop owns the core thread, so the server loop cannot tick: keep DAQ streams alive
+        // through a wait (a source-level step) instead of blanking them.
+        let now = Instant::now();
+        if cx.with(|c| c.daq.next_due().is_some_and(|d| now >= d)) {
+            crate::daq::tick(cx, now);
+        }
         if cx.with(|c| c.targets[t].core.state()) == want {
             return Ok(());
         }

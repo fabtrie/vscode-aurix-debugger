@@ -232,6 +232,49 @@ class RegisterValue:
 
 
 @dataclass
+class SymbolsForTarget:
+    """The symbol files of one target."""
+
+    files: list[str]
+    """Loaded files, primary first."""
+    functions: int
+    """Functions with debug information."""
+    globals: int
+    """Global and static variables that have a fixed address."""
+    source_files: int
+    """Source files in the line table."""
+    target: str
+    """Target name."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SymbolsForTarget:
+        return cls(
+            files=d.get("files"),
+            functions=d.get("functions"),
+            globals=d.get("globals"),
+            source_files=d.get("source_files"),
+            target=d.get("target"),
+        )
+
+
+@dataclass
+class SymbolsInfo:
+    """The symbol files loaded per target."""
+
+    load_seconds: float
+    """How long the load took."""
+    targets: list[SymbolsForTarget]
+    """Only targets that have symbols."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SymbolsInfo:
+        return cls(
+            load_seconds=d.get("load_seconds"),
+            targets=_list(SymbolsForTarget, d.get("targets")),
+        )
+
+
+@dataclass
 class TargetInfo:
     """A target (core) and its state."""
 
@@ -522,6 +565,26 @@ class GeneratedClient:
             file: Image file on the debug server's machine.
         """
         return CommandOutput.from_dict(self._call("POST", "/api/v1/flash/verify", None, _args({"file": file})))
+
+    def load_symbols(self, *, files: list[str], targets: list[str] | None = None) -> SymbolsInfo:
+        """Load symbol files (ELF) for the targets, as a VS Code debug session does.
+
+        Makes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a
+        DAQ session work without VS Code. Breakpoints that were pending are planted.
+
+        There is one symbol set per core, and the last writer wins: a VS Code debug session
+        started afterwards replaces what was loaded here, and the other way round.
+
+        Args:
+            files: Files on the machine the debug server runs on. The first is the primary ELF; the others add symbols (bootmanager, FBL, ...).
+            targets: Targets (names or indices) to load them for; default: all cores.
+        """
+        return SymbolsInfo.from_dict(self._call("POST", "/api/v1/symbols", None, _args({"files": files, "targets": targets})))
+
+    def symbols(self) -> SymbolsInfo:
+        """The symbol files loaded per target (by this API or by a VS Code debug session).
+        """
+        return SymbolsInfo.from_dict(self._call("GET", "/api/v1/symbols", None, None))
 
     def tcl(self, *, command: str) -> CommandOutput:
         """Run a command of the OpenOCD-compatible Tcl console (like the telnet console).

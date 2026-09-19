@@ -8,6 +8,7 @@ use std::rc::Rc;
 use jim::Interp;
 
 use crate::adapter::{Adapter, AdapterSettings, Io};
+use crate::daq;
 use crate::error::{Error, Result};
 use crate::flash::FlashBank;
 use crate::target::TargetEntry;
@@ -62,6 +63,8 @@ pub struct Ctx {
     pub search_dirs: Vec<PathBuf>,
     pub poll_enabled: bool,
     pub poll_period_ms: u64,
+    /// Periodic sampling; idle unless a frontend opened a session.
+    pub daq: daq::Registry,
     pub ports: Ports,
     pub next_bp_id: u32,
     pub initialized: bool,
@@ -97,6 +100,7 @@ impl Ctx {
             search_dirs: Vec::new(),
             poll_enabled: true,
             poll_period_ms: 10,
+            daq: daq::Registry::default(),
             ports: Ports { bind: "127.0.0.1".into(), telnet: Some(4444), tcf: Some(1534), gdb: None, tcl: None, api: Some(8080) },
             next_bp_id: 1,
             initialized: false,

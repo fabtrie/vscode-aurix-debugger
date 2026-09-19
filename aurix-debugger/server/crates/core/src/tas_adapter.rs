@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tas::{Batch, ConnectMode, OpResult, TasClient};
 
-use crate::adapter::{check, Adapter, AdapterSettings, DeviceInfo};
+use crate::adapter::{check, Adapter, AdapterSettings, BatchLimits, DeviceInfo};
 use crate::error::{Error, Result};
 use crate::util::parse_u32;
 use crate::{log_info, log_warn};
@@ -281,6 +281,17 @@ impl Adapter for TasAdapter {
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         self.ensure_device()?;
         Ok(self.client()?.execute(batch)?)
+    }
+
+    fn limits(&self) -> BatchLimits {
+        let Some(con) = self.client.as_ref().and_then(|c| c.con_info()) else {
+            return BatchLimits::default();
+        };
+        BatchLimits {
+            max_num_rw: (con.pl0_max_num_rw as usize).max(1),
+            max_rq: con.max_pl2rq_pkt_size as usize,
+            max_rsp: con.max_pl2rsp_pkt_size as usize,
+        }
     }
 
     fn assert_srst(&mut self) -> Result<()> {

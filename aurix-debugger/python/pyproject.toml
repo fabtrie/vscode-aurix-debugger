@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aurix-dbg"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client of the aurix-dbg AURIX debug server (REST API)"
 requires-python = ">=3.8"
-dependencies = ["requests"]
+dependencies = ["requests", "websocket-client"]
 
 [tool.setuptools]
 packages = ["aurix_dbg"]

@@ -105,6 +105,44 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
         }
         Ok(format!("{}", cx.with(|c| c.poll_period_ms)))
     });
+    // Read-only on purpose: DAQ sessions belong to their WebSocket, and a session created from
+    // the console would have no owner to die with. This is here so `monitor daq` (or telnet) can
+    // answer "what is hammering the probe right now?" without adding an API operation.
+    reg(interp, sh, "daq", |cx, a| {
+        match a.get(1).copied() {
+            None | Some("status") => {}
+            Some(other) => return Err(format!("usage: daq ?status? (read-only; sessions are opened on the DAQ WebSocket, not '{other}')")),
+        }
+        Ok(cx.with(|c| {
+            let mut out = Vec::new();
+            for s in c.daq.sessions() {
+                let st = s.stats();
+                out.push(format!("session {}: {} point(s), {} batch(es), {} dropped, {} missed", s.id, st.points, st.seq, st.dropped, st.missed));
+                for p in &s.points {
+                    let space = match p.space {
+                        crate::daq::Space::Host => String::from("bus"),
+                        crate::daq::Space::Core(t) => c.targets.get(t).map(|e| e.name.clone()).unwrap_or_else(|| t.to_string()),
+                    };
+                    let mode = match p.mode {
+                        crate::daq::SampleMode::EveryTick => "every_tick",
+                        crate::daq::SampleMode::OnChange => "on_change",
+                    };
+                    out.push(format!(
+                        "  {:3} 0x{:08x} {:4} B every {:6} us  {mode:10} via {space}{}",
+                        p.id,
+                        p.addr,
+                        p.len,
+                        p.interval_us(),
+                        if p.muted { "  MUTED" } else { "" }
+                    ));
+                }
+            }
+            if out.is_empty() {
+                out.push("no DAQ sessions".into());
+            }
+            out.join("\n")
+        }))
+    });
     reg(interp, sh, "tcf_port", |cx, a| port_cmd(cx, a, |p| &mut p.tcf));
     reg(interp, sh, "telnet_port", |cx, a| port_cmd(cx, a, |p| &mut p.telnet));
     reg(interp, sh, "gdb_port", |cx, a| port_cmd(cx, a, |p| &mut p.gdb));

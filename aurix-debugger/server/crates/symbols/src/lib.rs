@@ -512,6 +512,11 @@ impl Symbols {
         self.enumerators_by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Number of source files in the line table.
+    pub fn source_files(&self) -> usize {
+        self.files.len()
+    }
+
     pub fn global_indices(&self, name: &str) -> &[usize] {
         self.globals_by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
     }

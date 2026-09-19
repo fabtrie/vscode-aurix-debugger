@@ -656,6 +656,34 @@
         ],
         "type": "object"
       },
+      "LoadSymbolsRequest": {
+        "additionalProperties": false,
+        "description": "Symbol files to load.",
+        "properties": {
+          "files": {
+            "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "default": null,
+            "description": "Targets (names or indices) to load them for; default: all cores.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
       "MemoryData": {
         "description": "Memory contents.",
         "properties": {
@@ -943,6 +971,70 @@
             "type": "string"
           }
         ]
+      },
+      "SymbolsForTarget": {
+        "description": "The symbol files of one target.",
+        "properties": {
+          "files": {
+            "description": "Loaded files, primary first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "functions": {
+            "description": "Functions with debug information.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "globals": {
+            "description": "Global and static variables that have a fixed address.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_files": {
+            "description": "Source files in the line table.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target": {
+            "description": "Target name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "files",
+          "functions",
+          "globals",
+          "source_files"
+        ],
+        "type": "object"
+      },
+      "SymbolsInfo": {
+        "description": "The symbol files loaded per target.",
+        "properties": {
+          "load_seconds": {
+            "description": "How long the load took.",
+            "format": "double",
+            "type": "number"
+          },
+          "targets": {
+            "description": "Only targets that have symbols.",
+            "items": {
+              "$ref": "#/components/schemas/SymbolsForTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "targets",
+          "load_seconds"
+        ],
+        "type": "object"
       },
       "TargetInfo": {
         "description": "A target (core) and its state.",
@@ -1792,6 +1884,103 @@
         "summary": "Reset the device through the debug adapter and run the reset handlers of the configuration (OpenOCD `reset run|halt|init`).",
         "tags": [
           "run_control"
+        ]
+      }
+    },
+    "/api/v1/symbols": {
+      "get": {
+        "description": "The symbol files loaded per target (by this API or by a VS Code debug session).",
+        "operationId": "symbols",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The symbol files loaded per target (by this API or by a VS Code debug session).",
+        "tags": [
+          "symbols"
+        ]
+      },
+      "post": {
+        "description": "Load symbol files (ELF) for the targets, as a VS Code debug session does.\n\nMakes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a\nDAQ session work without VS Code. Breakpoints that were pending are planted.\n\nThere is one symbol set per core, and the last writer wins: a VS Code debug session\nstarted afterwards replaces what was loaded here, and the other way round.",
+        "operationId": "load_symbols",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Symbol files to load.",
+                "properties": {
+                  "files": {
+                    "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "targets": {
+                    "default": null,
+                    "description": "Targets (names or indices) to load them for; default: all cores.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "files"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Load symbol files (ELF) for the targets, as a VS Code debug session does.",
+        "tags": [
+          "symbols"
         ]
       }
     },

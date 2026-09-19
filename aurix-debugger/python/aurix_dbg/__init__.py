@@ -7,5 +7,15 @@ The API methods and types are generated from the server's API definition
 from ._generated import *  # noqa: F401,F403
 from ._generated import API_VERSION, MAX_TRANSFER
 from .client import ApiError, Client
+from .daq import DaqBatch, DaqError, DaqPoint, DaqStream
 
-__all__ = ["Client", "ApiError", "API_VERSION", "MAX_TRANSFER"]
+__all__ = [
+    "Client",
+    "ApiError",
+    "API_VERSION",
+    "MAX_TRANSFER",
+    "DaqStream",
+    "DaqBatch",
+    "DaqPoint",
+    "DaqError",
+]

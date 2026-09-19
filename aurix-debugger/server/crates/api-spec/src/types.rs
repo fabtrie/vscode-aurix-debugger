@@ -519,6 +519,44 @@ pub struct CommandOutput {
     pub output: String,
 }
 
+// --- Symbols ---------------------------------------------------------------------------------
+
+/// Symbol files to load.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoadSymbolsRequest {
+    /// Files on the machine the debug server runs on. The first is the primary ELF; the others
+    /// add symbols (bootmanager, FBL, ...).
+    pub files: Vec<String>,
+    /// Targets (names or indices) to load them for; default: all cores.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
+}
+
+/// The symbol files of one target.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolsForTarget {
+    /// Target name.
+    pub target: String,
+    /// Loaded files, primary first.
+    pub files: Vec<String>,
+    /// Functions with debug information.
+    pub functions: u32,
+    /// Global and static variables that have a fixed address.
+    pub globals: u32,
+    /// Source files in the line table.
+    pub source_files: u32,
+}
+
+/// The symbol files loaded per target.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolsInfo {
+    /// Only targets that have symbols.
+    pub targets: Vec<SymbolsForTarget>,
+    /// How long the load took.
+    pub load_seconds: f64,
+}
+
 // --- Events ----------------------------------------------------------------------------------
 
 /// An event of the stream `GET /api/v1/events` (server-sent events; the SSE event name is

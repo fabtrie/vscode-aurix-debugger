@@ -40,9 +40,7 @@ const instructionStepStateKey = 'aurix-debugger.instructionSteppingEnabled';
 let lastInstructionSteppingEnabled = false;
 let liveWatchStatusItem: vscode.StatusBarItem | undefined;
 let liveWatchProvider: LiveWatchProvider | undefined;
-const liveWatchEnabledStateKey = 'aurix-debugger.liveWatch.enabled';
 const liveWatchIntervalStateKey = 'aurix-debugger.liveWatch.intervalMs';
-let lastLiveWatchEnabled = false;
 let lastLiveWatchIntervalMs = 1000;
 let preferredSourceViewColumn: vscode.ViewColumn | undefined;
 let lastAutoSourcePath: string | undefined;
@@ -176,34 +174,23 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-debugger.toggleLiveWatch', async () => {
-			const enabled = !(await getLiveWatchEnabled());
-			await setLiveWatchMode(enabled);
-		})
-	);
-
-	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.configureLiveWatch', async () => {
-			const currentEnabled = await getLiveWatchEnabled();
 			const currentInterval = await getLiveWatchIntervalMs();
-			const items: Array<vscode.QuickPickItem & { enabled: boolean; intervalMs?: number; custom?: boolean }> = [
-				{ label: 'Off', description: currentEnabled ? '' : 'Current', enabled: false },
+			const items: Array<vscode.QuickPickItem & { intervalMs?: number; custom?: boolean }> = [
 				...LIVE_WATCH_INTERVAL_OPTIONS.map((intervalMs) => ({
 					label: `${intervalMs} ms`,
-					description: currentEnabled && currentInterval === intervalMs ? 'Current' : '',
-					enabled: true,
+					description: currentInterval === intervalMs ? 'Current' : '',
 					intervalMs,
 				})),
 				{
 					label: 'Custom...',
-					description: currentEnabled && !LIVE_WATCH_INTERVAL_OPTIONS.includes(currentInterval as any) ? `Current: ${currentInterval} ms` : '',
-					enabled: true,
+					description: !LIVE_WATCH_INTERVAL_OPTIONS.includes(currentInterval as any) ? `Current: ${currentInterval} ms` : '',
 					custom: true,
 				},
 			];
 			const picked = await vscode.window.showQuickPick(items, {
 				title: 'Configure Live Watch',
-				placeHolder: 'Select refresh interval for running global watch values (minimum 200ms+)',
+				placeHolder: 'Select the Live Watch refresh interval while the target runs (minimum 200ms+)',
 				ignoreFocusOut: true,
 			});
 			if (!picked) {
@@ -230,10 +217,10 @@ export function activate(context: vscode.ExtensionContext) {
 				if (customValue === undefined) {
 					return;
 				}
-				await setLiveWatchMode(true, Number(customValue.trim()));
+				await setLiveWatchInterval(Number(customValue.trim()));
 				return;
 			}
-			await setLiveWatchMode(picked.enabled, picked.intervalMs);
+			await setLiveWatchInterval(picked.intervalMs ?? currentInterval);
 		})
 	);
 
@@ -290,12 +277,6 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchCopyExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatchProvider?.copyExpression(item);
-		}),
-		vscode.commands.registerCommand('aurix-debugger.liveWatchDisableRefresh', async () => {
-			await setLiveWatchMode(false);
-		}),
-		vscode.commands.registerCommand('aurix-debugger.liveWatchEnableRefresh', async () => {
-			await setLiveWatchMode(true);
 		})
 	);
 
@@ -326,7 +307,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(instructionStepStatusItem);
 	liveWatchStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
 	liveWatchStatusItem.command = 'aurix-debugger.configureLiveWatch';
-	liveWatchStatusItem.tooltip = 'Configure live watch refresh for running global variables';
+	liveWatchStatusItem.tooltip = 'Configure the Live Watch refresh interval';
 	context.subscriptions.push(liveWatchStatusItem);
 	context.subscriptions.push(vscode.window.registerWebviewViewProvider(LiveWatchProvider.viewType, liveWatchProvider));
 	// Like the Watch view, the Live Watch updates on every break, also for paused expressions and when
@@ -452,7 +433,7 @@ export function activate(context: vscode.ExtensionContext) {
 			activeAurixSessions =Math.max(0, activeAurixSessions - 1);
 			if (activeAurixSessions === 0) {
 				updateInstructionSteppingStatus(lastInstructionSteppingEnabled, false);
-				updateLiveWatchStatus(lastLiveWatchEnabled, lastLiveWatchIntervalMs, false);
+				updateLiveWatchStatus(false);
 				liveWatchProvider?.refreshScheduling(false, lastLiveWatchIntervalMs);
 			}
 			// Use a short, cancelable delay so VS Code Restart (terminate + immediate start)
@@ -700,12 +681,6 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 		}
 		if (!config.port) {
 			config.port = 1534;
-		}
-		if (typeof (config as any).liveWatchEnabled !== 'boolean') {
-			(config as any).liveWatchEnabled = await getLiveWatchEnabled();
-		}
-		if (typeof (config as any).liveWatchIntervalMs !== 'number') {
-			(config as any).liveWatchIntervalMs = await getLiveWatchIntervalMs();
 		}
 
 		// Console logging toggle: enableConsoleLog maps to debugTCFMessages.
@@ -1371,15 +1346,6 @@ function normalizeLiveWatchIntervalMs(value: unknown): number {
 	return Math.min(10_000, Math.max(200, Math.round(numeric)));
 }
 
-async function getLiveWatchEnabled(): Promise<boolean> {
-	const stored = extensionContext.workspaceState.get<boolean>(liveWatchEnabledStateKey);
-	if (typeof stored === 'boolean') {
-		return stored;
-	}
-	const cfg = vscode.workspace.getConfiguration('aurixdbg');
-	return cfg.get<boolean>('liveWatch.enabled', false);
-}
-
 async function getLiveWatchIntervalMs(): Promise<number> {
 	const stored = extensionContext.workspaceState.get<number>(liveWatchIntervalStateKey);
 	if (typeof stored === 'number' && Number.isFinite(stored)) {
@@ -1389,46 +1355,21 @@ async function getLiveWatchIntervalMs(): Promise<number> {
 	return normalizeLiveWatchIntervalMs(cfg.get<number>('liveWatch.intervalMs', 1000));
 }
 
-async function setLiveWatchEnabled(value: boolean): Promise<void> {
-	lastLiveWatchEnabled = value;
-	await extensionContext.workspaceState.update(liveWatchEnabledStateKey, value);
-}
-
+/** Stores the Live Watch refresh interval and applies it while an AURIX session runs. */
 async function setLiveWatchInterval(value: number): Promise<void> {
 	lastLiveWatchIntervalMs = normalizeLiveWatchIntervalMs(value);
 	await extensionContext.workspaceState.update(liveWatchIntervalStateKey, lastLiveWatchIntervalMs);
+	const sessionActive = activeAurixSessions > 0;
+	updateLiveWatchStatus(sessionActive);
+	liveWatchProvider?.refreshScheduling(sessionActive, lastLiveWatchIntervalMs);
 }
 
-async function setLiveWatchMode(enabled: boolean, intervalMs?: number, session?: vscode.DebugSession): Promise<void> {
-	const nextIntervalMs = normalizeLiveWatchIntervalMs(intervalMs ?? await getLiveWatchIntervalMs());
-	await setLiveWatchEnabled(enabled);
-	await setLiveWatchInterval(nextIntervalMs);
-	const targetSession = session ?? vscode.debug.activeDebugSession;
-	if (targetSession && targetSession.type === 'aurixdbg') {
-		try {
-			await targetSession.customRequest('aurix/setLiveWatch', { enabled, intervalMs: nextIntervalMs });
-		} catch (e) {
-			agentOutput?.appendLine(`Failed to set live watch: ${String(e)}`);
-		}
-	}
-	updateLiveWatchStatus(enabled, nextIntervalMs, true);
-	liveWatchProvider?.refreshScheduling(enabled, nextIntervalMs);
-	if (enabled) {
-		void liveWatchProvider?.refreshNow();
-	}
-}
-
-function updateLiveWatchStatus(enabled: boolean, intervalMs: number, visible: boolean): void {
-	lastLiveWatchEnabled = enabled;
-	lastLiveWatchIntervalMs = normalizeLiveWatchIntervalMs(intervalMs);
-	void vscode.commands.executeCommand('setContext', 'aurix-debugger.liveWatchEnabled', enabled);
+function updateLiveWatchStatus(visible: boolean): void {
 	if (!liveWatchStatusItem) {
 		return;
 	}
-	liveWatchStatusItem.text = enabled ? `Live Watch: ${lastLiveWatchIntervalMs}ms` : 'Live Watch: OFF';
-	liveWatchStatusItem.tooltip = enabled
-		? `Live watch is enabled for running global watch expressions (${lastLiveWatchIntervalMs} ms). Click to change.`
-		: 'Live watch is disabled. Click to enable or change interval.';
+	liveWatchStatusItem.text = `Live Watch: ${lastLiveWatchIntervalMs}ms`;
+	liveWatchStatusItem.tooltip = `Live Watch refreshes every ${lastLiveWatchIntervalMs} ms while the target runs. Click to change.`;
 	if (visible) {
 		liveWatchStatusItem.show();
 	} else {
@@ -1483,14 +1424,11 @@ async function syncLiveWatchOnSessionStart(session: vscode.DebugSession): Promis
 	if (session.type !== 'aurixdbg') {
 		return;
 	}
-	const sessionConfig = session.configuration as { liveWatchEnabled?: boolean; liveWatchIntervalMs?: number } | undefined;
-	const enabled = typeof sessionConfig?.liveWatchEnabled === 'boolean'
-		? sessionConfig.liveWatchEnabled
-		: await getLiveWatchEnabled();
+	const sessionConfig = session.configuration as { liveWatchIntervalMs?: number } | undefined;
 	const intervalMs = sessionConfig?.liveWatchIntervalMs !== undefined
 		? normalizeLiveWatchIntervalMs(sessionConfig.liveWatchIntervalMs)
 		: await getLiveWatchIntervalMs();
-	await setLiveWatchMode(enabled, intervalMs, session);
+	await setLiveWatchInterval(intervalMs);
 }
 
 /** Returns true when the frame's source location is shown in an editor. */

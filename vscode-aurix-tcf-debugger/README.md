@@ -106,8 +106,8 @@ Once configured, the active interval appears in the view header (highlighted in 
 - Double-click a value (or press Enter) to change it. Double-click the name (or press F2) to edit the expression, e.g. to fix a typo. The context menu also copies the value or the expression.
 - Right-click a register or field in the **XPeripherals** view and choose **Add to Live Watch**. Registers show as hex and can be set. Fields show their bits and are read-only; change them in the XPeripherals view.
 - **Pause Updates** on an entry moves it to the **Paused** group, which is not refreshed while the target runs. **Resume Updates** moves it back.
-- The pause/play button in the view header turns the periodic refresh off and on for all entries.
-- Paused entries, and all entries while the refresh is off, still update like the WATCH section: when the target stops and when you press Refresh.
+- Paused entries still update like the WATCH section: when the target stops and when you press Refresh.
+- The WATCH section only evaluates while the target is stopped. Use the Live Watch view to follow values while the target runs.
 
 ![live-watch](media/live-watch.gif)
 

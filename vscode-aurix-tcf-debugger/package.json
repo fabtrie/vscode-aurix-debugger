@@ -136,11 +136,6 @@
         "icon": "$(search)"
       },
       {
-        "command": "aurix-debugger.toggleLiveWatch",
-        "title": "Toggle Live Watch",
-        "category": "AURIX™ Debugger"
-      },
-      {
         "command": "aurix-debugger.configureLiveWatch",
         "title": "Configure Live Watch",
         "category": "AURIX™ Debugger",
@@ -185,18 +180,6 @@
       {
         "command": "aurix-debugger.liveWatchResumeExpression",
         "title": "Resume Updates",
-        "category": "AURIX™ Debugger",
-        "icon": "$(debug-start)"
-      },
-      {
-        "command": "aurix-debugger.liveWatchDisableRefresh",
-        "title": "Pause Live Watch Refresh",
-        "category": "AURIX™ Debugger",
-        "icon": "$(debug-pause)"
-      },
-      {
-        "command": "aurix-debugger.liveWatchEnableRefresh",
-        "title": "Resume Live Watch Refresh",
         "category": "AURIX™ Debugger",
         "icon": "$(debug-start)"
       },
@@ -321,16 +304,6 @@
           "group": "navigation@1"
         },
         {
-          "command": "aurix-debugger.liveWatchDisableRefresh",
-          "when": "view == aurixLiveWatch && aurix-debugger.liveWatchEnabled",
-          "group": "navigation@2"
-        },
-        {
-          "command": "aurix-debugger.liveWatchEnableRefresh",
-          "when": "view == aurixLiveWatch && !aurix-debugger.liveWatchEnabled",
-          "group": "navigation@2"
-        },
-        {
           "command": "aurix-debugger.liveWatchRefresh",
           "when": "view == aurixLiveWatch",
           "group": "navigation@3"
@@ -450,16 +423,11 @@
           "default": false,
           "description": "Default state for instruction-level stepping when a debug session starts."
         },
-        "aurix-debugger.liveWatch.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Periodically refresh running global watch expressions. Local/frame-dependent watch expressions remain unchanged until the target stops."
-        },
         "aurix-debugger.liveWatch.intervalMs": {
           "type": "number",
           "default": 1000,
           "minimum": 200,
-          "description": "Refresh interval in milliseconds for running global watch expressions. Minimum 200ms+ is recommended and enforced."
+          "description": "Refresh interval in milliseconds for the Live Watch view while the target runs. Minimum 200ms+ is recommended and enforced."
         }
       }
     },
@@ -600,13 +568,8 @@
                 "type": "string",
                 "default": ""
               },
-              "liveWatchEnabled": {
-                "description": "Refresh running global watch expressions during execution.",
-                "type": "boolean",
-                "default": true
-              },
               "liveWatchIntervalMs": {
-                "description": "Refresh interval in milliseconds for running global watch expressions. Minimum 200ms+ is recommended and enforced.",
+                "description": "Refresh interval in milliseconds for the Live Watch view while the target runs. Minimum 200ms+ is recommended and enforced.",
                 "type": "number",
                 "default": 1000,
                 "minimum": 200
@@ -820,7 +783,6 @@
               "port": 1534,
               "core": 0,
               "enableFlashing": false,
-              "liveWatchEnabled": true,
               "enableConsoleLog": false
             }
           }

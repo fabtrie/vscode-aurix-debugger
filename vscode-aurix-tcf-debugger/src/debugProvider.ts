@@ -109,8 +109,6 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	stopStormPauseDelayMs?: number;
 	refocusOnWrongContext?: boolean;
 	instructionStepping?: boolean;
-	liveWatchEnabled?: boolean;
-	liveWatchIntervalMs?: number;
 
 	enableFlashing?: boolean;
 	// Debugger Actions toolbar button; handled in the extension (debuggerActions.ts).
@@ -189,7 +187,7 @@ type BreakpointTuple = { id: number; file: string; line: number; verified: boole
 /** `contextId` is the core whose disassembly the breakpoint was set in: an MCS program address
  *  means nothing to a TriCore, so the breakpoint has to be planted on that core only. */
 type InstructionBreakpointTuple = { id: number; address: number; verified: boolean; contextId?: string };
-type WatchExpressionState = { result: string; liveRefreshable: boolean };
+type WatchExpressionState = { result: string };
 
 class BreakpointsManager {
 	configured = false;
@@ -361,8 +359,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private suspendedContextIds = new Set<string>();
 	private pendingStepThreads = new Set<number>();
 	private configuredGlobals: string[] = [];
-	private liveWatchEnabled = false;
-	private liveWatchIntervalMs = 1000;
 	private liveWatchEvaluator: LiveWatchEvaluator;
 	/** Context the Live Watch evaluates in; picked again after a core suspends or resumes. */
 	private liveWatchContextId: string | undefined;
@@ -2078,8 +2074,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.launchArgs = args;
 		this.launchCore = args.core;
 		this.instructionSteppingEnabled = args.instructionStepping === true;
-		this.liveWatchEnabled = args.liveWatchEnabled === true;
-		this.liveWatchIntervalMs = this.normalizeLiveWatchIntervalMs(args.liveWatchIntervalMs);
 		this.launchResetType = typeof args.resetType === 'string' && args.resetType.trim() !== '' ? args.resetType.trim() : undefined;
 		// Default: run after reset so we stop at first breakpoint / stop-at-function.
 		this.launchResetSuspend = args.resetSuspend === true;
@@ -2627,37 +2621,25 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 
 			const isWatchRequest = args.context === 'watch';
-			const liveRefreshable = this.isLiveWatchRefreshableExpression(expressionText);
 
+			// Watch expressions are evaluated on a stopped core only; while the target runs they keep the
+			// value from the last stop. Values of a running target are the Live Watch view's job.
 			let ctx: string | undefined;
 			let stack: string | undefined;
 			let parentRef: number | undefined;
 			let createParentContext: string | undefined;
-			// A focused frame of a stopped core is the scope of locals and parameters; only without one
-			// is a (global) watch expression evaluated on a running core.
-			const frameCtx = typeof args.frameId === 'number' ? this.tryResolveFrame(args.frameId).ctx : undefined;
-			const frameIsStopped = frameCtx !== undefined && this.suspendedContextIds.has(frameCtx);
-			if (isWatchRequest && this.liveWatchEnabled && liveRefreshable && !frameIsStopped) {
-				ctx = await this.pickContextIdForRunningWatch();
-				if (ctx) {
-					parentRef = 0;
-					createParentContext = ctx;
-				}
-			}
-			if (!createParentContext && typeof args.frameId === 'number') {
+			if (typeof args.frameId === 'number') {
 				parentRef = this.getLocalScopeVariableReference(args.frameId);
 				[ctx, stack] = this.getStackFrameDetails(parentRef);
 				createParentContext = stack;
-			} else if (!createParentContext) {
+			} else {
 				// Watch / REPL sometimes evaluate without a frameId.
 				parentRef = 0;
-				if (!createParentContext) {
-					ctx = await this.pickAnySuspendedContextId();
-					if (ctx) {
-						const stacks = (await this.tcfClient.sendCommand(new GetChildrenStackTraceCommand(ctx))) || [];
-						stack = stacks.length > 0 ? stacks[stacks.length - 1] : undefined;
-						createParentContext = stack;
-					}
+				ctx = await this.pickAnySuspendedContextId();
+				if (ctx) {
+					const stacks = (await this.tcfClient.sendCommand(new GetChildrenStackTraceCommand(ctx))) || [];
+					stack = stacks.length > 0 ? stacks[stacks.length - 1] : undefined;
+					createParentContext = stack;
 				}
 			}
 
@@ -2700,10 +2682,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				variablesReference,
 			};
 			if (isWatchRequest) {
-				this.watchExpressionStates.set(expressionText, {
-					result: response.body.result,
-					liveRefreshable,
-				});
+				this.watchExpressionStates.set(expressionText, { result: response.body.result });
 				this.invalidateLiveWatchContext();
 			}
 			this.sendResponse(response);
@@ -2750,18 +2729,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
-	private normalizeLiveWatchIntervalMs(value: unknown): number {
-		const numeric = typeof value === 'number' ? value : Number(value);
-		if (!Number.isFinite(numeric)) {
-			return 1000;
-		}
-		return Math.min(10_000, Math.max(200, Math.round(numeric)));
-	}
-
-	private isLiveWatchRefreshableExpression(expressionText: string): boolean {
-		return /^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+\]))*$/.test(expressionText);
-	}
-
 	private tryRespondWithCachedWatchValue(response: DebugProtocol.EvaluateResponse, expressionText: string, isWatchRequest: boolean): boolean {
 		if (!isWatchRequest) {
 			return false;
@@ -2794,13 +2761,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	private invalidateLiveWatchContext(): void {
 		this.liveWatchContextId = undefined;
-	}
-
-	private setLiveWatchState(enabled: boolean, intervalMs?: number): void {
-		this.liveWatchEnabled = enabled;
-		if (intervalMs !== undefined) {
-			this.liveWatchIntervalMs = this.normalizeLiveWatchIntervalMs(intervalMs);
-		}
 	}
 
 	/**
@@ -4044,12 +4004,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (expression !== '' && !this.configuredGlobals.includes(expression)) {
 				this.configuredGlobals.push(expression);
 			}
-			this.sendResponse(response);
-			return;
-		}
-
-		if (command === 'aurix/setLiveWatch') {
-			this.setLiveWatchState(Boolean(args?.enabled), args?.intervalMs);
 			this.sendResponse(response);
 			return;
 		}

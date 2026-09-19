@@ -69,7 +69,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	private timer: NodeJS.Timeout | undefined;
 	private breakTimer: NodeJS.Timeout | undefined;
 	private refreshQueue: Promise<void> = Promise.resolve();
-	private refreshEnabled = false;
+	private sessionActive = false;
 	private refreshIntervalMs = 1000;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
@@ -285,8 +285,9 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		}, BREAK_REFRESH_DEBOUNCE_MS);
 	}
 
-	refreshScheduling(enabled: boolean, intervalMs: number): void {
-		this.refreshEnabled = enabled;
+	/** Starts the periodic refresh while an AURIX session runs and stops it when the last one ends. */
+	refreshScheduling(sessionActive: boolean, intervalMs: number): void {
+		this.sessionActive = sessionActive;
 		this.refreshIntervalMs = intervalMs;
 		this.updateDescription();
 		this.scheduleRefresh(0);
@@ -379,7 +380,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 			this.timer = undefined;
 		}
 		// A hidden view is not refreshed; becoming visible restarts the loop.
-		if (!this.refreshEnabled || !this.view?.visible || !this.hasLiveExpressions()) {
+		if (!this.sessionActive || !this.view?.visible || !this.hasLiveExpressions()) {
 			return;
 		}
 		this.timer = setTimeout(() => {
@@ -561,7 +562,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 
 	private updateDescription(): void {
 		if (this.view) {
-			this.view.description = this.refreshEnabled ? `${this.refreshIntervalMs} ms` : 'refresh off';
+			this.view.description = this.sessionActive ? `${this.refreshIntervalMs} ms` : '';
 		}
 	}
 

@@ -77,7 +77,7 @@ Create `.vscode/launch.json`:
       "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
       "symbolFiles": ["${workspaceFolder}/temp/TC375_CE/TriCore Debug (GCC)/TC375_CE.elf"],
       "flashFiles": ["${workspaceFolder}/temp/TC375_CE/TriCore Debug (GCC)/TC375_CE.hex"],
-      "svdFile": "",
+      "device": "TC37x",
       "workspace": "${workspaceFolder}\\temp\\TC375_CE"
     }
   ]
@@ -88,6 +88,7 @@ Create `.vscode/launch.json`:
 - `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port`.
 - `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
 - `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list.
+- `device` selects the SVD file bundled with the extension for the Peripheral View: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
 
 ### Watch global variables
 
@@ -112,7 +113,7 @@ Once configured, the active interval appears in the view header (highlighted in 
 
 ### Peripheral View
 
-This Peripheral View depends on the extension `mcu-debug.peripheral-viewer`. A SVD file is needed to enable this view and to keep it in sync with the target.
+This Peripheral View depends on the extension `mcu-debug.peripheral-viewer`. The register definitions come from the SVD file bundled for the `device` set in the launch configuration.
 
 ![peripheral-view](media/peripheral-view.gif)
 

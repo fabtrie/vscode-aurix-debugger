@@ -3,6 +3,8 @@ import * as path from 'path';
 
 export type SvdCatalogEntry = {
 	id: string;
+	/** Device name as used in the launch configuration's "device" (e.g. "TC37x"). */
+	device: string;
 	label: string;
 	relativePath: string;
 	absolutePath: string;
@@ -11,6 +13,7 @@ export type SvdCatalogEntry = {
 
 type RawSvdIndexEntry = {
 	id?: unknown;
+	device?: unknown;
 	label?: unknown;
 	path?: unknown;
 	deviceNames?: unknown;
@@ -34,44 +37,6 @@ function normalizeSvdBaseName(fileName: string): string {
 	return fileName;
 }
 
-function toWorkspaceRelativePath(absolutePath: string, extensionPath: string): string {
-	const rel = path.relative(extensionPath, absolutePath);
-	return rel.split(path.sep).join('/');
-}
-
-function isSvdFileName(fileName: string): boolean {
-	const lower = fileName.toLowerCase();
-	return lower.endsWith('.svd') || lower.endsWith('.svd.gz');
-}
-
-async function collectSvdFiles(dir: string): Promise<string[]> {
-	const result: string[] = [];
-	if (!fs.existsSync(dir)) {
-		return result;
-	}
-
-	const stack = [dir];
-	while (stack.length > 0) {
-		const current = stack.pop();
-		if (!current) {
-			continue;
-		}
-		const entries = await fs.promises.readdir(current, { withFileTypes: true });
-		for (const entry of entries) {
-			const fullPath = path.join(current, entry.name);
-			if (entry.isDirectory()) {
-				stack.push(fullPath);
-				continue;
-			}
-			if (entry.isFile() && isSvdFileName(entry.name)) {
-				result.push(fullPath);
-			}
-		}
-	}
-
-	return result;
-}
-
 function parseIndexEntry(raw: RawSvdIndexEntry, extensionPath: string): SvdCatalogEntry | undefined {
 	if (typeof raw.path !== 'string' || raw.path.trim() === '') {
 		return undefined;
@@ -85,6 +50,7 @@ function parseIndexEntry(raw: RawSvdIndexEntry, extensionPath: string): SvdCatal
 
 	const fallbackId = normalizeSvdBaseName(path.basename(rel));
 	const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : fallbackId;
+	const device = typeof raw.device === 'string' && raw.device.trim() ? raw.device.trim() : id;
 	const label = typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : id;
 
 	const deviceNames = Array.isArray(raw.deviceNames)
@@ -95,6 +61,7 @@ function parseIndexEntry(raw: RawSvdIndexEntry, extensionPath: string): SvdCatal
 
 	return {
 		id,
+		device,
 		label,
 		relativePath: rel,
 		absolutePath,
@@ -102,7 +69,8 @@ function parseIndexEntry(raw: RawSvdIndexEntry, extensionPath: string): SvdCatal
 	};
 }
 
-async function loadIndexedEntries(extensionPath: string): Promise<SvdCatalogEntry[]> {
+/** The SVD files listed in bin/svd/svd-index.json that exist in the extension. */
+export async function getSvdCatalogEntries(extensionPath: string): Promise<SvdCatalogEntry[]> {
 	const indexPath = path.join(extensionPath, SVD_ROOT_RELATIVE, SVD_INDEX_NAME);
 	if (!fs.existsSync(indexPath)) {
 		return [];
@@ -134,34 +102,13 @@ async function loadIndexedEntries(extensionPath: string): Promise<SvdCatalogEntr
 	return entries;
 }
 
-export async function getSvdCatalogEntries(extensionPath: string): Promise<SvdCatalogEntry[]> {
-	const byPath = new Map<string, SvdCatalogEntry>();
-
-	for (const entry of await loadIndexedEntries(extensionPath)) {
-		byPath.set(path.normalize(entry.absolutePath).toLowerCase(), entry);
+/** The bundled SVD for a device name ("TC37x"), case-insensitive; the SVD id ("TC37XPD") also matches. */
+export async function findSvdForDevice(extensionPath: string, device: string): Promise<SvdCatalogEntry | undefined> {
+	const wanted = device.trim().toLowerCase();
+	if (wanted === '') {
+		return undefined;
 	}
-
-	const svdRoot = path.join(extensionPath, SVD_ROOT_RELATIVE);
-	for (const absolutePath of await collectSvdFiles(svdRoot)) {
-		const key = path.normalize(absolutePath).toLowerCase();
-		if (byPath.has(key)) {
-			continue;
-		}
-		const baseName = normalizeSvdBaseName(path.basename(absolutePath));
-		byPath.set(key, {
-			id: baseName,
-			label: baseName,
-			relativePath: toWorkspaceRelativePath(absolutePath, extensionPath),
-			absolutePath,
-			deviceNames: [baseName],
-		});
-	}
-
-	return Array.from(byPath.values()).sort((a, b) => a.label.localeCompare(b.label));
-}
-
-export async function getSvdOptionsForDevice(extensionPath: string, targetDevice?: string): Promise<Array<{ label: string; value: string }>> {
 	const entries = await getSvdCatalogEntries(extensionPath);
-	void targetDevice;
-	return entries.map((entry) => ({ label: entry.label, value: entry.absolutePath }));
+	return entries.find((e) => e.device.toLowerCase() === wanted)
+		?? entries.find((e) => [e.id, ...e.deviceNames].some((n) => n.toLowerCase() === wanted));
 }

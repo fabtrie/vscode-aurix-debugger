@@ -76,11 +76,6 @@
   "contributes": {
     "commands": [
       {
-        "command": "aurix-debugger.pickSvd",
-        "title": "Pick SVD File",
-        "category": "AURIX™ Debugger"
-      },
-      {
         "command": "aurix-debugger.resetTarget",
         "title": "Reset",
         "category": "AURIX™ Debugger",
@@ -549,9 +544,41 @@
                 "description": "Workspace or project path",
                 "type": "string"
               },
-              "svdFile": {
-                "description": "Path to SVD (System View Description) file for register definitions. Supports ${command:aurix-debugger.pickSvd}.",
-                "type": "string"
+              "device": {
+                "description": "AURIX™ device; selects the bundled SVD file for the XPeripherals view.",
+                "type": "string",
+                "enum": [
+                  "TC22x",
+                  "TC23x",
+                  "TC26x",
+                  "TC27x",
+                  "TC29x",
+                  "TC33x",
+                  "TC33xEXT",
+                  "TC35x",
+                  "TC36x",
+                  "TC37x",
+                  "TC37xEXT",
+                  "TC38x",
+                  "TC39x",
+                  "TC4Dx"
+                ],
+                "enumDescriptions": [
+                  "AURIX™ TC22x",
+                  "AURIX™ TC23x",
+                  "AURIX™ TC26x",
+                  "AURIX™ TC27x",
+                  "AURIX™ TC29x",
+                  "AURIX™ TC33x",
+                  "AURIX™ TC33x emulation device (EXT)",
+                  "AURIX™ TC35x",
+                  "AURIX™ TC36x",
+                  "AURIX™ TC37x",
+                  "AURIX™ TC37x emulation device (EXT)",
+                  "AURIX™ TC38x",
+                  "AURIX™ TC39x",
+                  "AURIX™ TC4Dx"
+                ]
               },
               "ppuElfPath": {
                 "description": "Path to the PPU ELF executable",
@@ -782,6 +809,7 @@
               "configFiles": [
                 "board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"
               ],
+              "device": "TC37x",
               "symbolFiles": [
                 "^\"\\${workspaceFolder}/build/program.elf\""
               ],

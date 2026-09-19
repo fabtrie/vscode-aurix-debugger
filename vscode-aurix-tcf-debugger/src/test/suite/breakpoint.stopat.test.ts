@@ -40,7 +40,7 @@ function getDebugConfig(): vscode.DebugConfiguration | undefined {
 		host: '127.0.0.1',
 		port: 1534,
 		stopOnEntry: false,
-		svdFile: '',
+		device: 'TC37x',
 		workspace: getEnv('AURIX_TEST_WORKSPACE')
 	};
 	return config;

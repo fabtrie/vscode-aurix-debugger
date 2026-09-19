@@ -16,7 +16,7 @@ import { pipeline } from 'stream/promises';
 import { createGunzip } from 'zlib';
 import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
-import { getSvdOptionsForDevice } from './svdCatalog';
+import { findSvdForDevice } from './svdCatalog';
 import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 
@@ -48,6 +48,7 @@ let preferredSourceViewColumn: vscode.ViewColumn | undefined;
 let lastAutoSourcePath: string | undefined;
 let lastAutoSourceLine: number | undefined;
 const SVD_CACHE_FOLDER = 'svd-cache';
+let warnedSvdFileReplaced = false;
 const DISASSEMBLY_OPEN_DELAY_MS = 1200;
 const pendingDisassemblyOpenTimers = new Map<string, NodeJS.Timeout>();
 const LIVE_WATCH_INTERVAL_OPTIONS = [200, 500, 1000, 2000] as const;
@@ -80,39 +81,6 @@ export function activate(context: vscode.ExtensionContext) {
 					void Promise.resolve(s.customRequest('aurix/setDisassemblyOptions', { opcodeBytes })).catch(() => undefined);
 				}
 			}
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-debugger.pickSvd', async (args?: { targetDevice?: string }) => {
-			void args;
-			const options = await getSvdOptionsForDevice(context.extensionPath);
-			const items: Array<vscode.QuickPickItem & { value?: string; browse?: boolean }> = [
-				...options.map((option) => ({ label: option.label, description: option.value, value: option.value })),
-				{ label: 'Browse local SVD...', description: 'Select any .svd file from disk', browse: true },
-			];
-
-			const picked = await vscode.window.showQuickPick(items, {
-				title: 'Select SVD file',
-				placeHolder: 'Pick SVD file',
-				ignoreFocusOut: true,
-			});
-			if (!picked) {
-				return undefined;
-			}
-			if (picked.browse) {
-				const selected = await vscode.window.showOpenDialog({
-					canSelectMany: false,
-					openLabel: 'Select SVD',
-					filters: {
-						svdFiles: ['svd'],
-						allFiles: ['*'],
-					},
-				});
-				return selected?.[0]?.fsPath;
-			}
-
-			return picked.value;
 		})
 	);
 
@@ -606,23 +574,6 @@ function splitCommandLine(text: string): string[] {
 	return out;
 }
 
-function resolveConfigPathFromFolder(folder: vscode.WorkspaceFolder | undefined, p: unknown): string | undefined {
-	if (typeof p !== 'string' || p.trim() === '') {
-		return undefined;
-	}
-	let out = p;
-	const ws = folder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-	if (ws) {
-		out = out.replaceAll('${workspaceFolder}', ws);
-		out = out.replaceAll('${workspaceRoot}', ws);
-	}
-	out = out.replace(/\//g, path.sep);
-	if (!path.isAbsolute(out) && ws) {
-		out = path.resolve(ws, out);
-	}
-	return out;
-}
-
 function getSvdCacheRoot(): string {
 	const fromGlobalStorage = extensionContext?.globalStorageUri?.fsPath;
 	if (typeof fromGlobalStorage === 'string' && fromGlobalStorage.trim() !== '') {
@@ -679,20 +630,9 @@ async function materializeCompressedSvd(svdGzPath: string): Promise<string> {
 	return outputPath;
 }
 
-async function resolveUsableSvdPath(
-	folder: vscode.WorkspaceFolder | undefined,
-	value: string | undefined,
-): Promise<string | undefined> {
-	if (!value || value.trim() === '') {
-		return undefined;
-	}
-
-	const resolved = resolveConfigPathFromFolder(folder, value) ?? value;
-	const lower = resolved.toLowerCase();
-	if (lower.endsWith('.svd.gz')) {
-		return await materializeCompressedSvd(resolved);
-	}
-	return resolved;
+/** Path of a bundled SVD file the peripheral viewer can read (.svd.gz files are unpacked to the cache). */
+async function usableSvdPath(svdPath: string): Promise<string> {
+	return svdPath.toLowerCase().endsWith('.svd.gz') ? await materializeCompressedSvd(svdPath) : svdPath;
 }
 
 export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationProvider {
@@ -713,6 +653,7 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 				autoStartAgent: true,
 				searchDirs: ['${workspaceFolder}/tcl'],
 				configFiles: ['board/infineon/kit_a2g_tc377tx_3v3_trb.cfg'],
+				device: 'TC37x',
 				symbolFiles: ['${workspaceFolder}/build/program.elf'],
 				flashFiles: ['${workspaceFolder}/build/program.elf'],
 				enableFlashing: false,
@@ -772,41 +713,27 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 			(config as any).debugTCFMessages = (config as any).enableConsoleLog;
 		}
 
-		const asNonEmptyString = (value: any): string | undefined => {
-			return typeof value === 'string' && value.trim() !== '' ? value : undefined;
-		};
-		const looksLikeFilePath = (value: string): boolean => {
-			const v = value.trim();
-			if (v === '' || v.includes('::')) {
-				return false;
+		// The XPeripherals view (mcu-debug.peripheral-viewer) reads "svdPath" when the session
+		// starts; "device" selects the SVD file bundled with the extension. This does not
+		// touch the target, which may still be unpowered.
+		if ((config as any).svdFile !== undefined && !warnedSvdFileReplaced) {
+			warnedSvdFileReplaced = true;
+			void vscode.window.showWarningMessage('AURIX™ Debugger: "svdFile" is no longer supported and is ignored. Set "device" (e.g. "TC37x") to select the SVD file bundled with the extension.');
+		}
+		delete (config as any).svdFile;
+		delete (config as any).svdPath;
+		const device = typeof config.device === 'string' ? config.device.trim() : '';
+		if (device) {
+			const entry = await findSvdForDevice(extensionContext.extensionPath, device);
+			if (entry) {
+				try {
+					(config as any).svdPath = await usableSvdPath(entry.absolutePath);
+				} catch (e) {
+					agentOutput?.appendLine(`SVD for ${device} unavailable: ${e instanceof Error ? e.message : String(e)}`);
+				}
+			} else {
+				void vscode.window.showWarningMessage(`AURIX™ Debugger: unknown device "${device}"; the XPeripherals view is unavailable.`);
 			}
-			return v.toLowerCase().endsWith('.svd') || v.toLowerCase().endsWith('.svd.gz') || v.includes('${') || /[\\/]/.test(v);
-		};
-
-		const svdFile = asNonEmptyString((config as any).svdFile);
-		const svdPath = asNonEmptyString((config as any).svdPath);
-		const definitionPath = asNonEmptyString((config as any).definitionPath);
-
-		const effectiveSvdFile = asNonEmptyString((config as any).svdFile);
-
-		if (!svdPath && effectiveSvdFile) {
-			(config as any).svdPath = effectiveSvdFile;
-		}
-		if (!definitionPath && effectiveSvdFile) {
-			(config as any).definitionPath = effectiveSvdFile;
-		}
-		if (!effectiveSvdFile) {
-			const candidate = svdPath || definitionPath;
-			if (candidate && looksLikeFilePath(candidate)) {
-				(config as any).svdFile = candidate;
-			}
-		}
-
-		const usableSvd = await resolveUsableSvdPath(folder, asNonEmptyString((config as any).svdFile));
-		if (usableSvd) {
-			(config as any).svdFile = usableSvd;
-			(config as any).svdPath = usableSvd;
-			(config as any).definitionPath = usableSvd;
 		}
 
 		return config;

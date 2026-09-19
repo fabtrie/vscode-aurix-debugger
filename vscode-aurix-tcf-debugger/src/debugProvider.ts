@@ -87,7 +87,8 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 
 	// AURIX extras
 	core?: number;
-	svdFile?: string;
+	/** AURIX device (e.g. "TC37x"); selects the bundled SVD file. */
+	device?: string;
 	workspace?: string;
 	globalAccess?: boolean;
 

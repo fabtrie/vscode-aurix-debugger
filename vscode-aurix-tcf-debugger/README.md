@@ -87,7 +87,8 @@ Create `.vscode/launch.json`:
 - `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is.
 - `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port`.
 - `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
-- `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list.
+- `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list. `verifyFlash` (default true) reads the programmed sectors back.
+- After flashing and with the Reset button, the target is reset with `resetType` (default `reset`). With `resetSuspend: true` it halts at the reset vector; otherwise it runs, and the toolbar buttons pause all cores afterwards.
 - `device` selects the SVD file bundled with the extension for the Peripheral View: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
 
 ### Watch global variables

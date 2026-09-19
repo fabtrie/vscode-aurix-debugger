@@ -61,7 +61,25 @@ import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/lin
 import { LiveWatchEvaluator, LiveWatchRequestItem } from './liveWatchEvaluator';
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
 
-type ElfSymbol = { name: string; address: number; size: number };
+type ElfSymbol = { name: string; address: number; size: number; file?: string };
+
+/**
+ * Splits a .symtab name into the source-level name and, for file-local symbols, the defining file.
+ * The compiler appends a suffix to local symbols: `name..<file>` with the file path escaped as `.XX`
+ * hex bytes (e.g. `counter..C.3A.5Capp.5Cmain.2Ec.2Eo`), or `name.<n>` for function-local statics.
+ */
+function splitElfSymbolName(raw: string): { name: string; file?: string } {
+	const dot = raw.indexOf('.');
+	if (dot <= 0) {
+		return { name: raw };
+	}
+	const name = raw.slice(0, dot);
+	if (!raw.startsWith('..', dot)) {
+		return { name };
+	}
+	const file = raw.slice(dot + 2).replace(/\.([0-9A-Fa-f]{2})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+	return { name, file: file || undefined };
+}
 
 export interface InternalLaunchArguments {
 	debugTCFMessages?: boolean;
@@ -110,7 +128,9 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	refocusOnWrongContext?: boolean;
 	instructionStepping?: boolean;
 
+	flashFiles?: string[];
 	enableFlashing?: boolean;
+	verifyFlash?: boolean;
 	// Debugger Actions toolbar button; handled in the extension (debuggerActions.ts).
 	actions?: unknown[];
 }
@@ -1563,6 +1583,71 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return typeof e === 'object' ? JSON.stringify(e) : String(e);
 	}
 
+	/**
+	 * Resets the target with ContextReset.reset (Reset button, after flashing). Throws if every
+	 * reset type fails. "type", "suspend" and "core" default to the launch options resetType,
+	 * resetSuspend and core; "pauseAll" (pause all cores after a running reset) defaults to !suspend.
+	 */
+	private async resetTarget(opts: { type?: string; suspend?: boolean; core?: number; pauseAll?: boolean } = {}): Promise<void> {
+		this.beginResetTransition();
+		// NOTE: ContextReset.getCapabilities is unreliable on some AURIX agents (can time out).
+		// We therefore skip capability probing and use a configured resetType or a conservative default.
+		const candidateTypes = [opts.type ?? '', this.launchResetType ?? '', 'reset']
+			.map(t => t.trim())
+			.filter(t => t !== '')
+			.filter((t, i, a) => a.indexOf(t) === i);
+
+		// Default: run after reset (agent should stop at first breakpoint / stop-at-function).
+		const suspend = opts.suspend ?? this.launchResetSuspend;
+		const ctx = await this.pickContextIdForCore(opts.core ?? this.launchCore);
+		if (!ctx) {
+			throw new Error('No target context available for reset.');
+		}
+		// A running reset is paused afterwards unless the caller says otherwise; a halting reset
+		// (resetSuspend) is already stopped.
+		const pauseAllAfterReset = opts.pauseAll ?? !suspend;
+
+		// Temporarily increase timeout for reset; reset can legitimately take longer.
+		const oldTimeout = (this.tcfClient as any).commandTimeout;
+		try {
+			this.tcfClient.setCommandTimeout(Math.max(30_000, Number(oldTimeout) || 0));
+
+			let lastError: unknown;
+			for (const type of candidateTypes) {
+				try {
+					this.tcfLogger.log(`Reset: type='${type}', suspend=${suspend}`);
+					await this.tcfClient.reset(ctx, type, suspend);
+					lastError = undefined;
+					break;
+				} catch (e) {
+					lastError = e;
+					this.tcfLogger.error(`Reset attempt failed for type='${type}': ${AurixTCFDebugSession.formatError(e)}`);
+				}
+			}
+			if (lastError) {
+				throw lastError;
+			}
+
+			if (pauseAllAfterReset) {
+				// Some resets will cause one core to start running immediately.
+				// If the user requested a paused post-reset state, explicitly pause all cores.
+				await new Promise(resolve => setTimeout(resolve, 200));
+				try {
+					await this.pauseAllCoresBestEffort('post-reset');
+				} catch (e) {
+					this.tcfLogger.error(`Post-reset pause-all failed: ${String(e)}`);
+				}
+				this.beginResetTransition();
+				await new Promise(resolve => setTimeout(resolve, 200));
+				await this.emitStoppedForAllSuspendedAtStartup(ctx, { targetReason: StoppedEventReason.pause, otherReason: StoppedEventReason.pause });
+			}
+		} finally {
+			if (typeof oldTimeout === 'number') {
+				this.tcfClient.setCommandTimeout(oldTimeout);
+			}
+		}
+	}
+
 	/** Images to flash: the "flashFiles" launch option. */
 	private static getFlashFiles(args: any): string[] {
 		return Array.isArray(args?.flashFiles)
@@ -1583,6 +1668,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	/** Runs the Tcl commands, printing each with its output. */
 	private async runFlashSteps(steps: string[]): Promise<void> {
+		if (!this.tcfClient.supportedServices?.includes(TCL_SERVICE)) {
+			throw new Error('The debug server has no Tcl service: flashing needs aurix-dbg');
+		}
 		const oldTimeout = (this.tcfClient as any).commandTimeout;
 		try {
 			this.tcfClient.setCommandTimeout(15 * 60 * 1000);
@@ -1607,10 +1695,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * Flashes the images at launch (enableFlashing), then resets the target into the software.
 	 * "reset init" first: PFLASH can only be erased while the cores are halted right after a
 	 * reset; once the software has run, the DMU rejects erases with a protection error.
+	 * The final reset honors resetType and resetSuspend like the Reset button. It does not pause
+	 * the cores afterwards: the session is not initialized yet, stopOnEntry does that.
 	 */
 	private async flashWithAurixDbg(files: string[], args: any): Promise<void> {
 		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
-		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, args), 'reset run']);
+		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, args)]);
+		await this.resetTarget({ pauseAll: false });
 	}
 
 	/**
@@ -2945,9 +3036,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 				const start = strtab.offset + nameOff;
 				const end = buf.indexOf(0, start);
-				const name = buf.toString('utf8', start, end < 0 ? buf.length : end);
-				if (name && !target.has(name)) {
-					target.set(name, { name, address: value, size });
+				const rawName = buf.toString('utf8', start, end < 0 ? buf.length : end);
+				if (rawName && !target.has(rawName)) {
+					target.set(rawName, { ...splitElfSymbolName(rawName), address: value, size });
 				}
 			}
 		}
@@ -3788,14 +3879,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		if (command === 'aurix/variableSymbols') {
 			response.body = {
-				symbols: this.getElfSymbols().variables.map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, size: s.size })),
+				symbols: this.getElfSymbols().variables.map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, size: s.size, file: s.file })),
 			};
 			this.sendResponse(response);
 			return;
 		}
 
 		if (command === 'aurix/disassemblySymbols') {
-			response.body = { symbols: this.getElfFunctionSymbols().map(s => ({ name: s.name, address: `0x${s.address.toString(16)}` })) };
+			response.body = { symbols: this.getElfFunctionSymbols().map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, file: s.file })) };
 			this.sendResponse(response);
 			return;
 		}
@@ -3896,79 +3987,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		if (command === 'aurix/reset') {
 			try {
-				this.beginResetTransition();
-				// NOTE: ContextReset.getCapabilities is unreliable on some AURIX agents (can time out).
-				// We therefore skip capability probing and use a configured resetType or a conservative default.
-				const requestedType = typeof args?.type === 'string' ? args.type.trim() : '';
-				const candidateTypes = [requestedType, this.launchResetType ?? '', 'reset']
-					.map(t => (typeof t === 'string' ? t.trim() : ''))
-					.filter(t => t !== '')
-					.filter((t, i, a) => a.indexOf(t) === i);
-
-				// Default: run after reset (agent should stop at first breakpoint / stop-at-function).
-				const suspend = typeof args?.suspend === 'boolean' ? args.suspend : this.launchResetSuspend;
-				const requestedCore = typeof args?.core === 'number' ? args.core : this.launchCore;
-				const ctx = await this.pickContextIdForCore(requestedCore);
-				if (!ctx) {
-					throw new Error('No target context available for reset.');
-				}
-				// A running reset is paused afterwards unless the caller says otherwise; a halting reset
-				// (resetSuspend) is already stopped.
-				const pauseAllAfterReset = typeof args?.pauseAll === 'boolean' ? args.pauseAll : !suspend;
-
-				// Temporarily increase timeout for reset; reset can legitimately take longer.
-				const oldTimeout = (this.tcfClient as any).commandTimeout;
-				try {
-					this.tcfClient.setCommandTimeout(Math.max(30_000, Number(oldTimeout) || 0));
-
-					let lastError: unknown;
-					for (const type of candidateTypes) {
-						try {
-							this.tcfLogger.log(`Reset: type='${type}', suspend=${suspend}`);
-							await this.tcfClient.reset(ctx, type, suspend);
-							lastError = undefined;
-							break;
-						} catch (e) {
-							lastError = e;
-							let errText = '';
-							if (e instanceof Error) {
-								errText = e.message;
-							} else {
-								try {
-									errText = JSON.stringify(e);
-								} catch {
-									errText = String(e);
-								}
-							}
-							this.tcfLogger.error(`Reset attempt failed for type='${type}': ${errText}`);
-						}
-					}
-					if (lastError) {
-						throw lastError;
-					}
-
-					if (pauseAllAfterReset) {
-						// Some resets will cause one core to start running immediately.
-						// If the user requested a paused post-reset state, explicitly pause all cores.
-						await new Promise(resolve => setTimeout(resolve, 200));
-						try {
-							await this.pauseAllCoresBestEffort('post-reset');
-						} catch (e) {
-							this.tcfLogger.error(`Post-reset pause-all failed: ${String(e)}`);
-						}
-						this.beginResetTransition();
-						await new Promise(resolve => setTimeout(resolve, 200));
-						await this.emitStoppedForAllSuspendedAtStartup(ctx, { targetReason: StoppedEventReason.pause, otherReason: StoppedEventReason.pause });
-					}
-				} finally {
-					if (typeof oldTimeout === 'number') {
-						this.tcfClient.setCommandTimeout(oldTimeout);
-					}
-				}
+				await this.resetTarget({
+					type: typeof args?.type === 'string' ? args.type : undefined,
+					suspend: typeof args?.suspend === 'boolean' ? args.suspend : undefined,
+					core: typeof args?.core === 'number' ? args.core : undefined,
+					pauseAll: typeof args?.pauseAll === 'boolean' ? args.pauseAll : undefined,
+				});
+				this.sendResponse(response);
 			} catch (e) {
-				this.tcfLogger.error(`Reset failed: ${String(e)}`);
+				const message = AurixTCFDebugSession.formatError(e);
+				this.tcfLogger.error(`Reset failed: ${message}`);
+				this.sendErrorResponse(response, 1, 'Reset failed: {message}', { message });
 			}
-			this.sendResponse(response);
 			return;
 		}
 

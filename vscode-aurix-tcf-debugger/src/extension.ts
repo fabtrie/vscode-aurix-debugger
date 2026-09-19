@@ -93,7 +93,11 @@ export function activate(context: vscode.ExtensionContext) {
 			// otherwise the target runs after reset and is paused afterwards (pauseAll), since
 			// some firmware only relaxes its watchdog after a startup check that runs a short
 			// time after reset.
-			await s.customRequest('aurix/reset', {});
+			try {
+				await s.customRequest('aurix/reset', {});
+			} catch (e) {
+				void vscode.window.showErrorMessage(`AURIX™ Debugger: ${e instanceof Error ? e.message : String(e)}`);
+			}
 		})
 	);
 
@@ -111,15 +115,22 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 			flashing = true;
 			try {
-				await vscode.window.withProgress(
-					{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ Debugger: flashing target (see Debug Console)...' },
-					async () => { await s.customRequest('aurix/flash', {}); }
-				);
-				// Same as the Reset button: the launch configuration decides whether the target halts or runs.
-				await s.customRequest('aurix/reset', {});
-				void vscode.window.showInformationMessage('AURIX™ Debugger: flashing done.');
-			} catch (e) {
-				void vscode.window.showErrorMessage(`AURIX™ Debugger: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
+				try {
+					await vscode.window.withProgress(
+						{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ Debugger: flashing target (see Debug Console)...' },
+						async () => { await s.customRequest('aurix/flash', {}); }
+					);
+				} catch (e) {
+					void vscode.window.showErrorMessage(`AURIX™ Debugger: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
+					return;
+				}
+				try {
+					// Same as the Reset button: the launch configuration decides whether the target halts or runs.
+					await s.customRequest('aurix/reset', {});
+					void vscode.window.showInformationMessage('AURIX™ Debugger: flashing done.');
+				} catch (e) {
+					void vscode.window.showErrorMessage(`AURIX™ Debugger: flashed, but ${e instanceof Error ? e.message : String(e)}`);
+				}
 			} finally {
 				flashing = false;
 			}
@@ -483,13 +494,13 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 		try {
 		const config = session.configuration;
 
-		if (config.autoStartAgent) {
+		if (config.autoStartAgent ?? vscode.workspace.getConfiguration('aurix-debugger').get<boolean>('autoStartAgent', false)) {
 			await startAurixDbg(session, config);
 		}
 
 		// Enable path mapper based on workspace trust and configuration
-		const pathMapperConfigDefault = vscode.workspace.getConfiguration("aurixdbg").inspect("executePathMapper")?.defaultValue ?? true;
-		const pathMapperConfig = vscode.workspace.getConfiguration("aurixdbg").get('executePathMapper', pathMapperConfigDefault);
+		const pathMapperConfigDefault = vscode.workspace.getConfiguration('aurix-debugger').inspect("executePathMapper")?.defaultValue ?? true;
+		const pathMapperConfig = vscode.workspace.getConfiguration('aurix-debugger').get('executePathMapper', pathMapperConfigDefault);
 
 		const enablePathMapper = vscode.workspace.isTrusted && pathMapperConfig === true;
 		
@@ -722,7 +733,7 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
  * Uses the aurix-dbg.exe bundled with the extension unless "agentPath" overrides it.
  */
 async function startAurixDbg(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<void> {
-	const agentPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration('aurixdbg').get('agentPath'))
+	const agentPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration('aurix-debugger').get('agentPath'))
 		?? path.join(extensionContext.extensionPath, 'bin', 'aurix-dbg.exe');
 	if (!fs.existsSync(agentPath)) {
 		void vscode.window.showErrorMessage(`aurix-dbg not found: ${agentPath}`);
@@ -1102,7 +1113,7 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 	if (session.type !== 'aurixdbg') {
 		return;
 	}
-	const cfg = vscode.workspace.getConfiguration('aurixdbg');
+	const cfg = vscode.workspace.getConfiguration('aurix-debugger');
 	const autoOpen = cfg.get<boolean>('autoOpenDisassemblyView', true);
 	if (!autoOpen) {
 		return;
@@ -1219,10 +1230,14 @@ async function pickSymbolOrText(options: {
 	if (options.session) {
 		void Promise.resolve(options.session.customRequest(options.symbolsRequest))
 			.then((r) => {
-				const symbols: Array<{ name: string; address: string; size?: number }> = Array.isArray(r?.symbols) ? r.symbols : [];
+				const symbols: Array<{ name: string; address: string; size?: number; file?: string }> = Array.isArray(r?.symbols) ? r.symbols : [];
 				symbolItems = symbols.map((sym) => ({
 					label: sym.name,
-					description: sym.size ? `${sym.address} · ${sym.size} byte${sym.size === 1 ? '' : 's'}` : sym.address,
+					description: [
+						sym.address,
+						sym.size ? `${sym.size} byte${sym.size === 1 ? '' : 's'}` : undefined,
+						sym.file ? path.basename(sym.file.replace(/\\/g, '/')) : undefined,
+					].filter(Boolean).join(' · '),
 				}));
 			})
 			.catch(() => undefined)
@@ -1329,12 +1344,12 @@ async function getInstructionSteppingEnabled(): Promise<boolean> {
 	if (typeof stored === 'boolean') {
 		return stored;
 	}
-	const cfg = vscode.workspace.getConfiguration('aurixdbg');
+	const cfg = vscode.workspace.getConfiguration('aurix-debugger');
 	return cfg.get<boolean>('instructionSteppingDefault', false);
 }
 
 function getDisassemblyOpcodeBytes(): DisassemblyOpcodeBytes {
-	const value = vscode.workspace.getConfiguration('aurixdbg').get('disassembly.opcodeBytes');
+	const value = vscode.workspace.getConfiguration('aurix-debugger').get('disassembly.opcodeBytes');
 	return isDisassemblyOpcodeBytes(value) ? value : 'left';
 }
 
@@ -1351,7 +1366,7 @@ async function getLiveWatchIntervalMs(): Promise<number> {
 	if (typeof stored === 'number' && Number.isFinite(stored)) {
 		return normalizeLiveWatchIntervalMs(stored);
 	}
-	const cfg = vscode.workspace.getConfiguration('aurixdbg');
+	const cfg = vscode.workspace.getConfiguration('aurix-debugger');
 	return normalizeLiveWatchIntervalMs(cfg.get<number>('liveWatch.intervalMs', 1000));
 }
 

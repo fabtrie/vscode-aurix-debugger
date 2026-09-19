@@ -499,7 +499,16 @@
                 }
               },
               "enableFlashing": {
-                "description": "If true, programs flashFiles with aurix-dbg's 'flash write_images' before the debug session, then resets the target",
+                "description": "If true, programs flashFiles with aurix-dbg's 'flash write_images' before the debug session, then resets the target (resetType, resetSuspend)",
+                "type": "boolean",
+                "default": false
+              },
+              "resetType": {
+                "description": "ContextReset type used by the Reset and Flash Target toolbar buttons and after flashing (see the debug server's reset types). Falls back to 'reset' if this type fails.",
+                "type": "string"
+              },
+              "resetSuspend": {
+                "description": "If true, the target halts at the reset vector after a reset (Reset and Flash Target toolbar buttons, after flashing). If false, it runs after the reset; the toolbar buttons then pause all cores.",
                 "type": "boolean",
                 "default": false
               },

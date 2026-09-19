@@ -14,7 +14,6 @@ import { AurixTCFDebugSession, DisassemblyOpcodeBytes, isDisassemblyOpcodeBytes 
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { createGunzip } from 'zlib';
-import { showDebugConfigPanel } from './debugConfigPanel';
 import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
 import { getSvdOptionsForDevice } from './svdCatalog';
@@ -81,13 +80,6 @@ export function activate(context: vscode.ExtensionContext) {
 					void Promise.resolve(s.customRequest('aurix/setDisassemblyOptions', { opcodeBytes })).catch(() => undefined);
 				}
 			}
-		})
-	);
-
-	// Commands (added): open the debug configuration webview panel
-	context.subscriptions.push(
-		vscode.commands.registerCommand('aurix-debugger.openDebugConfig', () => {
-			void showDebugConfigPanel(context);
 		})
 	);
 
@@ -740,7 +732,7 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 
 		// This extension does not support user-facing attach sessions.
 		if ((config as any).request === 'attach') {
-			void vscode.window.showErrorMessage('AURIX™ Debugger: attach is not supported. Use a launch configuration (via the GUI panel).');
+			void vscode.window.showErrorMessage('AURIX™ Debugger: attach is not supported. Use a launch configuration.');
 			return undefined;
 		}
 

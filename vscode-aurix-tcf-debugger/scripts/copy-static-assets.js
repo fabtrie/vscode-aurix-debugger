@@ -33,7 +33,7 @@ function main() {
 	// When sources are deleted, tsc does not remove old outputs.
 	// Prune removed modules so they don't get packaged into the VSIX.
 	const outDir = path.join(projectRoot, 'out');
-	for (const base of ['pcap', 'mocksocket']) {
+	for (const base of ['pcap', 'mocksocket', 'debugConfigPanel']) {
 		removeIfExists(path.join(outDir, `${base}.js`));
 		removeIfExists(path.join(outDir, `${base}.d.ts`));
 		removeIfExists(path.join(outDir, `${base}.js.map`));

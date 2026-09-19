@@ -21,7 +21,7 @@
     "Debuggers"
   ],
   "keywords": [
-    "aurixdbg",
+    "aurix",
     "tricore",
     "embedded",
     "debugger",
@@ -75,11 +75,6 @@
   },
   "contributes": {
     "commands": [
-      {
-        "command": "aurix-debugger.openDebugConfig",
-        "title": "Open Debug Configuration",
-        "category": "AURIX™ Debugger"
-      },
       {
         "command": "aurix-debugger.pickSvd",
         "title": "Pick SVD File",

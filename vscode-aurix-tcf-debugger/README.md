@@ -58,15 +58,7 @@ npm run package
 
 ## Usage
 
-### Debug configuration (UI)
-
-1. Open Command Palette and run `AURIX™ Debugger: Open Debug Configuration`
-2. Fill in the fields and save the configuration
-3. Click `Debug` to start debugging
-
-![Debug Configuration](media/debug-configuration.png)
-
-### Or create launch.json manually
+### Launch configuration
 
 Create `.vscode/launch.json`:
 
@@ -96,12 +88,6 @@ Create `.vscode/launch.json`:
 - `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port`.
 - `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
 - `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list.
-
-### Start debugging
-
-We suggest start debugging with `AURIX™ Debugger: Open Debug Configuration`
-
-![how-to-start](media/how-to-start.gif)
 
 ### Watch global variables
 
@@ -158,14 +144,12 @@ To show any other code location while the target is halted, click the search ico
 
 ### PPU / CDSP Cores
 
-In addition to the TriCore cores, the debugger supports the cores: **PPU** and **CDSP**. Open `AURIX™ Debugger: Open Debug Configuration` and switch to the **PPU/CDSP/SCR Cores** tab to assign an ELF file to each core:
+In addition to the TriCore cores, the debugger supports the cores: **PPU** and **CDSP**. Assign an ELF file to each core in the launch configuration:
 
-- **PPU** — a single ELF file
-- **CDSP** — up to 12 ELF files (CDSP0 – CDSP11)
+- `ppuElfPath` — a single ELF file for the PPU
+- `cdspElfPaths` — up to 12 ELF files (CDSP0 – CDSP11)
 
 The assigned ELF files provide the debug symbols used for source-level debugging on the corresponding core.
-
-![cores-configuration](media/cores-configuration.png)
 
 ### Debugger Actions
 

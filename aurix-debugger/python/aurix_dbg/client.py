@@ -91,10 +91,13 @@ class Client(GeneratedClient):
         not, so CPU tracks the delivered count (1000/s -> 10 %, 1860/s -> 17 %). Ask for the rate
         you need.
 
-        The probe is the hard limit either way: a tick costs one round trip (~124 us on a
-        miniWiggler at 30 MHz) plus ~55 us per *non-adjacent* extra read, so one point tops out
-        near 6 kHz while 64 adjacent words still sustain ~230 000 values/s. Prefer few, contiguous
-        points: adjacent addresses coalesce into one read and are nearly free.
+        The probe is the hard limit: a tick costs ~123 us for its first bus access and ~57 us for
+        each one after it, while an extra byte inside a read already being made costs well under a
+        microsecond. The server therefore folds points closer than 96 bytes into one read (never
+        across peripheral space). **Lay the variables you sample together out together** - 12
+        points 12 bytes apart are 3x cheaper than 12 points 2 KB apart, and 128 adjacent words
+        sustain 129 000 values/s. Point count costs stream CPU, not sampling rate: the core thread
+        is flat at 3-5 %% whether you sample 1 point or 128.
 
         Only globals and statics can be sampled - a frame local lives in a register and needs a
         halted target. Names need symbols: call ``load_symbols`` first, or have a VS Code debug

@@ -227,42 +227,113 @@ fn far_apart_points_stay_separate_and_nothing_between_them_is_read() {
 }
 
 #[test]
-fn a_tick_over_the_packet_budget_is_truncated_and_reported() {
+fn a_tick_over_the_packet_budget_is_truncated_and_shared_out_fairly() {
     let s = server();
     let t0 = Instant::now();
     with_sim(&s, |sim| sim.limits = BatchLimits { max_num_rw: 2, ..BatchLimits::default() });
-    let (id, rx) = open(&s, 256, t0);
-    // 40 points, each its own run (a 16-byte stride leaves a gap).
-    let pts: Vec<PointCfg> = (0..40).map(|i| PointCfg::new(A + 16 * i, 4, Space::Host, 1000)).collect();
+    let (id, rx) = open(&s, 4096, t0);
+    // A stride wider than MAX_POINT_LEN, so no two points can ever share a read however large
+    // the coalescing gap is: this test is about the packet budget, not about merging.
+    const STRIDE: u32 = 2048;
+    let pts: Vec<PointCfg> = (0..40).map(|i| PointCfg::new(A + STRIDE * i, 4, Space::Host, 1000)).collect();
     add(&s, id, &pts, t0);
 
     daq::tick_at(&s.cx(), t0, Some(t0));
     let msgs = drain(&rx);
-    let n: usize = msgs
+    let first: Vec<u32> = msgs
         .iter()
-        .map(|m| match m {
-            DaqMsg::Samples { values, .. } => values.len(),
-            _ => 0,
+        .flat_map(|m| match m {
+            DaqMsg::Samples { values, .. } => values.iter().map(|(p, _)| *p).collect(),
+            _ => Vec::new(),
         })
-        .sum();
+        .collect();
     // max_num_rw 2 * MAX_PKTS_PER_TICK 2 = 4 runs per tick.
-    assert_eq!(n, 4, "the tick is capped: {msgs:?}");
+    assert_eq!(first.len(), 4, "the tick is capped: {msgs:?}");
     assert!(
         msgs.iter().any(|m| matches!(m, DaqMsg::State { state: DaqState::Stalled, .. })),
         "the client is told it is stalled: {msgs:?}"
     );
 
-    // The skipped points advanced too, so the next tick does not replay them.
+    // The budget must not fall on the same points every tick. Before rotation the four lowest
+    // addresses were served forever and everything above them starved - and since peripherals
+    // sort last, those were the points most likely to be lost.
     let at = t0 + Duration::from_millis(1);
     daq::tick_at(&s.cx(), at, Some(at));
-    let n2: usize = drain(&rx)
+    let second: Vec<u32> = drain(&rx)
         .iter()
-        .map(|m| match m {
-            DaqMsg::Samples { values, .. } => values.len(),
-            _ => 0,
+        .flat_map(|m| match m {
+            DaqMsg::Samples { values, .. } => values.iter().map(|(p, _)| *p).collect(),
+            _ => Vec::new(),
         })
-        .sum();
-    assert_eq!(n2, 4);
+        .collect();
+    assert_eq!(second.len(), 4, "still capped");
+    assert!(second.iter().all(|p| !first.contains(p)), "a different four: {first:?} then {second:?}");
+
+    // Over enough ticks every point gets its turn, and the skipped ones are never replayed as a
+    // burst - each tick still costs exactly the budget.
+    let mut seen: Vec<u32> = first.into_iter().chain(second).collect();
+    for k in 2..40u64 {
+        let at = t0 + Duration::from_millis(k);
+        daq::tick_at(&s.cx(), at, Some(at));
+        let got: Vec<u32> = drain(&rx)
+            .iter()
+            .flat_map(|m| match m {
+                DaqMsg::Samples { values, .. } => values.iter().map(|(p, _)| *p).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(got.len(), 4, "every tick costs the budget, no catch-up burst");
+        seen.extend(got);
+    }
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), 40, "every point was served at least once: {} of 40", seen.len());
+}
+
+#[test]
+fn nearby_points_are_folded_into_one_read_but_peripherals_are_not() {
+    let s = server();
+    let t0 = Instant::now();
+    let (id, rx) = open(&s, 256, t0);
+    // Two words 16 bytes apart: reading the 24-byte span costs far less than a second bus
+    // access, so the sampler takes the hole with it.
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 1000), PointCfg::new(A + 16, 4, Space::Host, 1000)], t0);
+    take_reads(&s);
+    daq::tick_at(&s.cx(), t0, Some(t0));
+    assert_eq!(take_reads(&s), vec![(A, 20)], "one read covering both points");
+    assert_eq!(samples(&rx).len(), 2, "and both points still get their own value");
+
+    // The same spacing in peripheral space must NOT be folded: a byte read there that nobody
+    // asked for can clear a flag.
+    const PERI: u32 = 0xF000_1010;
+    let (id2, _rx2) = open(&s, 256, t0);
+    add(&s, id2, &[PointCfg::new(PERI, 4, Space::Host, 1000), PointCfg::new(PERI + 16, 4, Space::Host, 1000)], t0);
+    s.cx().with(|c| c.daq.close(id));
+    take_reads(&s);
+    let at = t0 + Duration::from_millis(1);
+    daq::tick_at(&s.cx(), at, Some(at));
+    assert_eq!(take_reads(&s), vec![(PERI, 4), (PERI + 16, 4)], "two reads, nothing in between");
+}
+
+#[test]
+fn the_coalescing_gap_can_be_turned_off() {
+    let s = server();
+    let t0 = Instant::now();
+    let (id, rx) = open(&s, 256, t0);
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 1000), PointCfg::new(A + 16, 4, Space::Host, 1000)], t0);
+    s.cx().with(|c| c.daq_gap = 0);
+    take_reads(&s);
+    daq::tick_at(&s.cx(), t0, Some(t0));
+    assert_eq!(take_reads(&s), vec![(A, 4), (A + 16, 4)], "gap 0 merges only adjacent points");
+
+    // Adjacent points still merge with the gap off - that reads nothing extra.
+    let _ = drain(&rx);
+    s.cx().with(|c| c.daq.remove_points(id, &[1, 2]).unwrap());
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 1000), PointCfg::new(A + 4, 4, Space::Host, 1000)], t0);
+    take_reads(&s);
+    let at = t0 + Duration::from_millis(1);
+    daq::tick_at(&s.cx(), at, Some(at));
+    assert_eq!(take_reads(&s), vec![(A, 8)]);
 }
 
 #[test]

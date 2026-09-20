@@ -111,6 +111,16 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "daq", |cx, a| {
         match a.get(1).copied() {
             None | Some("status") => {}
+            // How far the sampler may over-read to fold two points into one bus access. A read
+            // costs ~57 us; a byte inside one costs a fraction of that, so a small hole is worth
+            // reading. Never applied in peripheral space, whatever this is set to.
+            Some("gap") => {
+                if let Some(v) = a.get(2) {
+                    let g = num(v)? as u32;
+                    cx.with(|c| c.daq_gap = g);
+                }
+                return Ok(format!("{}", cx.with(|c| c.daq_gap)));
+            }
             // Whether a due point rides in the run-state poll's batch instead of costing its own
             // round trip. On by default; off is here to measure what it is worth.
             Some("merge") => {
@@ -122,12 +132,21 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
             }
             Some(other) => {
                 return Err(format!(
-                    "usage: daq ?status|merge ?0|1?? (sessions are opened on the DAQ WebSocket, not '{other}')"
+                    "usage: daq ?status|gap ?bytes?|merge ?0|1?? (sessions are opened on the DAQ WebSocket, not '{other}')"
                 ))
             }
         }
         Ok(cx.with(|c| {
             let mut out = Vec::new();
+            // What the probe will take in one packet decides how a tick is split, and therefore
+            // how many scattered points can share a round trip.
+            if let Some(a) = c.adapter.as_ref() {
+                let l = a.limits();
+                out.push(format!(
+                    "probe: {} read(s) per packet, {} B request, {} B response; coalescing gap {} B",
+                    l.max_num_rw, l.max_rq, l.max_rsp, c.daq_gap
+                ));
+            }
             for s in c.daq.sessions() {
                 let st = s.stats();
                 out.push(format!("session {}: {} point(s), {} batch(es), {} dropped, {} missed", s.id, st.points, st.seq, st.dropped, st.missed));

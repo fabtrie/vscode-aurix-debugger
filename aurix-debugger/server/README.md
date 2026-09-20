@@ -190,23 +190,59 @@ Samples are columnar: `points[i]` pairs with `values[i]`, and a tick carries onl
 
   The rate needs no tuning — it is within 1.5 % of the request at every setting. Raising `polling_period` only tightens the spacing, and it plateaus around 2 ms because the residual there is the ~512 µs sleep quantum, not the poll. The cost of raising it is that a halt takes correspondingly longer to be noticed by every frontend, so it is left at 10 ms.
 
-- **What it costs per tick.** One round trip is ~124 µs at `adapter speed 30000`; each *additional non-adjacent* read in the tick adds ~55 µs; adjacent points coalesce into a single read and are therefore almost free. Measured, application running:
+- **What a tick costs is bus accesses, not points.** Timed flat out on a TC377 over a miniWiggler, one tick of N separate 4-byte reads against one read of N words:
 
-  | points | achieved | values/s |
+  | N | N scattered reads | µs per access | one block of N words | µs per word |
+  |---|---|---|---|---|
+  | 1 | 123 µs | — | 123 µs | — |
+  | 8 | 525 µs | 57.4 | 124 µs | 0.12 |
+  | 16 | 983 µs | 57.3 | 126 µs | 0.18 |
+  | 32 | 1969 µs | 59.5 | 149 µs | 0.84 |
+  | 64 | 3957 µs | 60.9 | 196 µs | 1.17 |
+
+  **~123 µs for the first access, ~57 µs for each one after it, and well under a microsecond per extra byte inside a read already being made.** The per-access figure is flat across the probe's 32-reads-per-packet boundary (`daq` prints it), so it is not packet count, not USB turnaround and not anything the host schedules — it is spent inside the probe. Host-side reordering or pipelining cannot recover it; all due reads already travel in one batch, and `tas::client::execute` already keeps 8 packets in flight.
+
+- **Coalescing gap.** Because one avoided access pays for about a hundred bytes, the sampler reads small holes rather than making a second access. `daq gap <bytes>` sets how far it may reach; the default is 96 B. Twelve points, timed flat out:
+
+  | hole between points | gap 0 | gap 96 | |
+  |---|---|---|---|
+  | 4 B | 740 µs | 189 µs | **3.9×** |
+  | 12 B | 735 µs | 235 µs | **3.1×** |
+  | 28 B | 737 µs | 306 µs | **2.4×** |
+  | 60 B | 740 µs | 450 µs | **1.7×** |
+  | 92 B | 739 µs | 598 µs | 1.2× |
+  | 124 B | 753 µs | 756 µs | 1.0× |
+
+  Break-even is a hole of ~105 B, so the default sits just below it and merging can never lose. **The gap is never applied in peripheral space** (`0xF0000000`+), where reading a byte nobody asked for can clear a flag; points that are genuinely adjacent still merge there, because that reads only what was asked for. `daq gap 0` restores the old strictly-adjacent behaviour.
+
+  What this buys at 1 kHz, for variables 32 B apart as a struct would lay them out:
+
+  | points | 32 B apart | 2 KB apart (cannot merge) |
   |---|---|---|
-  | 1 | 6340 Hz | 6 300 |
-  | 4 scattered | 2630 Hz | 10 500 |
-  | 16 scattered | 770 Hz | 12 300 |
-  | 16 adjacent | 6020 Hz | 96 000 |
-  | 64 adjacent | 3610 Hz | 231 000 |
+  | 12 | 1022 /s | 1011 /s |
+  | 24 | 1013 /s | 579 /s |
+  | 48 | 933 /s | 300 /s |
 
-  So **1 kHz is comfortably met**, and a contiguous block sustains over 200 000 values/s. These are probe ceilings measured without the scheduler in the way; the delivered rate is capped at ~1.5 kHz by the sleep quantum regardless. A stall that does stop the sampler - flashing, a long Tcl script, a reset - is not hidden: it is counted in periods and reported as a `gap`.
+  So laying the sampled variables out together moves the 1 kHz ceiling from ~12 points to ~40. Past that the limit stops being accesses and becomes bytes: a 96-point span 32 B apart is 3 KB per tick, of which seven eighths is hole. Tight layouts stay far better — 128 *adjacent* words is 512 B and sustains 129 000 values/s.
+
+  A stall that does stop the sampler — flashing, a long Tcl script, a reset — is not hidden: it is counted in periods and reported as a `gap`.
+
+- **Adding points does not cost the sampler.** Per-thread CPU at 1 kHz, raw hex:
+
+  | shape | values/s | core thread | decoder thread | WS runtime |
+  |---|---|---|---|---|
+  | 1 × 4 B | 1 009 | 3.8 % | 0.5 % | 3.3 % |
+  | 16 × 32 B | 16 166 | 3.3 % | 4.6 % | 3.3 % |
+  | 64 × 8 B | 64 874 | 4.8 % | 6.9 % | 2.8 % |
+  | 128 × 4 B | 129 879 | 4.6 % | 8.9 % | 4.3 % |
+
+  **The core thread is flat** at 3–5 % however many points there are — it only moves bytes. Everything that grows is downstream, on the per-session decoder thread and the socket. Typed decoding is not the cost either (`decode: true` is ~1 point of CPU more than raw hex); it is JSON construction. So point count costs stream CPU, never sampling quality.
 
 - **Effect on everyone else.** A REST `read_memory` measured 0.54 ms median with no session, 0.54 ms at 1 kHz, 0.59 ms at 5 kHz, and 1.14 ms with 16 scattered points at 5 kHz — i.e. the worst case adds about one DAQ batch, as intended. The 10 ms run-state poll of a 20-target configuration is *not* the limit either: raising `polling_period` to 100 ms changed the achieved rate by under 10 %.
 - **`mode`** is `every_tick` (default) or `on_change`. **On-change saves stream bandwidth, not probe traffic** — the point is still read every period, because that is how a change is noticed. The first read is always delivered as a baseline, and the baseline is dropped on a device reset and on `resume`, so a client never keeps believing a stale value. A quiet `on_change` point sends nothing at all; set `resend_after_us` if a plot needs a floor on the gap. For a bit field the comparison is masked to the field's own bits, so a neighbour in the same storage word does not trigger it.
 - **Encodings** come from the DWARF type: `int`, `uint`, `float`, `bool`, `enum` (the enumerator name, or the number if it matches none) and `hex` for aggregates, unknown types and anything over 8 bytes. JSON has no NaN, so a non-finite float is the string `nan`, `inf` or `-inf` rather than `null`; a `uint` above 2^53 is exact in the frame but loses precision in `JSON.parse`, so use `decode: false` for 64-bit counters read by JavaScript.
 - **Only globals and statics.** A frame local lives in a register and exists only while the target is halted, so it is rejected at subscribe time. Names need symbols: `load_symbols`, or an open VS Code debug session. A point that fails to resolve gets an `error` and `interval_us: 0`; the rest of the session still runs.
-- **Backpressure and gaps.** Each session has a bounded queue (`queue`, default 256 ticks). A client that falls behind loses the newest messages and is told how many with `overrun`. Periods lost to a stall are reported as `gap` and never replayed as a burst. Only an interval longer than **four periods** counts: running a little late every tick is what the scheduler corrects for, not loss. At 1 kHz the run-state poll produces a steady trickle (~14 periods/s per point, which is about the gap between the rate asked for and the rate delivered); a burst means something owned the core thread.
+- **Backpressure and gaps.** Each session has a bounded queue (`queue`, default 256 ticks). A client that falls behind loses the newest messages and is told how many with `overrun`. When a tick does not fit the per-tick budget it is truncated and reported as `stalled`, and the points it drops **rotate**, so the budget is shared instead of permanently starving the highest addresses - which is where the peripherals are. Periods lost to a stall are reported as `gap` and never replayed as a burst. Only an interval longer than **four periods** counts: running a little late every tick is what the scheduler corrects for, not loss. At 1 kHz the run-state poll produces a steady trickle (~14 periods/s per point, which is about the gap between the rate asked for and the rate delivered); a burst means something owned the core thread.
 - **Caps.** 8 sessions, 256 points per session, 1024 bytes per point, and per tick at most 8 KB and two response packets. A tick over budget is truncated and reports `state: stalled`; the skipped points keep their advanced deadline.
 
 ```python

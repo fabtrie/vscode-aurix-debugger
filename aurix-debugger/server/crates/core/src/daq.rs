@@ -41,6 +41,22 @@ pub const MAX_POINT_FAILS: u32 = 5;
 pub const DEFAULT_QUEUE: usize = 256;
 /// Backoff after a connection-level batch error, so a dead link is not hammered at 1 kHz.
 pub const RETRY_BACKOFF: Duration = Duration::from_millis(200);
+/// How far past the end of a read the sampler may reach to pull the next point into it, instead
+/// of making a second bus access.
+///
+/// Measured on a TC377 over a miniWiggler: a bus access costs ~123 µs for the first and ~57 µs for
+/// every one after it, while an extra *byte* inside a read already being made costs well under a
+/// microsecond (a 256-byte read is 196 µs against 123 µs for four bytes). So one avoided access
+/// pays for well over a hundred bytes, and reading a small hole nobody asked for is the cheaper
+/// trade. 12 points 16 bytes apart: 765 µs as twelve reads, 229 µs as one.
+///
+/// The break-even was measured at a hole of ~105 bytes: 12 points 92 bytes apart are 1.24x faster
+/// merged, 124 bytes apart 0.92x, i.e. a small loss. The default sits below that so merging can
+/// only help, and it is never applied in peripheral space - see [`coalesce_gap`].
+pub const DEFAULT_COALESCE_GAP: u32 = 96;
+/// Start of the TC3xx peripheral space. A read here can have side effects (clear-on-read), so the
+/// sampler never touches a byte inside it that nobody asked for.
+const PERIPHERAL_BASE: u32 = 0xF000_0000;
 /// An interval this many times the requested period is not the scheduler running late - it is a
 /// stall: a flash run, a long Tcl script, a reset. The controller ignores such an interval instead
 /// of correcting for it, and the sampler reports the ticks it cost as a `Gap`.
@@ -268,6 +284,9 @@ pub struct Registry {
     /// Earliest deadline over all schedulable points. `None`: nothing to do, and the server loop
     /// pays only one `Option` comparison per iteration.
     next_due: Option<Instant>,
+    /// Where the next truncated tick starts reading, so the per-tick budget is shared instead of
+    /// always falling on the same (highest-addressed) points.
+    rotate: usize,
     retry_after: Option<Instant>,
 }
 
@@ -540,6 +559,20 @@ fn changed(last: Option<&Vec<u8>>, new: &[u8], mask: Option<&Vec<u8>>) -> bool {
     }
 }
 
+/// How far a run starting at `run_addr` may reach to swallow a point at `addr..addr + len`.
+///
+/// `gap` everywhere the merged read stays in plain memory, and zero the moment either end is in
+/// peripheral space: a byte read there that nobody asked for can clear a flag. Points that are
+/// genuinely adjacent still merge in peripheral space, because that reads only what was asked for.
+fn coalesce_gap(run_addr: u32, addr: u32, len: u32, gap: u32) -> u32 {
+    let end = addr.saturating_add(len);
+    if run_addr >= PERIPHERAL_BASE || end > PERIPHERAL_BASE {
+        0
+    } else {
+        gap
+    }
+}
+
 /// A run of coalesced reads: one batch operation serving one or more points.
 struct Run {
     addr: u32,
@@ -616,13 +649,21 @@ pub fn queue_due(c: &mut Ctx, now: Instant, b: &mut Batch) -> Option<Plan> {
     let limits = c.adapter.as_ref().map(|a| a.limits()).unwrap_or_default();
     let max_runs = limits.max_num_rw.max(1) * MAX_PKTS_PER_TICK;
 
-    // Sort by address and merge strictly adjacent or overlapping points into one read. The gap is
-    // deliberately zero: reading a word nobody asked for can have side effects on AURIX peripherals.
+    // Sort by address, then merge neighbours into one read. Two points merge when the hole
+    // between them is small enough to be worth reading: see `coalesce_gap`.
     let mut order: Vec<usize> = (0..host.len()).collect();
     order.sort_by_key(|&i| {
         let p = &c.daq.sessions[host[i].0].points[host[i].1];
         (p.addr, p.len)
     });
+    // Truncation must not always fall on the same points. Starting where the last truncated tick
+    // stopped shares the budget round-robin instead of permanently starving the high addresses -
+    // which is where the peripherals are, so they were exactly what got starved.
+    let n_host = order.len();
+    if n_host > 0 {
+        order.rotate_left(c.daq.rotate % n_host);
+    }
+    let gap = c.daq_gap;
     let mut runs: Vec<Run> = Vec::new();
     let mut of_point: Vec<Option<(usize, u32)>> = vec![None; host.len()];
     let mut bytes = 0usize;
@@ -635,7 +676,8 @@ pub fn queue_due(c: &mut Ctx, now: Instant, b: &mut Batch) -> Option<Plan> {
         };
         if let Some(ci) = cur {
             let (ra, rl) = (runs[ci].addr, runs[ci].len);
-            if addr >= ra && addr as u64 <= ra as u64 + rl as u64 {
+            let reach = ra as u64 + rl as u64 + coalesce_gap(ra, addr, len, gap) as u64;
+            if addr >= ra && addr as u64 <= reach {
                 let new_len = ((addr as u64 + len as u64 - ra as u64) as u32).max(rl);
                 let grow = (new_len - rl) as usize;
                 if new_len <= MAX_POINT_LEN && bytes + grow <= MAX_BYTES_PER_TICK {
@@ -648,13 +690,20 @@ pub fn queue_due(c: &mut Ctx, now: Instant, b: &mut Batch) -> Option<Plan> {
         }
         if runs.len() >= max_runs || bytes + len as usize > MAX_BYTES_PER_TICK {
             truncated = true;
-            break;
+            continue;
         }
         bytes += len as usize;
         runs.push(Run { addr, len, handle: 0 });
         cur = Some(runs.len() - 1);
         of_point[i] = Some((runs.len() - 1, 0));
     }
+    // Only a truncated tick rotates; otherwise every tick would start at a different address and
+    // split one run in two for nothing. Resume at the first point this tick could not serve.
+    let unserved = order.iter().position(|&i| of_point[i].is_none());
+    c.daq.rotate = match (truncated, unserved) {
+        (true, Some(k)) => (c.daq.rotate + k) % n_host.max(1),
+        _ => 0,
+    };
 
     // Handles are indices into the whole batch, so they stay valid when the batch is shared.
     for r in runs.iter_mut() {

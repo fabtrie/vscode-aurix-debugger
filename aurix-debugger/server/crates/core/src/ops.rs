@@ -167,9 +167,30 @@ pub fn poll_all(cx: &Cx) {
                 handles.push((i, e.core.poll_queue(&mut b)));
             }
         }
-        let adapter = c.adapter.as_deref_mut().unwrap();
-        let r = if b.is_empty() { Vec::new() } else { adapter.execute(&b)? };
-        let resets = adapter.take_resets();
+        // Anything the sampler already owes goes into this batch rather than costing its own round
+        // trip right behind it. Queued *after* the run-state reads on purpose: a PL0 packet marks
+        // every access after a failing one "consequential", so a bad DAQ address must not be able
+        // to blank the poll it is riding in.
+        let daq_now = Instant::now();
+        let daq = (c.daq_merge && c.daq.next_due().is_some_and(|d| daq_now >= d))
+            .then(|| crate::daq::queue_due(c, daq_now, &mut b))
+            .flatten();
+        let exec = {
+            let adapter = c.adapter.as_deref_mut().unwrap();
+            let r = if b.is_empty() { Ok(Vec::new()) } else { adapter.execute(&b) };
+            r.map(|r| (r, adapter.take_resets()))
+        };
+        let (r, resets) = match exec {
+            Ok(v) => v,
+            Err(e) => {
+                // The plan mutated nothing, so dropping it leaves the points due; tell the sampler
+                // to back off just as its own tick would have.
+                if daq.is_some() {
+                    crate::daq::batch_failed(c, daq_now);
+                }
+                return Err(e);
+            }
+        };
         let mut out = Vec::new();
         let mut failed = Vec::new();
         for (i, ops) in handles {
@@ -198,6 +219,10 @@ pub fn poll_all(cx: &Cx) {
                     failed.push(i);
                 }
             }
+        }
+        // Before the fixups: those can fail with `?`, and the samples are already in hand.
+        if let Some(plan) = daq {
+            crate::daq::apply(c, plan, daq_now, &r, None);
         }
         // Follow-ups needing target access (e.g. MCS breakpoints overwritten by a program reload).
         for i in 0..c.targets.len() {

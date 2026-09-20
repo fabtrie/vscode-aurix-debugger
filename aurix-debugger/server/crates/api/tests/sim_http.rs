@@ -471,6 +471,13 @@ fn rest_mcp_and_tcf_share_one_session() {
     let e = ws.collect("error", 1);
     assert_eq!(e[0]["code"], "busy", "{:?}", e[0]);
 
+    // `pacing` is gone. A script that still sets it is told so, rather than quietly getting the
+    // other behaviour: the removed `exact` mode busy-waited the core thread.
+    ws.send(json!({ "op": "add", "id": 5, "points": [{ "address": "0x70000200", "size": 4, "pacing": "exact" }] }));
+    let e = ws.collect("error", 1);
+    assert_eq!(e[0]["code"], "bad_request", "{:?}", e[0]);
+    assert!(e[0]["message"].as_str().is_some_and(|m| m.contains("pacing")), "{:?}", e[0]);
+
     // The console can see what is sampling, without an API operation (and so without an MCP tool).
     let out = http.ok("POST", "/api/v1/tcl", Some(json!({ "command": "daq" })));
     let out = out["output"].as_str().unwrap();

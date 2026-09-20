@@ -90,9 +90,9 @@ DAQ is deliberately *not* an operation: a streaming session is of no use as an M
 - During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
 - Symbols can be loaded from the API (`load_symbols`), not only by a VS Code debug session. There is one symbol set per core and the last writer wins: a VS Code session started afterwards replaces what the API loaded, and the other way round. `symbols` reports what is loaded.
 
-**Performance.** Every operation is one short job on the core thread. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
+**Performance.** Every operation is one short job on the core thread. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. The core loop always sleeps: it never busy-waits for a DAQ deadline, and the sampler corrects its own rate instead, so 1 kHz costs ~8 % of a core. A point that is due when the run-state poll runs is read by the poll's own batch instead of costing a second round trip. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
 
-**Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it.
+**Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it. The core thread is never busy-waited, so the worst case is probe traffic and one batch of added latency, not a pinned CPU.
 
 Python ([python/](../python)): `pip install -e python`, then:
 
@@ -148,22 +148,65 @@ Server frames:
 
 Samples are columnar: `points[i]` pairs with `values[i]`, and a tick carries only the points that were due. `t_us` is microseconds since `start_wall_ms`, taken after the batch returns.
 
-- **Rates** are rounded up to a 1 ms grid, so 1 kHz is the scheduler's ceiling and every point reports the period it was granted — ask for 400 Hz (2500 µs) and you get 333 Hz (3000 µs). `Server::new` raises the Windows timer resolution to 1 ms, without which nothing below ~15 ms would be honoured.
-- **What the probe actually sustains is lower.** A tick costs one round trip to the TasServer, about 1.4 ms on a miniWiggler at `adapter speed 30000`, *independent of how many points the tick carries* — 16 scattered points measured the same as one, which is the whole point of batching them. Measured on a TC377 TRB board with the application running:
+- **Rates** are rounded up to a 100 µs grid and every point reports the period it was granted. The grid is that fine so ordinary rates come out exact: on a 1 ms grid, 400 Hz (2500 µs) would have been pulled down to 333 Hz.
 
-  | requested | delivered | missed |
+- **A rate is a floor, not a grid.** You get **at least** what you asked for; individual samples land where they land.
+
+  A sleep cannot resolve better than the OS timer. On Windows that is ~512 µs whatever you ask for — a request of 500 µs, 700 µs or 900 µs all return after ~1025 µs, and `timeBeginPeriod(1)` does not change it. Aiming a sleep straight at a 1 ms deadline therefore always lands late and delivers ~20 % under the request.
+
+  So the sampler does not aim at the deadline. It schedules on a *shorter* period than you asked for and corrects that period from the rate it actually achieves. The correction needs no model of where the time went — timer overshoot, probe round trip, a run-state poll that got in the way all show up as one number. Measured at 1 kHz: **~990 samples/s for ~8 % of a core**. Samples land where they land (p95 ~3.5 ms, max ~7 ms at 1 kHz), but each carries its own timestamp, so the *placement* is known even when the *spacing* varies. **Do not assume a fixed step between consecutive values** — use `t_us`.
+
+  **What the correction costs: about 4 % of a core.** Aiming a sleep straight at the deadline with no correction delivers 684 samples/s for 7 %; correcting delivers ~990 for ~11 %.
+
+  **Over-delivering does not make it cheaper.** The core loop flattens out around 9 % whatever the rate, but decoding and writing each sample does not, so total CPU tracks the delivered count: 512 samples/s → 6 %, 1004 → 10 %, 1303 → 13 %, 1859 → 17 %. The cheapest way to satisfy "at least 1 kHz" is therefore to land just above it, which is what the controller does; asking for far more only costs more.
+
+  **The ceiling is ~1.5 kHz**, because a sleep of *any* non-zero length costs a full ~512 µs quantum. Above that the delivered rate stops tracking the request; the probe itself would go to ~6 kHz.
+
+  There used to be a second mode, `pacing: exact`, which held the requested period by busy-waiting the core thread below 3 ms. It was removed: measured at 1 kHz it burned 64–68 % of a core to deliver **fewer** samples (868/s) than the sleeping scheduler does at 8 %, and at 100 Hz and 10 Hz the two were indistinguishable. What it bought — evenly spaced samples and the 1.5–6 kHz band — was never worth a busy core. A `pacing` key in a `subscribe` or `add` frame is now rejected rather than ignored, so a script that still sets it is told.
+
+  `daq` on the console shows, per point, the period asked for, the period the scheduler settled on and the interval actually achieved.
+
+- **Timestamps are trustworthy even when spacing is not.** Checked against the target's own STM clock (`0xF0001010`, 10 ns/tick) sampled in the same batch: the host timestamps track it to within 25 ppm over a run.
+
+- **The run-state poll is merged into the sampler.** `poll_all` of a 20-target configuration (3 cores, HSM, 16 MCS channels) runs every `polling_period` (10 ms) and holds the core thread for ~1.4 ms while its batch is in flight. Any DAQ point that is already due when it starts is queued into *that* batch rather than costing a second round trip right behind it. Measured at 1 kHz, `daq merge 0` versus `1` back to back:
+
+  | 1 kHz | merge off | merge on |
   |---|---|---|
-  | ≤ 200 Hz | exact | none |
-  | 500 Hz | ~460 Hz | some |
-  | 1 kHz | ~650 Hz | ~350/s |
+  | delivered | 837–879 samples/s | **989–996 samples/s** |
+  | core thread | 7–9 % | 8–10 % |
 
-  So **~200 Hz per session is the rate you can count on, and ~700 Hz is the hard ceiling**. Asking for more is not silently downgraded: the ticks that could not be served are counted and reported as `gap`, and 649 delivered plus 353/s missed adds back up to the 1000 that was asked for. Sample several signals in one session rather than opening a session per signal — the second costs a round trip, the first is free.
+  At 100 Hz and 10 Hz it makes no measurable difference either way: a DAQ deadline rarely lands inside a poll, and 1.4 ms is a small part of a 10 ms period.
 
-- **On a 20-target configuration** (3 cores, HSM, 16 MCS channels) the 10 ms run-state poll is *not* what limits DAQ: raising `polling_period` to 100 ms moved the achieved rate only from 695 to 743 Hz.
+  The DAQ reads are queued *after* the run-state reads on purpose. A PL0 packet marks every access after a failing one "consequential", so a bad DAQ address can never blank the poll it is riding in — and DAQ read errors never reach `mark_poll_failed`. `daq merge 0` on the console turns it off for a comparison.
+
+  **What is left is the poll's own duration**, and it shows up as jitter rather than as a lower rate — the controller schedules around it. Sweeping `polling_period` at 1 kHz:
+
+  | `polling_period` | delivered | p95 spacing |
+  |---|---|---|
+  | 10 ms (default) | 985 samples/s | 3525 µs |
+  | 20 ms | 987 | 2501 µs |
+  | 50 ms | 999 | 2085 µs |
+  | 200 ms | 1000 | 2054 µs |
+
+  The rate needs no tuning — it is within 1.5 % of the request at every setting. Raising `polling_period` only tightens the spacing, and it plateaus around 2 ms because the residual there is the ~512 µs sleep quantum, not the poll. The cost of raising it is that a halt takes correspondingly longer to be noticed by every frontend, so it is left at 10 ms.
+
+- **What it costs per tick.** One round trip is ~124 µs at `adapter speed 30000`; each *additional non-adjacent* read in the tick adds ~55 µs; adjacent points coalesce into a single read and are therefore almost free. Measured, application running:
+
+  | points | achieved | values/s |
+  |---|---|---|
+  | 1 | 6340 Hz | 6 300 |
+  | 4 scattered | 2630 Hz | 10 500 |
+  | 16 scattered | 770 Hz | 12 300 |
+  | 16 adjacent | 6020 Hz | 96 000 |
+  | 64 adjacent | 3610 Hz | 231 000 |
+
+  So **1 kHz is comfortably met**, and a contiguous block sustains over 200 000 values/s. These are probe ceilings measured without the scheduler in the way; the delivered rate is capped at ~1.5 kHz by the sleep quantum regardless. A stall that does stop the sampler - flashing, a long Tcl script, a reset - is not hidden: it is counted in periods and reported as a `gap`.
+
+- **Effect on everyone else.** A REST `read_memory` measured 0.54 ms median with no session, 0.54 ms at 1 kHz, 0.59 ms at 5 kHz, and 1.14 ms with 16 scattered points at 5 kHz — i.e. the worst case adds about one DAQ batch, as intended. The 10 ms run-state poll of a 20-target configuration is *not* the limit either: raising `polling_period` to 100 ms changed the achieved rate by under 10 %.
 - **`mode`** is `every_tick` (default) or `on_change`. **On-change saves stream bandwidth, not probe traffic** — the point is still read every period, because that is how a change is noticed. The first read is always delivered as a baseline, and the baseline is dropped on a device reset and on `resume`, so a client never keeps believing a stale value. A quiet `on_change` point sends nothing at all; set `resend_after_us` if a plot needs a floor on the gap. For a bit field the comparison is masked to the field's own bits, so a neighbour in the same storage word does not trigger it.
 - **Encodings** come from the DWARF type: `int`, `uint`, `float`, `bool`, `enum` (the enumerator name, or the number if it matches none) and `hex` for aggregates, unknown types and anything over 8 bytes. JSON has no NaN, so a non-finite float is the string `nan`, `inf` or `-inf` rather than `null`; a `uint` above 2^53 is exact in the frame but loses precision in `JSON.parse`, so use `decode: false` for 64-bit counters read by JavaScript.
 - **Only globals and statics.** A frame local lives in a register and exists only while the target is halted, so it is rejected at subscribe time. Names need symbols: `load_symbols`, or an open VS Code debug session. A point that fails to resolve gets an `error` and `interval_us: 0`; the rest of the session still runs.
-- **Backpressure and gaps.** Each session has a bounded queue (`queue`, default 256 ticks). A client that falls behind loses the newest messages and is told how many with `overrun`. Ticks the core thread could not serve at all — flashing, a long Tcl script — are reported once as `gap`, never replayed as a burst.
+- **Backpressure and gaps.** Each session has a bounded queue (`queue`, default 256 ticks). A client that falls behind loses the newest messages and is told how many with `overrun`. Periods lost to a stall are reported as `gap` and never replayed as a burst. Only an interval longer than **four periods** counts: running a little late every tick is what the scheduler corrects for, not loss. At 1 kHz the run-state poll produces a steady trickle (~14 periods/s per point, which is about the gap between the rate asked for and the rate delivered); a burst means something owned the core thread.
 - **Caps.** 8 sessions, 256 points per session, 1024 bytes per point, and per tick at most 8 KB and two response packets. A tick over budget is truncated and reports `state: stalled`; the skipped points keep their advanced deadline.
 
 ```python

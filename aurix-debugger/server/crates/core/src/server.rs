@@ -125,21 +125,33 @@ impl Server {
             if stop {
                 break;
             }
+            // The loop always sleeps. A sleep cannot resolve better than the OS timer tick
+            // (~512 us on Windows even with timeBeginPeriod(1)), so a deadline shorter than that
+            // is always met late - which is exactly what the sampler's own controller corrects
+            // for, by scheduling short and watching what comes out. Busy-waiting here would buy
+            // even spacing for about eight times the CPU, and it is not worth it: at 1 kHz the
+            // sleeping loop delivered *more* samples (989/s) than the spinning one (868/s).
             let wait = deadline(next_poll, daq_due).saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(wait) {
                 Ok(job) => job(&cx),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
-            // DAQ first: its deadline must not be pushed out by the run-state poll's round trip.
-            let now = Instant::now();
-            if cx.with(|c| c.daq.next_due().is_some_and(|d| now >= d)) {
-                daq::tick(&cx, now);
-            }
+            // The run-state poll goes first when it is due, because it carries any DAQ point that
+            // is due with it: one round trip instead of two, and the sample lands at the front of
+            // the poll's batch instead of queueing behind it. That used to be the other way round
+            // precisely because the poll pushed the deadline out - merging is what removed the
+            // reason.
             if Instant::now() >= next_poll {
                 ops::poll_all(&cx);
                 let period = Duration::from_millis(cx.with(|c| c.poll_period_ms).max(1));
                 next_poll = Instant::now() + period;
+            }
+            // Whatever the poll did not take: it only runs once a period, and it returns early
+            // when polling is disabled or the device is not up, so this stays the primary path.
+            let now = Instant::now();
+            if cx.with(|c| c.daq.next_due().is_some_and(|d| now >= d)) {
+                daq::tick(&cx, now);
             }
         }
         cx.with(|c| {

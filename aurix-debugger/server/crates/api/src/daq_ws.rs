@@ -111,6 +111,16 @@ fn mode_name(m: SampleMode) -> &'static str {
     }
 }
 
+/// `pacing` is gone: sampling always delivers at least the requested rate, because the `exact`
+/// alternative busy-waited the core thread to deliver *fewer* samples. Rejected rather than
+/// ignored, so a script that still sets it is told instead of quietly getting something else.
+fn reject_pacing(v: &serde_json::Map<String, Value>) -> Result<(), String> {
+    match v.contains_key("pacing") {
+        false => Ok(()),
+        true => Err("`pacing` was removed; every point now delivers at least the rate asked for".into()),
+    }
+}
+
 fn parse_mode(v: Option<&Value>, dflt: SampleMode) -> Result<SampleMode, String> {
     match v.and_then(Value::as_str) {
         None => Ok(dflt),
@@ -137,6 +147,7 @@ fn parse_addr(v: &Value) -> Option<u32> {
 /// One point of a `subscribe` or `add` frame.
 fn parse_spec(v: &Value, dflt_mode: SampleMode, dflt_interval: u32) -> Result<Spec, String> {
     let o = v.as_object().ok_or("each point must be an object")?;
+    reject_pacing(o)?;
     let interval_us = match (o.get("interval_us").and_then(Value::as_u64), o.get("rate_hz").and_then(Value::as_f64)) {
         (Some(_), Some(_)) => return Err("give either `interval_us` or `rate_hz`, not both".into()),
         (Some(us), None) => us as u32,
@@ -354,6 +365,9 @@ fn handle_op(api: &Arc<CoreApi>, state: &mut State, op: &str, v: &Value, req_id:
                 Ok(m) => m,
                 Err(e) => return err_frame(req_id, "bad_request", e),
             };
+            if let Err(e) = v.as_object().map_or(Ok(()), reject_pacing) {
+                return err_frame(req_id, "bad_request", e);
+            }
             let dflt_interval = v.get("interval_us").and_then(Value::as_u64).unwrap_or(10_000) as u32;
             let specs: Vec<Spec> = match v.get("points").and_then(Value::as_array) {
                 Some(a) => {

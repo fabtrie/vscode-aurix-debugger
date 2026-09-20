@@ -19,7 +19,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant, SystemTime};
 
-use tas::Batch;
+use tas::{Batch, OpResult};
 
 use crate::ctx::{Ctx, Cx};
 use crate::error::{Error, Result};
@@ -28,7 +28,7 @@ pub type SessionId = u64;
 pub type PointId = u32;
 
 /// Shortest period a point can be given, and the grid every period is rounded up to.
-pub const MIN_INTERVAL_US: u32 = 1_000;
+pub const MIN_INTERVAL_US: u32 = 100;
 pub const MAX_SESSIONS: usize = 8;
 pub const MAX_POINTS_PER_SESSION: usize = 256;
 /// Largest single point, and the longest coalesced read: the TAS block piece size.
@@ -41,6 +41,10 @@ pub const MAX_POINT_FAILS: u32 = 5;
 pub const DEFAULT_QUEUE: usize = 256;
 /// Backoff after a connection-level batch error, so a dead link is not hammered at 1 kHz.
 pub const RETRY_BACKOFF: Duration = Duration::from_millis(200);
+/// An interval this many times the requested period is not the scheduler running late - it is a
+/// stall: a flash run, a long Tcl script, a reset. The controller ignores such an interval instead
+/// of correcting for it, and the sampler reports the ticks it cost as a `Gap`.
+const STALL_PERIODS: u32 = 4;
 /// Report a `Gap` once a session missed this many of its own ticks.
 const GAP_REPORT_TICKS: u64 = 3;
 
@@ -104,8 +108,15 @@ pub struct Point {
     pub addr: u32,
     pub len: u32,
     pub space: Space,
+    /// The period the client asked for.
     pub period: Duration,
     pub next_due: Instant,
+    /// The period the scheduler actually uses, driven down from `period` until the *delivered*
+    /// rate reaches the request. See [`retune`].
+    eff: Duration,
+    /// Smoothed interval actually achieved, which is what the correction closes the loop on.
+    achieved: Option<Duration>,
+    last_tick: Option<Instant>,
     pub mode: SampleMode,
     pub cmp_mask: Option<Vec<u8>>,
     pub resend_after: Option<Duration>,
@@ -120,6 +131,17 @@ pub struct Point {
 impl Point {
     pub fn interval_us(&self) -> u32 {
         self.period.as_micros() as u32
+    }
+
+    /// The period the scheduler settled on, which is shorter than the one asked for by however
+    /// much the wait overshoots.
+    pub fn eff_us(&self) -> u32 {
+        self.eff.as_micros() as u32
+    }
+
+    /// Smoothed interval actually achieved, once there is one.
+    pub fn achieved_us(&self) -> Option<u32> {
+        self.achieved.map(|d| d.as_micros() as u32)
     }
 
     /// Forgets the change-detection baseline, so the next read is delivered.
@@ -333,6 +355,10 @@ impl Registry {
                 space: cfg.space,
                 period: Duration::from_micros(interval_us as u64),
                 next_due: phase(s.epoch, now, interval_us),
+                // Start at the requested period and let retune() find the shorter one it needs.
+                eff: Duration::from_micros(interval_us as u64),
+                achieved: None,
+                last_tick: None,
                 mode: cfg.mode,
                 cmp_mask: cfg.cmp_mask.clone(),
                 resend_after: (cfg.resend_after_us > 0).then(|| Duration::from_micros(cfg.resend_after_us as u64)),
@@ -400,12 +426,8 @@ impl Registry {
     /// Recomputes the cached deadline and reaps sessions whose consumer is gone.
     fn reseat(&mut self) {
         self.sessions.retain(|s| !s.closing);
-        self.next_due = self
-            .sessions
-            .iter()
-            .filter(|s| !s.paused)
-            .flat_map(|s| s.points.iter().filter(|p| !p.muted).map(|p| p.next_due))
-            .min();
+        let live = self.sessions.iter().filter(|s| !s.paused).flat_map(|s| s.points.iter().filter(|p| !p.muted));
+        self.next_due = live.map(|p| p.next_due).min();
         if let (Some(due), Some(retry)) = (self.next_due, self.retry_after) {
             self.next_due = Some(due.max(retry));
         }
@@ -456,17 +478,56 @@ pub fn on_reset(c: &mut Ctx, now: Instant) {
     c.daq.reseat();
 }
 
-/// Advances a point past `now`, returning the ticks that were skipped. Deadlines are absolute, so
-/// the long-run rate stays exact; a stall produces a gap and never a burst of catch-up samples.
+/// Re-aims a point from the interval it actually achieved.
+///
+/// Everything between the deadline and the sample - the timer overshoot, the probe round trip, a
+/// run-state poll that got in the way - shows up as one number here, so the correction needs no
+/// model of any of them. Schedule short, watch what comes out, close the gap.
+///
+/// Returns the interval that was measured, or `None` on the first tick and after a stall.
+fn retune(p: &mut Point, now: Instant) -> Option<Duration> {
+    let prev = p.last_tick.replace(now)?;
+    let actual = now.saturating_duration_since(prev);
+    // Ignore an interval that is orders out: a flash run or a reset, not the steady state. It is
+    // reported as a gap instead of being corrected for.
+    if actual > p.period * STALL_PERIODS {
+        return None;
+    }
+    let a = match p.achieved {
+        Some(e) => (e * 7 + actual) / 8,
+        None => actual,
+    };
+    p.achieved = Some(a);
+    let (target, got) = (p.period.as_micros() as i64, a.as_micros().max(1) as i64);
+    let eff = p.eff.as_micros() as i64;
+    // Proportional, damped by four, so a noisy interval cannot make the period oscillate.
+    let step = (got - target) / 4;
+    let next = (eff - step).clamp(MIN_INTERVAL_US as i64, target);
+    p.eff = Duration::from_micros(next as u64);
+    Some(actual)
+}
+
+/// Advances a point past `now`, returning the periods a stall cost. Deadlines are absolute, so the
+/// long-run rate stays steady; a stall produces a gap and never a burst of catch-up samples.
 fn advance(p: &mut Point, now: Instant) -> u64 {
-    p.next_due += p.period;
+    let prev = p.last_tick;
+    let steady = retune(p, now).is_some();
+    p.next_due += p.eff;
     if p.next_due <= now {
-        let period = p.period.as_nanos().max(1);
-        let missed = ((now - p.next_due).as_nanos() / period) as u64 + 1;
-        p.next_due += p.period * missed.min(u32::MAX as u64) as u32;
-        missed
-    } else {
-        0
+        let period = p.eff.as_nanos().max(1);
+        let skipped = ((now - p.next_due).as_nanos() / period) as u64 + 1;
+        p.next_due += p.eff * skipped.min(u32::MAX as u64) as u32;
+    }
+    // Landing past the *scheduled* deadline is the normal case, not a miss: the schedule is
+    // deliberately shorter than the period the client asked for and retune() is closing the gap.
+    // Only a real stall is worth reporting, and in the client's own periods rather than the
+    // shorter ones the scheduler happens to be running.
+    match prev {
+        Some(prev) if !steady => {
+            let gap = now.saturating_duration_since(prev).as_micros();
+            (gap / p.period.as_micros().max(1)).saturating_sub(1) as u64
+        }
+        _ => 0,
     }
 }
 
@@ -486,14 +547,38 @@ struct Run {
     handle: usize,
 }
 
-fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+/// What one tick decided to read, handed from [`queue_due`] to [`apply`].
+///
+/// The two halves are separate so the reads can ride in a batch somebody else already owns. That
+/// is what [`crate::ops::poll_all`] does: a DAQ point that falls due just as the run-state poll
+/// runs is served by the poll's own round trip instead of waiting behind it.
+pub struct Plan {
+    host: Vec<(usize, usize)>,
+    core_pts: Vec<(usize, usize)>,
+    runs: Vec<Run>,
+    /// Per entry of `host`: the run serving it and the offset into that run. `None` once the
+    /// per-tick budget ran out.
+    of_point: Vec<Option<(usize, u32)>>,
+    truncated: bool,
+}
+
+/// Queues the reads every due point needs into `b`, returning what [`apply`] has to do with the
+/// results.
+///
+/// `None` means there is nothing to sample. That covers the backoff and device-unavailable cases
+/// too: they report themselves and reschedule, so the caller has nothing left to do.
+///
+/// A returned `Plan` has mutated nothing - no deadline has moved and no baseline has changed - so
+/// dropping it because the batch failed simply leaves the points due and the next tick retries.
+/// That is what makes it safe to hand these reads to a batch whose owner has its own error paths.
+pub fn queue_due(c: &mut Ctx, now: Instant, b: &mut Batch) -> Option<Plan> {
     if c.daq.sessions.is_empty() {
         c.daq.reseat();
-        return;
+        return None;
     }
     if let Some(t) = c.daq.retry_after {
         if now < t {
-            return;
+            return None;
         }
         c.daq.retry_after = None;
     }
@@ -503,7 +588,7 @@ fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
         }
         c.daq.retry_after = Some(now + RETRY_BACKOFF);
         c.daq.reseat();
-        return;
+        return None;
     }
 
     // Everything due this tick, split by memory view.
@@ -525,7 +610,7 @@ fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
     }
     if host.is_empty() && core_pts.is_empty() {
         c.daq.reseat();
-        return;
+        return None;
     }
 
     let limits = c.adapter.as_ref().map(|a| a.limits()).unwrap_or_default();
@@ -571,35 +656,20 @@ fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
         of_point[i] = Some((runs.len() - 1, 0));
     }
 
-    // One batch for all host points.
-    let mut b = Batch::new();
+    // Handles are indices into the whole batch, so they stay valid when the batch is shared.
     for r in runs.iter_mut() {
         r.handle = b.read(r.addr as u64, r.len as usize).0;
     }
-    let exec = if b.is_empty() {
-        Ok(Vec::new())
-    } else {
-        match c.adapter.as_deref_mut() {
-            Some(a) => a.execute(&b),
-            None => Err(Error::Usage("the debug adapter disappeared".into())),
-        }
-    };
-    let results = match exec {
-        Ok(r) => r,
-        Err(e) => {
-            // Connection-level failure: back off instead of retrying at the point rate.
-            crate::log_debug!("DAQ batch failed: {e}");
-            for s in &mut c.daq.sessions {
-                s.set_state(DaqState::Unavailable, now);
-                for p in &mut s.points {
-                    advance(p, now);
-                }
-            }
-            c.daq.retry_after = Some(now + RETRY_BACKOFF);
-            c.daq.reseat();
-            return;
-        }
-    };
+    Some(Plan { host, core_pts, runs, of_point, truncated })
+}
+
+/// Turns the results of the batch [`queue_due`] filled into delivered samples: change filter,
+/// error accounting, deadlines.
+///
+/// `stamp` is the sample timestamp; `None` reads the clock here, which is right after the batch
+/// returned. Tests pass their simulated instant so the output is deterministic.
+pub fn apply(c: &mut Ctx, plan: Plan, now: Instant, results: &[OpResult], stamp: Option<Instant>) {
+    let Plan { host, core_pts, runs, of_point, truncated } = plan;
 
     // Core-relative points cannot join the batch: the HSM window and MCS program RAM need their
     // own access sequence. Each one costs a round trip, so keep them slow.
@@ -619,7 +689,6 @@ fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
 
     let at = stamp.unwrap_or_else(Instant::now);
 
-    // Apply: change filter, error accounting, deadlines.
     let n = c.daq.sessions.len();
     let mut per_session: Vec<Vec<Sample>> = (0..n).map(|_| Vec::new()).collect();
     let mut missed_by_session: Vec<u64> = vec![0; n];
@@ -701,6 +770,40 @@ fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
     c.daq.reseat();
 }
 
+/// Backs every session off after a connection-level batch failure, so a dead link is not hammered
+/// at the point rate.
+pub fn batch_failed(c: &mut Ctx, now: Instant) {
+    for s in &mut c.daq.sessions {
+        s.set_state(DaqState::Unavailable, now);
+        for p in &mut s.points {
+            advance(p, now);
+        }
+    }
+    c.daq.retry_after = Some(now + RETRY_BACKOFF);
+    c.daq.reseat();
+}
+
+fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+    let mut b = Batch::new();
+    let Some(plan) = queue_due(c, now, &mut b) else { return };
+    let exec = if b.is_empty() {
+        Ok(Vec::new())
+    } else {
+        match c.adapter.as_deref_mut() {
+            Some(a) => a.execute(&b),
+            None => Err(Error::Usage("the debug adapter disappeared".into())),
+        }
+    };
+    match exec {
+        Ok(results) => apply(c, plan, now, &results, stamp),
+        Err(e) => {
+            // Connection-level failure: back off instead of retrying at the point rate.
+            crate::log_debug!("DAQ batch failed: {e}");
+            batch_failed(c, now);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +816,9 @@ mod tests {
             space: Space::Host,
             period: Duration::from_millis(period_ms),
             next_due: t0,
+            eff: Duration::from_millis(period_ms),
+            achieved: None,
+            last_tick: None,
             mode: SampleMode::EveryTick,
             cmp_mask: None,
             resend_after: None,
@@ -728,8 +834,13 @@ mod tests {
         assert_eq!(quantize(0), MIN_INTERVAL_US);
         assert_eq!(quantize(1), MIN_INTERVAL_US);
         assert_eq!(quantize(1000), 1000);
-        assert_eq!(quantize(1001), 2000);
+        assert_eq!(quantize(1001), 1100);
         assert_eq!(quantize(9999), 10000);
+        // The grid is what a requested rate is really rounded to. It is 100 us rather than 1 ms
+        // so that ordinary rates come out exact instead of being quietly pulled down: 400 Hz is
+        // 2500 us, which on a 1 ms grid would have become 3000 us, i.e. 333 Hz.
+        assert_eq!(quantize(1_000_000 / 400), 2500);
+        assert_eq!(quantize(1_000_000 / 3), 333_400);
     }
 
     #[test]

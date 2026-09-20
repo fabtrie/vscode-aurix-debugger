@@ -156,6 +156,9 @@ pub struct SimAdapter {
     pub writes: Vec<(u32, u32)>,
     /// Host-space reads, as (address, length): lets tests assert how a batch was coalesced.
     pub reads: Vec<(u32, usize)>,
+    /// Batches executed: one per probe round trip, which is what merging DAQ into the run-state
+    /// poll is meant to save.
+    pub execs: usize,
     /// Packet limits reported to the DAQ sampler; tests shrink this to force truncation.
     pub limits: BatchLimits,
     pub halted: [bool; NUM_CORES],
@@ -185,6 +188,7 @@ impl SimAdapter {
             mem: HashMap::new(),
             writes: Vec::new(),
             reads: Vec::new(),
+            execs: 0,
             limits: BatchLimits::default(),
             halted: [false; NUM_CORES],
             susp: [false; NUM_CORES],
@@ -375,6 +379,7 @@ impl Adapter for SimAdapter {
     }
 
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        self.execs += 1;
         let mut out = Vec::with_capacity(batch.len());
         for op in batch.iter() {
             if let Some(r) = self.hsm_access(&op).or_else(|| self.gtm_access(&op)) {

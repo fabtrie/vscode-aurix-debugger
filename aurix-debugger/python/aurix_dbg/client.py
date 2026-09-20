@@ -37,7 +37,13 @@ class Client(GeneratedClient):
         (flash programming, ``wait_state``)."""
         self.url = url.rstrip("/")
         self.timeout = timeout
-        self.session = session or requests.Session()
+        if session is None:
+            session = requests.Session()
+            # The debug server is local, so never look for a proxy. Left on (the requests
+            # default), every single call pays a Windows proxy-configuration lookup: measured
+            # 21 ms versus 0.5 ms here. Pass your own `session` to get the usual behaviour.
+            session.trust_env = False
+        self.session = session
 
     def _call(self, method: str, path: str, query: dict[str, Any] | None, body: dict[str, Any] | None) -> Any:
         r = self.session.request(method, self.url + path, params=query, json=body, timeout=self.timeout)
@@ -71,12 +77,25 @@ class Client(GeneratedClient):
         plus ``rate_hz`` or ``interval_us``, and optionally ``name``, ``target``, ``decode``,
         ``mode`` and ``resend_after_us``. Points without their own rate use ``rate_hz``.
 
-        Rates are rounded up to the server's 1 ms grid; each point reports what it was granted.
-        What the probe sustains is lower than the grid allows: a tick costs one round trip
-        (~1.4 ms on a miniWiggler at 30 MHz) however many points it carries, so count on ~200 Hz
-        per session and expect ~700 Hz at best. Ticks that could not be served are counted in
-        ``DaqStream.missed`` and ``DaqBatch.missed`` rather than hidden. Put several signals in
-        one session instead of opening a session each - extra points in a tick are nearly free.
+        Rates are rounded up to the servers 100 us grid; each point reports what it was granted.
+
+        **A rate is a floor, not a grid.** You get at least what you asked for; individual
+        samples land where they land. An OS sleep cannot resolve better than ~0.5 ms, so the
+        server schedules on a shorter period and corrects it from the rate actually achieved.
+        Measured at 1 kHz: ~990 samples/s for ~8 % of a core, p95 spacing ~3.5 ms. Every sample
+        carries its own timestamp, so the placement is known even when the spacing varies - do
+        not assume a fixed step between consecutive values. The ceiling is ~1.5 kHz, because a
+        sleep of any non-zero length costs a full ~512 us quantum.
+
+        Over-delivering does not save anything: the core loop is flat but decoding each sample is
+        not, so CPU tracks the delivered count (1000/s -> 10 %, 1860/s -> 17 %). Ask for the rate
+        you need.
+
+        The probe is the hard limit either way: a tick costs one round trip (~124 us on a
+        miniWiggler at 30 MHz) plus ~55 us per *non-adjacent* extra read, so one point tops out
+        near 6 kHz while 64 adjacent words still sustain ~230 000 values/s. Prefer few, contiguous
+        points: adjacent addresses coalesce into one read and are nearly free.
+
         Only globals and statics can be sampled - a frame local lives in a register and needs a
         halted target. Names need symbols: call ``load_symbols`` first, or have a VS Code debug
         session open.

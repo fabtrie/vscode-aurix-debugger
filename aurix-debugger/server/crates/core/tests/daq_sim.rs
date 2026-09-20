@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use aurix_core::adapter::BatchLimits;
 use aurix_core::daq::{self, DaqMsg, DaqState, PointCfg, SampleMode, SessionCfg, SessionId, Space};
+use aurix_core::ops;
 use aurix_core::sim::SimAdapter;
 use aurix_core::Server;
 
@@ -412,6 +413,91 @@ fn a_dropped_receiver_stops_the_sampling() {
 }
 
 #[test]
+fn the_schedule_corrects_itself_towards_the_requested_rate() {
+    let s = server();
+    let t0 = Instant::now();
+    let (id, rx) = open(&s, 4096, t0);
+    // 1 kHz asked for.
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 1000)], t0);
+
+    // Simulate what the OS actually does: every tick lands ~400 us later than it was scheduled,
+    // which is why aiming a sleep at the deadline delivers ~30 % under the request.
+    const LATE: Duration = Duration::from_micros(400);
+    let mut now = t0;
+    let mut ticks = 0;
+    let mut last = None;
+    let mut intervals = Vec::new();
+    for _ in 0..400 {
+        let Some(due) = s.cx().with(|c| c.daq.next_due()) else { break };
+        now = due + LATE;
+        daq::tick_at(&s.cx(), now, Some(now));
+        ticks += 1;
+        if let Some(prev) = last.replace(now) {
+            intervals.push(now.duration_since(prev).as_micros() as u64);
+        }
+    }
+    assert!(ticks > 50, "the sampler kept running: {ticks}");
+
+    // Without correction every interval would be period + LATE = 1400 us (714 Hz). The controller
+    // shortens the scheduled period until what comes out is the 1000 us that was asked for.
+    let settled = &intervals[intervals.len() / 2..];
+    let mean: u64 = settled.iter().sum::<u64>() / settled.len() as u64;
+    assert!(
+        (900..=1100).contains(&mean),
+        "delivered interval should settle near the requested 1000 us, got {mean} (first {:?}, last {:?})",
+        &intervals[..3.min(intervals.len())],
+        &settled[settled.len().saturating_sub(3)..]
+    );
+
+    // And it is never *under*-delivering: at least as many samples as the request implies.
+    let span = now.duration_since(t0).as_secs_f64();
+    let rate = ticks as f64 / span;
+    assert!(rate >= 950.0, "at_least must not deliver under the request: {rate:.0} Hz");
+
+    // A point that misses nothing reports no gaps: falling behind is what it is correcting.
+    assert!(!drain(&rx).iter().any(|m| matches!(m, DaqMsg::Gap { .. })), "correcting for lateness is not a gap");
+}
+
+#[test]
+fn steady_lateness_is_corrected_while_a_real_stall_is_reported() {
+    let s = server();
+    let t0 = Instant::now();
+    let (id, rx) = open(&s, 4096, t0);
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 1000)], t0);
+
+    // Running late every tick is the normal case the controller exists for, so it must not be
+    // reported as loss - the client is still getting its rate.
+    const LATE: Duration = Duration::from_micros(400);
+    for _ in 0..200 {
+        let Some(due) = s.cx().with(|c| c.daq.next_due()) else { break };
+        let now = due + LATE;
+        daq::tick_at(&s.cx(), now, Some(now));
+    }
+    let stats = s.cx().with(|c| c.daq.stats(id).unwrap());
+    assert!(stats.seq > 50, "it kept delivering: {stats:?}");
+    assert_eq!(stats.missed, 0, "ordinary lateness is corrected for, not counted as a gap");
+    // The requested period is never rewritten; only the schedule derived from it moves.
+    let (period, eff) = s.cx().with(|c| {
+        let p = &c.daq.get(id).unwrap().points[0];
+        (p.period, p.eff_us())
+    });
+    assert_eq!(period, Duration::from_micros(1000), "the client's own period is reported back unchanged");
+    // A constant offset needs no correction - the interval between ticks *is* the scheduled
+    // period - so the schedule settles back at the request. It may never exceed it.
+    assert!(eff <= 1000, "the schedule never runs slower than the client asked for: {eff} us");
+    let _ = drain(&rx);
+
+    // A stall of many periods is something else, and it is counted.
+    let at = s.cx().with(|c| c.daq.next_due().unwrap()) + Duration::from_millis(100);
+    daq::tick_at(&s.cx(), at, Some(at));
+    let msgs = drain(&rx);
+    let gap = msgs.iter().find_map(|m| match m {
+        DaqMsg::Gap { missed, .. } => Some(*missed),
+        _ => None,
+    });
+    assert!(gap.is_some_and(|g| g >= 90), "a stall is reported as a gap: {msgs:?}");
+}
+#[test]
 fn an_idle_sampler_costs_nothing() {
     let s = server();
     s.cx().with(|c| {
@@ -421,4 +507,95 @@ fn an_idle_sampler_costs_nothing() {
     take_reads(&s);
     daq::tick_at(&s.cx(), Instant::now(), None);
     assert!(take_reads(&s).is_empty(), "no session means no target access at all");
+}
+
+/// Batches executed since the last call: one per probe round trip, which is what merging saves.
+fn take_execs(s: &Server) -> usize {
+    with_sim(s, |sim| std::mem::take(&mut sim.execs))
+}
+
+/// A server with the real board cfg, so `poll_all` has the 20 targets it polls on hardware and
+/// its batch is not empty. The plain `server()` has none, which would make "one batch" trivial.
+fn board_server() -> Server {
+    aurix_core::log::set_debug_level(0);
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap();
+    let path = |p: std::path::PathBuf| p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/");
+    let s = Server::new();
+    s.cx().with(|c| {
+        c.adapter_override = Some("sim".into());
+        c.search_dirs.push(repo.join("third_party/openocd/tcl"));
+    });
+    s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
+    s.interp.eval_global(&format!("script {}", jim::quote(&path(repo.join("tc37x_ocds_init.cfg"))))).unwrap();
+    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("init").unwrap();
+    s
+}
+
+/// Makes a point due right now, without disturbing its error counters.
+fn make_due(s: &Server, id: SessionId, point: u32, interval_us: u32) {
+    s.cx().with(|c| c.daq.set_interval(id, point, interval_us, Instant::now()).unwrap());
+}
+
+#[test]
+fn a_due_point_rides_in_the_run_state_poll_instead_of_its_own_batch() {
+    let s = board_server();
+    let t0 = Instant::now();
+    let (id, rx) = open(&s, 256, t0);
+    // 50 ms, so "due" and "not due" are decided by the test and not by how long a poll took.
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 50_000)], t0);
+    set_mem(&s, A, 0xabcd_1234);
+    // Let the first polls examine the targets, so the counting below sees a steady state.
+    for _ in 0..3 {
+        ops::poll_all(&s.cx());
+    }
+    let _ = drain(&rx);
+    assert!(s.cx().with(|c| c.targets.len()) >= 3, "the cfg must have created targets to poll");
+
+    make_due(&s, id, 1, 50_000);
+    take_execs(&s);
+    take_reads(&s);
+    ops::poll_all(&s.cx());
+    let execs = take_execs(&s);
+    assert!(take_reads(&s).contains(&(A, 4)), "the DAQ read went into the run-state poll's batch");
+    assert_eq!(samples(&rx), vec![(1, 0xabcd_1234)], "and the sample came back out of it");
+
+    // The point cost the poll nothing: without the merge this poll plus the sampler's own tick
+    // would have been two round trips.
+    make_due(&s, id, 1, 50_000);
+    take_execs(&s);
+    ops::poll_all(&s.cx());
+    assert_eq!(take_execs(&s), execs, "a due point adds no round trip to the poll that carries it");
+
+    // Nothing due: the point is never pulled forward just because a poll happens to run.
+    let _ = drain(&rx);
+    take_reads(&s);
+    ops::poll_all(&s.cx());
+    assert!(!take_reads(&s).contains(&(A, 4)), "a point that is not due yet is left alone");
+    assert!(samples(&rx).is_empty());
+}
+
+#[test]
+fn the_sampler_still_runs_when_the_run_state_poll_is_off() {
+    let s = server();
+    let t0 = Instant::now();
+    let (id, rx) = open(&s, 256, t0);
+    add(&s, id, &[PointCfg::new(A, 4, Space::Host, 50_000)], t0);
+    set_mem(&s, A, 0x0f0f_0f0f);
+    ops::poll_all(&s.cx());
+    let _ = drain(&rx);
+
+    // `poll_all` returns before it builds a batch, so the merge cannot fire and the standalone
+    // tick has to carry the session on its own.
+    s.cx().with(|c| c.poll_enabled = false);
+    make_due(&s, id, 1, 50_000);
+    take_execs(&s);
+    ops::poll_all(&s.cx());
+    assert_eq!(take_execs(&s), 0, "polling is off, so nothing was executed");
+    assert!(samples(&rx).is_empty());
+
+    let now = Instant::now();
+    daq::tick_at(&s.cx(), now, Some(now));
+    assert_eq!(take_execs(&s), 1, "the sampler ran its own batch");
+    assert_eq!(samples(&rx), vec![(1, 0x0f0f_0f0f)]);
 }

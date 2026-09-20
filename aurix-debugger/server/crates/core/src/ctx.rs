@@ -65,6 +65,10 @@ pub struct Ctx {
     pub poll_period_ms: u64,
     /// Periodic sampling; idle unless a frontend opened a session.
     pub daq: daq::Registry,
+    /// Let the run-state poll carry the DAQ points that are due, instead of the sampler paying a
+    /// second round trip right behind it (`daq merge <0|1>`). Runtime-settable for the same
+    /// reason a measurement knob is useful at all: so the two can be compared in one session.
+    pub daq_merge: bool,
     pub ports: Ports,
     pub next_bp_id: u32,
     pub initialized: bool,
@@ -101,6 +105,7 @@ impl Ctx {
             poll_enabled: true,
             poll_period_ms: 10,
             daq: daq::Registry::default(),
+            daq_merge: true,
             ports: Ports { bind: "127.0.0.1".into(), telnet: Some(4444), tcf: Some(1534), gdb: None, tcl: None, api: Some(8080) },
             next_bp_id: 1,
             initialized: false,

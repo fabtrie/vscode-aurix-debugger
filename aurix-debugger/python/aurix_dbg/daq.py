@@ -74,8 +74,8 @@ class DaqBatch:
         self.by_id = by_id
         #: Batches the server discarded before this one because this client was too slow.
         self.dropped = dropped
-        #: Ticks the server could not sample before this one - the requested rate was not met,
-        #: or the core thread was busy (flashing, a long Tcl script).
+        #: Periods lost to a stall before this batch: the core thread was blocked for more than
+        #: four periods (flashing, a long Tcl script, a reset, or the run-state poll at 1 kHz).
         self.missed = missed
 
     def __repr__(self) -> str:
@@ -132,8 +132,10 @@ class DaqStream:
         self.latest = {}  # type: Dict[str, Any]
         #: Batches the server dropped in total because this client did not keep up.
         self.dropped = 0
-        #: Ticks the server could not sample at all, in total. A steady count means the requested
-        #: rate is above what the probe sustains; a burst means something blocked the core thread.
+        #: Periods lost to a stall, in total. Only intervals longer than four periods count -
+        #: ordinary lateness is corrected for, not reported. A burst means something owned the
+        #: core thread (flashing, a reset). A steady trickle at 1 kHz is the run-state poll, and
+        #: is roughly the difference between the rate asked for and the rate delivered.
         self.missed = 0
         #: Last reported session state: running, reset, unavailable or stalled.
         self.state = "running"

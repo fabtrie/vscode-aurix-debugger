@@ -111,7 +111,20 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "daq", |cx, a| {
         match a.get(1).copied() {
             None | Some("status") => {}
-            Some(other) => return Err(format!("usage: daq ?status? (read-only; sessions are opened on the DAQ WebSocket, not '{other}')")),
+            // Whether a due point rides in the run-state poll's batch instead of costing its own
+            // round trip. On by default; off is here to measure what it is worth.
+            Some("merge") => {
+                if let Some(v) = a.get(2) {
+                    let on = num(v)? != 0;
+                    cx.with(|c| c.daq_merge = on);
+                }
+                return Ok(format!("{}", cx.with(|c| c.daq_merge as u8)));
+            }
+            Some(other) => {
+                return Err(format!(
+                    "usage: daq ?status|merge ?0|1?? (sessions are opened on the DAQ WebSocket, not '{other}')"
+                ))
+            }
         }
         Ok(cx.with(|c| {
             let mut out = Vec::new();
@@ -128,11 +141,13 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
                         crate::daq::SampleMode::OnChange => "on_change",
                     };
                     out.push(format!(
-                        "  {:3} 0x{:08x} {:4} B every {:6} us  {mode:10} via {space}{}",
+                        "  {:3} 0x{:08x} {:4} B  asked {:6} us  scheduled {:6} us  achieved {:>6}  {mode:10} via {space}{}",
                         p.id,
                         p.addr,
                         p.len,
                         p.interval_us(),
+                        p.eff_us(),
+                        p.achieved_us().map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
                         if p.muted { "  MUTED" } else { "" }
                     ));
                 }

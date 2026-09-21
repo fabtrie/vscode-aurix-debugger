@@ -3,7 +3,8 @@
 //! Supported: identifiers (locals, globals, functions, enumerators),
 //! `$d0`..`$a15`/`$sp`/`$ra`/`$pc`, `${SymbolID}`, integer/float/char
 //! literals, `.` `->` `[]`, unary `- + ~ ! * &`, casts to named, builtin and
-//! pointer types, `sizeof`, and the binary C operators except assignment.
+//! pointer types, `sizeof`, the conditional operator `?:`, and the binary C
+//! operators except assignment.
 
 use crate::scope::Loc;
 use crate::types::{TypeClass, TypeId, TypeInfo};
@@ -21,7 +22,7 @@ enum Tok {
 }
 
 const PUNCTS: &[&str] = &[
-    "->", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+", "-", "*", "/", "%", "&", "|", "^", "~", "!", "<", ">", "(", ")", "[", "]", ".",
+    "->", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+", "-", "*", "/", "%", "&", "|", "^", "~", "!", "<", ">", "?", ":", "(", ")", "[", "]", ".",
 ];
 
 fn skip_suffix(b: &[u8], i: &mut usize, allowed: &[u8]) {
@@ -154,6 +155,8 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Unary(&'static str, Box<Expr>),
     Binary(&'static str, Box<Expr>, Box<Expr>),
+    /// `cond ? then : otherwise`; only the taken branch is evaluated.
+    Cond(Box<Expr>, Box<Expr>, Box<Expr>),
     Cast(TypeId, Box<Expr>),
     Sizeof(Box<Expr>),
     SizeofType(TypeId),
@@ -246,6 +249,18 @@ impl Parser<'_> {
         }
     }
 
+    /// `logical-or ? expression : conditional` - right associative, below every binary operator.
+    fn conditional(&mut self) -> Result<Expr, String> {
+        let cond = self.binary(0)?;
+        if !self.eat("?") {
+            return Ok(cond);
+        }
+        let then = self.conditional()?;
+        self.expect(":")?;
+        let otherwise = self.conditional()?;
+        Ok(Expr::Cond(Box::new(cond), Box::new(then), Box::new(otherwise)))
+    }
+
     fn binary(&mut self, min_prec: u8) -> Result<Expr, String> {
         let mut lhs = self.unary()?;
         while let Some(Tok::P(op)) = self.toks.get(self.pos) {
@@ -335,7 +350,7 @@ impl Parser<'_> {
         let mut e = self.primary()?;
         loop {
             if self.eat("[") {
-                let i = self.binary(0)?;
+                let i = self.conditional()?;
                 self.expect("]")?;
                 e = Expr::Index(Box::new(e), Box::new(i));
             } else if self.eat(".") {
@@ -357,7 +372,7 @@ impl Parser<'_> {
             Some(Tok::Ident(n)) => Ok(Expr::Ident(n)),
             Some(Tok::SymRef(id)) => Ok(Expr::SymRef(id)),
             Some(Tok::P("(")) => {
-                let e = self.binary(0)?;
+                let e = self.conditional()?;
                 self.expect(")")?;
                 Ok(e)
             }
@@ -372,7 +387,7 @@ pub fn parse(text: &str, types: TypeResolver) -> Result<Expr, String> {
     if p.toks.is_empty() {
         return Err("empty expression".into());
     }
-    let e = p.binary(0)?;
+    let e = p.conditional()?;
     if p.pos < p.toks.len() {
         return Err(format!("unexpected {:?}", p.toks[p.pos]));
     }
@@ -828,6 +843,13 @@ impl<'a, T: Target> Eval<'a, T> {
                 let vb = self.eval(b)?;
                 self.binary(op, va, vb)
             }
+            // Only the taken branch is evaluated: the untaken one routinely faults on purpose,
+            // e.g. an ORTI attribute that reads a task control block only once its core is up.
+            Expr::Cond(c, then, otherwise) => {
+                let vc = self.eval(c)?;
+                let (sc, _) = self.scalar(&vc)?;
+                self.eval(if sc.truthy() { then } else { otherwise })
+            }
             Expr::Cast(ty, b) => {
                 let v = self.eval(b)?;
                 let ti = self.info(ty);
@@ -1025,6 +1047,32 @@ mod tests {
             parse("(unsigned char)300", &no_types).unwrap(),
             Expr::Cast(TypeId::Base(TypeClass::Cardinal, 1), Box::new(Expr::Int(300)))
         );
+        // The conditional operator, which every dynamic ORTI attribute is built from.
+        assert_eq!(
+            parse("a ? b : c", &no_types).unwrap(),
+            Expr::Cond(Box::new(Expr::Ident("a".into())), Box::new(Expr::Ident("b".into())), Box::new(Expr::Ident("c".into())))
+        );
+        // Binds looser than every binary operator, on all three operands.
+        assert_eq!(
+            parse("x == 2 ? 1 + 1 : 0", &no_types).unwrap(),
+            Expr::Cond(
+                Box::new(Expr::Binary("==", Box::new(Expr::Ident("x".into())), Box::new(Expr::Int(2)))),
+                Box::new(Expr::Binary("+", Box::new(Expr::Int(1)), Box::new(Expr::Int(1)))),
+                Box::new(Expr::Int(0))
+            )
+        );
+        // Right associative: a ? b : (c ? d : e).
+        assert!(matches!(parse("a ? b : c ? d : e", &no_types).unwrap(), Expr::Cond(_, _, o) if matches!(*o, Expr::Cond(..))));
+        // The shape MICROSAR's ORTI generator emits for TASK.STATE.
+        let orti = "Core_Dyn.OsState == 2 ? ( Trace_Dyn.CurrentTask == &Trace_Task ? 0 : Task_Dyn.State ) : 0xFF";
+        assert!(matches!(parse(orti, &no_types).unwrap(), Expr::Cond(_, t, _) if matches!(*t, Expr::Cond(..))), "{orti}");
+        // ...and for ALARM.vs_AlarmTime_ms, where the then-branch carries arithmetic.
+        assert!(matches!(
+            parse("s == 1 ? (a - b) * 1000000 / 1000000 : 0", &no_types).unwrap(),
+            Expr::Cond(_, t, _) if matches!(*t, Expr::Binary("/", ..))
+        ));
+        assert!(parse("a ? b", &no_types).is_err());
+        assert!(parse("a : b", &no_types).is_err());
         assert!(parse("a +", &no_types).is_err());
         assert!(parse("", &no_types).is_err());
     }
@@ -1077,6 +1125,18 @@ mod tests {
         assert_eq!(r.place, Place::Memory(0x7001_3954));
         assert_eq!(ev.load(&r).unwrap(), vec![5]);
         assert_eq!(ev.assign(&r, &[7]).unwrap(), Write::Memory(0x7001_3954, vec![7]));
+
+        // Conditional operator. module_sm is 5, and 0xdead0000 is unmapped in `Mem`, so an
+        // evaluated branch that reads it fails - which is how the untaken branch is proven unread.
+        let r = ev.evaluate("module_sm == 5 ? 1 : *(uint32*)0xdead0000 + 1").unwrap();
+        assert_eq!(ev.load(&r).unwrap(), 1i32.to_le_bytes());
+        let r = ev.evaluate("module_sm == 9 ? *(uint32*)0xdead0000 + 1 : 7").unwrap();
+        assert_eq!(ev.load(&r).unwrap(), 7i32.to_le_bytes());
+        assert!(ev.evaluate("module_sm == 5 ? *(uint32*)0xdead0000 + 1 : 7").is_err());
+        // The taken branch keeps its place, so a nested ORTI-shaped attribute stays readable.
+        let r = ev.evaluate("module_sm == 5 ? ( module_sm == 6 ? 0 : module_sm ) : 0xFF").unwrap();
+        assert_eq!(r.place, Place::Memory(0x7001_3954));
+        assert_eq!(ev.load(&r).unwrap(), 5u32.to_le_bytes());
 
         // Locals of App_CyclicTask at line 743 (0x8021a99c):
         // State_u8 is at A10+6, rte_read_state in D8.

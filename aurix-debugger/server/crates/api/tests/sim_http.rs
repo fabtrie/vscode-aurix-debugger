@@ -283,6 +283,13 @@ fn rest_mcp_and_tcf_share_one_session() {
     let tcf_port = tcf::listen(&session, "127.0.0.1", 0).unwrap();
     let http = Http(api::start(h.clone(), session.clone(), "127.0.0.1", 0).unwrap());
     let mut vs = Tcf::connect(tcf_port);
+    // A TCF client will not use a service the server does not advertise, so every service the
+    // extension needs has to be in the Hello list - not merely implemented in the dispatcher.
+    let hello = vs.event("Locator", "Hello", "Locator");
+    let advertised: Vec<String> = serde_json::from_str(&hello[3]).unwrap();
+    for want in ["Locator", "RunControl", "Memory", "Registers", "Breakpoints", "Expressions", "AurixOS"] {
+        assert!(advertised.iter().any(|s| s == want), "{want} is not advertised: {advertised:?}");
+    }
     let sse = http.events();
     let c0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
     const CPU0: &str = "tc37x.cpu0";
@@ -496,6 +503,259 @@ fn rest_mcp_and_tcf_share_one_session() {
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(h.call(|cx| cx.with(|c| c.daq.is_empty())), Some(true), "the DAQ session outlived its socket");
+
+    // --- AUTOSAR OS awareness (ORTI) ---------------------------------------------------------
+
+    // Nothing loaded: an empty description rather than an error, so a panel can ask on startup.
+    let os = http.ok("GET", "/api/v1/os", None);
+    assert_eq!(os["cores"], 0);
+    assert!(os["file"].is_null(), "{os}");
+    assert!(os["types"].as_array().unwrap().is_empty(), "{os}");
+
+    // Reading objects before a file is loaded says which call is missing.
+    let (status, e) = http.request("GET", "/api/v1/os/objects/TASK", None, &[]);
+    assert_eq!(status, 404, "{e}");
+    assert!(e["message"].as_str().is_some_and(|m| m.contains("load_orti")), "{e}");
+
+    // A file that is not there is a 404, not a parse error.
+    let (status, e) = http.request("POST", "/api/v1/os/orti", Some(json!({ "file": "no/such.ORT" })), &[]);
+    assert_eq!(status, 404, "{e}");
+
+    // Attribute expressions need symbols, so that failure has to name `load_symbols`.
+    let ort = PathBuf::from(
+        std::env::var("AURIX_TEST_ORTI").unwrap_or_else(|_| "C:/workspace/app/vector/Applications/Appl/GenData/Os_Trace.ORT".into()),
+    );
+    let elf = PathBuf::from(
+        std::env::var("AURIX_TEST_ELF")
+            .unwrap_or_else(|_| "C:/workspace/app/build/bin/app.elf".into()),
+    );
+    if ort.is_file() {
+        let (status, e) = http.request("POST", "/api/v1/os/orti", Some(json!({ "file": tcl_path(ort.clone()) })), &[]);
+        assert_eq!(status, 400, "{e}");
+        assert!(e["message"].as_str().is_some_and(|m| m.contains("load_symbols")), "{e}");
+    }
+
+    if ort.is_file() && elf.is_file() {
+        http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [tcl_path(elf)] })));
+        let os = http.ok("POST", "/api/v1/os/orti", Some(json!({ "file": tcl_path(ort) })));
+        assert_eq!(os["implementation"], "Vector_ORTI");
+        assert_eq!(os["version"], "2.3");
+        assert_eq!(os["cores"], 2);
+        assert_eq!(os["target"], CPU0);
+
+        // The object types are whatever the generator declared, Vector's own ones included.
+        let types: Vec<&str> = os["types"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(types.contains(&"TASK") && types.contains(&"vs_SPINLOCK"), "{types:?}");
+        let task = os["types"].as_array().unwrap().iter().find(|t| t["name"] == "TASK").unwrap();
+        assert_eq!(task["count"], 38);
+        let attrs = task["attributes"].as_array().unwrap();
+        let state = attrs.iter().find(|a| a["name"] == "STATE").unwrap();
+        assert_eq!((state["kind"].as_str(), state["live"].as_bool()), (Some("enum"), Some(true)));
+        // `STACK` is `&OsCfg_Stack_...`: a constant, so it is never re-read.
+        let stack = attrs.iter().find(|a| a["name"] == "STACK").unwrap();
+        assert_eq!(stack["live"], false);
+        // Prose stays prose.
+        let sched = attrs.iter().find(|a| a["name"] == "vs_Schedule").unwrap();
+        assert_eq!(sched["kind"], "string");
+        // The SMP extension shows up as per-core attributes on the OS object.
+        let os_t = os["types"].as_array().unwrap().iter().find(|t| t["name"] == "OS").unwrap();
+        let running = os_t["attributes"].as_array().unwrap().iter().find(|a| a["name"] == "RUNNINGTASK").unwrap();
+        assert_eq!(running["per_core"], true);
+
+        // The description survives a reload of the same session.
+        let again = http.ok("GET", "/api/v1/os", None);
+        assert_eq!(again["cores"], 2);
+
+        // Reading objects. The simulator has no real OS in memory, so the values are whatever
+        // the sim holds - what matters is that every attribute resolves and is reported.
+        let list = http.ok("GET", "/api/v1/os/objects/TASK?name=Task_Core0", None);
+        let objs = list["objects"].as_array().unwrap();
+        assert_eq!(objs.len(), 1, "{list}");
+        let attrs = objs[0]["attributes"].as_array().unwrap();
+        assert_eq!(attrs.len(), 12, "{:?}", attrs);
+        let by = |n: &str| attrs.iter().find(|a| a["name"] == n).unwrap();
+        // The stack is a constant address, and its enumerator names the stack object, so the
+        // cell can link to it.
+        assert_eq!(by("STACK")["value"], "OsCfg_Stack_Task_Core0");
+        assert_eq!(by("STACK")["link"], "OsCfg_Stack_Task_Core0");
+        assert_eq!(by("vs_Schedule")["value"], "FULL");
+        assert!(by("PRIORITY")["error"].is_null(), "{:?}", by("PRIORITY"));
+        assert!(list["reads"].as_u64().unwrap() > 0);
+
+        // `live_only` drops the attributes that cannot change, which is most of a refresh.
+        let live = http.ok("GET", "/api/v1/os/objects/TASK?name=Task_Core0&live_only=true", None);
+        let n = live["objects"][0]["attributes"].as_array().unwrap().len();
+        assert!(n > 0 && n < 12, "{n} of 12 attributes are live");
+
+        // An OS object type that the file declares but never instantiates is empty, not an error.
+        let empty = http.ok("GET", "/api/v1/os/objects/vs_SCHEDULETABLE", None);
+        assert!(empty["objects"].as_array().unwrap().is_empty(), "{empty}");
+        assert_eq!(empty["reads"], 0);
+
+        // A type the file never declared lists the ones it did.
+        let (status, e) = http.request("GET", "/api/v1/os/objects/NOPE", None, &[]);
+        assert_eq!(status, 404, "{e}");
+        assert!(e["message"].as_str().is_some_and(|m| m.contains("TASK")), "{e}");
+
+        // The whole OS object, both cores at once: this is what the sidebar view reads.
+        let os_objs = http.ok("GET", "/api/v1/os/objects/OS", None);
+        let attrs = os_objs["objects"][0]["attributes"].as_array().unwrap();
+        let running: Vec<&Value> = attrs.iter().filter(|a| a["name"] == "RUNNINGTASK").collect();
+        assert_eq!(running.len(), 2, "one RUNNINGTASK per core: {running:?}");
+        assert_eq!(running[0]["core"], 0);
+        assert_eq!(running[1]["core"], 1);
+
+        // ...and the same awareness over TCF, which is the channel the VS Code extension has.
+        // One session: the file the REST call loaded is already there.
+        let r = vs.command("AurixOS", "getInfo", &[]);
+        assert_eq!(r[0], "", "{r:?}");
+        let info: Value = serde_json::from_str(&r[1]).unwrap();
+        assert_eq!(info["Loaded"], true);
+        assert_eq!(info["Implementation"], "Vector_ORTI");
+        assert_eq!(info["Cores"], 2);
+        let types: Vec<&str> = info["Types"].as_array().unwrap().iter().map(|t| t["Name"].as_str().unwrap()).collect();
+        assert!(types.contains(&"vs_ISR"), "{types:?}");
+
+        let r = vs.command("AurixOS", "getObjects", &[json!("TASK"), json!("Task_Core0"), json!(false)]);
+        assert_eq!(r[0], "", "{r:?}");
+        let got: Value = serde_json::from_str(&r[1]).unwrap();
+        let attrs = got["Objects"][0]["Attributes"].as_array().unwrap();
+        let by = |n: &str| attrs.iter().find(|a| a["Name"] == n).unwrap().clone();
+        assert_eq!(by("STACK")["Value"], "OsCfg_Stack_Task_Core0");
+        assert_eq!(by("STACK")["Link"], "OsCfg_Stack_Task_Core0");
+        assert_eq!(by("vs_Schedule")["Value"], "FULL");
+
+        // `getRunning` is what the debug adapter calls on every stop to name its threads, so it
+        // has to answer per core and stay small.
+        let r = vs.command("AurixOS", "getRunning", &[]);
+        assert_eq!(r[0], "", "{r:?}");
+        let run: Value = serde_json::from_str(&r[1]).unwrap();
+        let per_core = run["Cores"].as_array().unwrap();
+        assert_eq!(per_core.len(), 2);
+        assert_eq!(per_core[0]["Core"], 0);
+        assert_eq!(per_core[1]["Core"], 1);
+        for c in per_core {
+            assert!(c["Task"].is_string(), "{c}");
+            assert!(c["Priority"].is_string(), "{c}");
+        }
+        assert!(run["Reads"].as_u64().unwrap() <= 12, "a stop must not cost much: {run}");
+        // The AUTOSAR core id goes out as a number: it is for matching a debug target, not for
+        // a person to read.
+        assert!(per_core.iter().all(|c| c["CoreId"].is_number()), "{run}");
+
+
+        // Stack coverage. The simulator's RAM is not filled with the OS pattern, so the numbers
+        // are meaningless - what matters is that every stack is described and measured, and that
+        // an unreadable one says so instead of reporting zero.
+        let cov = http.ok("GET", "/api/v1/os/stacks", None);
+        let stacks = cov["stacks"].as_array().unwrap();
+        assert_eq!(stacks.len(), 50, "one entry per STACK object");
+        for s in stacks {
+            assert!(s["name"].is_string() && s["size"].as_u64().is_some(), "{s}");
+            assert_eq!(s["direction"], "DOWN", "{s}");
+            // Vector fills with 0xAAAAAAAA; the value comes from the ORTI file, not from us.
+            assert_eq!(s["pattern"], 0xAAAA_AAAAu32, "{s}");
+            // Either it was measured or it explains itself - never silently absent.
+            assert!(s["used"].is_u64() || s["error"].is_string(), "{s}");
+            if let Some(u) = s["used"].as_u64() {
+                assert!(u <= s["size"].as_u64().unwrap(), "used beyond the end: {s}");
+                assert_eq!(s["free"].as_u64().unwrap(), s["size"].as_u64().unwrap() - u, "{s}");
+            }
+        }
+        assert!(cov["reads"].as_u64().unwrap() > 0);
+
+        // Narrowing to one stack is what a panel does when the user picks a row: far cheaper.
+        let one = http.ok("GET", "/api/v1/os/stacks?names=OsCfg_Stack_OsCore0_Kernel", None);
+        assert_eq!(one["stacks"].as_array().unwrap().len(), 1, "{one}");
+        assert_eq!(one["stacks"][0]["name"], "OsCfg_Stack_OsCore0_Kernel");
+        assert!(one["reads"].as_u64().unwrap() < cov["reads"].as_u64().unwrap(), "narrowing must cost less");
+
+        // A name nobody declared measures nothing rather than erroring: a panel may be showing a
+        // stale selection after the ORTI file changed.
+        let none = http.ok("GET", "/api/v1/os/stacks?names=nope", None);
+        assert!(none["stacks"].as_array().unwrap().is_empty(), "{none}");
+        assert_eq!(none["reads"], 0);
+
+        // ...and over TCF, which is the channel the extension uses.
+        let r = vs.command("AurixOS", "getStacks", &[Value::Null]);
+        assert_eq!(r[0], "", "{r:?}");
+        let got: Value = serde_json::from_str(&r[1]).unwrap();
+        assert_eq!(got["Stacks"].as_array().unwrap().len(), 50);
+
+
+        // Sampled task profiling. The simulator's RAM never changes, so there is nothing to
+        // observe except the first baseline sample per core - which is exactly the shape the
+        // panel consumes, and enough to prove the sampler, the decoder and the accounting.
+        let r = vs.command("AurixOS", "getProfile", &[json!(0)]);
+        assert_eq!(r[0], "", "{r:?}");
+        let idle: Value = serde_json::from_str(&r[1]).unwrap();
+        assert_eq!(idle["Running"], false, "nothing runs before it is started: {idle}");
+
+        let r = vs.command("AurixOS", "startProfile", &[json!(500)]);
+        assert_eq!(r[0], "", "{r:?}");
+        let started: Value = serde_json::from_str(&r[1]).unwrap();
+        assert_eq!(started["Cores"], 2, "one sampling point per core: {started}");
+        assert_eq!(started["PeriodUs"], 500);
+
+        // Give the sampler a moment to deliver its baseline.
+        thread::sleep(Duration::from_millis(300));
+        let r = vs.command("AurixOS", "getProfile", &[json!(0)]);
+        let p: Value = serde_json::from_str(&r[1]).unwrap();
+        assert_eq!(p["Running"], true, "{p}");
+        assert!(p["NowUs"].as_u64().unwrap() > 0, "{p}");
+        let trans = p["Transitions"].as_array().unwrap();
+        assert_eq!(trans.len(), 2, "one baseline transition per core: {p}");
+        for t in trans {
+            // The bytes came back through the ORTI enumerator table, so this is a task name.
+            assert_eq!(t["Task"], "INVALID_TASK", "{t}");
+            assert!(t["Core"].is_u64() && t["T"].is_u64(), "{t}");
+        }
+        // Occupancy counts the time each core has spent in its current task, not only closed ones.
+        let totals = p["Totals"].as_array().unwrap();
+        assert_eq!(totals.len(), 2, "{p}");
+        assert!(totals.iter().all(|o| o["Us"].as_u64().unwrap() > 0), "{p}");
+        assert_eq!(p["DroppedTransitions"], 0);
+
+        // Polling with the last timestamp returns only what is new - nothing, here, because a
+        // value that does not change is never delivered again.
+        let now = p["NowUs"].as_u64().unwrap();
+        let r = vs.command("AurixOS", "getProfile", &[json!(now)]);
+        let p2: Value = serde_json::from_str(&r[1]).unwrap();
+        assert!(p2["Transitions"].as_array().unwrap().is_empty(), "{p2}");
+        assert!(p2["Totals"].as_array().unwrap().len() == 2, "totals keep accumulating: {p2}");
+
+        // Starting again replaces the session rather than sampling the same points twice.
+        let r = vs.command("AurixOS", "startProfile", &[json!(1000)]);
+        assert_eq!(r[0], "", "{r:?}");
+        let restarted: Value = serde_json::from_str(&r[1]).unwrap();
+        assert_eq!(restarted["PeriodUs"], 1000);
+        assert_eq!(h.call(|cx| cx.with(|c| c.daq.sessions().count())), Some(1), "the old sampling session must be gone");
+
+        let r = vs.command("AurixOS", "stopProfile", &[]);
+        assert_eq!(r[0], "", "{r:?}");
+        assert_eq!(serde_json::from_str::<Value>(&r[1]).unwrap()["Stopped"], true);
+        // Stopping releases the sampler: nothing keeps reading the target.
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && h.call(|cx| cx.with(|c| c.daq.is_empty())) != Some(true) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(h.call(|cx| cx.with(|c| c.daq.is_empty())), Some(true), "the profiler outlived its stop");
+        // Stopping twice is not an error: a panel closing says so blindly.
+        let r = vs.command("AurixOS", "stopProfile", &[]);
+        assert_eq!(serde_json::from_str::<Value>(&r[1]).unwrap()["Stopped"], false);
+
+        // Errors come back as TCF errors, not as a reply that looks like success.
+        let r = vs.command("AurixOS", "getObjects", &[json!("NOPE"), Value::Null, json!(false)]);
+        assert_ne!(r[0], "", "{r:?}");
+        assert!(r[0].contains("NOPE"), "{r:?}");
+    }
+
+    // Loading over TCF is what the extension will actually do. Without symbols it must say so
+    // rather than failing obscurely.
+    {
+        let r = vs.command("AurixOS", "load", &[json!("no/such.ORT"), Value::Null]);
+        assert!(r[0].contains("no such file"), "{r:?}");
+    }
 
     // Web pages of other sites must not drive the debugger.
     let (status, _) = http.request("POST", &format!("/api/v1/targets/{CPU0}/halt"), None, &[("Origin", "http://evil.example")]);

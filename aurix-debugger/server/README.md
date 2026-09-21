@@ -68,6 +68,7 @@ One HTTP port (`api_port`, default 8080) serves:
 | Path | Content |
 |---|---|
 | `/api/v1/...` | REST API: targets, run control, registers, memory, breakpoints, watchpoints, flash, Tcl. |
+| `/api/v1/os/...` | [AUTOSAR OS awareness](#autosar-os-awareness-orti): the objects an ORTI file describes, read from the running target. |
 | `/docs` | Swagger UI; `/openapi.json` is the OpenAPI 3.1 document. |
 | `/mcp` | MCP server (Streamable HTTP). Register it with `claude mcp add --transport http aurix http://127.0.0.1:8080/mcp`. |
 | `/api/v1/events` | Server-sent events: halts, resumes, resets, breakpoint changes and log lines of all clients. |
@@ -263,6 +264,68 @@ with dbg.daq(("g_motor.speed_rpm", 1000),                # 1 kHz, every tick
 # leaving the `with` closes the socket, which stops the sampling
 ```
 
+## AUTOSAR OS awareness (ORTI)
+
+An AUTOSAR/OSEK generator writes an **ORTI file** beside the ELF describing the OS objects: tasks, ISRs, stacks, alarms, resources, spinlocks, events. `load_orti` reads one and the debugger can then show them.
+
+```python
+dbg.load_symbols(files=["app.elf"])
+dbg.load_orti(file="GenData/Os_Trace.ORT")
+for o in dbg.os_objects("TASK", live_only=True).objects:
+    print(o.name, {a.name: a.value for a in o.attributes})
+```
+
+Both frontends serve it: the REST operations above, and the `AurixOS` [TCF service](#tcf-services) that the VS Code extension uses. They share one loaded file, because they share one session.
+
+Nothing about the OS is built in. The file *declares* its own object types and attributes, so a MICROSAR file's `vs_ISR`, `vs_SPINLOCK` and `vs_OS_CONFIG` come through exactly like the standard OSEK ones. `os` lists whatever was declared.
+
+**Versions.** ORTI 2.1 and 2.2 are the published OSEK/VDX specification. **2.3 is not published**: it is Lauterbach's unofficial SMP extension, where the `OS` attributes become arrays indexed by logical core — `RUNNINGTASK[0]`, `RUNNINGTASK[1]` — so one file describes a multicore system. Vector's generator adds `vs_SMP_NUMCPU` and `vs_COREID[]`, which is what lets a reader map ORTI core indices onto debug targets. Indexed attributes are accepted whatever the `VERSION` block claims. AUTOSAR ARTI is the official successor and is not implemented.
+
+**What a value costs.** Every attribute is a C expression, and they fall into four classes, decided once when the file is loaded:
+
+| Class | Example | Cost per refresh |
+|---|---|---|
+| prose | `ACTION = "SET_EVENT task ev"` | none — never evaluated |
+| constant | `STACK = "&OsCfg_Stack_…"`, `SIZE = "sizeof(…_Dyn)"` | none — resolved at load |
+| one address | `RUNNINGTASK[0] = "OsCfg_Trace_OsCore0_Dyn.CurrentTask"` | one read |
+| computed | `STATE = "…OsState == 2 ? ( … ? 0 : …State ) : 0xFF"` | the reads the expression makes |
+
+On the MICROSAR file this repo is developed against, that splits 1 522 attributes into 613 one-address, 252 computed, 360 constant and 297 prose — so most of a task table costs nothing to refresh. `live_only=true` skips the two free classes; `reads` in the response reports what the call actually cost.
+
+Only the declaration says which class an attribute is in: `CTYPE` and `ENUM` values are code, `STRING` values are text. Two things follow that are easy to get wrong and are worth knowing when reading the output:
+
+- **Priority enums are an inverse map.** `PRIORITY` is declared `ENUM ["700" = 0, "680" = 1, …]`, so the field on the target holds an *ordinal* and the enumerator name is the priority to display. `vs_HomePriorityInt` is the same field read raw.
+- **Enumerator values are often addresses.** `RUNNINGTASK`'s enumerators are `"IdleTask_OsCore0" = "&OsCfg_Trace_IdleTask_OsCore0"`. Those are evaluated against DWARF at load time, which is what turns the sampled pointer into a task name — and into a `link` to the object it names.
+
+
+**Stack coverage.** `os_stacks` (REST) and `getStacks` (TCF) measure how much of each OS stack has ever been used. The OS fills every stack with a pattern at startup, so the high-water mark is the far end of the region that still holds it — and `SIZE`, `BASEADDRESS`, `STACKDIRECTION` and `FILLPATTERN` are ORTI-specified attribute names, so nothing about the OS is assumed.
+
+This is the one expensive part of OS awareness: finding a mark means reading the untouched part of a stack. It is therefore on demand only, never on a refresh timer, and `names` narrows it to the stacks you care about (measuring one of the 50 stacks in this file costs 2 reads against 100).
+
+A stack the debugger cannot read is reported with its `error` rather than as unused — on this board the SMPU hides CPU0 stack RAM below `0x7000B400` from TAS, and reporting 0% there would be a lie. A pattern-looking hole inside live data is counted as used, so the answer errs high rather than low.
+
+
+
+
+**One live-update loop.** The Live Watch, the AUTOSAR OS view and the OS Objects panel share a single scheduler (`src/liveUpdate.ts` in the extension), so they behave the same way and there is one rate to reason about:
+
+- One interval for all of them (`aurix-debugger.liveWatch.intervalMs`, the `liveWatchIntervalMs` launch option, or the status-bar item). 200 ms to 10 s.
+- **A view that is not on screen reads nothing.** A collapsed sidebar section, a hidden tab, a panel in the background: no bus accesses at all. For the OS Profile panel that also stops the sampler, not just the drawing.
+- Pause means *only on halt*, not *stop*: a paused view still updates when a core stops, the way the Watch view does. Stops of several cores coalesce into one refresh.
+- The next refresh is timed from the start of the previous one, so a slow read delays the next instead of queueing another behind it.
+
+**Sampled task profiling.** `startProfile` puts one [DAQ](#periodic-sampling-daq) point per core on `RUNNINGTASK` in on-change mode: the point is still *read* every period, but only *delivered* when the value differs. Two cores at 100 µs is two reads per tick, coalesced into one bus access, and the stream carries only the switches. `getProfile <sinceUs>` then returns the transitions since the caller last asked, plus the occupancy each task has accumulated — so a panel redrawing four times a second is independent of the sampling rate.
+
+This is **not a trace**. There is no MCDS on a miniWiggler, so a switch shorter than the sampling period is not seen at all, and one that straddles a sample is attributed to whichever task the sample caught. The result is a statistical profile, and the panel says so on its face.
+
+The other views do *not* use DAQ, deliberately. A task table is 613 single-address attributes — well past the 256-point session cap — and refreshing it once a second costs about as much as the sampler would. Sampling is worth its machinery where the rate has to be high; for a table, a one-shot read per refresh is simpler and no more expensive.
+
+**Task-filtered breakpoints.** A breakpoint whose condition reads `task == <name>` (or `task != <name>`, or just a task name) halts only when that task is running. The VS Code extension implements this on top of the awareness: right-click a breakpoint → *Edit Breakpoint* → *Expression*, or use *Halt Only in Task…* from the editor context menu, which offers the tasks of the loaded file.
+
+It is not free. The breakpoint is a plain hardware breakpoint, so the core really does halt on every hit and the adapter resumes it again when the wrong task got there — the same trade-off TRACE32 makes. A hit the adapter cannot attribute to a task is reported rather than swallowed: a stop the user cannot explain is better than one that never arrives.
+
+A conditional attribute's read set depends on which branch is live, so an attribute planned while a core was down is planned again the first time it is read. Loading an ORTI file before the board is powered is therefore harmless; `errors` lists what has not resolved yet.
+
 ## Architecture
 
 | Crate | Responsibility |
@@ -271,6 +334,7 @@ with dbg.daq(("g_motor.speed_rpm", 1000),                # 1 kHz, every tick
 | `jim` | Jim Tcl 0.83 (OpenOCD's copy) built with `cc`, with a safe `Interp` API. |
 | `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, periodic sampling (DAQ), CSA unwinder, flash driver and image loader. |
 | `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
+| `orti` | ORTI files: the AUTOSAR/OSEK OS awareness description a generator emits. Parser (generic over the object types a file declares), and planning each attribute into the reads it costs. |
 | `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
 | `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
 | `api` | REST, MCP, Swagger UI, event stream and the DAQ WebSocket (axum on its own thread); its build script writes the generated files. |
@@ -334,7 +398,22 @@ Unknown commands fail with `not supported by aurix-dbg`.
 
 ## TCF services
 
-Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, and Tcl (the debug console `monitor` command).
+Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS ([OS awareness](#autosar-os-awareness-orti)), and Tcl (the debug console `monitor` command).
+
+`AurixOS` carries the ORTI objects on the connection the debug adapter already has, so the extension needs no second port and the awareness dies with the session:
+
+| Command | Arguments | Reply |
+|---|---|---|
+| `load` | `<file>`, `<target>` or null | the description below |
+| `getInfo` | — | `{Loaded, File, Implementation, Version, Cores, Types[{Name, Description, Count, Attributes[{Name, Description, Kind, PerCore, Live}]}], Errors}` |
+| `getObjects` | `<kind>`, `<name>` or null, `<liveOnly>` | `{Kind, Objects[{Name, Attributes[{Name, Core?, Value, Number?, Link?, Error?}]}], Reads}` |
+| `getRunning` | — | `{Cores[{Core, CoreId, Task, Priority, Isr, LastError}], Reads}` |
+| `startProfile` | `<periodUs>` | `{PeriodUs, Cores}` |
+| `stopProfile` | — | `{Stopped}` |
+| `getProfile` | `<sinceUs>` | `{Running, PeriodUs, NowUs, Transitions[{T, Core, Task}], Totals[{Core, Task, Us}], Dropped, Missed}` |
+| `getStacks` | `<names>` or null | `{Stacks[{Name, Base, Size, Direction, Pattern, Used?, Free?, Percent?, Error?}], Reads}` |
+
+`getRunning` is the one the adapter calls on every stop, to name each thread after the task it is running; it is a handful of reads.
 
 Context IDs:
 - **Chip:** `S0.D0`.

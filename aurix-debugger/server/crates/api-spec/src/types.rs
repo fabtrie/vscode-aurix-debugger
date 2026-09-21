@@ -599,3 +599,157 @@ pub enum ApiEvent {
     /// The client did not keep up: this many events were dropped.
     Lagged { missed: u64 },
 }
+
+// --- AUTOSAR OS awareness (ORTI) -------------------------------------------------------------
+
+/// Which ORTI file to load.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LoadOrtiRequest {
+    /// Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.
+    pub file: String,
+    /// Target whose symbols resolve the attribute expressions, and whose memory view is read.
+    /// Default: the first core that has symbols.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// One attribute of an ORTI object type.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsAttributeInfo {
+    /// Name as the ORTI file declares it, e.g. `RUNNINGTASK`, `vs_HomePriority`.
+    pub name: String,
+    /// The description the generator gave it, suitable as a column header.
+    pub description: String,
+    /// `ctype` (a number), `enum` (a name from a fixed list) or `string` (literal text).
+    pub kind: String,
+    /// Declared `NAME[]`: it has one value per logical core. This is the ORTI 2.3 SMP extension.
+    pub per_core: bool,
+    /// The value can change while the target runs, so it is worth re-reading.
+    pub live: bool,
+}
+
+/// One ORTI object type.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsTypeInfo {
+    /// `OS`, `TASK`, `STACK`, `vs_SPINLOCK`, ... Generators invent their own types, so this is
+    /// whatever the file declared.
+    pub name: String,
+    /// The description the generator gave the collection, e.g. `Stacks`.
+    pub description: String,
+    /// Object instances of this type.
+    pub count: u32,
+    pub attributes: Vec<OsAttributeInfo>,
+}
+
+/// The loaded OS awareness description.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsInfo {
+    /// The ORTI file, or null when none is loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The `IMPLEMENTATION` name, e.g. `Vector_ORTI`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
+    /// ORTI semantics version. `2.3` is the unofficial SMP extension, where the OS attributes
+    /// are arrays indexed by logical core.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Logical cores the file describes.
+    pub cores: u32,
+    /// The target whose symbols the attribute expressions were resolved against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub types: Vec<OsTypeInfo>,
+    /// Attributes that could not be planned, with the reason. They are read again on demand, so
+    /// entries here are usually attributes planned while the board was not reachable.
+    pub errors: Vec<String>,
+}
+
+/// Which objects to read.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsObjectsRequest {
+    /// The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...
+    pub kind: String,
+    /// Only this object, by name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Skip attributes that cannot change, for a cheaper refresh. Default: false.
+    #[serde(default)]
+    pub live_only: Option<bool>,
+}
+
+/// One attribute value of one object.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsAttributeValue {
+    pub name: String,
+    /// Logical core, for an attribute declared per core.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub core: Option<u32>,
+    /// The value to display: an enumerator name, a number, or literal text.
+    pub value: String,
+    /// The raw integer behind `value`, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<i64>,
+    /// The ORTI object this value points at, when the enumerator names one, e.g. the stack of a
+    /// task or the owner of a spinlock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Why the value could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One object instance and its attribute values.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsObject {
+    pub name: String,
+    pub attributes: Vec<OsAttributeValue>,
+}
+
+/// Objects of one ORTI type, read now.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsObjectList {
+    pub kind: String,
+    pub objects: Vec<OsObject>,
+    /// Bus accesses this call made. Constants and literal text cost none.
+    pub reads: u32,
+}
+
+/// Which stacks to measure.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsStacksRequest {
+    /// Measure only these stacks, by name. Default: every stack the ORTI file describes.
+    #[serde(default)]
+    pub names: Option<Vec<String>>,
+}
+
+/// One stack's coverage.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsStack {
+    pub name: String,
+    /// Lowest address of the region.
+    pub base: u32,
+    pub size: u32,
+    /// `DOWN` or `UP`: which end keeps the fill pattern.
+    pub direction: String,
+    /// The word the OS fills the stack with at startup.
+    pub pattern: u32,
+    /// Bytes ever used (the high-water mark). Absent when it could not be measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u32>,
+    /// Why it could not be measured, e.g. a region the memory protection hides from the debugger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Stack coverage.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OsStackList {
+    pub stacks: Vec<OsStack>,
+    /// Bus accesses this call made. Measuring is the expensive part of OS awareness.
+    pub reads: u32,
+}

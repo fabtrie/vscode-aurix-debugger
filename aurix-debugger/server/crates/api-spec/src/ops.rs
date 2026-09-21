@@ -106,6 +106,36 @@ api! {
     /// The symbol files loaded per target (by this API or by a VS Code debug session).
     op symbols [symbols]: GET "/api/v1/symbols" (NoArgs) -> SymbolsInfo;
 
+    /// Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.
+    ///
+    /// Every attribute is parsed as a C expression and resolved against the loaded symbols, so
+    /// `load_symbols` (or a VS Code debug session) has to have run first. Attributes that cannot
+    /// be resolved are reported in `errors` and retried when they are first read, so loading
+    /// before the board is powered is harmless.
+    op load_orti [os]: POST "/api/v1/os/orti" (LoadOrtiRequest) -> OsInfo;
+
+    /// The loaded ORTI file: its object types, their attributes and how many cores it describes.
+    ///
+    /// Object types are whatever the file declared. A MICROSAR file adds `vs_ISR`, `vs_SPINLOCK`,
+    /// `vs_EVENT` and `vs_OS_CONFIG` to the standard OSEK ones.
+    op os [os]: GET "/api/v1/os" (NoArgs) -> OsInfo;
+
+    /// Read the objects of one ORTI type with their current attribute values.
+    ///
+    /// Values come from the target as it is now. Attributes that are constants (a stack address,
+    /// a `sizeof`) or literal text (an alarm action) cost no bus access.
+    op os_objects [os]: GET "/api/v1/os/objects/{kind}" (OsObjectsRequest) -> OsObjectList;
+
+    /// Measure stack coverage: how much of each OS stack has ever been used.
+    ///
+    /// The OS fills every stack with a pattern at startup, so the high-water mark is the far end
+    /// of the region that still holds it. Finding it means reading the untouched part of every
+    /// stack, so this is on demand and never part of a refresh - prefer `names` to narrow it.
+    ///
+    /// A stack the debugger cannot read (a region the memory protection hides) is reported with
+    /// its `error` rather than as unused.
+    op os_stacks [os]: GET "/api/v1/os/stacks" (OsStacksRequest) -> OsStackList;
+
     /// Run a command of the OpenOCD-compatible Tcl console (like the telnet console).
     op tcl [tcl]: POST "/api/v1/tcl" (TclRequest) -> CommandOutput;
 }

@@ -19,6 +19,8 @@ use aurix_core::target::{DebugReason, TargetState};
 use aurix_core::{ops, Cx, Event, ServerHandle};
 
 use crate::events::Hub;
+use crate::orti_state::CoreTarget;
+use orti::Awareness;
 
 pub struct CoreApi {
     pub handle: ServerHandle,
@@ -217,6 +219,30 @@ impl CoreApi {
         Ok(BreakpointList { breakpoints: self.session.breakpoints().iter().map(|(id, bp)| breakpoint_info(id, bp, &names, &self.session)).collect() })
     }
 
+    /// The target and primary ELF an ORTI file is resolved against.
+    ///
+    /// ORTI names plain globals (`OsCfg_Task_…`), which every core's ELF sees the same way, so
+    /// without an explicit target the first core that has symbols is as good as any.
+    fn orti_symbols(&self, want: Option<&str>) -> Result<(String, Arc<symbols::Symbols>), ApiError> {
+        let cores = tcf::cores(&self.handle);
+        let chosen: Vec<&tcf::CoreInfo> = match want {
+            Some(n) => vec![cores
+                .iter()
+                .find(|c| c.name == n || c.idx.to_string() == n)
+                .ok_or_else(|| ApiError::not_found(format!("unknown target '{n}' (see `targets`)")))?],
+            None => cores.iter().collect(),
+        };
+        for c in chosen {
+            let ctx = tcf::owning_core(&c.id).unwrap_or_else(|| c.id.clone());
+            if let Some(set) = self.session.symbols_for(&ctx) {
+                if let Some((_, syms)) = set.elfs.first() {
+                    return Ok((c.name.clone(), syms.clone()));
+                }
+            }
+        }
+        Err(ApiError::bad_request("no symbols loaded (use `load_symbols`, or start a VS Code debug session)"))
+    }
+
     /// The symbol set of every core that has one, primary ELF first.
     fn symbols_info(&self) -> SymbolsInfo {
         let cores = tcf::cores(&self.handle);
@@ -253,6 +279,50 @@ impl CoreApi {
             }
             Err(e) => Err(ApiError::failed(if out.is_empty() { e } else { format!("{out}\n{e}") })),
         }
+    }
+}
+
+/// The `os` / `load_orti` view of a loaded ORTI file.
+fn os_info(aw: &Awareness, target: Option<String>) -> OsInfo {
+    let types = aw
+        .orti
+        .decls
+        .iter()
+        .map(|d| OsTypeInfo {
+            name: d.name.clone(),
+            description: d.desc.clone(),
+            count: aw.objects_of(&d.name).count() as u32,
+            attributes: d
+                .attrs
+                .iter()
+                .map(|a| OsAttributeInfo {
+                    name: a.name.clone(),
+                    description: a.desc.clone(),
+                    kind: match a.kind {
+                        orti::AttrKind::CType => "ctype",
+                        orti::AttrKind::Enum => "enum",
+                        orti::AttrKind::String => "string",
+                    }
+                    .into(),
+                    per_core: a.indexed,
+                    // Whether it is live is a property of the planned instances, not of the
+                    // declaration: `STACK` is an address constant in every task.
+                    live: aw
+                        .objects_of(&d.name)
+                        .flat_map(|o| o.attrs.iter())
+                        .any(|p| p.name == a.name && p.plan.is_live()),
+                })
+                .collect(),
+        })
+        .collect();
+    OsInfo {
+        file: Some(aw.file.to_string_lossy().into_owned()),
+        implementation: Some(aw.orti.implementation.clone()),
+        version: aw.orti.version.semantics_version.clone(),
+        cores: aw.orti.core_count(),
+        target,
+        types,
+        errors: aw.errors.clone(),
     }
 }
 
@@ -547,4 +617,94 @@ impl DebuggerApi for CoreApi {
     fn symbols(&self, _: NoArgs) -> Result<SymbolsInfo, ApiError> {
         Ok(self.symbols_info())
     }
+
+    fn load_orti(&self, req: LoadOrtiRequest) -> Result<OsInfo, ApiError> {
+        let path = PathBuf::from(&req.file);
+        if !path.is_file() {
+            return Err(ApiError::not_found(format!("no such file: {}", req.file)));
+        }
+        let (target_name, syms) = self.orti_symbols(req.target.as_deref())?;
+
+        // On an API thread: parsing and planning walk DWARF for every attribute, which takes long
+        // enough that doing it on the core thread would stall run control.
+        let mut t = CoreTarget::new(&self.handle);
+        let aw = Awareness::load(&path, syms, &mut t).map_err(ApiError::bad_request)?;
+        let info = os_info(&aw, Some(target_name));
+        *self.session.orti.lock().unwrap() = Some(Arc::new(aw));
+        Ok(info)
+    }
+
+    fn os(&self, _: NoArgs) -> Result<OsInfo, ApiError> {
+        let guard = self.session.orti.lock().unwrap();
+        match guard.as_ref() {
+            Some(aw) => Ok(os_info(aw, None)),
+            None => Ok(OsInfo {
+                file: None,
+                implementation: None,
+                version: None,
+                cores: 0,
+                target: None,
+                types: Vec::new(),
+                errors: Vec::new(),
+            }),
+        }
+    }
+
+    fn os_objects(&self, req: OsObjectsRequest) -> Result<OsObjectList, ApiError> {
+        let aw = self.session.orti.lock().unwrap().clone().ok_or_else(|| ApiError::not_found("no ORTI file loaded (use `load_orti`)"))?;
+        if aw.orti.decl(&req.kind).is_none() {
+            let known: Vec<&str> = aw.orti.decls.iter().map(|d| d.name.as_str()).collect();
+            return Err(ApiError::not_found(format!("unknown object type '{}' (have: {})", req.kind, known.join(", "))));
+        }
+        let live_only = req.live_only.unwrap_or(false);
+        let mut t = CoreTarget::new(&self.handle);
+        let mut objects = Vec::new();
+        for o in aw.objects_of(&req.kind) {
+            if req.name.as_ref().is_some_and(|n| *n != o.name) {
+                continue;
+            }
+            let mut attributes = Vec::new();
+            for a in &o.attrs {
+                if live_only && !a.plan.is_live() {
+                    continue;
+                }
+                let (value, number, link, error) = match aw.read(&req.kind, a, &mut t) {
+                    Ok(bytes) => {
+                        let s = a.show(&bytes);
+                        (s.text, s.number, s.link, None)
+                    }
+                    Err(e) => (String::new(), None, None, Some(e)),
+                };
+                attributes.push(OsAttributeValue { name: a.name.clone(), core: a.index, value, number, link, error });
+            }
+            objects.push(OsObject { name: o.name.clone(), attributes });
+        }
+        if objects.is_empty() && req.name.is_some() {
+            return Err(ApiError::not_found(format!("no {} object named '{}'", req.kind, req.name.unwrap_or_default())));
+        }
+        Ok(OsObjectList { kind: req.kind, objects, reads: t.reads })
+    }
+
+    fn os_stacks(&self, req: OsStacksRequest) -> Result<OsStackList, ApiError> {
+        let aw = self.session.orti.lock().unwrap().clone().ok_or_else(|| ApiError::not_found("no ORTI file loaded (use `load_orti`)"))?;
+        let mut t = CoreTarget::new(&self.handle);
+        let measured = orti::stack::measure(&aw, req.names.as_deref(), &mut t);
+        let stacks = measured
+            .iter()
+            .map(|s| OsStack {
+                name: s.name.clone(),
+                base: s.base,
+                size: s.size,
+                direction: if s.direction == orti::Direction::Up { "UP".into() } else { "DOWN".into() },
+                pattern: s.pattern,
+                used: s.used,
+                free: s.used.map(|u| s.size.saturating_sub(u)),
+                percent: s.percent(),
+                error: s.error.clone(),
+            })
+            .collect();
+        Ok(OsStackList { stacks, reads: t.reads })
+    }
 }
+
+

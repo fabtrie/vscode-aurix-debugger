@@ -21,7 +21,7 @@ use aurix_core::{log_debug, log_warn, ops};
 use crate::contexts::{chip_name, cores, find_core, owning_core, read_pc, reason_text, CoreInfo, CONTAINER};
 use crate::symstore::elf_id;
 use crate::wire::{self, Reader};
-use crate::{Shared, SERVICES};
+use crate::{osaware, profile, Shared, SERVICES};
 
 // TCF standard error codes
 const ERR_OTHER: i64 = 1;
@@ -163,6 +163,43 @@ impl Channel {
 
     fn dispatch(&self, service: &str, command: &str, a: &Args) -> Reply {
         match (service, command) {
+            ("AurixOS", "load") => {
+                let file = a.string(0)?;
+                let target = a.opt_string(1)?;
+                let v = osaware::load(&self.shared, &file, target.as_deref()).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixOS", "getInfo") => Ok(vec![String::new(), osaware::info(&self.shared).to_string()]),
+            ("AurixOS", "getObjects") => {
+                let kind = a.string(0)?;
+                let name = a.opt_string(1)?;
+                let live_only = matches!(a.value(2), Ok(Value::Bool(true)));
+                let v = osaware::objects(&self.shared, &kind, name.as_deref(), live_only).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixOS", "startProfile") => {
+                let period = a.value(0).ok().and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
+                let v = profile::start_cmd(&self.shared, period).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixOS", "stopProfile") => Ok(vec![String::new(), profile::stop_cmd(&self.shared).to_string()]),
+            ("AurixOS", "getProfile") => {
+                let since = a.value(0).ok().and_then(|v| v.as_u64()).unwrap_or(0);
+                Ok(vec![String::new(), profile::poll_cmd(&self.shared, since).to_string()])
+            }
+            ("AurixOS", "getStacks") => {
+                let only = match a.value(0) {
+                    Ok(Value::Array(v)) => Some(v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>()),
+                    _ => None,
+                };
+                let v = osaware::stacks(&self.shared, only.as_deref()).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixOS", "getRunning") => {
+                let v = osaware::running(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+
             ("Locator", "sync") => Ok(vec![]),
             ("Locator", "getPeers") => Ok(vec![String::new(), "[]".into()]),
             ("ContextQuery", "query") => {

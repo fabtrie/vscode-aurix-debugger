@@ -10,6 +10,7 @@
 
 mod core_impl;
 mod daq_resolve;
+mod orti_state;
 mod daq_ws;
 mod events;
 mod http;

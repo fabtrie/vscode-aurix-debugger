@@ -13,6 +13,7 @@ jim = { path = "crates/jim" }
 aurix-core = { path = "crates/core" }
 tcf = { path = "crates/tcf" }
 symbols = { path = "crates/symbols" }
+orti = { path = "crates/orti" }
 isa = { path = "crates/isa" }
 api-spec = { path = "crates/api-spec" }
 api = { path = "crates/api" }

@@ -10,6 +10,8 @@ mod contexts;
 mod disassembly;
 mod expressions;
 mod forwarder;
+mod osaware;
+mod profile;
 mod stack;
 mod stepping;
 mod symstore;
@@ -49,6 +51,7 @@ pub enum SessionEvent {
 /// Services announced in `Locator.Hello`.
 pub const SERVICES: &[&str] = &[
     "Locator",
+    "AurixOS",
     "ContextQuery",
     "RunControl",
     "Memory",
@@ -77,6 +80,11 @@ pub struct Shared {
     /// Targets doing a source-level step, with their cancel flag.
     pub stepping: Mutex<HashMap<usize, Arc<AtomicBool>>>,
     pub exprs: Mutex<ExprTable>,
+    /// The loaded ORTI file with its attributes planned, shared by every frontend. Handed out as
+    /// an `Arc` so reading a large object table does not hold the lock while it talks to the core.
+    pub orti: Mutex<Option<Arc<orti::Awareness>>>,
+    /// The running task profiler, while one is started.
+    pub profile: Mutex<Option<Arc<profile::Profile>>>,
     /// Receivers of [`SessionEvent`]s (bounded: a receiver that does not keep up misses events).
     listeners: Mutex<Vec<SyncSender<SessionEvent>>>,
     next_id: AtomicU64,
@@ -291,6 +299,8 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         stacks: Mutex::new(HashMap::new()),
         stepping: Mutex::new(HashMap::new()),
         exprs: Mutex::new(ExprTable::default()),
+        orti: Mutex::new(None),
+        profile: Mutex::new(None),
         listeners: Mutex::new(Vec::new()),
         next_id: AtomicU64::new(1),
     })

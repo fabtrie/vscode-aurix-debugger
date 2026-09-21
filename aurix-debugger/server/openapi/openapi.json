@@ -656,6 +656,27 @@
         ],
         "type": "object"
       },
+      "LoadOrtiRequest": {
+        "description": "Which ORTI file to load.",
+        "properties": {
+          "file": {
+            "description": "Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.",
+            "type": "string"
+          },
+          "target": {
+            "default": null,
+            "description": "Target whose symbols resolve the attribute expressions, and whose memory view is read.\nDefault: the first core that has symbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "type": "object"
+      },
       "LoadSymbolsRequest": {
         "additionalProperties": false,
         "description": "Symbol files to load.",
@@ -730,6 +751,359 @@
       "NoArgs": {
         "additionalProperties": false,
         "description": "No arguments.",
+        "type": "object"
+      },
+      "OsAttributeInfo": {
+        "description": "One attribute of an ORTI object type.",
+        "properties": {
+          "description": {
+            "description": "The description the generator gave it, suitable as a column header.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`ctype` (a number), `enum` (a name from a fixed list) or `string` (literal text).",
+            "type": "string"
+          },
+          "live": {
+            "description": "The value can change while the target runs, so it is worth re-reading.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name as the ORTI file declares it, e.g. `RUNNINGTASK`, `vs_HomePriority`.",
+            "type": "string"
+          },
+          "per_core": {
+            "description": "Declared `NAME[]`: it has one value per logical core. This is the ORTI 2.3 SMP extension.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "kind",
+          "per_core",
+          "live"
+        ],
+        "type": "object"
+      },
+      "OsAttributeValue": {
+        "description": "One attribute value of one object.",
+        "properties": {
+          "core": {
+            "description": "Logical core, for an attribute declared per core.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "description": "Why the value could not be read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "description": "The ORTI object this value points at, when the enumerator names one, e.g. the stack of a\ntask or the owner of a spinlock.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "number": {
+            "description": "The raw integer behind `value`, when there is one.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "value": {
+            "description": "The value to display: an enumerator name, a number, or literal text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "OsInfo": {
+        "description": "The loaded OS awareness description.",
+        "properties": {
+          "cores": {
+            "description": "Logical cores the file describes.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "errors": {
+            "description": "Attributes that could not be planned, with the reason. They are read again on demand, so\nentries here are usually attributes planned while the board was not reachable.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file": {
+            "description": "The ORTI file, or null when none is loaded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "implementation": {
+            "description": "The `IMPLEMENTATION` name, e.g. `Vector_ORTI`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "description": "The target whose symbols the attribute expressions were resolved against.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "types": {
+            "items": {
+              "$ref": "#/components/schemas/OsTypeInfo"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "ORTI semantics version. `2.3` is the unofficial SMP extension, where the OS attributes\nare arrays indexed by logical core.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "cores",
+          "types",
+          "errors"
+        ],
+        "type": "object"
+      },
+      "OsObject": {
+        "description": "One object instance and its attribute values.",
+        "properties": {
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/OsAttributeValue"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "attributes"
+        ],
+        "type": "object"
+      },
+      "OsObjectList": {
+        "description": "Objects of one ORTI type, read now.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "objects": {
+            "items": {
+              "$ref": "#/components/schemas/OsObject"
+            },
+            "type": "array"
+          },
+          "reads": {
+            "description": "Bus accesses this call made. Constants and literal text cost none.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "objects",
+          "reads"
+        ],
+        "type": "object"
+      },
+      "OsObjectsRequest": {
+        "description": "Which objects to read.",
+        "properties": {
+          "kind": {
+            "description": "The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...",
+            "type": "string"
+          },
+          "live_only": {
+            "default": null,
+            "description": "Skip attributes that cannot change, for a cheaper refresh. Default: false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "default": null,
+            "description": "Only this object, by name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "OsStack": {
+        "description": "One stack's coverage.",
+        "properties": {
+          "base": {
+            "description": "Lowest address of the region.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "direction": {
+            "description": "`DOWN` or `UP`: which end keeps the fill pattern.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why it could not be measured, e.g. a region the memory protection hides from the debugger.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "free": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "pattern": {
+            "description": "The word the OS fills the stack with at startup.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "percent": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "used": {
+            "description": "Bytes ever used (the high-water mark). Absent when it could not be measured.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "base",
+          "size",
+          "direction",
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "OsStackList": {
+        "description": "Stack coverage.",
+        "properties": {
+          "reads": {
+            "description": "Bus accesses this call made. Measuring is the expensive part of OS awareness.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stacks": {
+            "items": {
+              "$ref": "#/components/schemas/OsStack"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "stacks",
+          "reads"
+        ],
+        "type": "object"
+      },
+      "OsStacksRequest": {
+        "description": "Which stacks to measure.",
+        "properties": {
+          "names": {
+            "default": null,
+            "description": "Measure only these stacks, by name. Default: every stack the ORTI file describes.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OsTypeInfo": {
+        "description": "One ORTI object type.",
+        "properties": {
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/OsAttributeInfo"
+            },
+            "type": "array"
+          },
+          "count": {
+            "description": "Object instances of this type.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "description": "The description the generator gave the collection, e.g. `Stacks`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "`OS`, `TASK`, `STACK`, `vs_SPINLOCK`, ... Generators invent their own types, so this is\nwhatever the file declared.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "count",
+          "attributes"
+        ],
         "type": "object"
       },
       "ReadMemoryRequest": {
@@ -1826,6 +2200,218 @@
         "summary": "Write memory (at most 65536 bytes per call).",
         "tags": [
           "memory"
+        ]
+      }
+    },
+    "/api/v1/os": {
+      "get": {
+        "description": "The loaded ORTI file: its object types, their attributes and how many cores it describes.\n\nObject types are whatever the file declared. A MICROSAR file adds `vs_ISR`, `vs_SPINLOCK`,\n`vs_EVENT` and `vs_OS_CONFIG` to the standard OSEK ones.",
+        "operationId": "os",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The loaded ORTI file: its object types, their attributes and how many cores it describes.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/os/objects/{kind}": {
+      "get": {
+        "description": "Read the objects of one ORTI type with their current attribute values.\n\nValues come from the target as it is now. Attributes that are constants (a stack address,\na `sizeof`) or literal text (an alarm action) cost no bus access.",
+        "operationId": "os_objects",
+        "parameters": [
+          {
+            "description": "The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Skip attributes that cannot change, for a cheaper refresh. Default: false.",
+            "in": "query",
+            "name": "live_only",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only this object, by name.",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsObjectList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read the objects of one ORTI type with their current attribute values.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/os/orti": {
+      "post": {
+        "description": "Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.\n\nEvery attribute is parsed as a C expression and resolved against the loaded symbols, so\n`load_symbols` (or a VS Code debug session) has to have run first. Attributes that cannot\nbe resolved are reported in `errors` and retried when they are first read, so loading\nbefore the board is powered is harmless.",
+        "operationId": "load_orti",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Which ORTI file to load.",
+                "properties": {
+                  "file": {
+                    "description": "Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.",
+                    "type": "string"
+                  },
+                  "target": {
+                    "default": null,
+                    "description": "Target whose symbols resolve the attribute expressions, and whose memory view is read.\nDefault: the first core that has symbols.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/os/stacks": {
+      "get": {
+        "description": "Measure stack coverage: how much of each OS stack has ever been used.\n\nThe OS fills every stack with a pattern at startup, so the high-water mark is the far end\nof the region that still holds it. Finding it means reading the untouched part of every\nstack, so this is on demand and never part of a refresh - prefer `names` to narrow it.\n\nA stack the debugger cannot read (a region the memory protection hides) is reported with\nits `error` rather than as unused.",
+        "operationId": "os_stacks",
+        "parameters": [
+          {
+            "description": "Measure only these stacks, by name. Default: every stack the ORTI file describes.",
+            "in": "query",
+            "name": "names",
+            "required": false,
+            "schema": {
+              "default": null,
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsStackList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Measure stack coverage: how much of each OS stack has ever been used.",
+        "tags": [
+          "os"
         ]
       }
     },

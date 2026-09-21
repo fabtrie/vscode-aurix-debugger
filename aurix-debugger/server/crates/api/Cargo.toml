@@ -10,6 +10,7 @@ publish = false
 aurix-core.workspace = true
 tcf.workspace = true
 symbols.workspace = true
+orti.workspace = true
 jim.workspace = true
 api-spec.workspace = true
 serde_json.workspace = true

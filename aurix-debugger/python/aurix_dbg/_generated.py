@@ -196,6 +196,200 @@ class MemoryWritten:
 
 
 @dataclass
+class OsAttributeInfo:
+    """One attribute of an ORTI object type."""
+
+    description: str
+    """The description the generator gave it, suitable as a column header."""
+    kind: str
+    """`ctype` (a number), `enum` (a name from a fixed list) or `string` (literal text)."""
+    live: bool
+    """The value can change while the target runs, so it is worth re-reading."""
+    name: str
+    """Name as the ORTI file declares it, e.g. `RUNNINGTASK`, `vs_HomePriority`."""
+    per_core: bool
+    """Declared `NAME[]`: it has one value per logical core. This is the ORTI 2.3 SMP extension."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsAttributeInfo:
+        return cls(
+            description=d.get("description"),
+            kind=d.get("kind"),
+            live=d.get("live"),
+            name=d.get("name"),
+            per_core=d.get("per_core"),
+        )
+
+
+@dataclass
+class OsAttributeValue:
+    """One attribute value of one object."""
+
+    name: str
+    value: str
+    """The value to display: an enumerator name, a number, or literal text."""
+    core: int | None = None
+    """Logical core, for an attribute declared per core."""
+    error: str | None = None
+    """Why the value could not be read."""
+    link: str | None = None
+    """The ORTI object this value points at, when the enumerator names one, e.g. the stack of a
+    task or the owner of a spinlock."""
+    number: int | None = None
+    """The raw integer behind `value`, when there is one."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsAttributeValue:
+        return cls(
+            name=d.get("name"),
+            value=d.get("value"),
+            core=d.get("core"),
+            error=d.get("error"),
+            link=d.get("link"),
+            number=d.get("number"),
+        )
+
+
+@dataclass
+class OsInfo:
+    """The loaded OS awareness description."""
+
+    cores: int
+    """Logical cores the file describes."""
+    errors: list[str]
+    """Attributes that could not be planned, with the reason. They are read again on demand, so
+    entries here are usually attributes planned while the board was not reachable."""
+    types: list[OsTypeInfo]
+    file: str | None = None
+    """The ORTI file, or null when none is loaded."""
+    implementation: str | None = None
+    """The `IMPLEMENTATION` name, e.g. `Vector_ORTI`."""
+    target: str | None = None
+    """The target whose symbols the attribute expressions were resolved against."""
+    version: str | None = None
+    """ORTI semantics version. `2.3` is the unofficial SMP extension, where the OS attributes
+    are arrays indexed by logical core."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsInfo:
+        return cls(
+            cores=d.get("cores"),
+            errors=d.get("errors"),
+            types=_list(OsTypeInfo, d.get("types")),
+            file=d.get("file"),
+            implementation=d.get("implementation"),
+            target=d.get("target"),
+            version=d.get("version"),
+        )
+
+
+@dataclass
+class OsObject:
+    """One object instance and its attribute values."""
+
+    attributes: list[OsAttributeValue]
+    name: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsObject:
+        return cls(
+            attributes=_list(OsAttributeValue, d.get("attributes")),
+            name=d.get("name"),
+        )
+
+
+@dataclass
+class OsObjectList:
+    """Objects of one ORTI type, read now."""
+
+    kind: str
+    objects: list[OsObject]
+    reads: int
+    """Bus accesses this call made. Constants and literal text cost none."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsObjectList:
+        return cls(
+            kind=d.get("kind"),
+            objects=_list(OsObject, d.get("objects")),
+            reads=d.get("reads"),
+        )
+
+
+@dataclass
+class OsStack:
+    """One stack's coverage."""
+
+    base: int
+    """Lowest address of the region."""
+    direction: str
+    """`DOWN` or `UP`: which end keeps the fill pattern."""
+    name: str
+    pattern: int
+    """The word the OS fills the stack with at startup."""
+    size: int
+    error: str | None = None
+    """Why it could not be measured, e.g. a region the memory protection hides from the debugger."""
+    free: int | None = None
+    percent: int | None = None
+    used: int | None = None
+    """Bytes ever used (the high-water mark). Absent when it could not be measured."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsStack:
+        return cls(
+            base=d.get("base"),
+            direction=d.get("direction"),
+            name=d.get("name"),
+            pattern=d.get("pattern"),
+            size=d.get("size"),
+            error=d.get("error"),
+            free=d.get("free"),
+            percent=d.get("percent"),
+            used=d.get("used"),
+        )
+
+
+@dataclass
+class OsStackList:
+    """Stack coverage."""
+
+    reads: int
+    """Bus accesses this call made. Measuring is the expensive part of OS awareness."""
+    stacks: list[OsStack]
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsStackList:
+        return cls(
+            reads=d.get("reads"),
+            stacks=_list(OsStack, d.get("stacks")),
+        )
+
+
+@dataclass
+class OsTypeInfo:
+    """One ORTI object type."""
+
+    attributes: list[OsAttributeInfo]
+    count: int
+    """Object instances of this type."""
+    description: str
+    """The description the generator gave the collection, e.g. `Stacks`."""
+    name: str
+    """`OS`, `TASK`, `STACK`, `vs_SPINLOCK`, ... Generators invent their own types, so this is
+    whatever the file declared."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> OsTypeInfo:
+        return cls(
+            attributes=_list(OsAttributeInfo, d.get("attributes")),
+            count=d.get("count"),
+            description=d.get("description"),
+            name=d.get("name"),
+        )
+
+
+@dataclass
 class RegisterList:
     """Register values of a target."""
 
@@ -585,6 +779,56 @@ class GeneratedClient:
         """The symbol files loaded per target (by this API or by a VS Code debug session).
         """
         return SymbolsInfo.from_dict(self._call("GET", "/api/v1/symbols", None, None))
+
+    def load_orti(self, *, file: str, target: str | None = None) -> OsInfo:
+        """Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.
+
+        Every attribute is parsed as a C expression and resolved against the loaded symbols, so
+        `load_symbols` (or a VS Code debug session) has to have run first. Attributes that cannot
+        be resolved are reported in `errors` and retried when they are first read, so loading
+        before the board is powered is harmless.
+
+        Args:
+            file: Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.
+            target: Target whose symbols resolve the attribute expressions, and whose memory view is read. Default: the first core that has symbols.
+        """
+        return OsInfo.from_dict(self._call("POST", "/api/v1/os/orti", None, _args({"file": file, "target": target})))
+
+    def os(self) -> OsInfo:
+        """The loaded ORTI file: its object types, their attributes and how many cores it describes.
+
+        Object types are whatever the file declared. A MICROSAR file adds `vs_ISR`, `vs_SPINLOCK`,
+        `vs_EVENT` and `vs_OS_CONFIG` to the standard OSEK ones.
+        """
+        return OsInfo.from_dict(self._call("GET", "/api/v1/os", None, None))
+
+    def os_objects(self, kind: str, *, live_only: bool | None = None, name: str | None = None) -> OsObjectList:
+        """Read the objects of one ORTI type with their current attribute values.
+
+        Values come from the target as it is now. Attributes that are constants (a stack address,
+        a `sizeof`) or literal text (an alarm action) cost no bus access.
+
+        Args:
+            kind: The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...
+            live_only: Skip attributes that cannot change, for a cheaper refresh. Default: false.
+            name: Only this object, by name.
+        """
+        return OsObjectList.from_dict(self._call("GET", f"/api/v1/os/objects/{quote(str(kind), safe='')}", _args({"live_only": live_only, "name": name}), None))
+
+    def os_stacks(self, *, names: list[str] | None = None) -> OsStackList:
+        """Measure stack coverage: how much of each OS stack has ever been used.
+
+        The OS fills every stack with a pattern at startup, so the high-water mark is the far end
+        of the region that still holds it. Finding it means reading the untouched part of every
+        stack, so this is on demand and never part of a refresh - prefer `names` to narrow it.
+
+        A stack the debugger cannot read (a region the memory protection hides) is reported with
+        its `error` rather than as unused.
+
+        Args:
+            names: Measure only these stacks, by name. Default: every stack the ORTI file describes.
+        """
+        return OsStackList.from_dict(self._call("GET", "/api/v1/os/stacks", _args({"names": names}), None))
 
     def tcl(self, *, command: str) -> CommandOutput:
         """Run a command of the OpenOCD-compatible Tcl console (like the telnet console).

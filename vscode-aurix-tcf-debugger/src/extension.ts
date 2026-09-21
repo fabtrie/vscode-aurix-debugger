@@ -15,6 +15,11 @@ import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { createGunzip } from 'zlib';
 import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
+import { OsObjectsPanel } from './osObjectsPanel';
+import { OsProfilePanel } from './osProfilePanel';
+import { describeOsError } from './tcf/osaware';
+import { notifyLiveUpdateBreak, setLiveUpdateIntervalMs, setLiveUpdateSessionActive } from './liveUpdate';
+import { OsViewProvider } from './osView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
 import { findSvdForDevice } from './svdCatalog';
 import { registerDebuggerActions } from './debuggerActions';
@@ -40,6 +45,7 @@ const instructionStepStateKey = 'aurix-debugger.instructionSteppingEnabled';
 let lastInstructionSteppingEnabled = false;
 let liveWatchStatusItem: vscode.StatusBarItem | undefined;
 let liveWatchProvider: LiveWatchProvider | undefined;
+let osViewProvider: OsViewProvider | undefined;
 const liveWatchIntervalStateKey = 'aurix-debugger.liveWatch.intervalMs';
 let lastLiveWatchIntervalMs = 1000;
 let preferredSourceViewColumn: vscode.ViewColumn | undefined;
@@ -329,10 +335,96 @@ export function activate(context: vscode.ExtensionContext) {
 				onDidSendMessage: (message: { type?: string; event?: string }) => {
 					if (message?.type === 'event' && message.event === 'stopped') {
 						liveWatchProvider?.refreshOnBreak();
+						// Paused live views still update on a halt, the way the Watch view does.
+						notifyLiveUpdateBreak();
 					}
 				},
 			}),
 		})
+	);
+
+	osViewProvider = new OsViewProvider();
+	context.subscriptions.push(osViewProvider);
+	// A TreeView, not just a provider: only a view can say whether anyone is looking, and a
+	// hidden AUTOSAR OS section must read nothing.
+	const osTree = vscode.window.createTreeView(OsViewProvider.viewId, { treeDataProvider: osViewProvider });
+	osViewProvider.attach(osTree);
+	context.subscriptions.push(osTree);
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-debugger.osRefresh', () => osViewProvider?.refresh()),
+		vscode.commands.registerCommand('aurix-debugger.osTogglePause', () => osViewProvider?.togglePaused()),
+		vscode.commands.registerCommand('aurix-debugger.osShowProfile', () => OsProfilePanel.show(context.extensionUri)),
+		vscode.commands.registerCommand('aurix-debugger.osShowObjects', (kind?: string) =>
+			OsObjectsPanel.show(context.extensionUri, typeof kind === 'string' ? kind : undefined),
+		),
+		vscode.commands.registerCommand('aurix-debugger.osBreakInTask', async () => {
+			const session = vscode.debug.activeDebugSession;
+			if (session?.type !== 'aurixdbg') {
+				void vscode.window.showWarningMessage('Start an AURIX debug session first.');
+				return;
+			}
+			const editor = vscode.window.activeTextEditor;
+			if (!editor) {
+				void vscode.window.showWarningMessage('Open the file with the breakpoint first.');
+				return;
+			}
+			// The breakpoints on the cursor's line, which is what "this breakpoint" means.
+			const line = editor.selection.active.line;
+			const here = vscode.debug.breakpoints.filter(
+				(b): b is vscode.SourceBreakpoint =>
+					b instanceof vscode.SourceBreakpoint &&
+					b.location.uri.toString() === editor.document.uri.toString() &&
+					b.location.range.start.line === line,
+			);
+			if (here.length === 0) {
+				void vscode.window.showWarningMessage('No breakpoint on this line.');
+				return;
+			}
+
+			let tasks: string[] = [];
+			try {
+				const list = (await session.customRequest('aurix/osObjects', { kind: 'TASK', liveOnly: true })) as { Objects?: Array<{ Name: string }> };
+				tasks = (list.Objects ?? []).map(o => o.Name);
+			} catch (e) {
+				void vscode.window.showErrorMessage(`Cannot list tasks: ${describeOsError(e)}`);
+				return;
+			}
+			if (tasks.length === 0) {
+				void vscode.window.showWarningMessage('No ORTI file is loaded, so there are no tasks to pick from.');
+				return;
+			}
+
+			const CLEAR = 'Any task (remove the filter)';
+			const picked = await vscode.window.showQuickPick([CLEAR, ...tasks], {
+				title: 'Halt only in this task',
+				placeHolder: 'The breakpoint still halts the core every time; the debugger resumes it for other tasks',
+			});
+			if (picked === undefined) {
+				return;
+			}
+			// A breakpoint's condition cannot be edited in place, so it is replaced.
+			const condition = picked === CLEAR ? undefined : `task == ${picked}`;
+			vscode.debug.removeBreakpoints(here);
+			vscode.debug.addBreakpoints(
+				here.map(b => new vscode.SourceBreakpoint(b.location, b.enabled, condition, b.hitCondition, b.logMessage)),
+			);
+		}),
+		vscode.commands.registerCommand('aurix-debugger.osLoadFile', async () => {
+			const picked = await vscode.window.showOpenDialog({
+				canSelectMany: false,
+				openLabel: 'Load ORTI file',
+				filters: { 'ORTI files': ['ORT', 'ort', 'orti', 'ORTI'], 'All files': ['*'] },
+			});
+			const file = picked?.[0]?.fsPath;
+			if (!file) {
+				return;
+			}
+			try {
+				await osViewProvider?.load(file);
+			} catch (e) {
+				void vscode.window.showErrorMessage(`Cannot load ORTI file: ${describeOsError(e)}`);
+			}
+		}),
 	);
 
 	// Register debug configuration provider
@@ -445,7 +537,7 @@ export function activate(context: vscode.ExtensionContext) {
 			if (activeAurixSessions === 0) {
 				updateInstructionSteppingStatus(lastInstructionSteppingEnabled, false);
 				updateLiveWatchStatus(false);
-				liveWatchProvider?.refreshScheduling(false, lastLiveWatchIntervalMs);
+				setLiveUpdateSessionActive(false);
 			}
 			// Use a short, cancelable delay so VS Code Restart (terminate + immediate start)
 			// can reuse the same agent without kill+start churn.
@@ -1376,15 +1468,17 @@ async function setLiveWatchInterval(value: number): Promise<void> {
 	await extensionContext.workspaceState.update(liveWatchIntervalStateKey, lastLiveWatchIntervalMs);
 	const sessionActive = activeAurixSessions > 0;
 	updateLiveWatchStatus(sessionActive);
-	liveWatchProvider?.refreshScheduling(sessionActive, lastLiveWatchIntervalMs);
+	// One rate for every live view, so there is a single thing to reason about.
+	setLiveUpdateIntervalMs(lastLiveWatchIntervalMs);
+	setLiveUpdateSessionActive(sessionActive);
 }
 
 function updateLiveWatchStatus(visible: boolean): void {
 	if (!liveWatchStatusItem) {
 		return;
 	}
-	liveWatchStatusItem.text = `Live Watch: ${lastLiveWatchIntervalMs}ms`;
-	liveWatchStatusItem.tooltip = `Live Watch refreshes every ${lastLiveWatchIntervalMs} ms while the target runs. Click to change.`;
+	liveWatchStatusItem.text = `Live: ${lastLiveWatchIntervalMs}ms`;
+	liveWatchStatusItem.tooltip = `The live views refresh every ${lastLiveWatchIntervalMs} ms while the target runs. A view that is not on screen reads nothing. Click to change.`;
 	if (visible) {
 		liveWatchStatusItem.show();
 	} else {

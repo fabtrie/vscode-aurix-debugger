@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
+import { LiveUpdater } from './liveUpdate';
 import type { LiveWatchNode, LiveWatchRootResult } from './liveWatchEvaluator';
 import { isLiveWatchPeripheral, LiveWatchPeripheral, peripheralExpression, PeripheralWatchEntry } from './peripheralLiveWatch';
 
@@ -46,10 +47,6 @@ export type LiveWatchCommandArgument = { rowId?: string } | undefined;
 
 const LIVE_WATCH_EXPRESSIONS_KEY = 'aurix-debugger.liveWatch.expressions';
 const PAUSED_GROUP_ID = 'pausedGroup';
-/** Minimum pause between two refreshes, so a slow target is not polled continuously. */
-const MIN_REFRESH_GAP_MS = 50;
-/** Stops of several cores within this time cause one refresh. */
-const BREAK_REFRESH_DEBOUNCE_MS = 100;
 
 export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Disposable {
 	static readonly viewType = 'aurixLiveWatch';
@@ -66,11 +63,16 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	private view: vscode.WebviewView | undefined;
 	private viewDisposables: vscode.Disposable[] = [];
 	private selectedId: string | undefined;
-	private timer: NodeJS.Timeout | undefined;
-	private breakTimer: NodeJS.Timeout | undefined;
 	private refreshQueue: Promise<void> = Promise.resolve();
-	private sessionActive = false;
-	private refreshIntervalMs = 1000;
+	/// The refresh loop, shared with the AUTOSAR OS views: one interval, and nothing read while
+	/// the view is off screen.
+	private readonly live = new LiveUpdater({
+		// A halt refreshes everything, paused expressions included, the way the Watch view does;
+		// the periodic loop only touches the ones that are not paused.
+		refresh: onBreak => (onBreak ? this.refreshNow() : this.refreshRoots(this.liveRoots())),
+		canRefresh: () => this.hasLiveExpressions(),
+		onChanged: () => this.updateDescription(),
+	});
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.loadExpressions();
@@ -86,9 +88,9 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		this.viewDisposables = [
 			view.webview.onDidReceiveMessage((message) => void this.onMessage(message)),
 			view.onDidChangeVisibility(() => {
+				this.live.setVisible(view.visible);
 				if (view.visible) {
 					this.render(true);
-					this.scheduleRefresh(0);
 					// Paused expressions that never got a value (e.g. restored from the last session).
 					const missing = Array.from(this.expressions.keys()).filter((e) => !this.results.has(e));
 					if (missing.length > 0) {
@@ -99,21 +101,18 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 			view.onDidDispose(() => {
 				if (this.view === view) {
 					this.view = undefined;
+					this.live.setVisible(false);
 				}
 			}),
 		];
+		// onDidChangeVisibility only fires on a change, so the state it starts in has to be pushed
+		// once here - otherwise a view that is already open never starts refreshing.
+		this.live.setVisible(view.visible);
 		this.updateDescription();
 	}
 
 	dispose(): void {
-		if (this.timer) {
-			clearTimeout(this.timer);
-			this.timer = undefined;
-		}
-		if (this.breakTimer) {
-			clearTimeout(this.breakTimer);
-			this.breakTimer = undefined;
-		}
+		this.live.dispose();
 		vscode.Disposable.from(...this.viewDisposables).dispose();
 	}
 
@@ -276,21 +275,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	 * multi-core target stop together and each reports its own stop.
 	 */
 	refreshOnBreak(): void {
-		if (this.breakTimer) {
-			clearTimeout(this.breakTimer);
-		}
-		this.breakTimer = setTimeout(() => {
-			this.breakTimer = undefined;
-			void this.refreshNow();
-		}, BREAK_REFRESH_DEBOUNCE_MS);
-	}
-
-	/** Starts the periodic refresh while an AURIX session runs and stops it when the last one ends. */
-	refreshScheduling(sessionActive: boolean, intervalMs: number): void {
-		this.sessionActive = sessionActive;
-		this.refreshIntervalMs = intervalMs;
-		this.updateDescription();
-		this.scheduleRefresh(0);
+		this.live.onBreak();
 	}
 
 	private async onMessage(message: any): Promise<void> {
@@ -372,33 +357,6 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		}
 		// Also refreshes a paused expression, so the written value is shown.
 		await this.refreshRoots([target.root]);
-	}
-
-	private scheduleRefresh(delayMs: number): void {
-		if (this.timer) {
-			clearTimeout(this.timer);
-			this.timer = undefined;
-		}
-		// A hidden view is not refreshed; becoming visible restarts the loop.
-		if (!this.sessionActive || !this.view?.visible || !this.hasLiveExpressions()) {
-			return;
-		}
-		this.timer = setTimeout(() => {
-			this.timer = undefined;
-			void this.runScheduledRefresh();
-		}, delayMs);
-	}
-
-	/**
-	 * Runs one refresh and schedules the next one relative to its start, so updates come at a steady
-	 * rate; a refresh that takes longer than the interval delays the next one instead of skipping it.
-	 */
-	private async runScheduledRefresh(): Promise<void> {
-		const started = Date.now();
-		await this.refreshRoots(this.liveRoots());
-		if (!this.timer) {
-			this.scheduleRefresh(Math.max(MIN_REFRESH_GAP_MS, this.refreshIntervalMs - (Date.now() - started)));
-		}
 	}
 
 	/** Refreshes are queued rather than dropped, so an added or expanded expression is always shown. */
@@ -554,15 +512,13 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	/** The expression list changed. */
 	private changed(): void {
 		this.render();
-		if (!this.timer) {
-			// Starts the refresh loop if this added the first live expression; a running loop continues.
-			this.scheduleRefresh(this.refreshIntervalMs);
-		}
+		// Starts the loop if this added the first live expression; a running loop continues.
+		this.live.kick();
 	}
 
 	private updateDescription(): void {
 		if (this.view) {
-			this.view.description = this.sessionActive ? `${this.refreshIntervalMs} ms` : '';
+			this.view.description = this.live.description;
 		}
 	}
 

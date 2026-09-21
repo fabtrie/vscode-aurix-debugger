@@ -58,6 +58,7 @@ import { SetMemoryMapCommand } from './tcf/memorymap';
 import { DisassembleDisassemblyCommand, GetCapabilitiesDisassemblyCommand } from './tcf/disassembly';
 import { GetMemoryCommand, MemoryErrorAddress, SetMemoryCommand } from './tcf/memory';
 import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/linenumbers';
+import { GetInfoOsCommand, GetObjectsOsCommand, GetRunningOsCommand, GetProfileOsCommand, GetStacksOsCommand, LoadOsCommand, parseTaskFilter, StartProfileOsCommand, StopProfileOsCommand, TaskFilter } from './tcf/osaware';
 import { LiveWatchEvaluator, LiveWatchRequestItem } from './liveWatchEvaluator';
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
 
@@ -117,6 +118,9 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	// ELF files for symbols (application, bootmanager, FBL, HSM, ...). A file applies to the cores
 	// whose architecture matches the ELF, or to the cores listed in "cores".
 	symbolFiles?: Array<string | { path: string; cores?: string[] }>;
+	// The ORTI file the AUTOSAR OS generator wrote beside the ELF. Loaded after the symbols, so
+	// the AUTOSAR OS view and task-aware thread names work without any further setup.
+	ortiFile?: string;
 
 	// Optional reset behavior (no GUI; can be set in launch.json)
 	resetType?: string;
@@ -2361,13 +2365,21 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		await this.syncAllBreakpoints();
 		this.sendResponse(response);
 		void this.showExistingExternalBreakpoints();
+		// After the symbols are in place: the attribute expressions are resolved against them.
+		void this.loadOrtiFromLaunchConfig(this.launchArgs?.ortiFile);
 	}
 
 	protected override async threadsRequestAsync(response: DebugProtocol.ThreadsResponse): Promise<void> {
 		const infos = await this.tcfClient.getThreads();
+		// With OS awareness the interesting name is the task, not the core: a thread reads
+		// "cpu0 - Task_Core0".
+		const running = await this.getOrtiRunning();
 		const threads = infos.map(x => {
 			const id = this.getOrAssignThreadId(x.info.ID);
-			return new Thread(id, x.info.Name || x.info.ID);
+			const base = x.info.Name || x.info.ID;
+			const core = AurixTCFDebugSession.coreOfContext(x.info.ID);
+			const task = core === undefined ? undefined : running.get(core);
+			return new Thread(id, task ? `${base} · ${task}` : base);
 		});
 		if (this.startupDiagnosticsEnabled) {
 			const list = threads.map(t => `${t.id}:${t.name}`).join(', ');
@@ -3232,6 +3244,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		const byLine = new Map(tuples.map(t => [t.line, t]));
+		// A condition of the form `task == NAME` is a task filter, applied when the breakpoint hits.
+		this.noteTaskFilters(
+			(args.breakpoints || []).map(b => byLine.get(b.line)?.id),
+			(args.breakpoints || []).map(b => b.condition),
+		);
 		const bps = requested.map(line => {
 			const ext = external.get(line);
 			const t = byLine.get(line);
@@ -3283,6 +3300,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		for (const t of tuples) {
 			byAddr.set(t.address, t);
 		}
+		this.noteTaskFilters(
+			requestAddrs.map(a => (a === undefined ? undefined : byAddr.get(a)?.id)),
+			(args.breakpoints || []).map(b => b.condition),
+		);
 
 		const bps = requestAddrs.map((addr) => {
 			if (addr === undefined) {
@@ -3672,6 +3693,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	private onContextSuspended(info: ContextSuspendedData) {
+		void this.onContextSuspendedAsync(info);
+	}
+
+	// Async because a task-filtered breakpoint has to read the running task before it can decide
+	// whether this stop is one the user asked for.
+	private async onContextSuspendedAsync(info: ContextSuspendedData): Promise<void> {
 		// Ignore duplicate suspend events for the same context.
 		const contextId = info.id;
 		if (this.suspendedContextIds.has(contextId)) {
@@ -3742,6 +3769,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 		}
 		if (reason === StoppedEventReason.breakpoint) {
+			// A task-filtered breakpoint that the wrong task hit is resumed without ever being
+			// reported, so VS Code never flickers a stop the user did not ask for.
+			if (!(await this.breakpointStopWanted(contextId, info.data))) {
+				this.suspendedContextIds.delete(contextId);
+				try {
+					await this.tcfClient.continue(contextId);
+				} catch (e) {
+					this.tcfLogger.log(`[orti] cannot resume ${contextId} after a filtered breakpoint: ${AurixTCFDebugSession.formatError(e)}`);
+				}
+				return;
+			}
 			this.invalidateLiveWatchContext();
 			this.cancelPendingPauseStoppedTimers('runcontrolBreakpoint');
 			this.suppressPauseStoppedUntilMs = Date.now() + Math.max(150, this.stopStormPauseDelayMs * 4);
@@ -3862,7 +3900,222 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.invalidateLiveWatchContext();
 	}
 
+	// --- Task-filtered breakpoints -----------------------------------------------------------
+
+	/** Task filters by breakpoint id, from the breakpoint's condition. */
+	private taskFilters = new Map<number, TaskFilter>();
+	/** Breakpoint hits skipped because the wrong task ran, for the log and a status line. */
+	private taskFilterSkips = 0;
+
+	/** Records the task filters of one file's breakpoints, replacing what was there. */
+	private noteTaskFilters(ids: Array<number | undefined>, conditions: Array<string | undefined>): void {
+		ids.forEach((id, i) => {
+			if (id === undefined) {
+				return;
+			}
+			const f = parseTaskFilter(conditions[i]);
+			if (f) {
+				this.taskFilters.set(id, f);
+			} else {
+				this.taskFilters.delete(id);
+			}
+		});
+	}
+
+	/**
+	 * Whether a breakpoint stop should be reported, given which task is running.
+	 *
+	 * A breakpoint with a task filter is still a plain hardware breakpoint: the target really does
+	 * halt every time, and the adapter resumes it again when the wrong task hit it. That costs
+	 * real time on every hit - the same trade-off TRACE32 makes for a conditional breakpoint - so
+	 * it is only applied when the user asked for it.
+	 */
+	private async breakpointStopWanted(contextId: string, data: unknown): Promise<boolean> {
+		if (this.taskFilters.size === 0 || !this.ortiLoaded) {
+			return true;
+		}
+		const bpIds = Array.isArray((data as { BPs?: unknown })?.BPs) ? ((data as { BPs: unknown[] }).BPs as unknown[]) : [];
+		const filters = bpIds
+			.map(x => this.taskFilters.get(this.breakpointTcfIdToId(String(x))))
+			.filter((f): f is TaskFilter => f !== undefined);
+		// Only breakpoints without a filter were hit (or none was reported): report the stop.
+		if (filters.length === 0 || filters.length !== bpIds.length) {
+			return true;
+		}
+		const core = AurixTCFDebugSession.coreOfContext(contextId);
+		// Never from the cache: the decision is about this stop, not about the last one.
+		const running = await this.getOrtiRunning(true);
+		const task = core === undefined ? undefined : running.get(core);
+		if (task === undefined) {
+			// No answer means no basis to skip: a stop the user cannot explain is worse than one
+			// they did not want.
+			return true;
+		}
+		const wanted = filters.some(f => (f.negate ? f.task !== task : f.task === task));
+		if (!wanted) {
+			this.taskFilterSkips += 1;
+			this.tcfLogger.log(`[orti] breakpoint hit in ${task}, which no filter matches: resuming (${this.taskFilterSkips} skipped)`);
+		}
+		return wanted;
+	}
+
+	// --- AUTOSAR OS awareness (ORTI) ---------------------------------------------------------
+
+	/** Set once an ORTI file is loaded, so the views and thread naming stop asking. */
+	private ortiLoaded = false;
+	/** The running task per AUTOSAR core id, refreshed on each stop. */
+	private ortiRunning = new Map<number, string>();
+	private ortiRunningAt = 0;
+
+	/**
+	 * Loads the ORTI file named in the launch configuration, if any.
+	 *
+	 * Best effort: a missing or broken file must not stop a debug session, it only means no OS
+	 * awareness. The reason is logged and surfaced by the AUTOSAR OS view.
+	 */
+	private async loadOrtiFromLaunchConfig(file: string | undefined): Promise<void> {
+		if (!file) {
+			return;
+		}
+		const resolved = path.isAbsolute(file)
+			? file
+			: path.resolve(this.projectRootDir ?? this.launchArgs?.workspace ?? process.cwd(), file);
+		try {
+			const info = await this.tcfClient.sendCommand(new LoadOsCommand(resolved));
+			this.ortiLoaded = info.Loaded === true;
+			const n = info.Types?.reduce((s, t) => s + t.Count, 0) ?? 0;
+			this.tcfLogger.log(`[orti] ${resolved}: ${info.Implementation ?? '?'} ${info.Version ?? '?'}, ${info.Cores ?? 0} core(s), ${n} objects`);
+			for (const e of info.Errors ?? []) {
+				this.tcfLogger.log(`[orti] ${e}`);
+			}
+		} catch (e) {
+			this.tcfLogger.log(`[orti] cannot load ${resolved}: ${AurixTCFDebugSession.formatError(e)}`);
+		}
+	}
+
+	/**
+	 * The task running on each core, by AUTOSAR core id.
+	 *
+	 * Cached for a moment: `threads` can be asked for several times per stop, and every call is a
+	 * handful of bus reads.
+	 */
+	private async getOrtiRunning(force = false): Promise<Map<number, string>> {
+		if (!this.ortiLoaded) {
+			return new Map();
+		}
+		if (!force && Date.now() - this.ortiRunningAt < 200) {
+			return this.ortiRunning;
+		}
+		try {
+			const r = await this.tcfClient.sendCommand(new GetRunningOsCommand());
+			const m = new Map<number, string>();
+			for (const c of r.Cores) {
+				// `CoreId` is the AUTOSAR core id; `Core` is only the position in the ORTI file.
+				const id = typeof c.CoreId === 'number' ? c.CoreId : c.Core;
+				if (c.Task) {
+					m.set(id, c.Task);
+				}
+			}
+			this.ortiRunning = m;
+			this.ortiRunningAt = Date.now();
+		} catch {
+			// The target may be mid-reset, or the OS not started. Keep the last answer.
+		}
+		return this.ortiRunning;
+	}
+
+	/** The core number a TCF context id names, e.g. `S0.D0.C1` -> 1. */
+	private static coreOfContext(id: string): number | undefined {
+		const m = /\.C(\d+)(?:$|\b)/i.exec(id);
+		return m ? Number(m[1]) : undefined;
+	}
+
 	protected override async customRequestAsync(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): Promise<void> {
+		if (command === 'aurix/osInfo') {
+			try {
+				response.body = await this.tcfClient.sendCommand(new GetInfoOsCommand());
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osLoad') {
+			try {
+				const info = await this.tcfClient.sendCommand(new LoadOsCommand(String(args?.file ?? ''), args?.target));
+				this.ortiLoaded = info.Loaded === true;
+				response.body = info;
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osObjects') {
+			try {
+				const kind = String(args?.kind ?? '');
+				const name = typeof args?.name === 'string' ? args.name : undefined;
+				response.body = await this.tcfClient.sendCommand(new GetObjectsOsCommand(kind, name, Boolean(args?.liveOnly)));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osProfileStart') {
+			try {
+				response.body = await this.tcfClient.sendCommand(new StartProfileOsCommand(Number(args?.periodUs ?? 1000)));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osProfileStop') {
+			try {
+				response.body = await this.tcfClient.sendCommand(new StopProfileOsCommand());
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osProfile') {
+			try {
+				response.body = await this.tcfClient.sendCommand(new GetProfileOsCommand(Number(args?.sinceUs ?? 0)));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osStacks') {
+			try {
+				const names = Array.isArray(args?.names) ? args.names.map(String) : undefined;
+				response.body = await this.tcfClient.sendCommand(new GetStacksOsCommand(names));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
+		if (command === 'aurix/osRunning') {
+			try {
+				response.body = await this.tcfClient.sendCommand(new GetRunningOsCommand());
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
 		if (command === 'aurix/activeThread') {
 			this.activeThreadId = typeof args?.threadId === 'number' ? args.threadId : undefined;
 			this.sendResponse(response);

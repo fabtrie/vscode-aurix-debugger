@@ -55,6 +55,8 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     // configuration
     reg(interp, sh, "adapter", cmd_adapter);
     reg(interp, sh, "tas-client", cmd_driver_group);
+    #[cfg(feature = "winidea")]
+    reg(interp, sh, "winidea", cmd_driver_group);
     reg(interp, sh, "transport", cmd_transport);
     reg(interp, sh, "reset_config", cmd_reset_config);
     reg(interp, sh, "ifxdap", cmd_ifxdap);
@@ -230,6 +232,43 @@ fn port_cmd(cx: &Cx, a: &[&str], field: fn(&mut crate::ctx::Ports) -> &mut Optio
     Ok(cx.with(|c| field(&mut c.ports).map(|p| p.to_string()).unwrap_or_else(|| "disabled".into())))
 }
 
+/// The driver name, if this adapter programs flash from its own download list
+/// rather than by driving the on-chip flash controller.
+fn flash_download_driver(cx: &Cx) -> Option<&'static str> {
+    cx.with(|c| {
+        let ad = c.adapter.as_deref_mut()?;
+        ad.flash_download().is_some().then(|| ad.driver_name())
+    })
+}
+
+/// Refuses a DMU-level flash command on a backend that programs by download.
+///
+/// These have no equivalent there, so they fail loudly instead of appearing to
+/// succeed. Note this guards the *command*, never `flash::write_image_with`,
+/// which calls `probe_bank` internally -- refusing deeper would kill
+/// `flash write_image` before its own reroute could run.
+fn require_controller_flash(cx: &Cx, what: &str) -> Result<(), String> {
+    match flash_download_driver(cx) {
+        Some(d) => Err(format!(
+            "'flash {what}' is not supported by the '{d}' adapter: it programs flash from its own download list"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Hands the files to a probe that programs from its own download list.
+///
+/// `Ok(false)` means this adapter drives the flash controller itself, and the
+/// caller goes on to the DMU path.
+fn flash_by_download(cx: &Cx, files: &[&str]) -> Result<bool, String> {
+    let owned: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
+    cx.with(|c| {
+        let Some(ad) = c.adapter.as_deref_mut() else { return Ok(false) };
+        let Some(dl) = ad.flash_download() else { return Ok(false) };
+        dl.download(&owned).map(|()| true).map_err(e2s)
+    })
+}
+
 fn require_init(cx: &Cx, name: &str) -> Result<(), String> {
     if cx.with(|c| c.initialized) {
         Ok(())
@@ -261,7 +300,15 @@ fn cmd_adapter(cx: &Cx, a: &[&str]) -> CmdResult {
             });
             ok()
         }
-        Some("name") => Ok(cx.with(|c| c.adapter_name.clone().unwrap_or_default())),
+        // The driver actually in use, which `--adapter` may have overridden.
+        // Cfg scripts branch on this to skip what a backend cannot do.
+        Some("name") => Ok(cx.with(|c| {
+            c.adapter
+                .as_deref()
+                .map(|ad| ad.driver_name().to_string())
+                .or_else(|| c.adapter_name.clone())
+                .unwrap_or_default()
+        })),
         Some("list") => Ok(adapter::DRIVERS.join("\n")),
         Some("speed") => {
             if let Some(v) = a.get(2) {
@@ -290,14 +337,20 @@ fn cmd_adapter(cx: &Cx, a: &[&str]) -> CmdResult {
 }
 
 /// Driver-specific command groups (e.g. `tas-client host`).
+///
+/// A group the active adapter does not claim is an **error**, not a silent
+/// no-op. A cfg meant for another probe has to say so -- guard it with
+/// `if {[adapter name] eq "tas_client"} { ... }` -- rather than have its
+/// settings quietly ignored and the session then behave in a way the script
+/// never asked for.
 fn cmd_driver_group(cx: &Cx, a: &[&str]) -> CmdResult {
-    cx.with(|c| {
-        let overridden = c.adapter_override.is_some();
-        match c.adapter.as_deref_mut() {
-            Some(ad) if ad.command_groups().contains(&a[0]) => ad.command(a).map_err(e2s),
-            _ if overridden => Ok(String::new()),
-            _ => Err(format!("'{}' requires 'adapter driver tas_client' first", a[0])),
+    cx.with(|c| match c.adapter.as_deref_mut() {
+        Some(ad) if ad.command_groups().contains(&a[0]) => ad.command(a).map_err(e2s),
+        Some(ad) => {
+            let d = ad.driver_name();
+            Err(format!("'{}' is not supported by the '{d}' adapter", a[0]))
         }
+        None => Err(format!("'{}' requires 'adapter driver' first", a[0])),
     })
 }
 
@@ -708,6 +761,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
         })),
         Some("init") => ok(),
         Some("probe") | Some("info") => {
+            require_controller_flash(cx, "probe")?;
             require_init(cx, "flash")?;
             let bank = flash::find_bank(cx, a.get(2).ok_or("usage: flash info|probe <bank>")?).map_err(e2s)?;
             let p = flash::probe_bank(cx, &bank).map_err(e2s)?;
@@ -725,6 +779,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             ))
         }
         Some("erase_check") => {
+            require_controller_flash(cx, "erase_check")?;
             require_init(cx, "flash")?;
             let bank = flash::find_bank(cx, a.get(2).ok_or("usage: flash erase_check <bank>")?).map_err(e2s)?;
             let sectors = flash::erase_check(cx, &bank).map_err(e2s)?;
@@ -734,6 +789,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             Ok(out.join("\n"))
         }
         Some("erase_sector") => {
+            require_controller_flash(cx, "erase_sector")?;
             require_init(cx, "flash")?;
             if a.len() != 5 {
                 return Err("usage: flash erase_sector <bank> <first> <last|'last'>".into());
@@ -762,6 +818,11 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
                 }
                 args.remove(0);
             }
+            // A probe that programs from its own download list takes the file as
+            // it is; the DMU path below only applies when we drive the controller.
+            if !args.is_empty() && flash_by_download(cx, &args[..1])? {
+                return Ok(format!("downloaded {}", args[0]));
+            }
             let img = load_image(&args, "flash write_image [erase] [incremental] [unlock] <file> [offset [type]]")?;
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
             Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped, args[0]))
@@ -785,6 +846,11 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             }
             if files.is_empty() {
                 return Err(USAGE.into());
+            }
+            // As in write_image: hand the whole list over, already merged by
+            // winIDEA's own loader rather than by us.
+            if flash_by_download(cx, &files)? {
+                return Ok(format!("downloaded {}", files.join(", ")));
             }
             let mut img = Image::default();
             for file in &files {
@@ -863,8 +929,17 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
         }
         if needs_flash {
             out.push("** Programming Started **".into());
-            let stats = flash::write_image(cx, &img, true).map_err(|e| format!("** Programming Failed **: {e}"))?;
-            out.push(format!("** Programming Finished **: {stats}"));
+            // A probe that programs from its own download list gets the file;
+            // otherwise we drive the flash controller ourselves.
+            if flash_by_download(cx, &[file])? {
+                out.push("** Programming Finished **: downloaded".into());
+            } else {
+                let stats = flash::write_image(cx, &img, true)
+                    .map_err(|e| format!("** Programming Failed **: {e}"))?;
+                out.push(format!("** Programming Finished **: {stats}"));
+            }
+            // Verification is ours on either backend: it reads the image back
+            // through ordinary memory, so both report the same thing.
             if verify {
                 out.push("** Verify Started **".into());
                 let n = flash::verify_image(cx, &img).map_err(|e| format!("**Verify Failed**: {e}"))?;

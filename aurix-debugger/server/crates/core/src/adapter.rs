@@ -61,16 +61,43 @@ pub trait Adapter {
     /// Number of device resets noticed since the last call.
     fn take_resets(&mut self) -> u64;
     fn set_speed_khz(&mut self, khz: u32) -> Result<()>;
+    /// Run control the probe performs itself, when it does not expose the raw
+    /// OCDS registers the TriCore target drives.
+    ///
+    /// `None` (the default, and what the TAS and simulator adapters return)
+    /// means the caller writes the debug registers over the bus as usual.
+    /// See [`crate::target::RunControl`].
+    fn run_control(&mut self) -> Option<&mut dyn crate::target::RunControl> {
+        None
+    }
+    /// Programming the probe performs itself, from its own list of files,
+    /// instead of by driving the on-chip flash controller over the bus.
+    ///
+    /// `None` (the default) means the caller runs the TriCore DMU sequences in
+    /// [`crate::flash`]. See [`FlashDownload`].
+    fn flash_download(&mut self) -> Option<&mut dyn FlashDownload> {
+        None
+    }
+    /// The run-state poll period this probe wants when the cfg sets none
+    /// (`polling_period`). `None`: the server default.
+    fn default_poll_period_ms(&self) -> Option<u64> {
+        None
+    }
     fn quit(&mut self) {}
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+#[cfg(feature = "winidea")]
+pub const DRIVERS: &[&str] = &["tas_client", "sim", "winidea"];
+#[cfg(not(feature = "winidea"))]
 pub const DRIVERS: &[&str] = &["tas_client", "sim"];
 
 pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
     match name {
         "tas_client" => Some(Box::new(crate::tas_adapter::TasAdapter::default())),
         "sim" => Some(Box::new(crate::sim::SimAdapter::new())),
+        #[cfg(feature = "winidea")]
+        "winidea" => Some(Box::new(crate::winidea_adapter::WinIdeaAdapter::new())),
         _ => None,
     }
 }
@@ -300,4 +327,18 @@ pub fn check(r: &OpResult, addr: u64, write: bool) -> Result<()> {
     } else {
         Err(Error::Memory { addr: addr + r.bytes_ok as u64, write, detail: tas::pl_err_name(r.err).to_string() })
     }
+}
+
+/// Programming performed by the probe itself, from its own list of files.
+///
+/// winIDEA flashes from a download list, so the TriCore DMU driver in
+/// [`crate::flash`] -- which drives the flash controller over the debug bus --
+/// does not apply there and the files are handed over instead.
+///
+/// Verifying is deliberately *not* part of this. `verify_image` reads the image
+/// back through ordinary memory, which works on either backend, so both report
+/// verification the same way.
+pub trait FlashDownload {
+    /// Programs `files` (code only -- symbols stay with our own DWARF reader).
+    fn download(&mut self, files: &[String]) -> Result<()>;
 }

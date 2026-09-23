@@ -30,6 +30,7 @@ orti = { path = "crates/orti" }
 isa = { path = "crates/isa" }
 api-spec = { path = "crates/api-spec" }
 api = { path = "crates/api" }
+winidea-sdk = { path = "crates/winidea-sdk" }
 serde_json = "1"
 base64 = "0.22"
 gimli = "0.34"

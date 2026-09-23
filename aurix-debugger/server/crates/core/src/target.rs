@@ -124,6 +124,89 @@ macro_rules! each {
     };
 }
 
+/// Run control performed by the probe itself, instead of by writing OCDS
+/// registers over the bus.
+///
+/// The TAS path drives an AURIX by writing its debug registers as ordinary
+/// memory ([`crate::tricore`]), so `Adapter` only has to move bytes. A probe
+/// whose vendor software owns OCDS -- an iSYSTEM BlueBox through the winIDEA
+/// SDK -- cannot expose that, and offers halt/resume/step directly instead.
+/// Such an adapter returns `Some` from [`crate::adapter::Adapter::run_control`]
+/// and the [`Core`] methods below route to it.
+///
+/// Only TriCore cores are routed. The HSM ([`crate::cortex_m`], reached through
+/// its debug bridge) and the GTM MCS channels ([`crate::gtm_mcs`], plain module
+/// RAM) use no OCDS registers, so they keep working over ordinary bus accesses
+/// on any adapter.
+///
+/// Methods mirror the [`Core`] ones, minus the [`Io`]: the implementation talks
+/// to its own probe and gets the core it is acting on, which carries the core
+/// id and the state fields to update.
+pub trait RunControl {
+    fn examine(&mut self, c: &mut Tricore) -> Result<()>;
+    fn poll(&mut self, c: &mut Tricore) -> Result<Transition>;
+    fn halt(&mut self, c: &mut Tricore) -> Result<()>;
+    fn resume(&mut self, c: &mut Tricore, addr: Option<u32>, mode: RunMode) -> Result<()>;
+    fn step(&mut self, c: &mut Tricore, addr: Option<u32>, mode: RunMode) -> Result<bool>;
+    fn unmask_irq(&mut self, c: &mut Tricore) -> Result<()>;
+    fn read_regs(&mut self, c: &mut Tricore, idxs: &[usize]) -> Result<Vec<u32>>;
+    fn write_reg(&mut self, c: &mut Tricore, idx: usize, value: u32) -> Result<()>;
+    fn add_breakpoint(&mut self, c: &mut Tricore, addr: u32, len: u32) -> Result<u8>;
+    fn add_watchpoint(&mut self, c: &mut Tricore, addr: u32, len: u32, access: u32) -> Result<u8>;
+    fn remove_trigger(&mut self, c: &mut Tricore, slot: u8) -> Result<()>;
+    fn restore_triggers(&mut self, c: &mut Tricore) -> Result<()>;
+    /// Replaces the OCDS register work of `arp_reset deassert`; see
+    /// [`Core::after_reset`].
+    fn after_reset(&mut self, c: &mut Tricore, halt: bool) -> Result<Transition>;
+    /// Whether this probe can drive the core at all. A core it cannot reach
+    /// is left out of a halting reset instead of failing it; the default is
+    /// "yes", which is every core on the OCDS path.
+    fn drives(&self, _c: &Tricore) -> bool {
+        true
+    }
+    /// A whole source-level step, done by the probe from its own line
+    /// information, when it has the same ELF (`elf`) loaded.
+    ///
+    /// `None` means not available here, and the caller steps instruction by
+    /// instruction. `Some(Ok(true))`: the core is halted at the new line;
+    /// `Some(Ok(false))`: the step is still running, and the poll reports the
+    /// halt.
+    fn source_step(
+        &mut self,
+        _c: &mut Tricore,
+        _kind: SourceStep,
+        _elf: &std::path::Path,
+    ) -> Option<Result<bool>> {
+        None
+    }
+}
+
+/// A source-level step, see [`RunControl::source_step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStep {
+    Over,
+    Into,
+    Out,
+}
+
+/// Defines a [`Core`] method that a [`RunControl`] adapter may take over.
+///
+/// Without one (the TAS and simulator adapters) this is exactly the `each!`
+/// dispatch the method had before.
+macro_rules! forward {
+    ($(#[$m:meta])* $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
+        $(#[$m])*
+        pub fn $name(&mut self, io: &mut Io $(, $arg: $ty)*) -> Result<$ret> {
+            if let Core::Tricore(c) = self {
+                if let Some(rc) = io.adapter.run_control() {
+                    return rc.$name(c $(, $arg)*);
+                }
+            }
+            each!(self, c => c.$name(io $(, $arg)*))
+        }
+    };
+}
+
 impl Core {
     /// Creates a core of a target type (`tricore`, `cortex_m`).
     pub fn for_type(type_name: &str) -> Option<Core> {
@@ -291,57 +374,100 @@ impl Core {
     pub fn invalidate(&mut self) {
         each!(self, c => c.invalidate())
     }
-    pub fn examine(&mut self, io: &mut Io) -> Result<()> {
-        each!(self, c => c.examine(io))
-    }
+    forward!(examine() -> ());
     pub fn poll_queue(&self, b: &mut Batch) -> PollOps {
         each!(self, c => c.poll_queue(b))
     }
-    pub fn poll(&mut self, io: &mut Io) -> Result<Transition> {
-        each!(self, c => c.poll(io))
-    }
+    forward!(poll() -> Transition);
     pub fn poll_apply(&mut self, vals: &[u32]) -> Transition {
         each!(self, c => c.poll_apply(vals))
     }
     pub fn hit_trigger(&self) -> Option<usize> {
         each!(self, c => c.hit_trigger())
     }
-    pub fn halt(&mut self, io: &mut Io) -> Result<()> {
-        each!(self, c => c.halt(io))
-    }
-    pub fn resume(&mut self, io: &mut Io, addr: Option<u32>, mode: RunMode) -> Result<()> {
-        each!(self, c => c.resume(io, addr, mode))
-    }
-    pub fn step(&mut self, io: &mut Io, addr: Option<u32>, mode: RunMode) -> Result<bool> {
-        each!(self, c => c.step(io, addr, mode))
-    }
+    forward!(halt() -> ());
+    forward!(resume(addr: Option<u32>, mode: RunMode) -> ());
+    forward!(step(addr: Option<u32>, mode: RunMode) -> bool);
     pub fn irq_masked(&self) -> bool {
         each!(self, c => c.irq_masked())
     }
-    pub fn unmask_irq(&mut self, io: &mut Io) -> Result<()> {
-        each!(self, c => c.unmask_irq(io))
-    }
+    forward!(unmask_irq() -> ());
+    /// One register, as the single-register case of [`Core::read_regs`] -- a
+    /// probe that does its own run control answers both the same way.
     pub fn read_reg(&mut self, io: &mut Io, idx: usize) -> Result<u32> {
+        if let Core::Tricore(c) = self {
+            if let Some(rc) = io.adapter.run_control() {
+                return Ok(rc.read_regs(c, &[idx])?[0]);
+            }
+        }
         each!(self, c => c.read_reg(io, idx))
     }
-    pub fn read_regs(&mut self, io: &mut Io, idxs: &[usize]) -> Result<Vec<u32>> {
-        each!(self, c => c.read_regs(io, idxs))
+    forward!(read_regs(idxs: &[usize]) -> Vec<u32>);
+    forward!(write_reg(idx: usize, value: u32) -> ());
+    forward!(add_breakpoint(addr: u32, len: u32) -> u8);
+    forward!(add_watchpoint(addr: u32, len: u32, access: u32) -> u8);
+    forward!(remove_trigger(slot: u8) -> ());
+    forward!(restore_triggers() -> ());
+    /// A source-level step done by the probe; see [`RunControl::source_step`].
+    /// `None` for cores and adapters that do not offer it.
+    pub fn source_step(
+        &mut self,
+        io: &mut Io,
+        kind: SourceStep,
+        elf: &std::path::Path,
+    ) -> Option<Result<bool>> {
+        match self {
+            Core::Tricore(c) => io.adapter.run_control()?.source_step(c, kind, elf),
+            _ => None,
+        }
     }
-    pub fn write_reg(&mut self, io: &mut Io, idx: usize, value: u32) -> Result<()> {
-        each!(self, c => c.write_reg(io, idx, value))
+
+    /// Whether the adapter can drive this core. Always true without a
+    /// [`RunControl`] adapter.
+    pub fn drivable(&mut self, io: &mut Io) -> bool {
+        match self {
+            Core::Tricore(c) => io.adapter.run_control().is_none_or(|rc| rc.drives(c)),
+            _ => true,
+        }
     }
-    pub fn add_breakpoint(&mut self, io: &mut Io, addr: u32, len: u32) -> Result<u8> {
-        each!(self, c => c.add_breakpoint(io, addr, len))
+
+    /// Brings this core back up after `arp_reset deassert` released reset.
+    ///
+    /// TriCore cores need their OCDS re-enabled and the halt-after-reset
+    /// trigger cleared; the HSM and the MCS channels are simply re-examined,
+    /// since they only become accessible once the startup software has run.
+    pub fn after_reset(&mut self, io: &mut Io, halt: bool, name: &str) -> Result<Transition> {
+        if let Core::Tricore(c) = self {
+            if let Some(rc) = io.adapter.run_control() {
+                return rc.after_reset(c, halt);
+            }
+        }
+        match self {
+            Core::Tricore(core) => core.after_reset(io, halt, name),
+            core => {
+                // The HSM starts when the host startup software releases it and is only
+                // accessible when its firmware enables HSM debugging; MCS channels once the
+                // startup software enables the GTM. They are examined again (e.g. by the
+                // reset-end handler after the HSM release, or the background poll) instead of
+                // failing the reset.
+                if !core.examined() {
+                    return Ok(Transition::None);
+                }
+                match core.examine(io).and_then(|_| core.poll(io)) {
+                    Ok(tr) => {
+                        core.restore_triggers(io)?;
+                        Ok(tr)
+                    }
+                    Err(err) => {
+                        crate::log_debug!("[{name}] not accessible after reset: {err}");
+                        core.set_examined(false);
+                        Ok(Transition::None)
+                    }
+                }
+            }
+        }
     }
-    pub fn add_watchpoint(&mut self, io: &mut Io, addr: u32, len: u32, access: u32) -> Result<u8> {
-        each!(self, c => c.add_watchpoint(io, addr, len, access))
-    }
-    pub fn remove_trigger(&mut self, io: &mut Io, slot: u8) -> Result<()> {
-        each!(self, c => c.remove_trigger(io, slot))
-    }
-    pub fn restore_triggers(&mut self, io: &mut Io) -> Result<()> {
-        each!(self, c => c.restore_triggers(io))
-    }
+
     pub fn assert_reset(&mut self) {
         each!(self, c => c.assert_reset())
     }

@@ -943,3 +943,74 @@ fn generic_setup_follows_the_target_cfg() {
     assert!(i.eval("catch {target create x gtm_mcs -module 10}").unwrap() == "1");
     assert!(i.eval("catch {tc3xx_ocds_setup tc27x}").unwrap() == "1");
 }
+
+/// The cfg drives OCDS itself on the TAS and simulator backends, and steps
+/// aside on one whose probe owns OCDS -- without losing the target topology.
+mod backend_guard {
+    use super::*;
+
+    fn server_with(driver: &str) -> Server {
+        aurix_core::log::set_debug_level(1);
+        let s = Server::new();
+        s.cx().with(|c| {
+            c.adapter_override = Some(driver.into());
+            c.search_dirs.push(repo().join("third_party/openocd/tcl"));
+        });
+        s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
+        s.interp
+            .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn ocds_backends_keep_the_full_event_wiring() {
+        let s = server_with("sim");
+        let i = &s.interp;
+        assert_eq!(i.eval("adapter name").unwrap(), "sim");
+        assert_eq!(i.eval("tc3xx_ocds_available").unwrap(), "1");
+        assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap(), "tc3xx_on_examine");
+        assert_eq!(i.eval("tc37x.cpu0 cget -event reset-end").unwrap(), "tc3xx_on_reset_end");
+        assert_eq!(i.eval("tc37x.cpu1 cget -event halted").unwrap(), "tc3xx_on_halted tc37x.cpu1");
+        assert_eq!(i.eval("tc37x.cpu0 cget -event step-start").unwrap(), "tc3xx_on_step_start tc37x.cpu0");
+    }
+
+    /// The winIDEA backend skips the OCDS handlers and leaves the HSM to
+    /// winIDEA, but must still create the TriCore and MCS targets.
+    ///
+    /// Seen on a BlueBox: with our HSM target examined (halting debug enabled
+    /// on the HSM), halting cpu1 through winIDEA also halted the HSM through
+    /// TL1, and nothing resumed it.
+    #[test]
+    fn winidea_skips_ocds_handlers_and_leaves_the_hsm_to_winidea() {
+        let s = server_with("winidea");
+        let i = &s.interp;
+        assert_eq!(i.eval("adapter name").unwrap(), "winidea");
+        assert_eq!(i.eval("tc3xx_ocds_available").unwrap(), "0");
+
+        // No OCDS event handler is wired, reset-end included.
+        for (target, event) in [
+            ("tc37x.cpu0", "examine-end"),
+            ("tc37x.cpu0", "reset-end"),
+            ("tc37x.cpu0", "halted"),
+            ("tc37x.cpu0", "resume-start"),
+            ("tc37x.cpu0", "resume-end"),
+            ("tc37x.cpu0", "step-start"),
+            ("tc37x.cpu1", "halted"),
+        ] {
+            let got = i.eval(&format!("{target} cget -event {event}")).unwrap();
+            assert_eq!(got, "", "{target} still has a {event} handler");
+        }
+
+        let names = i.eval("target names").unwrap();
+        assert!(!names.contains("tc37x.hsm"), "the HSM is winIDEA's core here: {names}");
+        // MCS channels are polled through memory reads, ~5 ms each over winIDEA.
+        assert!(!names.contains(".mcs"), "no MCS targets on winIDEA: {names}");
+        for t in ["tc37x.cpu0", "tc37x.cpu1", "tc37x.cpu2"] {
+            assert!(names.contains(t), "{t} missing from: {names}");
+        }
+        assert_eq!(i.eval("llength $tc3xx_mcs_targets").unwrap(), "0");
+        // And the globals every other proc reads are still set.
+        assert_eq!(i.eval("llength $tc3xx_cores").unwrap(), "3");
+    }
+}

@@ -4,6 +4,7 @@
         "embedded-debug",
         "arm-debugger",
         "gdbtarget",
-        "aurix-tcf"
+        "aurix-tcf",
+        "aurixdbg"
     ]
 }

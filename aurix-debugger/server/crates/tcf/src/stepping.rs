@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use aurix_core::arch::{CM_REG_LR, CM_REG_PC, CM_REG_SP, MCS_REG_PC, MCS_REG_R7, REG_A11, REG_PC, REG_PCXI};
-use aurix_core::target::{BpKind, DebugReason, RunMode, TargetState};
+use aurix_core::target::{BpKind, DebugReason, RunMode, SourceStep, TargetState};
 use aurix_core::unwind::csa_address;
 use aurix_core::unwind_arm::is_thumb32;
 use aurix_core::{log_warn, ops, ServerHandle};
@@ -116,6 +116,51 @@ fn read_regs(h: &ServerHandle, idx: usize, kind: Kind) -> Result<Regs, String> {
     Ok(if kind == Kind::Arm { Regs { pc: v[0] & !1, ra: v[1] & !1, frame: v[2] } } else { Regs { pc: v[0], ra: v[1], frame: v[2] } })
 }
 
+/// A whole source step done by the probe, where it offers one (winIDEA, with
+/// our ELF loaded in its own project), instead of the instruction loop below.
+///
+/// On that backend every instruction step costs ~250 ms of winIDEA's own work,
+/// so the loop took seconds for a line that winIDEA steps over in one go.
+/// `None`: not offered here; step instruction by instruction as usual.
+fn delegated_step(
+    h: &ServerHandle,
+    idx: usize,
+    kind: SourceStep,
+    syms: &SymbolSet,
+    pc: u32,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Option<Result<Stop, String>> {
+    let elf = syms.for_addr(pc)?.1.path.clone();
+    let started = h
+        .call(move |cx| ops::source_step(cx, idx, kind, &elf).map(|r| r.map_err(|e| e.to_string())))
+        .flatten()?;
+    if let Err(e) = started {
+        return Some(Err(e));
+    }
+    // Still stepping (over a slow call): wait for the halt as `run_to` does.
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = call(h, move |cx| ops::halt(cx, idx).map_err(|e| e.to_string()));
+            return Some(Ok(Stop::Cancelled));
+        }
+        let state = h.call(move |cx| {
+            ops::poll_all(cx);
+            ops::state(cx, idx)
+        });
+        if let Some((TargetState::Halted, reason)) = state {
+            // A breakpoint or watchpoint in a function the step ran over.
+            let elsewhere = matches!(reason, DebugReason::Breakpoint | DebugReason::Watchpoint);
+            return Some(Ok(if elsewhere { Stop::Elsewhere } else { Stop::Done }));
+        }
+        if Instant::now() > deadline {
+            let _ = call(h, move |cx| ops::halt(cx, idx).map_err(|e| e.to_string()));
+            return Some(Err("step timed out".into()));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// First word (saved PCXI) of the CSA a PCXI value links to.
 fn csa_word0(h: &ServerHandle, pcxi: u32) -> Option<u32> {
     let addr = csa_address(pcxi)?;
@@ -147,6 +192,9 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
     let mut r = regs(h)?;
 
     if mode == 5 {
+        if let Some(stop) = delegated_step(h, idx, SourceStep::Out, &syms, r.pc, cancel, deadline) {
+            return stop;
+        }
         let caller_pcxi = csa_word0(h, r.frame);
         return run_to(h, idx, Kind::TriCore, r.ra, caller_pcxi, rm, cancel, deadline);
     }
@@ -155,6 +203,10 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
         step_instruction(h, idx, rm)?;
         return Ok(Stop::Done);
     };
+    let kind = if mode == 4 { SourceStep::Into } else { SourceStep::Over };
+    if let Some(stop) = delegated_step(h, idx, kind, &syms, r.pc, cancel, deadline) {
+        return stop;
+    }
     let mut func = (f.low, f.high);
     let mut line = (li.file, li.line);
     let mut frame_pcxi = r.frame;

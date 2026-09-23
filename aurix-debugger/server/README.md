@@ -1,6 +1,6 @@
 # aurix-dbg
 
-An AURIX TC3xx debug server written in Rust. It talks to the target through Infineon's `tas_server` (miniWiggler, no DAS, no OpenOCD process) and runs the **unchanged OpenOCD cfg scripts**. Frontends sit on top of a protocol-neutral core. The first frontend is **TCF**, for the VS Code extension `vscode-aurix-tcf-debugger`. A gdb RSP frontend is planned; see [docs/gdb-frontend.md](docs/gdb-frontend.md).
+An AURIX TC3xx debug server written in Rust. It talks to the target through Infineon's `tas_server` (miniWiggler, no DAS, no OpenOCD process) or, on the `winidea` backend, through an iSYSTEM **BlueBox** driven by the winIDEA SDK -- see [Backends](#backends-tas_client-sim-winidea). Either way it runs the **unchanged OpenOCD cfg scripts**. Frontends sit on top of a protocol-neutral core. The first frontend is **TCF**, for the VS Code extension `vscode-aurix-tcf-debugger`. A gdb RSP frontend is planned; see [docs/gdb-frontend.md](docs/gdb-frontend.md).
 
 Compared with OpenOCD + gdb + cppdbg, this gives VS Code writable registers and variables, a live watch while the target runs, source breakpoints and stepping on all cores, disassembly, reset, and flashing.
 
@@ -339,8 +339,103 @@ A conditional attribute's read set depends on which branch is live, so an attrib
 | `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
 | `api` | REST, MCP, Swagger UI, event stream and the DAQ WebSocket (axum on its own thread); its build script writes the generated files. |
 | `aurix-dbg` | The executable: OpenOCD-style CLI, telnet console, TCF and API listeners. |
+| `winidea-sdk` | Rust bindings to the iSYSTEM winIDEA SDK (`isystemConnect.dll`), loaded at runtime. Used by the `winidea` backend. |
 
 Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures run on the core thread) and subscribe to core events.
+
+## Backends (`tas_client`, `sim`, `winidea`)
+
+`adapter driver <name>`, or `--adapter <name>` to override whatever the cfg says. `adapter name` reports the one actually in use, which is how a cfg branches.
+
+| Driver | Probe | Run control |
+|---|---|---|
+| `tas_client` | miniWiggler through `tas_server` | ours: [`crates/core/src/tricore.rs`](crates/core/src/tricore.rs) writes the OCDS debug registers |
+| `sim` | built-in TC37x model | as above, against the model |
+| `winidea` | **iSYSTEM BlueBox**, through a winIDEA instance | winIDEA's |
+
+### How the winIDEA backend differs
+
+winIDEA is itself a debugger and owns OCDS, so it will not let a second master drive the debug registers underneath it. The backend therefore sits at two levels:
+
+- **As an `Adapter`** it serves ordinary memory (`DataController::read_memory` / `write_memory`, with `REAL_TIME | DIRECT` so a running target is not disturbed). That alone is enough for DAQ, OS awareness, CSA stack unwinding, expressions, disassembly, `verify_image` and console `mdw` / `mww` — they need memory, not OCDS.
+- **As a `RunControl`** (`crates/core/src/target.rs`) it takes over halt, resume, step, registers, breakpoints and watchpoints, so the OCDS register paths are never reached. The hook lives inside `Core`, not in `ops.rs`, because `ops.rs` is not the only route to the silicon: the TCF call stack and source stepping call `Core::read_regs` directly.
+
+Only TriCore cores are taken over. The HSM (through its debug bridge) and the GTM MCS channels use no OCDS registers, so they keep working over plain bus accesses on either backend.
+
+### Tcl on this backend
+
+Unsupported **actions** fail loudly; **declarations** are accepted and reported. The split is forced by the cfg chain: `board/infineon/kit_a2g_tc377tx_3v3_trb.cfg` sources `interface/tas_client.cfg` and sets `adapter speed 5000`, and those are third-party files nobody can add an `if` to.
+
+| | Behaviour |
+|---|---|
+| `adapter speed`, `reset_config`, `transport select`, `flash bank`, `target create` | accepted, listed by `winidea status` and summarised at `init` |
+| `tas-client …`, `tricore tl1_halt` / `tl1_step` / `irq_mask` / `triggers` | error, naming the adapter |
+| `flash probe` / `info` / `erase_check` / `erase_sector` | error: winIDEA programs from its own download list, so there is no flash controller for us to drive |
+| a `mww` into a core debug register or the CBS trigger fabric | error; reads of the same addresses are allowed, because `tc3xx_connect_reset_halt` and the `tc3xx_stm_status` / `tc3xx_wdt_status` diagnostics read them |
+
+`tc3xx_ocds.cfg` guards itself with `tc3xx_ocds_available` and skips only the OCDS **event wiring** — it still creates every target and still releases the HSM, which is plain SFR and is what starts cpu1 on this board.
+
+### Commands
+
+```
+winidea workspace <path>                      # the primary instance's .xjrf (optional, see below)
+winidea start if-required|existing|always     # default: if-required
+winidea status
+```
+
+**Further cores.** winIDEA debugs CPU0 in the window you opened and every other core in a window of its own. The server attaches a core when it examines it, as TAS examines every core at `init`: it looks the core up in winIDEA's session topology (on a TC377 `CPU0`–`CPU2`, `SCR`, `HSM`; TriCore core *n* is `CPU<n>`) and attaches it through the session (`CSessionCtrl::instance_attach`). winIDEA opens that core's window, creating its workspace if the project has none — that is normal. A core whose application has not started it yet (cpu1 right after a reset, or an unused cpu2) has no running core in its window until it is started; it is reported as halted (boot-halt), as over TAS, and switches to running once the application starts it.
+
+**Choosing the primary.** With core windows open several winIDEA instances run side by side, and attaching to an arbitrary one drove the wrong window on hardware. The primary is `winidea workspace` when set; otherwise the running instance the core windows are named after (`Project.xjrf` for `Project_CPU1.xjrf`). Two unrelated projects open at once fail the connect and list them. With nothing running, the start mode decides: `if-required` launches one, `existing` fails. These are the SDK's own modes (`CConnectionConfig`), applied through `ConnectionMgr::connect_with`; the `connectMRU` family ignores them and always launches.
+
+**Registers.** The GPRs, PCXI, PSW and PC are winIDEA registers by name. The other system and debug CSFRs (ICR, FCX, BTV, DBGSR, …) are not in winIDEA's register namespace; they are read from the core's CSFR window instead, and are read-only on this backend.
+
+**The HSM is winIDEA's.** It is core 4 of winIDEA's topology, so `tc3xx_ocds.cfg` creates no HSM target on this backend and does not release it after a halting reset. Examining it from here enables halting debug on it, after which a halt of any TriCore core can stop it through TL1 with nothing to resume it (seen on hardware).
+
+**Synchronous break is winIDEA's.** With winIDEA's multi-core synchronous break on, a halt of one core stops the others (and the HSM, if winIDEA debugs it) through the CBS TL1 capture-and-hold routing. That routing is winIDEA's own setting — it comes back after clearing it — so the server leaves it alone. Code on a halted core that waits for a stopped HSM does not finish a step.
+
+### Flashing
+
+`program`, `flash write_image` and `flash write_images` hand their files to winIDEA (option tree `/IDE/Debug.DownloadFiles`, then `CLoaderController::download`), with **code only and no symbols**: this server keeps its own DWARF reader, and two symbol tables for one target would disagree as soon as the files differ. `verify_image` stays ours on both backends — it reads the image back through ordinary memory, so both report the same thing. `incremental`, `unlock` and the per-sector write statistics are TAS-only.
+
+### Example
+
+```powershell
+aurix-dbg.exe --adapter winidea -s third_party/openocd/tcl `
+    -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg `
+    -c "winidea workspace C:/ws/app.xjrf" -c "init"
+```
+
+From VS Code, no new launch attribute is needed — `configCommands` already forwards `-c`:
+
+```json
+"configCommands": ["adapter driver winidea", "winidea workspace C:/ws/app.xjrf", "init"]
+```
+
+### Status
+
+Run against a BlueBox, winIDEA 9.21.356 and a TC377 (bindings and DLL are 9.21.417; no SDK DLL ships with that winIDEA):
+
+| | Result |
+|---|---|
+| Attach, instance choice, version | works; the primary is found among its core windows |
+| Run control | cpu0 and cpu1: step (PC +4, single-step), resume, halt (debug-request), breakpoint. Halting one core halts the others while winIDEA's synchronous break is on (see above) |
+| Watchpoint by address | write watchpoint on a live RAM word halts with reason watchpoint |
+| Registers | all 52 read (35 by name, 17 through the CSFR window); writes to the latter refused |
+| Memory | reads of a running target, write-back; debug-window reads allowed |
+| Reset | `reset halt`, `reset init`, `reset run` |
+| HSM | left to winIDEA (see above) |
+| Further cores | attached through the session by topology name; cpu1 and cpu2 attached |
+| Flashing | **not tried on hardware** — a download replaces the board's firmware |
+| DAQ | polled DAQ goes through the same reads; not measured end to end |
+
+**Cost per call** (measured): status 0.16 ms running / 1.8 ms halted, register 40–240 µs, memory read **~4–7 ms regardless of size or access flags**, 64 KB in 75 ms (~0.9 MB/s). winIDEA's own run control is slow, whatever the step: stop ~220 ms, instruction step ~250 ms, source step 200–370 ms, run ~1.2 s — the time is spent inside winIDEA, also with a non-blocking timeout. Three things follow:
+
+- **Source steps are winIDEA's.** Stepping a line instruction by instruction, as over TAS, costs ~250 ms per instruction. When winIDEA has loaded the same ELF itself (its project does), step over / into / out are handed to winIDEA as a whole (`RunControl::source_step`); the log says when they are not.
+- **The poll reads little memory.** TriCore cores are asked for their status. `tc3xx_ocds.cfg` creates no MCS targets on this backend: polling all 16 channels took ~220 ms and kept the core thread busy behind every step. Plain-memory cores a cfg does create are polled an eighth per period (`RC_MEMORY_POLL_SHARE`). The poll period is 50 ms on this backend.
+- Measured over TCF (VS Code's requests) with both changes: step over 300–540 ms, step into ~450 ms, instruction step ~300 ms, call stack 15–50 ms, pause ~220 ms. Before: step over 750 ms–11 s, pause 1.3 s.
+
+Polled DAQ is bounded by the read cost — roughly 250 reads per second across all points — so winIDEA's hardware DAQ (`DaqController`) is the way to faster sampling; with winIDEA 9.21.356 note the SDK README's warning that its DAQ read fails against 9.21.417 bindings.
+
 
 ## Cfg scripts and other derivatives
 
@@ -446,6 +541,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 ## Not yet implemented
 
 - gdb RSP frontend (contract in [docs/gdb-frontend.md](docs/gdb-frontend.md)).
+- On the `winidea` backend: flashing and multi-core attach are implemented but not yet confirmed on hardware (see [Backends](#backends-tas_client-sim-winidea)).
 - DFLASH/UCB programming and PFLASH protection unlock.
 - A RAM flash loader.
 - A TCF Flash service; flashing goes through the Tcl `program` command.

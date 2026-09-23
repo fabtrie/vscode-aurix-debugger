@@ -550,6 +550,42 @@ impl Tricore {
     }
 
     /// Re-programs all enabled triggers (after a reset cleared them).
+    /// The OCDS half of `arp_reset deassert` for this core.
+    ///
+    /// Extracted from `ops::arp_reset_deassert` so that a probe doing its own
+    /// run control can replace it wholesale
+    /// ([`crate::target::RunControl::after_reset`]): none of the register
+    /// writes below are possible -- or needed -- when the probe owns OCDS.
+    pub fn after_reset(&mut self, io: &mut Io, halt: bool, name: &str) -> Result<Transition> {
+        if self.coreid == 0 {
+            // Boot-time debug lock lasts a few tens of ms after a reset.
+            let t0 = Instant::now();
+            loop {
+                match crate::ops::enable_ocds(io) {
+                    Ok(_) => break,
+                    Err(err) if t0.elapsed() > Duration::from_millis(1000) => return Err(err),
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if halt {
+                // Clear the halt-after-reset trigger left in TR0.
+                io.write32_seq(&[(self.csfr(trxevt(0)), 0), (self.csfr(trxadr(0)), 0)])?;
+            }
+        }
+        if !self.examined {
+            return Ok(Transition::None);
+        }
+        io.write32(self.csfr(SWEVT), SWEVT_HALT_TC16)?;
+        let tr = self.poll(io)?;
+        if halt && self.state != TargetState::Halted {
+            crate::log_warn!("[{name}] ran after reset and before halt ...");
+            self.halt(io)?;
+        }
+        self.restore_triggers(io)?;
+        Ok(tr)
+    }
+
     pub fn restore_triggers(&self, io: &mut Io) -> Result<()> {
         for i in 0..NUM_TRIGGERS {
             let t = self.triggers[i];

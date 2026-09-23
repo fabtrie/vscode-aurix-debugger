@@ -1137,14 +1137,32 @@ mod tests {
         let r = ev.evaluate("module_sm == 5 ? ( module_sm == 6 ? 0 : module_sm ) : 0xFF").unwrap();
         assert_eq!(r.place, Place::Memory(0x7001_3954));
         assert_eq!(ev.load(&r).unwrap(), 5u32.to_le_bytes());
-
-        // Locals of App_CyclicTask at line 743 (0x8021a99c):
-        // State_u8 is at A10+6, rte_read_state in D8.
-        let locals = s.locals_at(0x8021_a99c);
+        // Locals of App_CyclicTask: State_u8 is at
+        // A10+6, rte_read_state in D8.
+        //
+        // The pc is resolved, not hardcoded. Code addresses move with every
+        // application rebuild, and a stale constant does not fail cleanly --
+        // it silently retargets the test at whichever function now occupies
+        // that address. (0x8021a99c, hardcoded here before, today lands in
+        // App_Init.)
+        let f = *s
+            .functions_named("App_CyclicTask")
+            .first()
+            .expect("test ELF has App_CyclicTask");
+        // The first body statement: the function's own locals are in scope,
+        // while the block-local Loop_u8 further down is not yet. The entry at
+        // f.low is the prologue, where nothing is live.
+        let pc = s
+            .lines_in_range(f.low, f.high)
+            .into_iter()
+            .map(|l| l.start)
+            .find(|&a| !s.locals_at(a).is_empty())
+            .expect("a body statement with locals in scope");
+        let locals = s.locals_at(pc);
         let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
         assert!(names.contains(&"State_u8") && names.contains(&"rte_read_state"), "{names:?}");
         assert!(!names.contains(&"Loop_u8"), "block-local variable outside its block: {names:?}");
-        let mut t = Mem { pc: Some(0x8021_a99c), regs: HashMap::from([(26, 0x7000_1000), (8, 1)]), mem: HashMap::from([(0x7000_1006, 42)]) };
+        let mut t = Mem { pc: Some(pc), regs: HashMap::from([(26, 0x7000_1000), (8, 1)]), mem: HashMap::from([(0x7000_1006, 42)]) };
         let mut ev = Eval::new(&s, &mut t);
         let v = ev.evaluate("State_u8").unwrap();
         assert_eq!(v.place, Place::Memory(0x7000_1006));

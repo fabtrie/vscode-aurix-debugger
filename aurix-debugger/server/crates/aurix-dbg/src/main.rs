@@ -22,7 +22,7 @@ Usage: aurix-dbg [options]
   -s, --search <dir>      add a script search directory
   -d<n>, --debug <n>      debug level 0..3 (default 2)
   -l, --log_output <file> append log to file
-      --adapter <driver>  force the adapter driver (tas_client, sim)
+      --adapter <driver>  force the adapter driver (tas_client, sim, winidea)
   -h, --help              this help
   -v, --version           version
       --remote [host:]port <cmd>...   send commands to a running server's console

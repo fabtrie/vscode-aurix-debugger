@@ -13,7 +13,7 @@ use crate::cortex_m;
 use crate::ctx::{Cx, Mode};
 use crate::error::{other, usage, Error, Result};
 use crate::events::{emit, Event};
-use crate::target::{BpKind, Breakpoint, Core, DebugReason, RunMode, TargetState, Transition, WatchAccess, Watchpoint, FLAP_RETRY, POLL_FAIL_TIME, UNREACHABLE_TIME};
+use crate::target::{BpKind, Breakpoint, DebugReason, RunMode, SourceStep, TargetState, Transition, WatchAccess, Watchpoint, FLAP_RETRY, POLL_FAIL_TIME, UNREACHABLE_TIME};
 use crate::{log_debug, log_error, log_info, log_warn};
 
 /// Runs a target event handler (`$t configure -event name body`).
@@ -74,7 +74,11 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
     fire(cx, t, "examine-start");
     let res = cx.with(|c| -> Result<Transition> {
         let (mut io, e) = c.target_io(t)?;
-        enable_ocds(&mut io)?;
+        // A probe that does its own run control has already enabled debug, and
+        // the OEC key write below is one it would refuse: OCDS is its to steer.
+        if io.adapter.run_control().is_none() {
+            enable_ocds(&mut io)?;
+        }
         e.core.examine(&mut io)?;
         let tr = e.core.poll(&mut io)?;
         e.core.restore_triggers(&mut io)?;
@@ -154,6 +158,10 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
     }
 }
 
+/// On a run-control probe, each plain-memory core (HSM, MCS channel) is polled
+/// every this many periods; see [`poll_all`].
+const RC_MEMORY_POLL_SHARE: usize = 8;
+
 /// One background poll of all targets (OpenOCD `handle_target`).
 pub fn poll_all(cx: &Cx) {
     let go = cx.with(|c| c.poll_enabled && c.initialized && !c.in_reset && c.adapter.as_ref().is_some_and(|a| a.initialized()));
@@ -161,19 +169,33 @@ pub fn poll_all(cx: &Cx) {
         return;
     }
     let res = cx.with(|c| -> Result<(Vec<(usize, Transition)>, u64, Vec<usize>)> {
+        // A probe that does its own run control answers "is it stopped?" for
+        // the TriCore cores by being asked, not by a batch of DBGSR reads.
+        // `poll_queue` has no `Io` to redirect, so this is one of the few
+        // places that has to branch rather than go through `Core`. The HSM and
+        // the MCS channels are plain memory there too, and stay in the batch --
+        // but only a share of them per period: such a probe pays one call per
+        // access (~5 ms on winIDEA), and all 16 MCS channels took ~220 ms, which
+        // kept the core thread busy and delayed every step and pause behind it.
+        let rc = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_some());
+        let (mut out, mut failed) = if rc { poll_run_controlled(c) } else { Default::default() };
+        let turn = c.poll_turn;
+        c.poll_turn = c.poll_turn.wrapping_add(1);
         let mut b = Batch::new();
         let mut handles = Vec::new();
         for (i, e) in c.targets.iter().enumerate() {
-            if e.core.examined() && e.poll_failures == 0 {
+            let skip = rc && (matches!(e.core, crate::target::Core::Tricore(_)) || i % RC_MEMORY_POLL_SHARE != turn % RC_MEMORY_POLL_SHARE);
+            if e.core.examined() && e.poll_failures == 0 && !skip {
                 handles.push((i, e.core.poll_queue(&mut b)));
             }
         }
         // Anything the sampler already owes goes into this batch rather than costing its own round
         // trip right behind it. Queued *after* the run-state reads on purpose: a PL0 packet marks
         // every access after a failing one "consequential", so a bad DAQ address must not be able
-        // to blank the poll it is riding in.
+        // to blank the poll it is riding in. Not on a run-control probe: there every access is its
+        // own call either way, and the sampler's own tick handles them.
         let daq_now = Instant::now();
-        let daq = (c.daq_merge && c.daq.next_due().is_some_and(|d| daq_now >= d))
+        let daq = (!rc && c.daq_merge && c.daq.next_due().is_some_and(|d| daq_now >= d))
             .then(|| crate::daq::queue_due(c, daq_now, &mut b))
             .flatten();
         let exec = {
@@ -192,8 +214,6 @@ pub fn poll_all(cx: &Cx) {
                 return Err(e);
             }
         };
-        let mut out = Vec::new();
-        let mut failed = Vec::new();
         for (i, ops) in handles {
             if ops.all.iter().all(|&h| r[h].ok()) {
                 let vals: Vec<u32> = ops.reads.iter().map(|&h| r[h].u32()).collect();
@@ -516,58 +536,7 @@ pub fn arp_reset_deassert(cx: &Cx, t: usize, halt: bool) -> Result<()> {
         }
         let (mut io, e) = c.target_io(t)?;
         let name = e.name.clone();
-        match &mut e.core {
-            Core::Tricore(core) => {
-                if core.coreid == 0 {
-                    // Boot-time debug lock lasts a few tens of ms after a reset.
-                    let t0 = Instant::now();
-                    loop {
-                        match enable_ocds(&mut io) {
-                            Ok(_) => break,
-                            Err(err) if t0.elapsed() > Duration::from_millis(1000) => return Err(err),
-                            Err(_) => std::thread::sleep(Duration::from_millis(10)),
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                    if halt {
-                        // Clear the halt-after-reset trigger left in TR0.
-                        io.write32_seq(&[(core.csfr(trxevt(0)), 0), (core.csfr(trxadr(0)), 0)])?;
-                    }
-                }
-                if !core.examined {
-                    return Ok(Transition::None);
-                }
-                io.write32(core.csfr(SWEVT), SWEVT_HALT_TC16)?;
-                let tr = core.poll(&mut io)?;
-                if halt && core.state != TargetState::Halted {
-                    crate::log_warn!("[{name}] ran after reset and before halt ...");
-                    core.halt(&mut io)?;
-                }
-                core.restore_triggers(&mut io)?;
-                Ok(tr)
-            }
-            core => {
-                // The HSM starts when the host startup software releases it and is only
-                // accessible when its firmware enables HSM debugging; MCS channels once the
-                // startup software enables the GTM. They are examined again (e.g. by the
-                // reset-end handler after the HSM release, or the background poll) instead of
-                // failing the reset.
-                if !core.examined() {
-                    return Ok(Transition::None);
-                }
-                match core.examine(&mut io).and_then(|_| core.poll(&mut io)) {
-                    Ok(tr) => {
-                        core.restore_triggers(&mut io)?;
-                        Ok(tr)
-                    }
-                    Err(err) => {
-                        crate::log_debug!("[{name}] not accessible after reset: {err}");
-                        core.set_examined(false);
-                        Ok(Transition::None)
-                    }
-                }
-            }
-        }
+        e.core.after_reset(&mut io, halt, &name)
     })?;
     handle_transition(cx, t, tr);
     Ok(())
@@ -634,6 +603,14 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
             if !cx.with(|c| c.targets[t].core.halts_after_reset()) {
                 continue;
             }
+            // A core the probe cannot drive (winIDEA without an instance for it)
+            // cannot be halted by us either; leave it out rather than fail the
+            // reset of the cores that can.
+            let drivable = cx.with(|c| c.target_io(t).map(|(mut io, e)| e.core.drivable(&mut io)).unwrap_or(true));
+            if !drivable {
+                crate::log_warn!("[{}] not driven by this adapter; not waiting for it to halt", target_name(cx, t));
+                continue;
+            }
             if !cx.with(|c| c.targets[t].core.examined()) {
                 if cx.with(|c| c.targets[t].defer_examine) {
                     continue;
@@ -694,6 +671,13 @@ pub fn init(cx: &Cx) -> Result<()> {
         }
         c.mode = Mode::Exec;
         c.initialized = true;
+        // A probe with a costly status query (winIDEA: ~1.8 ms per halted core)
+        // asks for a slower poll, unless the cfg chose a period itself.
+        if c.poll_period_ms == crate::ctx::DEFAULT_POLL_PERIOD_MS {
+            if let Some(ms) = c.adapter.as_deref().and_then(|a| a.default_poll_period_ms()) {
+                c.poll_period_ms = ms;
+            }
+        }
         if c.current.is_none() && !c.targets.is_empty() {
             c.current = Some(0);
         }
@@ -844,4 +828,67 @@ pub fn write_memory_as(cx: &Cx, t: usize, addr: u32, data: &[u8]) -> Result<()> 
 
 pub fn state(cx: &Cx, t: usize) -> (TargetState, DebugReason) {
     cx.with(|c| (c.targets[t].core.state(), c.targets[t].core.reason()))
+}
+
+/// The TriCore part of the run-state poll for a probe that performs run control
+/// itself: there are no debug registers to read, and asking each core for its
+/// status is the whole operation. The other cores stay in [`poll_all`]'s batch.
+fn poll_run_controlled(c: &mut crate::ctx::Ctx) -> (Vec<(usize, Transition)>, Vec<usize>) {
+    let mut out = Vec::new();
+    let mut failed = Vec::new();
+    for i in 0..c.targets.len() {
+        let e = &c.targets[i];
+        if !(matches!(e.core, crate::target::Core::Tricore(_)) && e.core.examined() && e.poll_failures == 0) {
+            continue;
+        }
+        let (mut io, e) = match c.target_io(i) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match e.core.poll(&mut io) {
+            Ok(Transition::None) => {}
+            Ok(tr) => out.push((i, tr)),
+            Err(_) => failed.push(i),
+        }
+    }
+    (out, failed)
+}
+
+/// A whole source-level step done by the probe, when it offers one for this
+/// core and has `elf` loaded (see [`crate::target::RunControl::source_step`]).
+///
+/// `None` means it does not, and the caller steps instruction by instruction
+/// with [`step_as`]. On winIDEA that difference is large: one source step over
+/// measured ~200-350 ms, while every instruction step costs ~250 ms of its own.
+///
+/// `Some(Ok(true))`: halted at the new line, and the halt is announced here as
+/// `step_as` does. `Some(Ok(false))`: still stepping (a step over a slow call);
+/// the poll announces the halt.
+pub fn source_step(cx: &Cx, t: usize, kind: SourceStep, elf: &std::path::Path) -> Option<Result<()>> {
+    if let Err(e) = require_examined(cx, t) {
+        return Some(Err(e));
+    }
+    let name = target_name(cx, t);
+    if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
+        return Some(Err(Error::NotHalted(name)));
+    }
+    let res = cx.with(|c| {
+        let (mut io, e) = c.target_io(t).ok()?;
+        e.core.source_step(&mut io, kind, elf)
+    })?;
+    fire(cx, t, "step-start");
+    fire(cx, t, "resumed");
+    let r = match res {
+        Ok(true) => {
+            handle_transition(cx, t, Transition::Halted { debug: false, boot: false });
+            Ok(())
+        }
+        Ok(false) => {
+            emit(Event::Resumed { target: t, name });
+            Ok(())
+        }
+        Err(e) => Err(e),
+    };
+    fire(cx, t, "step-end");
+    Some(r)
 }

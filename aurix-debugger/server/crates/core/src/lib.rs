@@ -25,6 +25,12 @@ pub mod sim;
 pub mod sim_mcs;
 pub mod target;
 pub mod tas_adapter;
+#[cfg(feature = "winidea")]
+pub mod winidea_adapter;
+#[cfg(feature = "winidea")]
+pub mod winidea_regs;
+#[cfg(feature = "winidea")]
+pub mod winidea_session;
 pub mod telnet;
 pub mod tricore;
 pub mod unwind;

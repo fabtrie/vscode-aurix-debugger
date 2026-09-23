@@ -43,6 +43,9 @@ pub struct Ports {
     pub api: Option<u16>,
 }
 
+/// Run-state poll period unless the cfg (`polling_period`) or the adapter sets another.
+pub const DEFAULT_POLL_PERIOD_MS: u64 = 10;
+
 pub struct Ctx {
     pub mode: Mode,
     pub adapter_name: Option<String>,
@@ -63,6 +66,9 @@ pub struct Ctx {
     pub search_dirs: Vec<PathBuf>,
     pub poll_enabled: bool,
     pub poll_period_ms: u64,
+    /// Rotates which plain-memory cores a run-control probe polls this period
+    /// (see `ops::poll_all`).
+    pub poll_turn: usize,
     /// Periodic sampling; idle unless a frontend opened a session.
     pub daq: daq::Registry,
     /// How far the sampler may read past what was asked for to fold two points into one bus
@@ -106,7 +112,8 @@ impl Ctx {
             flash_banks: Vec::new(),
             search_dirs: Vec::new(),
             poll_enabled: true,
-            poll_period_ms: 10,
+            poll_period_ms: DEFAULT_POLL_PERIOD_MS,
+            poll_turn: 0,
             daq: daq::Registry::default(),
             daq_gap: daq::DEFAULT_COALESCE_GAP,
             daq_merge: true,

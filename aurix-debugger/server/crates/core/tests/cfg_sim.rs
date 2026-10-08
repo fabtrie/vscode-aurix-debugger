@@ -27,6 +27,8 @@ fn server() -> Server {
         .unwrap();
     // The simulated HSM never reports ready: don't wait for it after halting resets.
     s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    // Halting resets hold: don't wait for an SBC reset loop (see the sbc_reset_loop tests).
+    s.interp.eval_global("set tc3xx_reset_settle_ms 0").unwrap();
     s
 }
 
@@ -284,6 +286,37 @@ fn reset_halt_runs_reset_sequence() {
     s.interp.eval("reset halt").unwrap();
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
     assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
+}
+
+#[test]
+fn halting_reset_is_repeated_until_the_sbc_reset_loop_ends() {
+    let s = server();
+    s.interp.eval("set tc3xx_reset_settle_ms 400").unwrap();
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| sim.sbc_loop_resets = 3);
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.sbc_loop_resets), 0, "SBC loop not run to its end");
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
+    // The loop's resets belong to the reset: none is reported as detected afterwards.
+    assert_eq!(with_sim(&s, |sim| sim.pending_resets), 0);
+}
+
+#[test]
+fn halting_reset_without_sbc_reset_loop_is_done_once() {
+    let s = server();
+    s.interp.eval("set tc3xx_reset_settle_ms 1000").unwrap();
+    s.interp.eval("init").unwrap();
+    take_writes(&s);
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    let w = take_writes(&s);
+    let setups = w.iter().filter(|x| **x == (0xF000_0494, 0xB000_003F)).count();
+    assert_eq!(setups, 1, "reset repeated: {w:08x?}");
+    // A running reset is not checked (it takes ~100 ms itself).
+    let t0 = std::time::Instant::now();
+    s.interp.eval("reset run").unwrap();
+    assert!(t0.elapsed() < std::time::Duration::from_millis(500), "reset run waited {:?}", t0.elapsed());
 }
 
 #[test]

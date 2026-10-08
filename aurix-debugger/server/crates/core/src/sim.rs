@@ -10,6 +10,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use tas::{Batch, BatchOp, OpResult, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
 
@@ -177,12 +178,19 @@ pub struct SimAdapter {
     pub pc: [u32; NUM_CORES],
     pub ostate: u32,
     pub pending_resets: u64,
+    /// SBC whose RSTB sees the debugger reset: resets the device again [`SBC_LOOP_DELAY`] after
+    /// each halting reset, this many times (then it is in deep fail-safe).
+    pub sbc_loop_resets: u32,
+    sbc_reset_at: Option<Instant>,
     pub device_id: u32,
     pub hsm: SimHsm,
     pub gtm: SimGtm,
     initialized: bool,
     srst: bool,
 }
+
+/// Delay of a reset of the simulated SBC reset loop after a halting reset.
+pub const SBC_LOOP_DELAY: Duration = Duration::from_millis(200);
 
 impl Default for SimAdapter {
     fn default() -> Self {
@@ -205,6 +213,8 @@ impl SimAdapter {
             pc: [0x8000_1000, 0x8010_0000, 0x8020_0000],
             ostate: 0,
             pending_resets: 0,
+            sbc_loop_resets: 0,
+            sbc_reset_at: None,
             device_id: 0x1020_7083,
             hsm: SimHsm::new(),
             gtm: SimGtm::new(),
@@ -400,6 +410,10 @@ impl Adapter for SimAdapter {
     }
 
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        if self.sbc_reset_at.is_some_and(|t| Instant::now() >= t) {
+            self.sbc_reset_at = None;
+            self.external_reset();
+        }
         self.execs += 1;
         let mut out = Vec::with_capacity(batch.len());
         // As on the chip, a failing bridge access fails the bridge accesses after it in the batch.
@@ -466,6 +480,11 @@ impl Adapter for SimAdapter {
             self.srst = false;
             self.ostate = 0;
             self.halted = [halt_after_reset, false, false];
+            self.sbc_reset_at = None;
+            if halt_after_reset && self.sbc_loop_resets > 0 {
+                self.sbc_loop_resets -= 1;
+                self.sbc_reset_at = Some(Instant::now() + SBC_LOOP_DELAY);
+            }
             self.pc = [0x800A_8000, 0x8010_0000, 0x8020_0000];
             // With a debugger connected the HSM boot ROM halts at its first user instruction
             // (breakpoint in FP_COMP0); the debug units are reset.

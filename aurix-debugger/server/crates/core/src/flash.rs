@@ -364,8 +364,23 @@ pub fn find_bank(cx: &Cx, spec: &str) -> Result<FlashBank> {
     })
 }
 
-/// Halts all examined cores.
+/// Halts all examined cores. Right after a halting reset the released HSM runs, and accesses fail
+/// now and then while it does (a lost halt request, a failed status read): retried.
 pub fn halt_all(cx: &Cx) -> Result<()> {
+    let mut retries = 2;
+    loop {
+        match halt_all_once(cx) {
+            Err(e) if retries > 0 => {
+                retries -= 1;
+                crate::log_debug!("halting all cores: {e}, retrying");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            r => return r,
+        }
+    }
+}
+
+fn halt_all_once(cx: &Cx) -> Result<()> {
     let n = cx.with(|c| c.targets.len());
     let examined = |t: usize| cx.with(|c| c.targets[t].core.examined());
     for t in 0..n {
@@ -576,8 +591,8 @@ pub fn verify_image(cx: &Cx, img: &Image) -> Result<usize> {
 
 /// Sector erase check of a whole bank: (sector address, erased).
 pub fn erase_check(cx: &Cx, bank: &FlashBank) -> Result<Vec<(u32, bool)>> {
-    let layout = probe_bank(cx, bank)?;
     halt_all(cx)?;
+    let layout = probe_bank(cx, bank)?;
     cx.with(|c| {
         let mut io = c.io()?;
         let mut f = Driver::new(&mut io, layout);
@@ -588,12 +603,12 @@ pub fn erase_check(cx: &Cx, bank: &FlashBank) -> Result<Vec<(u32, bool)>> {
 
 /// Erases sectors `first..=last` of a bank.
 pub fn erase_sectors(cx: &Cx, bank: &FlashBank, first: u32, last: u32) -> Result<()> {
+    halt_all(cx)?;
     let layout = probe_bank(cx, bank)?;
     let count = layout.size / layout.sector_size;
     if first > last || last >= count {
         return Err(usage(format!("invalid sector range {first}..{last} (bank has {count} sectors)")));
     }
-    halt_all(cx)?;
     cx.with(|c| {
         let mut io = c.io()?;
         Driver::new(&mut io, layout).erase(bank.base + first * layout.sector_size, last - first + 1)

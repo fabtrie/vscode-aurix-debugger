@@ -61,6 +61,7 @@ import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/lin
 import { GetInfoOsCommand, GetObjectsOsCommand, GetRunningOsCommand, GetProfileOsCommand, GetStacksOsCommand, LoadOsCommand, parseTaskFilter, StartProfileOsCommand, StopProfileOsCommand, TaskFilter } from './tcf/osaware';
 import { LiveWatchEvaluator, LiveWatchRequestItem } from './liveWatchEvaluator';
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
+import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 
 type ElfSymbol = { name: string; address: number; size: number; file?: string };
 
@@ -98,6 +99,10 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	debugUIFocus?: boolean;
 	breakpointPrefix?: string;
 	pathMapper?: string;
+	/** Debug-information path prefix -> local path, e.g. {"c:/git/project": "${workspaceFolder}"}. */
+	sourceFileMap?: Record<string, string>;
+	/** Folders searched for sources whose debug-information path does not exist locally. */
+	sourceSearchPaths?: string[];
 	internal?: InternalLaunchArguments;
 	stackTraceDepth?: number;
 	stopOnEntry?: boolean;
@@ -354,6 +359,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private workspaceBaseDir: string | undefined;
 	private projectRootDir: string | undefined;
 	private librariesBasenameIndex: Map<string, string> | undefined;
+	private sourceResolver: SourceFileResolver | undefined;
 	/** ELF files ("symbolFiles"). */
 	private symbolFilePaths: string[] = [];
 	// Disassembly ISAs per core context (TriCore cores, Thumb for the HSM).
@@ -427,7 +433,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private functionBreakpoints = new Map<string, number>();
 
 	/** `breakpointUi`: shows the breakpoints of other clients in VS Code (none outside VS Code). */
-	constructor(enablePathMapper: boolean, disassemblyOpcodeBytes: DisassemblyOpcodeBytes = 'left', private breakpointUi?: BreakpointUi) {
+	/** `sourceMappingStore`: keeps the learned source path mappings across sessions. */
+	constructor(
+		enablePathMapper: boolean,
+		disassemblyOpcodeBytes: DisassemblyOpcodeBytes = 'left',
+		private breakpointUi?: BreakpointUi,
+		private sourceMappingStore?: SourceMappingStore
+	) {
 		super();
 		this.enabledPathMapper = enablePathMapper;
 		this.disassemblyOpcodeBytes = disassemblyOpcodeBytes;
@@ -791,9 +803,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override convertClientPathToDebugger(p: string): string {
-		const mapped = this.pathMapper(p);
+		// A file of a checkout mapped by "sourceFileMap" or a learned mapping: send the path below the
+		// mapping root, which the debugger matches as a suffix of the debug-information path. This finds
+		// the file whether its object was compiled here or (compiler cache) in the other checkout. The
+		// shorter suffix wins: a path relative to the ELF folder inside the checkout is one as well.
 		// The TCF side commonly uses '/' path separators even on Windows.
-		return mapped.replace(/\\/g, '/');
+		const mapped = this.pathMapper(p).replace(/\\/g, '/');
+		const belowMapping = this.sourceResolver?.toDebugger(p);
+		const suffixLength = (s: string) => s.split('/').filter(c => c !== '' && c !== '.' && c !== '..').length;
+		if (belowMapping && (isAbsolutePath(mapped) || suffixLength(belowMapping) < suffixLength(mapped))) {
+			return belowMapping;
+		}
+		return mapped;
 	}
 
 	protected override convertDebuggerPathToClient(p: string): string {
@@ -803,36 +824,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (isAbs) {
 			// Keep the absolute path shape but normalize separators for local FS.
 			const localAbs = isWindowsAbs ? normalized.replace(/\//g, '\\') : normalized;
-			if (fs.existsSync(localAbs)) {
-				return localAbs;
-			}
-
-			// Fix: some toolchains embed absolute paths from a different machine/workspace
-			// (e.g. "C:\\Infineon\\...\\TC375_CE\\Libraries\\..."). If that path doesn't exist locally,
-			// remap it onto the detected local project root.
-			const lower = normalized.toLowerCase();
-			const tcMarker = '/tc375_ce/';
-			const libMarker = '/libraries/';
-			const candidates: string[] = [];
-			if (this.projectRootDir) {
-				const tcIndex = lower.indexOf(tcMarker);
-				if (tcIndex >= 0) {
-					const tail = normalized.substring(tcIndex + tcMarker.length);
-					candidates.push(path.resolve(this.projectRootDir, ...tail.split('/')));
-				}
-				const libIndex = lower.indexOf(libMarker);
-				if (libIndex >= 0) {
-					const tail = normalized.substring(libIndex + 1); // "Libraries/..."
-					candidates.push(path.resolve(this.projectRootDir, ...tail.split('/')));
-				}
-			}
-			for (const c of candidates) {
-				if (fs.existsSync(c)) {
-					return c;
-				}
-			}
-
-			return localAbs;
+			// Paths of another checkout (compiler cache, build server, vendor examples such as
+			// "C:\Infineon\...\TC375_CE\Libraries\...") are mapped onto the local one: "sourceFileMap",
+			// learned mappings, then the path without its leading folders under the search roots.
+			return this.sourceResolver?.toLocal(localAbs) ?? localAbs;
 		}
 
 		// Fix: debug info often reports project-relative paths (e.g. "Libraries/..."),
@@ -2227,6 +2222,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (this.projectRootDir) {
 				break;
 			}
+		}
+
+		const sourceSearchPaths = Array.isArray(args.sourceSearchPaths)
+			? args.sourceSearchPaths.filter(x => typeof x === 'string' && x.trim() !== '')
+			: [this.workspaceBaseDir, this.projectRootDir].filter((x): x is string => !!x);
+		const sourceFileMap = args.sourceFileMap && typeof args.sourceFileMap === 'object' ? args.sourceFileMap : undefined;
+		this.sourceResolver = new SourceFileResolver(sourceFileMap, sourceSearchPaths, this.sourceMappingStore);
+		if (this.sourceResolver.mappings.length > 0) {
+			this.tcfLogger.log(`Source mappings: ${this.sourceResolver.mappings.map(m => `${m.from} -> ${m.to}`).join(', ')}`);
 		}
 
 		// No local DWARF tooling: rely on agent-provided line info (mapToSource) + MemoryMap.
@@ -4119,6 +4123,24 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (command === 'aurix/activeThread') {
 			this.activeThreadId = typeof args?.threadId === 'number' ? args.threadId : undefined;
 			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix/addSourceMapping') {
+			// "Locate File" for a source that did not resolve: map the debug-information path onto the
+			// picked file, which also resolves the other files of that checkout.
+			const mapping = typeof args?.debugPath === 'string' && typeof args?.localPath === 'string'
+				? deriveMapping(args.debugPath, args.localPath)
+				: undefined;
+			if (!mapping || !this.sourceResolver) {
+				this.sendErrorResponse(response, 0, 'The picked file does not have the name of the missing source.');
+				return;
+			}
+			this.sourceResolver.learn(mapping);
+			this.tcfLogger.log(`Source mapping added: ${mapping.from} -> ${mapping.to}`);
+			response.body = mapping;
+			this.sendResponse(response);
+			this.sendEvent(new InvalidatedEvent(['stacks']));
 			return;
 		}
 

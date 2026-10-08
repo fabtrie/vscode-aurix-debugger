@@ -25,6 +25,7 @@ import { findSvdForDevice, SvdCatalogEntry } from './svdCatalog';
 import { mergeSvdPeripherals } from './svdMerge';
 import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
+import { SourceMappingStore, SourcePrefixMapping } from './sourceFileMap';
 
 let tcfAgentProcess: ChildProcess | undefined;
 let extensionContext: vscode.ExtensionContext;
@@ -52,6 +53,11 @@ let lastLiveWatchIntervalMs = 1000;
 let preferredSourceViewColumn: vscode.ViewColumn | undefined;
 let lastAutoSourcePath: string | undefined;
 let lastAutoSourceLine: number | undefined;
+/** Sources not found locally, already logged, per debug session ID. */
+const missingSourcesLogged = new Map<string, Set<string>>();
+/** Debug sessions in which "Locate File" was offered (once per session). */
+const missingSourcePromptShown = new Set<string>();
+const LEARNED_SOURCE_MAPPINGS_KEY = 'aurix-debugger.learnedSourceMappings';
 const SVD_CACHE_FOLDER = 'svd-cache';
 let warnedSvdFileReplaced = false;
 const DISASSEMBLY_OPEN_DELAY_MS = 1200;
@@ -519,7 +525,7 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 			focusFileLog(e.session, `sourceLocation event ${srcPath}:${line}`);
-			void autoRevealSourcePath(srcPath, line);
+			void autoRevealSourcePath(srcPath, line, e.session);
 		})
 	);
 	context.subscriptions.push(
@@ -533,6 +539,8 @@ export function activate(context: vscode.ExtensionContext) {
 				pendingDisassemblyOpenTimers.delete(session.id);
 			}
 			openedDisassemblySessions.delete(session.id);
+			missingSourcesLogged.delete(session.id);
+			missingSourcePromptShown.delete(session.id);
 			aurixDebugSessions.delete(session);
 			activeAurixSessions =Math.max(0, activeAurixSessions - 1);
 			if (activeAurixSessions === 0) {
@@ -597,7 +605,9 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 
 		const enablePathMapper = vscode.workspace.isTrusted && pathMapperConfig === true;
 		
-		return new vscode.DebugAdapterInlineImplementation(new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes(), new VsCodeBreakpointUi()));
+		return new vscode.DebugAdapterInlineImplementation(
+			new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes(), new VsCodeBreakpointUi(), sourceMappingStore())
+		);
 		} finally {
 			startingAurixSessions = Math.max(0, startingAurixSessions - 1);
 		}
@@ -1609,15 +1619,16 @@ async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promi
 	if (!(path.isAbsolute(srcPath) || /^[a-zA-Z]:[\\/]/.test(srcPath))) {
 		return false;
 	}
-	if (!fs.existsSync(srcPath)) {
-		return false;
-	}
 	const line = typeof frame.line === 'number' && frame.line > 0 ? frame.line : 1;
-	return autoRevealSourcePath(srcPath, line);
+	return autoRevealSourcePath(srcPath, line, item.session);
 }
 
 /** Returns true when the location is shown in an editor. */
-async function autoRevealSourcePath(srcPath: string, line: number): Promise<boolean> {
+async function autoRevealSourcePath(srcPath: string, line: number, session?: vscode.DebugSession): Promise<boolean> {
+	if (!fs.existsSync(srcPath)) {
+		reportMissingSource(session ?? vscode.debug.activeDebugSession, srcPath, line);
+		return false;
+	}
 	const norm = normalizePathForCompare(srcPath);
 	// Skip only while the active editor still shows this location (the same stop is revealed by both
 	// the focused stack frame and the adapter's sourceLocation event). A later stop at the same line
@@ -1669,6 +1680,77 @@ async function autoRevealSourcePath(srcPath: string, line: number): Promise<bool
 		agentOutput?.appendLine(`Failed to auto-open source file: ${String(e)}`);
 		return false;
 	}
+}
+
+/** Learned source path mappings, kept per workspace. */
+function sourceMappingStore(): SourceMappingStore | undefined {
+	const state = extensionContext?.workspaceState;
+	if (!state) {
+		return undefined;
+	}
+	return {
+		load: () => state.get<SourcePrefixMapping[]>(LEARNED_SOURCE_MAPPINGS_KEY, []),
+		save: (mappings) => void state.update(LEARNED_SOURCE_MAPPINGS_KEY, mappings)
+	};
+}
+
+/**
+ * A stop location whose source file does not exist locally (e.g. an object a compiler cache built in
+ * another checkout): logs it once per session and offers once per session to locate the file.
+ */
+function reportMissingSource(session: vscode.DebugSession | undefined, srcPath: string, line: number): void {
+	if (session?.type !== 'aurixdbg') {
+		return;
+	}
+	let logged = missingSourcesLogged.get(session.id);
+	if (!logged) {
+		logged = new Set<string>();
+		missingSourcesLogged.set(session.id, logged);
+	}
+	const key = normalizePathForCompare(srcPath);
+	if (logged.has(key)) {
+		return;
+	}
+	logged.add(key);
+	agentOutput?.appendLine(
+		`Source not found: ${srcPath}. Map the folder of the build onto your checkout with "sourceFileMap" ` +
+		`(e.g. "sourceFileMap": { "<build folder>": "\${workspaceFolder}" }) or add your checkout to "sourceSearchPaths".`
+	);
+	if (missingSourcePromptShown.has(session.id)) {
+		return;
+	}
+	missingSourcePromptShown.add(session.id);
+	void (async () => {
+		const locate = 'Locate File…';
+		const picked = await vscode.window.showWarningMessage(
+			`Source file not found: ${srcPath}. Locate it in your checkout to map the other files of that build as well.`,
+			locate
+		);
+		if (picked !== locate) {
+			return;
+		}
+		const name = path.basename(srcPath.replace(/\\/g, '/'));
+		const files = await vscode.window.showOpenDialog({
+			canSelectMany: false,
+			defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+			openLabel: `Use as ${name}`,
+			title: `Locate ${name}`
+		});
+		const localPath = files?.[0]?.fsPath;
+		if (!localPath) {
+			return;
+		}
+		try {
+			const mapping = await session.customRequest('aurix/addSourceMapping', { debugPath: srcPath, localPath }) as SourcePrefixMapping;
+			agentOutput?.appendLine(`Source mapping added: ${mapping.from} -> ${mapping.to}`);
+			// The other missing files of this session may resolve now.
+			missingSourcesLogged.delete(session.id);
+			missingSourcePromptShown.delete(session.id);
+			await autoRevealSourcePath(localPath, line, session);
+		} catch (e) {
+			void vscode.window.showErrorMessage(`Cannot map ${name}: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	})();
 }
 
 /** Appends to %TEMP%/aurix-debugger-focus.log when the session's launch configuration has "debugUIFocus": true. */

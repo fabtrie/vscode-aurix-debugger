@@ -596,6 +596,21 @@
 								"description": "Workspace or project path",
 								"type": "string"
 							},
+							"sourceFileMap": {
+								"markdownDescription": "Maps source path prefixes in the debug information onto local folders, e.g. `{ \"c:/git/project\": \"${workspaceFolder}\" }` when a compiler cache (ccache) supplied objects built in another checkout. Applied before anything else, also when the original path exists. Breakpoints in mapped files are found in objects of either checkout.",
+								"type": "object",
+								"additionalProperties": {
+									"type": "string"
+								},
+								"default": {}
+							},
+							"sourceSearchPaths": {
+								"markdownDescription": "Folders searched for a source whose debug-information path does not exist: the path without its leading folders is tried under each folder (`c:/git/project/app/x.c` → `<folder>/project/app/x.c`, `<folder>/app/x.c`, …). The first hit is remembered as a mapping for the other files of that checkout. Default: `workspace` and the detected project root.",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
 							"device": {
 								"description": "AURIX™ device; selects the bundled SVD file for the XPeripherals view.",
 								"type": "string",

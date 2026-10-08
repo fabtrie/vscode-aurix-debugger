@@ -43,6 +43,12 @@ pub struct SimHsm {
     pub cache_cleans: u32,
     /// Local RAM reads while the cache was not cleaned during the current halt.
     pub uncleaned_reads: u32,
+    /// Addresses that answer with a bus error: HSM addresses in the window (unused addresses inside
+    /// a peripheral) and host addresses of the bridge (registers only the HSM may access).
+    pub bus_errors: std::collections::HashSet<u32>,
+    /// HSM addresses whose next window accesses fail, with the number of failures left (the window
+    /// fails now and then while the HSM runs).
+    pub flaky: HashMap<u32, u32>,
 }
 
 impl SimHsm {
@@ -61,6 +67,8 @@ impl SimHsm {
             writes: Vec::new(),
             cache_cleans: 0,
             uncleaned_reads: 0,
+            bus_errors: Default::default(),
+            flaky: HashMap::new(),
         }
     }
 
@@ -282,22 +290,35 @@ impl SimAdapter {
         self.mem.insert(addr, v);
     }
 
-    /// DBGBASE and debug window accesses; `None` for other addresses.
+    /// HSM bridge accesses: only aligned words; DBGBASE and the debug window only while HSM
+    /// debugging is enabled. `None` for other addresses and the other bridge registers.
     fn hsm_access(&mut self, op: &BatchOp) -> Option<OpResult> {
         let (addr, len, data) = match *op {
             BatchOp::Read { addr, len, addr_map: 0 } => (addr as u32, len, None),
             BatchOp::Write { addr, data, addr_map: 0 } => (addr as u32, data.len(), Some(data)),
             _ => return None,
         };
-        let window = (HSM_WINDOW..HSM_WINDOW + 0x1_0000).contains(&addr);
-        if addr != HSM_DBGBASE && !window {
+        if !(BRIDGE_BASE..BRIDGE_BASE + 0x2_0000).contains(&addr) {
             return None;
         }
         let bus_error = OpResult { err: PL0_ERR_DATA, bytes_ok: 0, data: vec![0; if data.is_some() { 0 } else { len }] };
-        if !self.hsm.debug_enabled || len != 4 || addr & 3 != 0 {
+        if len != 4 || addr & 3 != 0 {
+            return Some(bus_error);
+        }
+        let window = (HSM_WINDOW..HSM_WINDOW + 0x1_0000).contains(&addr);
+        if addr != HSM_DBGBASE && !window {
+            return self.hsm.bus_errors.contains(&addr).then_some(bus_error);
+        }
+        if !self.hsm.debug_enabled {
             return Some(bus_error);
         }
         let hsm_addr = self.hsm.dbgbase | (addr.wrapping_sub(HSM_WINDOW) & 0xFFFF);
+        if addr != HSM_DBGBASE {
+            let flaky = self.hsm.flaky.get_mut(&hsm_addr).filter(|n| **n > 0).map(|n| *n -= 1).is_some();
+            if flaky || self.hsm.bus_errors.contains(&hsm_addr) {
+                return Some(bus_error);
+            }
+        }
         match data {
             Some(d) => {
                 let v = u32::from_le_bytes([d[0], d[1], d[2], d[3]]);
@@ -381,8 +402,23 @@ impl Adapter for SimAdapter {
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         self.execs += 1;
         let mut out = Vec::with_capacity(batch.len());
+        // As on the chip, a failing bridge access fails the bridge accesses after it in the batch.
+        let mut bridge_failed = false;
         for op in batch.iter() {
-            if let Some(r) = self.hsm_access(&op).or_else(|| self.gtm_access(&op)) {
+            let (a, len, write) = match op {
+                BatchOp::Read { addr, len, .. } => (addr as u32, len, false),
+                BatchOp::Write { addr, data, .. } => (addr as u32, data.len(), true),
+            };
+            if bridge_failed && (BRIDGE_BASE..BRIDGE_BASE + 0x2_0000).contains(&a) {
+                out.push(OpResult { err: PL0_ERR_DATA, bytes_ok: 0, data: vec![0; if write { 0 } else { len }] });
+                continue;
+            }
+            if let Some(r) = self.hsm_access(&op) {
+                bridge_failed |= !r.ok();
+                out.push(r);
+                continue;
+            }
+            if let Some(r) = self.gtm_access(&op) {
                 out.push(r);
                 continue;
             }

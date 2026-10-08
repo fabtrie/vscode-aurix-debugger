@@ -472,18 +472,31 @@ impl Channel {
     // --- Memory ----------------------------------------------------------------------
 
     /// The target for a memory access of a core context to addresses the core accesses through
-    /// its own path (HSM-private memory, MCS program RAM).
+    /// its own path (HSM-private memory, MCS program RAM). HSM peripherals have no host address, so
+    /// they go to the HSM from every context (the XPeripherals view reads through the TriCore).
     fn own_access(&self, ctx: &str, addr: u32, size: usize) -> Option<usize> {
-        let idx = find_core(self.h(), ctx)?.idx;
-        let last = addr.wrapping_add(size.saturating_sub(1) as u32);
-        self.h()
-            .call(move |cx| cx.with(|c| c.targets.get(idx).is_some_and(|t| t.core.owns_address(addr) || t.core.owns_address(last))))
-            .unwrap_or(false)
-            .then_some(idx)
+        let idx = find_core(self.h(), ctx).map(|c| c.idx);
+        self.h().call(move |cx| ops::own_access_target(cx, idx, addr, size)).flatten()
     }
 
     fn mem_error(addr: u32, size: usize, msg: String) -> String {
         json!([{ "addr": addr as u64, "size": size, "stat": 0x300, "msg": { "Code": ERR_INV_ADDRESS, "Format": msg } }]).to_string()
+    }
+
+    /// `Memory.get` reply of a read that may fail for parts of the range.
+    fn partial_reply(addr: u32, size: usize, r: Result<aurix_core::adapter::PartialRead, String>) -> Vec<String> {
+        match r {
+            Ok(r) if r.unreadable.is_empty() => vec![j(&B64.encode(&r.data)), String::new(), "null".into()],
+            Ok(r) => {
+                let errs: Vec<Value> = r
+                    .unreadable
+                    .iter()
+                    .map(|(a, n, msg)| json!({ "addr": *a as u64, "size": n, "stat": 0x300, "msg": { "Code": ERR_INV_ADDRESS, "Format": msg } }))
+                    .collect();
+                vec![j(&B64.encode(&r.data)), String::new(), Value::Array(errs).to_string()]
+            }
+            Err(e) => vec![j(&B64.encode(vec![0u8; size])), String::new(), Self::mem_error(addr, size, e)],
+        }
     }
 
     fn mem_get(&self, a: &Args) -> Reply {
@@ -493,22 +506,21 @@ impl Channel {
         if let Some(t) = self.own_access(&ctx, addr, size) {
             let r = self
                 .h()
-                .call(move |cx| ops::read_memory_as(cx, t, addr, size).map_err(|e| e.to_string()))
+                .call(move |cx| ops::read_memory_partial_as(cx, t, addr, size).map_err(|e| e.to_string()))
                 .unwrap_or_else(|| Err("server stopped".into()));
-            return Ok(match r {
-                Ok(data) => vec![j(&B64.encode(&data)), String::new(), "null".into()],
-                Err(e) => vec![j(&B64.encode(vec![0u8; size])), String::new(), Self::mem_error(addr, size, e)],
-            });
+            return Ok(Self::partial_reply(addr, size, r));
+        }
+        if aurix_core::cortex_m::word_only(addr, size) {
+            let r = self
+                .h()
+                .call(move |cx| ops::read_memory_partial(cx, addr, size).map_err(|e| e.to_string()))
+                .unwrap_or_else(|| Err("server stopped".into()));
+            return Ok(Self::partial_reply(addr, size, r));
         }
         let res = self
             .h()
             .call(move |cx| {
-                cx.with(|c| -> Result<tas::OpResult, String> {
-                    let mut b = tas::Batch::new();
-                    b.read(addr as u64, size);
-                    let mut r = c.io().map_err(|e| e.to_string())?.batch(&b).map_err(|e| e.to_string())?;
-                    Ok(r.remove(0))
-                })
+                cx.with(|c| -> Result<tas::OpResult, String> { c.io().map_err(|e| e.to_string())?.read_op(addr, size).map_err(|e| e.to_string()) })
             })
             .unwrap_or_else(|| Err("server stopped".into()))
             .map_err(|e| err(ERR_INV_ADDRESS, e))?;
@@ -543,12 +555,7 @@ impl Channel {
         let res = self
             .h()
             .call(move |cx| {
-                cx.with(|c| -> Result<tas::OpResult, String> {
-                    let mut b = tas::Batch::new();
-                    b.write(addr as u64, &data);
-                    let mut r = c.io().map_err(|e| e.to_string())?.batch(&b).map_err(|e| e.to_string())?;
-                    Ok(r.remove(0))
-                })
+                cx.with(|c| -> Result<tas::OpResult, String> { c.io().map_err(|e| e.to_string())?.write_op(addr, &data).map_err(|e| e.to_string()) })
             })
             .unwrap_or_else(|| Err("server stopped".into()))
             .map_err(|e| err(ERR_INV_ADDRESS, e))?;

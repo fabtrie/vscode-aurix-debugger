@@ -1,6 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# Listed explicitly: a glob would also pick up crate directories left behind by other branches
+# (untracked files keep them alive), which have no manifest here and break the build.
+members = [
+    "crates/api",
+    "crates/api-spec",
+    "crates/aurix-dbg",
+    "crates/core",
+    "crates/isa",
+    "crates/jim",
+    "crates/orti",
+    "crates/symbols",
+    "crates/tas",
+    "crates/tcf",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -9,6 +9,7 @@ use tas::Batch;
 
 use crate::adapter::{self, Io};
 use crate::arch::*;
+use crate::cortex_m;
 use crate::ctx::{Cx, Mode};
 use crate::error::{other, usage, Error, Result};
 use crate::events::{emit, Event};
@@ -793,8 +794,27 @@ pub fn read_memory(cx: &Cx, addr: u32, len: usize) -> Result<Vec<u8>> {
     cx.with(|c| c.io()?.read(addr, len))
 }
 
+/// Host memory like [`read_memory`]; unreadable words of the HSM bridge only fail their own bytes.
+pub fn read_memory_partial(cx: &Cx, addr: u32, len: usize) -> Result<adapter::PartialRead> {
+    cx.with(|c| c.io()?.read_partial(addr, len))
+}
+
 pub fn write_memory(cx: &Cx, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| c.io()?.write(addr, data))
+}
+
+/// The target that serves a memory access of core `t` to `addr..addr + len` through its own path:
+/// `t` itself for addresses it owns (HSM-private memory, MCS program RAM), and the HSM for its
+/// peripherals from every core, as they have no host address. `None`: host memory.
+pub fn own_access_target(cx: &Cx, t: Option<usize>, addr: u32, len: usize) -> Option<usize> {
+    let last = addr.wrapping_add(len.saturating_sub(1) as u32);
+    cx.with(|c| {
+        t.filter(|&i| c.targets.get(i).is_some_and(|e| e.core.owns_address(addr) || e.core.owns_address(last))).or_else(|| {
+            (cortex_m::hsm_peripheral(addr) && cortex_m::hsm_peripheral(last))
+                .then(|| c.targets.iter().position(|e| matches!(e.core, Core::CortexM(_))))
+                .flatten()
+        })
+    })
 }
 
 /// Memory as a core sees it: HSM-private addresses go through the HSM debug window, MCS
@@ -803,6 +823,15 @@ pub fn read_memory_as(cx: &Cx, t: usize, addr: u32, len: usize) -> Result<Vec<u8
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
         e.core.read_memory(&mut io, addr, len)
+    })
+}
+
+/// [`read_memory_as`] where unreadable words of HSM-private memory (unused peripheral addresses)
+/// only fail their own bytes.
+pub fn read_memory_partial_as(cx: &Cx, t: usize, addr: u32, len: usize) -> Result<adapter::PartialRead> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        e.core.read_memory_partial(&mut io, addr, len)
     })
 }
 

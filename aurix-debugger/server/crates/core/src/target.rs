@@ -256,6 +256,15 @@ impl Core {
         }
     }
 
+    /// Reads memory as the core sees it; unreadable words of HSM-private memory only fail their own
+    /// bytes. Other memory fails as a whole, as in [`Self::read_memory`].
+    pub fn read_memory_partial(&mut self, io: &mut Io, addr: u32, len: usize) -> Result<crate::adapter::PartialRead> {
+        match self {
+            Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.read_memory_partial(io, addr, len),
+            _ => Ok(crate::adapter::PartialRead { data: self.read_memory(io, addr, len)?, unreadable: Vec::new() }),
+        }
+    }
+
     pub fn write_memory(&mut self, io: &mut Io, addr: u32, data: &[u8]) -> Result<()> {
         match self {
             Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.write_memory(io, addr, data),

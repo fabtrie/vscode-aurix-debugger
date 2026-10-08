@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use tas::Batch;
 
-use crate::adapter::{check, Io};
+use crate::adapter::{check, Io, PartialRead};
 use crate::arch::*;
 use crate::error::{other, Error, Result};
 use crate::log_info;
@@ -82,11 +82,29 @@ const WP_SLOT_BASE: u8 = 16;
 const DEFAULT_FPB: usize = 6;
 const DEFAULT_DWT: usize = 4;
 const REG_TIMEOUT: Duration = Duration::from_millis(100);
+/// Attempts of a window transaction whose DBGBASE write fails, in tolerant reads. Right after a
+/// failed window access the next transaction's first access fails as well (TC377 TRB, miniWiggler);
+/// a short pause before the retry is enough.
+const WINDOW_TRIES: usize = 5;
+const WINDOW_RETRY_DELAY: Duration = Duration::from_millis(1);
 
 /// HSM address ranges that are only visible through the debug window: boot ROM,
 /// local RAM (with its bit-band alias) and the HSM peripherals and debug units.
 pub fn hsm_private(addr: u32) -> bool {
     addr < 0x1000 || (0x2000_0000..0x2400_0000).contains(&addr) || (0xE000_0000..0xF000_0000).contains(&addr)
+}
+
+/// HSM peripherals and debug units (AES, hash, PKC, timers, TRNG, cache, SCS, DWT, FPB): only
+/// visible through the debug window. Unlike the HSM memories they can be accessed while the HSM runs.
+pub fn hsm_peripheral(addr: u32) -> bool {
+    (0xE000_0000..0xF000_0000).contains(&addr)
+}
+
+/// Whether host memory `addr..addr + len` touches addresses that only allow 32-bit aligned accesses:
+/// the HSM bridge registers and the debug window (HSM TS 9.3). Other access widths give a bus error.
+pub fn word_only(addr: u32, len: usize) -> bool {
+    let end = addr as u64 + len as u64;
+    len > 0 && (addr as u64) < BRIDGE_BASE as u64 + 0x2_0000 && end > BRIDGE_BASE as u64
 }
 
 /// HSM memories read through the HSM cache (cleaned before debug access).
@@ -184,6 +202,12 @@ impl CortexM {
     }
 
     fn run_ops(&self, io: &mut Io, ops: &[(u32, Option<u32>)]) -> Result<Vec<u32>> {
+        self.run_ops_each(io, ops)?.into_iter().collect()
+    }
+
+    /// Like [`Self::run_ops`], with the outcome of each access: the whole batch only fails if the
+    /// window is not available at all.
+    fn run_ops_each(&self, io: &mut Io, ops: &[(u32, Option<u32>)]) -> Result<Vec<Result<u32>>> {
         let mut b = Batch::new();
         let handles = self.queue(&mut b, ops);
         let r = io.batch(&b)?;
@@ -196,7 +220,7 @@ impl CortexM {
                 )));
             }
         }
-        handles
+        Ok(handles
             .iter()
             .zip(ops)
             .map(|(&h, &(addr, value))| {
@@ -206,7 +230,7 @@ impl CortexM {
                 })?;
                 Ok(if value.is_some() { 0 } else { r[h].u32() })
             })
-            .collect()
+            .collect())
     }
 
     pub fn read32(&self, io: &mut Io, addr: u32) -> Result<u32> {
@@ -261,6 +285,32 @@ impl CortexM {
         let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
         let off = (addr - start) as usize;
         Ok(bytes[off..off + len].to_vec())
+    }
+
+    /// Reads HSM-private memory through the window like [`Self::read_memory`], but a word that
+    /// fails only fails its own bytes (see [`crate::adapter::read_words_tolerant`]): unused
+    /// addresses inside the HSM peripherals answer with bus errors, and while the HSM runs a window
+    /// access fails now and then (about 1 in 20 on the TC377 TRB).
+    pub fn read_memory_partial(&mut self, io: &mut Io, addr: u32, len: usize) -> Result<PartialRead> {
+        if len == 0 {
+            return Ok(PartialRead::default());
+        }
+        self.prepare_memory_access(io, addr, len)?;
+        addr.checked_add(len as u32 - 1).ok_or_else(|| other("address range overflow"))?;
+        PartialRead::from_words(addr, len, |words| {
+            let ops: Vec<(u32, Option<u32>)> = words.iter().map(|&a| (a, None)).collect();
+            // A failing DBGBASE write fails the whole transaction (see WINDOW_TRIES).
+            let mut tries = 1;
+            loop {
+                match self.run_ops_each(io, &ops) {
+                    Err(_) if tries < WINDOW_TRIES => {
+                        std::thread::sleep(WINDOW_RETRY_DELAY);
+                        tries += 1
+                    }
+                    r => break r,
+                }
+            }
+        })
     }
 
     /// Writes HSM-private memory through the window (word access, partial words merged).

@@ -348,6 +348,96 @@ fn hsm_is_examined_through_the_debug_window() {
     assert!(i.eval("tc37x.hsm cortex_m triggers").unwrap().contains("FP_COMP5: off"));
 }
 
+/// The HSM bridge only takes aligned word accesses: host reads and writes of it are split into
+/// single words instead of the 64-bit blocks and byte edges of other memory.
+#[test]
+fn hsm_bridge_is_accessed_word_by_word() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| {
+        for (i, a) in (0xF004_0020..0xF004_0040).step_by(4).enumerate() {
+            sim.set_mem(a, 0x1111_1111 * i as u32);
+        }
+        sim.reads.clear();
+    });
+    // Unaligned and longer than a word (HT2HSMF at 0x20 ... HSM2HTS at 0x34).
+    let data = ops::read_memory(&s.cx(), 0xF004_0022, 0x14).unwrap();
+    let words: Vec<u8> = (0..8u32).flat_map(|i| (0x1111_1111 * i).to_le_bytes()).collect();
+    assert_eq!(data, words[2..0x16]);
+    let reads = with_sim(&s, |sim| std::mem::take(&mut sim.reads));
+    assert_eq!(reads, (0xF004_0020..0xF004_0038).step_by(4).map(|a| (a, 4)).collect::<Vec<_>>());
+
+    take_writes(&s);
+    ops::write_memory(&s.cx(), 0xF004_0030, &[1, 0, 0, 0, 2, 0, 0, 0]).unwrap();
+    assert_eq!(take_writes(&s), vec![(0xF004_0030, 1), (0xF004_0034, 2)]);
+    // A partial word is refused rather than merged by read-modify-write.
+    let err = ops::write_memory(&s.cx(), 0xF004_0022, &[1, 2]).unwrap_err().to_string();
+    assert!(err.contains("32-bit aligned"), "{err}");
+    // Other host memory is unaffected.
+    ops::read_memory(&s.cx(), 0x7000_0001, 3).unwrap();
+}
+
+/// HSM peripherals have no host address: accesses from a TriCore context go to the HSM, while
+/// HSM RAM stays HSM-context only (it needs a halted HSM and a cache clean).
+#[test]
+fn hsm_peripherals_are_read_through_the_hsm_from_every_core() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    let cx = s.cx();
+    assert_eq!(ops::own_access_target(&cx, Some(0), 0xE800_0014, 4), Some(HSM));
+    assert_eq!(ops::own_access_target(&cx, None, 0xEC00_0200, 0x14), Some(HSM));
+    assert_eq!(ops::own_access_target(&cx, Some(0), 0x2000_0000, 4), None);
+    assert_eq!(ops::own_access_target(&cx, Some(HSM), 0x2000_0000, 4), Some(HSM));
+    assert_eq!(ops::own_access_target(&cx, Some(0), 0xEFFF_FFFC, 8), None, "range leaves the peripheral region");
+    assert_eq!(ops::own_access_target(&cx, Some(0), 0x7000_0000, 4), None);
+
+    with_sim(&s, |sim| sim.hsm.mem.insert(0xE800_0014, 0x0000_0006));
+    take_writes(&s);
+    assert_eq!(ops::read_memory_as(&cx, HSM, 0xE800_0014, 4).unwrap(), vec![6, 0, 0, 0]);
+    assert!(take_writes(&s).contains(&(HSM_DBGBASE, 0xE800_0000)));
+}
+
+/// Unused addresses inside an HSM peripheral give bus errors (TIM, WDT), and a failing access also
+/// fails the rest of its transaction: a read across them only fails those words, so the peripheral
+/// view still shows the registers around them. A word that fails once is read again.
+#[test]
+fn hsm_peripheral_read_fails_only_the_unused_words() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| {
+        sim.hsm.bus_errors.extend([0xEC00_0008, 0xEC00_000C, 0xEC00_0018]);
+        sim.hsm.flaky.insert(0xEC00_0010, 2);
+        sim.hsm.mem.insert(0xEC00_0010, 0x1234);
+        sim.hsm.mem.insert(0xEC00_0020, 0x5678);
+    });
+    let r = ops::read_memory_partial_as(&s.cx(), HSM, 0xEC00_0002, 0x20).unwrap();
+    let e: Vec<(u32, usize)> = r.unreadable.iter().map(|(a, n, _)| (*a, *n)).collect();
+    assert_eq!(e, vec![(0xEC00_0008, 8), (0xEC00_0018, 4)]);
+    assert!(r.unreadable[0].2.contains("HSM address"), "{:?}", r.unreadable);
+    assert_eq!(r.data.len(), 0x20);
+    assert_eq!(r.data[0x0E..0x10], [0x34, 0x12]);
+    assert_eq!(r.data[0x1E..0x20], [0x78, 0x56]);
+    assert_eq!(with_sim(&s, |sim| sim.hsm.flaky[&0xEC00_0010]), 0);
+    // The all-or-nothing read still fails.
+    assert!(ops::read_memory_as(&s.cx(), HSM, 0xEC00_0000, 0x28).is_err());
+}
+
+/// Host reads across bridge registers only the HSM may access (HT2HSMIE) fail only those words.
+#[test]
+fn hsm_bridge_read_fails_only_the_hsm_side_registers() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| {
+        sim.hsm.bus_errors.insert(0xF004_0024);
+        sim.set_mem(0xF004_0034, 3);
+    });
+    let r = ops::read_memory_partial(&s.cx(), 0xF004_0020, 0x1C).unwrap();
+    let e: Vec<(u32, usize)> = r.unreadable.iter().map(|(a, n, _)| (*a, *n)).collect();
+    assert_eq!(e, vec![(0xF004_0024, 4)]);
+    assert_eq!(r.data[0x14..0x18], [3, 0, 0, 0]);
+    assert!(ops::read_memory(&s.cx(), 0xF004_0020, 0x1C).is_err());
+}
+
 #[test]
 fn hsm_without_debug_access_stays_unexamined_and_is_retried() {
     let s = server();

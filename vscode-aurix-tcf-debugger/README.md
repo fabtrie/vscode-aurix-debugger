@@ -116,6 +116,16 @@ Once configured, the active interval appears in the view header (highlighted in 
 
 This Peripheral View depends on the extension `mcu-debug.peripheral-viewer`. The register definitions come from the SVD file bundled for the `device` set in the launch configuration.
 
+For the TC3xx devices the view also shows the HSM, as the `HSM_*` peripherals merged in from `bin/svd/HSM_TC3xx.svd.gz`:
+
+- `HSM_BRIDGE` holds the host-side bridge registers. They are always readable.
+- The HSM-internal peripherals are AES, hash, PKC, timers, watchdog, TRNG, cache and the Cortex-M3 SCB, NVIC, SysTick, MPU, DWT and FPB. The server reads them through the HSM debug window. That only works while the HSM firmware has enabled HSM debugging (`DBGCTRL.HSM`) and the HSM target is configured. Otherwise they show a read error.
+- Registers with destructive reads are not read automatically: `TRNG_DATA32` and `HASH_VAL`.
+- Only expand `HSM_PKC_SCM` while `PKC_STATUS.BUSY` is 0.
+- The run-control and breakpoint registers (DHCSR, FPB and DWT comparators, DBGBASE) are read-only here because the debug server owns them.
+
+The SVD file is generated from `scripts/hsm-svd/hsm_tc3xx.json` with `npm run svd:hsm`. That also writes a readable copy, `scripts/hsm-svd/HSM_TC3xx.svd`, which works as a standalone Cortex-M3 SVD for the HSM. The standalone copy also contains `HSM_BRIDGE_HSMSIDE`, the bridge registers only the HSM can access (DBGCTRL, ERRCTRL, ...). This peripheral is not merged into the view.
+
 ![peripheral-view](media/peripheral-view.gif)
 
 ### Memory Inspector

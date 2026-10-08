@@ -16,6 +16,7 @@ export function run(): Promise<void> {
 	const mocha = new Mocha({ ui: 'tdd', timeout: 120000, reporter, reporterOptions });
 	const testsRoot = path.resolve(__dirname);
 	mocha.addFile(path.join(testsRoot, 'svdCatalog.test'));
+	mocha.addFile(path.join(testsRoot, 'svdMerge.test'));
 	mocha.addFile(path.join(testsRoot, 'breakpoint.stopat.test'));
 	mocha.addFile(path.join(testsRoot, 'debug.stress.test'));
 	return new Promise((resolve, reject) => {

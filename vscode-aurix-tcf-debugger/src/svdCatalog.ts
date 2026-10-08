@@ -1,6 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+/** An SVD file whose peripherals are merged into a device SVD (e.g. the HSM of the TC3xx). */
+export type SvdExtra = {
+	absolutePath: string;
+	/** Device peripherals it replaces. */
+	replace: string[];
+	/** Its peripherals that are not merged. */
+	exclude: string[];
+};
+
 export type SvdCatalogEntry = {
 	id: string;
 	/** Device name as used in the launch configuration's "device" (e.g. "TC37x"). */
@@ -9,6 +18,7 @@ export type SvdCatalogEntry = {
 	relativePath: string;
 	absolutePath: string;
 	deviceNames: string[];
+	extraSvd: SvdExtra[];
 };
 
 type RawSvdIndexEntry = {
@@ -17,6 +27,7 @@ type RawSvdIndexEntry = {
 	label?: unknown;
 	path?: unknown;
 	deviceNames?: unknown;
+	extraSvd?: unknown;
 };
 
 type RawSvdIndex = {
@@ -35,6 +46,22 @@ function normalizeSvdBaseName(fileName: string): string {
 		return fileName.slice(0, -4);
 	}
 	return fileName;
+}
+
+function stringList(v: unknown): string[] {
+	return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string' && s.trim() !== '').map((s) => s.trim()) : [];
+}
+
+function parseExtra(raw: unknown, extensionPath: string): SvdExtra | undefined {
+	const r = (typeof raw === 'string' ? { path: raw } : raw) as { path?: unknown; replace?: unknown; exclude?: unknown } | null;
+	if (!r || typeof r.path !== 'string' || r.path.trim() === '') {
+		return undefined;
+	}
+	const absolutePath = path.resolve(extensionPath, r.path.trim().split(/[\\/]+/).join('/'));
+	if (!fs.existsSync(absolutePath)) {
+		return undefined;
+	}
+	return { absolutePath, replace: stringList(r.replace), exclude: stringList(r.exclude) };
 }
 
 function parseIndexEntry(raw: RawSvdIndexEntry, extensionPath: string): SvdCatalogEntry | undefined {
@@ -66,6 +93,9 @@ function parseIndexEntry(raw: RawSvdIndexEntry, extensionPath: string): SvdCatal
 		relativePath: rel,
 		absolutePath,
 		deviceNames,
+		extraSvd: Array.isArray(raw.extraSvd)
+			? raw.extraSvd.map((x) => parseExtra(x, extensionPath)).filter((x): x is SvdExtra => x !== undefined)
+			: [],
 	};
 }
 

@@ -49,6 +49,7 @@
 		"compile": "tsc -p ./ && node ./scripts/copy-static-assets.js",
 		"watch": "tsc -watch -p ./",
 		"svd:compress": "node ./scripts/compress-svd.js --delete",
+		"svd:hsm": "node ./scripts/gen-hsm-svd.js",
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
 		"test": "node ./out/test/runTest.js",

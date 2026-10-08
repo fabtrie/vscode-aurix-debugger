@@ -13,7 +13,7 @@ import * as crypto from 'crypto';
 import { AurixTCFDebugSession, DisassemblyOpcodeBytes, isDisassemblyOpcodeBytes } from './debugProvider';
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
-import { createGunzip } from 'zlib';
+import { createGunzip, gunzipSync } from 'zlib';
 import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
 import { OsObjectsPanel } from './osObjectsPanel';
 import { OsProfilePanel } from './osProfilePanel';
@@ -21,7 +21,8 @@ import { describeOsError } from './tcf/osaware';
 import { notifyLiveUpdateBreak, setLiveUpdateIntervalMs, setLiveUpdateSessionActive } from './liveUpdate';
 import { OsViewProvider } from './osView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
-import { findSvdForDevice } from './svdCatalog';
+import { findSvdForDevice, SvdCatalogEntry } from './svdCatalog';
+import { mergeSvdPeripherals } from './svdMerge';
 import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 
@@ -719,6 +720,46 @@ async function usableSvdPath(svdPath: string): Promise<string> {
 	return svdPath.toLowerCase().endsWith('.svd.gz') ? await materializeCompressedSvd(svdPath) : svdPath;
 }
 
+async function readSvdText(svdPath: string): Promise<string> {
+	const data = await fs.promises.readFile(svdPath);
+	return (svdPath.toLowerCase().endsWith('.gz') ? gunzipSync(data) : data).toString('utf8');
+}
+
+/**
+ * The SVD file of a catalog entry for the peripheral viewer: the device SVD with the peripherals
+ * of the entry's extra SVD files (e.g. the HSM of the TC3xx) merged in, cached like the device file.
+ * Falls back to the device SVD alone if merging fails.
+ */
+async function sessionSvdPath(entry: SvdCatalogEntry): Promise<string> {
+	const devicePath = await usableSvdPath(entry.absolutePath);
+	if (entry.extraSvd.length === 0) {
+		return devicePath;
+	}
+	try {
+		const hash = crypto.createHash('sha256').update(path.basename(devicePath));
+		for (const extra of entry.extraSvd) {
+			hash.update(await fs.promises.readFile(extra.absolutePath));
+			hash.update(JSON.stringify([extra.replace, extra.exclude]));
+		}
+		const outputPath = path.join(getSvdCacheRoot(), `${entry.id}-merged.svd.${hash.digest('hex').slice(0, 16)}`);
+		if (fs.existsSync(outputPath)) {
+			return outputPath;
+		}
+		let xml = await fs.promises.readFile(devicePath, 'utf8');
+		for (const extra of entry.extraSvd) {
+			xml = mergeSvdPeripherals(xml, await readSvdText(extra.absolutePath), extra);
+		}
+		const tempPath = `${outputPath}.tmp`;
+		await fs.promises.writeFile(tempPath, xml, 'utf8');
+		await fs.promises.rename(tempPath, outputPath);
+		agentOutput?.appendLine(`SVD cache ready: ${outputPath} (${entry.extraSvd.map((e) => path.basename(e.absolutePath)).join(', ')} merged)`);
+		return outputPath;
+	} catch (e) {
+		agentOutput?.appendLine(`SVD merge for ${entry.id} failed, using the device SVD alone: ${e instanceof Error ? e.message : String(e)}`);
+		return devicePath;
+	}
+}
+
 export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationProvider {
 
 	/**
@@ -805,7 +846,7 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 			const entry = await findSvdForDevice(extensionContext.extensionPath, device);
 			if (entry) {
 				try {
-					(config as any).svdPath = await usableSvdPath(entry.absolutePath);
+					(config as any).svdPath = await sessionSvdPath(entry);
 				} catch (e) {
 					agentOutput?.appendLine(`SVD for ${device} unavailable: ${e instanceof Error ? e.message : String(e)}`);
 				}

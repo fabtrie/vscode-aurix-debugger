@@ -13,7 +13,7 @@ use crate::cortex_m;
 use crate::ctx::{Cx, Mode};
 use crate::error::{other, usage, Error, Result};
 use crate::events::{emit, Event};
-use crate::target::{BpKind, Breakpoint, DebugReason, RunMode, SourceStep, TargetState, Transition, WatchAccess, Watchpoint, FLAP_RETRY, POLL_FAIL_TIME, UNREACHABLE_TIME};
+use crate::target::{BpKind, Breakpoint, Core, DebugReason, RunMode, SourceStep, TargetState, Transition, WatchAccess, Watchpoint, FLAP_RETRY, POLL_FAIL_TIME, UNREACHABLE_TIME};
 use crate::{log_debug, log_error, log_info, log_warn};
 
 /// Runs a target event handler (`$t configure -event name body`).
@@ -184,7 +184,7 @@ pub fn poll_all(cx: &Cx) {
         let mut b = Batch::new();
         let mut handles = Vec::new();
         for (i, e) in c.targets.iter().enumerate() {
-            let skip = rc && (matches!(e.core, crate::target::Core::Tricore(_)) || i % RC_MEMORY_POLL_SHARE != turn % RC_MEMORY_POLL_SHARE);
+            let skip = rc && (matches!(e.core, Core::Tricore(_)) || i % RC_MEMORY_POLL_SHARE != turn % RC_MEMORY_POLL_SHARE);
             if e.core.examined() && e.poll_failures == 0 && !skip {
                 handles.push((i, e.core.poll_queue(&mut b)));
             }
@@ -838,7 +838,7 @@ fn poll_run_controlled(c: &mut crate::ctx::Ctx) -> (Vec<(usize, Transition)>, Ve
     let mut failed = Vec::new();
     for i in 0..c.targets.len() {
         let e = &c.targets[i];
-        if !(matches!(e.core, crate::target::Core::Tricore(_)) && e.core.examined() && e.poll_failures == 0) {
+        if !(matches!(e.core, Core::Tricore(_)) && e.core.examined() && e.poll_failures == 0) {
             continue;
         }
         let (mut io, e) = match c.target_io(i) {

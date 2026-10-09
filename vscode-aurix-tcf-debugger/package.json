@@ -277,6 +277,11 @@
 				"category": "AURIX™ Debugger"
 			},
 			{
+				"command": "aurix-debugger.resetDebugLayout",
+				"title": "Reset Debug Layout",
+				"category": "AURIX™ Debugger"
+			},
+			{
 				"command": "aurix-debugger.osShowProfile",
 				"title": "Show OS Profile",
 				"category": "AURIX™ Debugger",
@@ -569,6 +574,11 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Automatically start aurix-dbg when a debug session starts."
+				},
+				"aurix-debugger.rememberDebugLayout": {
+					"type": "boolean",
+					"default": true,
+					"description": "When the last AURIX debug session ends, remember where the debug tabs were (Disassembly, Live Watch panels, OS panels, Memory Inspector editors), close them, and reopen them in the same editor groups and sizes when the next session starts. \"Reset Debug Layout\" forgets the remembered layout."
 				},
 				"aurix-debugger.autoOpenDisassemblyView": {
 					"type": "boolean",

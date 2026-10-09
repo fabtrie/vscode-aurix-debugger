@@ -7,6 +7,7 @@
  */
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
+import type { PanelPlacement } from './debugLayout';
 import { liveUpdateIntervalMs, normalizeIntervalMs } from './liveUpdate';
 import { LiveWatchCommandArgument, LiveWatchHost, LiveWatchInstance } from './liveWatchView';
 
@@ -220,6 +221,26 @@ export class LiveWatchManager implements vscode.Disposable {
 				void vscode.window.showInformationMessage('Opening a Live Watch in a new window needs VS Code 1.85 or newer; drag its tab out instead.');
 			}
 		}
+	}
+
+	/** The saved panel a tab shows, found by its title: panel names are unique. */
+	panelIdByTitle(title: string): string | undefined {
+		return this.saved.find((p) => p.name === title)?.id;
+	}
+
+	/** Shows a saved panel by id at a given place, for the debug layout restore. */
+	openPanelById(id: string, placement: PanelPlacement): boolean {
+		const saved = this.saved.find((p) => p.id === id);
+		if (!saved) {
+			return false;
+		}
+		const open = this.panels.get(id);
+		if (open) {
+			open.panel.reveal(placement.viewColumn, placement.preserveFocus);
+		} else {
+			this.attachPanel(saved, vscode.window.createWebviewPanel(LiveWatchManager.panelViewType, saved.name, placement));
+		}
+		return true;
 	}
 
 	/** Moves the active Live Watch panel into a floating window. */

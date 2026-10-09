@@ -10,6 +10,7 @@
  */
 
 import * as vscode from 'vscode';
+import type { PanelPlacement } from './debugLayout';
 import { LiveUpdater } from './liveUpdate';
 import { describeOsError } from './tcf/osaware';
 import type { OsProfile, OsTransition } from './tcf/osaware';
@@ -49,6 +50,7 @@ type View = {
 const IDLE = /^(INVALID_TASK|IdleTask|.*_?Idle(Task)?(_.*)?)$/i;
 
 export class OsProfilePanel {
+	static readonly viewType = 'aurixOsProfile';
 	private static current: OsProfilePanel | undefined;
 
 	private readonly disposables: vscode.Disposable[] = [];
@@ -92,13 +94,14 @@ export class OsProfilePanel {
 	}
 
 
-	static show(extensionUri: vscode.Uri): void {
+	static show(extensionUri: vscode.Uri, placement?: PanelPlacement): void {
 		const media = vscode.Uri.joinPath(extensionUri, 'media');
 		if (OsProfilePanel.current) {
-			OsProfilePanel.current.panel.reveal();
+			OsProfilePanel.current.panel.reveal(placement?.viewColumn, placement?.preserveFocus);
 			return;
 		}
-		const panel = vscode.window.createWebviewPanel('aurixOsProfile', 'OS Profile', vscode.ViewColumn.Active, {
+		const column = placement?.viewColumn ?? vscode.ViewColumn.Active;
+		const panel = vscode.window.createWebviewPanel(OsProfilePanel.viewType, 'OS Profile', { viewColumn: column, preserveFocus: placement?.preserveFocus }, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
 			localResourceRoots: [media],

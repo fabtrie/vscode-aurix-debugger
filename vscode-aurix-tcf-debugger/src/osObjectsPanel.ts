@@ -11,6 +11,7 @@
  */
 
 import * as vscode from 'vscode';
+import type { PanelPlacement } from './debugLayout';
 import { LiveUpdater } from './liveUpdate';
 import { describeOsError } from './tcf/osaware';
 import type { OsInfo, OsObjectList, OsStack, OsStackList, OsTypeInfo } from './tcf/osaware';
@@ -35,6 +36,7 @@ type Table = {
 const NOTHING = new Set(['INVALID_TASK', 'INVALID_ISR', '-', '']);
 
 export class OsObjectsPanel {
+	static readonly viewType = 'aurixOsObjects';
 	private static current: OsObjectsPanel | undefined;
 
 	private readonly disposables: vscode.Disposable[] = [];
@@ -73,16 +75,17 @@ export class OsObjectsPanel {
 	}
 
 
-	static show(extensionUri: vscode.Uri, kind?: string): void {
+	static show(extensionUri: vscode.Uri, kind?: string, placement?: PanelPlacement): void {
 		const media = vscode.Uri.joinPath(extensionUri, 'media');
+		const column = placement?.viewColumn ?? vscode.ViewColumn.Active;
 		if (OsObjectsPanel.current) {
-			OsObjectsPanel.current.panel.reveal(vscode.ViewColumn.Active);
+			OsObjectsPanel.current.panel.reveal(column, placement?.preserveFocus);
 			if (kind) {
 				void OsObjectsPanel.current.select(kind);
 			}
 			return;
 		}
-		const panel = vscode.window.createWebviewPanel('aurixOsObjects', 'AUTOSAR OS', vscode.ViewColumn.Active, {
+		const panel = vscode.window.createWebviewPanel(OsObjectsPanel.viewType, 'AUTOSAR OS', { viewColumn: column, preserveFocus: placement?.preserveFocus }, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
 			localResourceRoots: [media],

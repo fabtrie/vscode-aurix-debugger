@@ -18,6 +18,7 @@ import { LiveWatchCommandArgument } from './liveWatchView';
 import { LiveWatchManager, pickIntervalMs } from './liveWatchManager';
 import { OsObjectsPanel } from './osObjectsPanel';
 import { OsProfilePanel } from './osProfilePanel';
+import { DebugLayout, focusEditorGroup } from './debugLayout';
 import { describeOsError } from './tcf/osaware';
 import { notifyLiveUpdateBreak, setLiveUpdateIntervalMs, setLiveUpdateSessionActive } from './liveUpdate';
 import { OsViewProvider } from './osView';
@@ -49,6 +50,7 @@ let lastInstructionSteppingEnabled = false;
 let liveWatchStatusItem: vscode.StatusBarItem | undefined;
 let liveWatches: LiveWatchManager | undefined;
 let osViewProvider: OsViewProvider | undefined;
+let debugLayout: DebugLayout | undefined;
 const liveWatchIntervalStateKey = 'aurix-debugger.liveWatch.intervalMs';
 let lastLiveWatchIntervalMs = 1000;
 let preferredSourceViewColumn: vscode.ViewColumn | undefined;
@@ -70,6 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log('AURIX debugger extension is activating...');
 	agentOutput = vscode.window.createOutputChannel('AURIX Debug Server');
 	liveWatches = new LiveWatchManager(context);
+	debugLayout = new DebugLayout(context, liveWatches, (line) => agentOutput?.appendLine(line));
 	context.subscriptions.push(liveWatches);
 
 	void ensureMemoryInspectorSettings();
@@ -363,6 +366,10 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.osRefresh', () => osViewProvider?.refresh()),
 		vscode.commands.registerCommand('aurix-debugger.osTogglePause', () => osViewProvider?.togglePaused()),
+		vscode.commands.registerCommand('aurix-debugger.resetDebugLayout', async () => {
+			await debugLayout?.reset();
+			void vscode.window.showInformationMessage('Debug layout forgotten: the next session opens the default layout.');
+		}),
 		vscode.commands.registerCommand('aurix-debugger.osShowProfile', () => OsProfilePanel.show(context.extensionUri)),
 		vscode.commands.registerCommand('aurix-debugger.osShowObjects', (kind?: string) =>
 			OsObjectsPanel.show(context.extensionUri, typeof kind === 'string' ? kind : undefined),
@@ -470,6 +477,9 @@ export function activate(context: vscode.ExtensionContext) {
 				void syncInstructionSteppingOnSessionStart(session);
 				void syncLiveWatchOnSessionStart(session);
 				void liveWatches?.refreshAll();
+				if (activeAurixSessions === 1) {
+					void debugLayout?.sessionStarted();
+				}
 			}
 		})
 	);
@@ -550,6 +560,7 @@ export function activate(context: vscode.ExtensionContext) {
 				updateInstructionSteppingStatus(lastInstructionSteppingEnabled, false);
 				updateLiveWatchStatus(false);
 				setLiveUpdateSessionActive(false);
+				void debugLayout?.sessionsEnded();
 			}
 			// Use a short, cancelable delay so VS Code Restart (terminate + immediate start)
 			// can reuse the same agent without kill+start churn.
@@ -1260,8 +1271,10 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 		return;
 	}
 	const cfg = vscode.workspace.getConfiguration('aurix-debugger');
+	// A remembered debug layout puts the view back into its group; else it goes to the right.
+	const savedColumn = debugLayout?.takeDisassemblyColumn();
 	const autoOpen = cfg.get<boolean>('autoOpenDisassemblyView', true);
-	if (!autoOpen) {
+	if (!autoOpen && savedColumn === undefined) {
 		return;
 	}
 	const autoLock = cfg.get<boolean>('autoLockDisassemblyView', true);
@@ -1275,6 +1288,7 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 		preferredSourceViewColumn = startViewColumn;
 	}
 
+	const placed = savedColumn !== undefined && await focusEditorGroup(savedColumn);
 	try {
 		const cmd = await resolveDisassemblyOpenCommand();
 		if (!cmd) {
@@ -1286,10 +1300,12 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 		return;
 	}
 
-	try {
-		await vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
-	} catch (e) {
-		agentOutput?.appendLine(`Failed to move disassembly view to the right: ${String(e)}`);
+	if (!placed) {
+		try {
+			await vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
+		} catch (e) {
+			agentOutput?.appendLine(`Failed to move disassembly view to the right: ${String(e)}`);
+		}
 	}
 
 	if (autoLock) {
@@ -1304,7 +1320,8 @@ async function openDisassemblyEditorLayout(session: vscode.DebugSession): Promis
 		}
 	}
 
-	if (autoEven) {
+	// A restored layout has its own group sizes.
+	if (autoEven && !placed) {
 		try {
 			await vscode.commands.executeCommand('workbench.action.evenEditorWidths');
 		} catch (e) {

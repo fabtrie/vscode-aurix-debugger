@@ -31,7 +31,8 @@
 	],
 	"activationEvents": [
 		"onDebug",
-		"onDebugResolve:aurixdbg"
+		"onDebugResolve:aurixdbg",
+		"onWebviewPanel:aurixLiveWatchPanel"
 	],
 	"extensionDependencies": [
 		"mcu-debug.peripheral-viewer",
@@ -138,7 +139,7 @@
 			},
 			{
 				"command": "aurix-debugger.configureLiveWatch",
-				"title": "Configure Live Watch",
+				"title": "Configure Global Live Update Interval",
 				"category": "AURIX™ Debugger",
 				"icon": "$(gear)"
 			},
@@ -204,6 +205,53 @@
 				"title": "Add to Live Watch",
 				"category": "AURIX™ Debugger",
 				"icon": "$(eye)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchOpenPanel",
+				"title": "Open Live Watch Panel...",
+				"category": "AURIX™ Debugger",
+				"icon": "$(multiple-windows)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchConfigureInterval",
+				"title": "Configure Live Watch Refresh Interval",
+				"category": "AURIX™ Debugger",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelAddExpression",
+				"title": "Add Live Watch Expression",
+				"category": "AURIX™ Debugger",
+				"icon": "$(add)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelRefresh",
+				"title": "Refresh Live Watch",
+				"category": "AURIX™ Debugger",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelConfigureInterval",
+				"title": "Configure Live Watch Refresh Interval",
+				"category": "AURIX™ Debugger",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelClearExpressions",
+				"title": "Clear Live Watch Expressions",
+				"category": "AURIX™ Debugger",
+				"icon": "$(clear-all)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelRename",
+				"title": "Rename Live Watch Panel",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelMoveToNewWindow",
+				"title": "Move Live Watch Panel into New Window",
+				"category": "AURIX™ Debugger",
+				"icon": "$(empty-window)"
 			},
 			{
 				"command": "aurix-debugger.osRefresh",
@@ -292,6 +340,36 @@
 					"command": "aurix-debugger.disassemblyGoTo",
 					"when": "debugType == aurixdbg && debugState == stopped && activeEditor == workbench.debug.disassemblyView",
 					"group": "navigation"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelAddExpression",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRefresh",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@3"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelConfigureInterval",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@4"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelClearExpressions",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@9"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRename",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "1_liveWatch@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelMoveToNewWindow",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "1_liveWatch@2"
 				}
 			],
 			"commandPalette": [
@@ -338,6 +416,30 @@
 				{
 					"command": "aurix-debugger.liveWatchAddPeripheral",
 					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelAddExpression",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRefresh",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelConfigureInterval",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelClearExpressions",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRename",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelMoveToNewWindow",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
 				}
 			],
 			"view/title": [
@@ -352,9 +454,14 @@
 					"group": "navigation@3"
 				},
 				{
-					"command": "aurix-debugger.configureLiveWatch",
+					"command": "aurix-debugger.liveWatchConfigureInterval",
 					"when": "view == aurixLiveWatch",
 					"group": "navigation@4"
+				},
+				{
+					"command": "aurix-debugger.liveWatchOpenPanel",
+					"when": "view == aurixLiveWatch",
+					"group": "navigation@5"
 				},
 				{
 					"command": "aurix-debugger.liveWatchClearExpressions",
@@ -390,37 +497,37 @@
 			"webview/context": [
 				{
 					"command": "aurix-debugger.liveWatchEditExpression",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.(live|paused)$/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root\\.(live|paused)$/",
 					"group": "1_edit@0"
 				},
 				{
 					"command": "aurix-debugger.liveWatchSetValue",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.(root\\.(live|paused)(\\.register)?|child)$/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root\\.(live|paused)(\\.register)?|child)$/",
 					"group": "1_edit@1"
 				},
 				{
 					"command": "aurix-debugger.liveWatchCopyValue",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/",
 					"group": "2_copy@1"
 				},
 				{
 					"command": "aurix-debugger.liveWatchCopyExpression",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.(root|child)/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/",
 					"group": "2_copy@2"
 				},
 				{
 					"command": "aurix-debugger.liveWatchPauseExpression",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.live/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root\\.live/",
 					"group": "3_updates@1"
 				},
 				{
 					"command": "aurix-debugger.liveWatchResumeExpression",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root\\.paused/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root\\.paused/",
 					"group": "3_updates@1"
 				},
 				{
 					"command": "aurix-debugger.liveWatchRemoveExpression",
-					"when": "webviewId == 'aurixLiveWatch' && webviewSection =~ /^liveWatch\\.root/",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root/",
 					"group": "4_remove@1"
 				}
 			],
@@ -502,7 +609,7 @@
 					"type": "number",
 					"default": 1000,
 					"minimum": 200,
-					"description": "How often the live views re-read the target while it runs: the Live Watch, the AUTOSAR OS view and the OS Objects panel. A view that is not on screen reads nothing."
+					"description": "How often the live views re-read the target while it runs: the Live Watch, the AUTOSAR OS view and the OS Objects panel. A Live Watch can have its own interval (its gear button), which this one then leaves alone. A view that is not on screen reads nothing."
 				}
 			}
 		},

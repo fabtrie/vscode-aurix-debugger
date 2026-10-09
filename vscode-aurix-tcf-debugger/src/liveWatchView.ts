@@ -42,14 +42,38 @@ type RowTarget = {
 	node?: LiveWatchNode;
 };
 
-/** Argument of the Live Watch commands when run from the view's context menu. */
-export type LiveWatchCommandArgument = { rowId?: string } | undefined;
+/**
+ * Argument of the Live Watch commands when run from a view's context menu: the row, and the Live
+ * Watch instance it is in (the sidebar's when missing).
+ */
+export type LiveWatchCommandArgument = { rowId?: string; instanceId?: string } | undefined;
 
-const LIVE_WATCH_EXPRESSIONS_KEY = 'aurix-debugger.liveWatch.expressions';
+/** Where an instance is shown: the sidebar view or a panel. */
+export interface LiveWatchHost {
+	readonly webview: vscode.Webview;
+	readonly visible: boolean;
+	/** The refresh state ("1000 ms", "paused"): the view's description, or part of a panel's title. */
+	setDescription(description: string): void;
+}
+
+export interface LiveWatchInstanceOptions {
+	id: string;
+	/** workspaceState key of the expression list. */
+	storageKey: string;
+	/** The instance's own refresh interval; the global one when missing. */
+	intervalMs?: number;
+	/** The webview got the focus, so it is the one "Add to Live Watch" offers first. */
+	onDidFocus?: () => void;
+}
+
 const PAUSED_GROUP_ID = 'pausedGroup';
 
-export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Disposable {
-	static readonly viewType = 'aurixLiveWatch';
+/**
+ * One Live Watch: its own expression list and refresh interval, shown in the sidebar view or in a
+ * panel (a host). Several can be open at once; each reads only while its host is on screen.
+ */
+export class LiveWatchInstance implements vscode.Disposable {
+	readonly id: string;
 
 	/** In the order they were added, like the Watch view. */
 	private readonly expressions = new Map<string, LiveWatchStoredExpression>();
@@ -60,8 +84,8 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	/** What each row shown in the webview refers to, by row id. */
 	private rowTargets = new Map<string, RowTarget>();
 	private lastPostedRows: string | undefined;
-	private view: vscode.WebviewView | undefined;
-	private viewDisposables: vscode.Disposable[] = [];
+	private host: LiveWatchHost | undefined;
+	private hostDisposables: vscode.Disposable[] = [];
 	private selectedId: string | undefined;
 	private refreshQueue: Promise<void> = Promise.resolve();
 	/// The refresh loop, shared with the AUTOSAR OS views: one interval, and nothing read while
@@ -74,46 +98,72 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		onChanged: () => this.updateDescription(),
 	});
 
-	constructor(private readonly context: vscode.ExtensionContext) {
+	constructor(private readonly context: vscode.ExtensionContext, private readonly options: LiveWatchInstanceOptions) {
+		this.id = options.id;
 		this.loadExpressions();
+		if (options.intervalMs !== undefined) {
+			this.live.setIntervalOverride(options.intervalMs);
+		}
 	}
 
-	resolveWebviewView(view: vscode.WebviewView): void {
-		this.view = view;
+	/** Shows the instance in a view or panel. The host reports visibility changes with setVisible. */
+	attach(host: LiveWatchHost): void {
+		this.host = host;
 		const mediaRoot = vscode.Uri.joinPath(this.context.extensionUri, 'media');
-		view.webview.options = { enableScripts: true, localResourceRoots: [mediaRoot] };
-		view.webview.html = this.getHtml(view.webview, mediaRoot);
+		host.webview.options = { enableScripts: true, localResourceRoots: [mediaRoot] };
+		host.webview.html = this.getHtml(host.webview, mediaRoot);
 		this.lastPostedRows = undefined;
-		vscode.Disposable.from(...this.viewDisposables).dispose();
-		this.viewDisposables = [
-			view.webview.onDidReceiveMessage((message) => void this.onMessage(message)),
-			view.onDidChangeVisibility(() => {
-				this.live.setVisible(view.visible);
-				if (view.visible) {
-					this.render(true);
-					// Paused expressions that never got a value (e.g. restored from the last session).
-					const missing = Array.from(this.expressions.keys()).filter((e) => !this.results.has(e));
-					if (missing.length > 0) {
-						void this.refreshRoots(missing);
-					}
-				}
-			}),
-			view.onDidDispose(() => {
-				if (this.view === view) {
-					this.view = undefined;
-					this.live.setVisible(false);
-				}
-			}),
-		];
-		// onDidChangeVisibility only fires on a change, so the state it starts in has to be pushed
-		// once here - otherwise a view that is already open never starts refreshing.
-		this.live.setVisible(view.visible);
+		vscode.Disposable.from(...this.hostDisposables).dispose();
+		this.hostDisposables = [host.webview.onDidReceiveMessage((message) => void this.onMessage(message))];
+		// Visibility events only fire on a change, so the state it starts in has to be pushed once
+		// here - otherwise a view that is already open never starts refreshing.
+		this.live.setVisible(host.visible);
 		this.updateDescription();
+	}
+
+	/** The host was closed. */
+	detach(host: LiveWatchHost): void {
+		if (this.host === host) {
+			this.host = undefined;
+			vscode.Disposable.from(...this.hostDisposables).dispose();
+			this.hostDisposables = [];
+			this.live.setVisible(false);
+		}
+	}
+
+	setVisible(visible: boolean): void {
+		this.live.setVisible(visible);
+		if (visible) {
+			this.render(true);
+			// Paused expressions that never got a value (e.g. restored from the last session).
+			const missing = Array.from(this.expressions.keys()).filter((e) => !this.results.has(e));
+			if (missing.length > 0) {
+				void this.refreshRoots(missing);
+			}
+		}
+	}
+
+	get visible(): boolean {
+		return this.host?.visible === true;
+	}
+
+	/** The refresh interval in use, the instance's own or the global one. */
+	get intervalMs(): number {
+		return this.live.intervalMs;
+	}
+
+	/** The instance's own refresh interval, undefined when it follows the global one. */
+	get intervalOverrideMs(): number | undefined {
+		return this.live.intervalOverrideMs;
+	}
+
+	setIntervalOverride(ms: number | undefined): void {
+		this.live.setIntervalOverride(ms);
 	}
 
 	dispose(): void {
 		this.live.dispose();
-		vscode.Disposable.from(...this.viewDisposables).dispose();
+		vscode.Disposable.from(...this.hostDisposables).dispose();
 	}
 
 	async addExpression(expression: string | undefined): Promise<void> {
@@ -171,8 +221,8 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		if (!id || target?.kind !== 'root' || this.expressions.get(target.root)?.peripheral) {
 			return;
 		}
-		if (this.view?.visible) {
-			void this.view.webview.postMessage({ type: 'edit', id, mode: 'expression' });
+		if (this.host?.visible) {
+			void this.host.webview.postMessage({ type: 'edit', id, mode: 'expression' });
 			return;
 		}
 		const expression = await vscode.window.showInputBox({
@@ -213,7 +263,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		this.changed();
 		const newId = rootRowId(next, Boolean(old.paused));
 		this.selectedId = newId;
-		void this.view?.webview.postMessage({ type: 'select', id: newId });
+		void this.host?.webview.postMessage({ type: 'select', id: newId });
 		// Also evaluates a paused entry once, so the new expression shows a value.
 		await this.refreshRoots([next]);
 	}
@@ -225,8 +275,8 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		if (!id || !target || (target.kind !== 'root' && target.kind !== 'child') || this.isReadOnly(target)) {
 			return;
 		}
-		if (this.view?.visible) {
-			void this.view.webview.postMessage({ type: 'edit', id });
+		if (this.host?.visible) {
+			void this.host.webview.postMessage({ type: 'edit', id });
 			return;
 		}
 		const value = await vscode.window.showInputBox({
@@ -270,14 +320,6 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 		await this.refreshRoots(Array.from(this.expressions.keys()));
 	}
 
-	/**
-	 * A core stopped: update everything like the Watch view does. Debounced, since all cores of a
-	 * multi-core target stop together and each reports its own stop.
-	 */
-	refreshOnBreak(): void {
-		this.live.onBreak();
-	}
-
 	private async onMessage(message: any): Promise<void> {
 		const id = typeof message?.id === 'string' ? message.id : undefined;
 		switch (message?.type) {
@@ -287,6 +329,9 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 				break;
 			case 'select':
 				this.selectedId = id;
+				break;
+			case 'focus':
+				this.options.onDidFocus?.();
 				break;
 			case 'toggle':
 				if (id) {
@@ -397,7 +442,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 
 	/** Sends the visible rows to the webview; it only touches the rows that differ. */
 	private render(force = false): void {
-		if (!this.view) {
+		if (!this.host) {
 			return;
 		}
 		const rows = this.buildRows();
@@ -406,7 +451,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 			return;
 		}
 		this.lastPostedRows = json;
-		void this.view.webview.postMessage({
+		void this.host.webview.postMessage({
 			type: 'rows',
 			rows,
 			emptyMessage: this.expressions.size === 0 ? 'Add expressions with + to watch them while the target is running.' : undefined,
@@ -484,7 +529,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 			renamable: kind === 'root' && !peripheral,
 			tooltip: kind === 'more' ? '' : tooltipOf(root, node, value, error, peripheral),
 			context: JSON.stringify(section
-				? { webviewSection: section, rowId: id, preventDefaultContextMenuItems: true }
+				? { webviewSection: section, rowId: id, instanceId: this.id, preventDefaultContextMenuItems: true }
 				: { preventDefaultContextMenuItems: true }),
 		});
 		this.rowTargets.set(id, target);
@@ -517,9 +562,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	}
 
 	private updateDescription(): void {
-		if (this.view) {
-			this.view.description = this.live.description;
-		}
+		this.host?.setDescription(this.live.description);
 	}
 
 	private getHtml(webview: vscode.Webview, mediaRoot: vscode.Uri): string {
@@ -534,7 +577,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<link href="${css}" rel="stylesheet">
 </head>
-<body data-vscode-context='{"preventDefaultContextMenuItems": true}'>
+<body data-vscode-context='{"preventDefaultContextMenuItems": true}' data-instance-id="${this.id}">
 	<div id="tree" class="tree" role="tree" tabindex="0"></div>
 	<div id="empty" class="empty" hidden></div>
 	<script nonce="${nonce}" src="${js}"></script>
@@ -543,7 +586,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	}
 
 	private loadExpressions(): void {
-		const stored = this.context.workspaceState.get<LiveWatchStoredExpression[]>(LIVE_WATCH_EXPRESSIONS_KEY, []);
+		const stored = this.context.workspaceState.get<LiveWatchStoredExpression[]>(this.options.storageKey, []);
 		for (const item of stored) {
 			if (typeof item?.expression === 'string' && item.expression.trim() !== '') {
 				this.expressions.set(item.expression, {
@@ -556,7 +599,7 @@ export class LiveWatchProvider implements vscode.WebviewViewProvider, vscode.Dis
 	}
 
 	private async saveExpressions(): Promise<void> {
-		await this.context.workspaceState.update(LIVE_WATCH_EXPRESSIONS_KEY, Array.from(this.expressions.values()));
+		await this.context.workspaceState.update(this.options.storageKey, Array.from(this.expressions.values()));
 	}
 }
 

@@ -14,7 +14,8 @@ import { AurixTCFDebugSession, DisassemblyOpcodeBytes, isDisassemblyOpcodeBytes 
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { createGunzip, gunzipSync } from 'zlib';
-import { LiveWatchCommandArgument, LiveWatchProvider } from './liveWatchView';
+import { LiveWatchCommandArgument } from './liveWatchView';
+import { LiveWatchManager, pickIntervalMs } from './liveWatchManager';
 import { OsObjectsPanel } from './osObjectsPanel';
 import { OsProfilePanel } from './osProfilePanel';
 import { describeOsError } from './tcf/osaware';
@@ -46,7 +47,7 @@ let instructionStepStatusItem: vscode.StatusBarItem | undefined;
 const instructionStepStateKey = 'aurix-debugger.instructionSteppingEnabled';
 let lastInstructionSteppingEnabled = false;
 let liveWatchStatusItem: vscode.StatusBarItem | undefined;
-let liveWatchProvider: LiveWatchProvider | undefined;
+let liveWatches: LiveWatchManager | undefined;
 let osViewProvider: OsViewProvider | undefined;
 const liveWatchIntervalStateKey = 'aurix-debugger.liveWatch.intervalMs';
 let lastLiveWatchIntervalMs = 1000;
@@ -62,15 +63,14 @@ const SVD_CACHE_FOLDER = 'svd-cache';
 let warnedSvdFileReplaced = false;
 const DISASSEMBLY_OPEN_DELAY_MS = 1200;
 const pendingDisassemblyOpenTimers = new Map<string, NodeJS.Timeout>();
-const LIVE_WATCH_INTERVAL_OPTIONS = [200, 500, 1000, 2000] as const;
 
 export function activate(context: vscode.ExtensionContext) {
 	// This method is called when the extension is activated
 	extensionContext = context;
 	console.log('AURIX debugger extension is activating...');
 	agentOutput = vscode.window.createOutputChannel('AURIX Debug Server');
-	liveWatchProvider = new LiveWatchProvider(context);
-	context.subscriptions.push(liveWatchProvider);
+	liveWatches = new LiveWatchManager(context);
+	context.subscriptions.push(liveWatches);
 
 	void ensureMemoryInspectorSettings();
 	context.subscriptions.push(
@@ -199,79 +199,81 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.configureLiveWatch', async () => {
-			const currentInterval = await getLiveWatchIntervalMs();
-			const items: Array<vscode.QuickPickItem & { intervalMs?: number; custom?: boolean }> = [
-				...LIVE_WATCH_INTERVAL_OPTIONS.map((intervalMs) => ({
-					label: `${intervalMs} ms`,
-					description: currentInterval === intervalMs ? 'Current' : '',
-					intervalMs,
-				})),
-				{
-					label: 'Custom...',
-					description: !LIVE_WATCH_INTERVAL_OPTIONS.includes(currentInterval as any) ? `Current: ${currentInterval} ms` : '',
-					custom: true,
-				},
-			];
-			const picked = await vscode.window.showQuickPick(items, {
-				title: 'Configure Live Watch',
-				placeHolder: 'Select the Live Watch refresh interval while the target runs (minimum 200ms+)',
-				ignoreFocusOut: true,
+			const picked = await pickIntervalMs({
+				title: 'Global Live Update Interval',
+				placeHolder: 'How often the live views re-read the target while it runs',
+				current: await getLiveWatchIntervalMs(),
 			});
-			if (!picked) {
-				return;
+			if (typeof picked === 'number') {
+				await setLiveWatchInterval(picked);
 			}
-			if (picked.custom) {
-				const customValue = await vscode.window.showInputBox({
-					title: 'Custom Live Watch Interval',
-					placeHolder: 'Enter refresh interval in milliseconds (minimum 200ms+)',
-					value: String(currentInterval),
-					ignoreFocusOut: true,
-					validateInput: (input) => {
-						const trimmed = input.trim();
-						if (trimmed === '') {
-							return 'Interval is required.';
-						}
-						const parsed = Number(trimmed);
-						if (!Number.isFinite(parsed) || parsed < 200) {
-							return 'Minimum 200ms+';
-						}
-						return undefined;
-					},
-				});
-				if (customValue === undefined) {
-					return;
-				}
-				await setLiveWatchInterval(Number(customValue.trim()));
-				return;
+		})
+	);
+
+	// Live Watch panels. The commands without an argument act on the sidebar; the panel's title bar
+	// has its own ones, which act on the active panel.
+	const activePanel = () => liveWatches?.activePanelInstance();
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-debugger.liveWatchOpenPanel', async () => {
+			await liveWatches?.showPanelPicker();
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchConfigureInterval', async (item?: LiveWatchCommandArgument) => {
+			if (liveWatches) {
+				await liveWatches.configureInterval(liveWatches.resolve(item));
+				updateLiveWatchStatus(activeAurixSessions > 0);
 			}
-			await setLiveWatchInterval(picked.intervalMs ?? currentInterval);
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPanelAddExpression', async () => {
+			const instance = activePanel();
+			if (instance) {
+				await instance.addExpression(await pickLiveWatchExpression());
+			}
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPanelRefresh', async () => {
+			await activePanel()?.refreshNow();
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPanelConfigureInterval', async () => {
+			const instance = activePanel();
+			if (instance && liveWatches) {
+				await liveWatches.configureInterval(instance);
+				updateLiveWatchStatus(activeAurixSessions > 0);
+			}
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPanelClearExpressions', async () => {
+			await activePanel()?.clearExpressions();
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPanelRename', async () => {
+			await liveWatches?.renamePanel(activePanel()?.id);
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchPanelMoveToNewWindow', async () => {
+			await liveWatches?.moveActivePanelToNewWindow();
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.liveWatchAddExpression', async () => {
-			await liveWatchProvider?.addExpression(await pickLiveWatchExpression());
+			await liveWatches?.sidebar.addExpression(await pickLiveWatchExpression());
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.liveWatchRemoveExpression', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.removeExpression(item);
+			await liveWatches?.resolve(item).removeExpression(item);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.liveWatchSetValue', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.setValue(item);
+			await liveWatches?.resolve(item).setValue(item);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.liveWatchPauseExpression', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.setExpressionPaused(item, true);
+			await liveWatches?.resolve(item).setExpressionPaused(item, true);
 		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchResumeExpression', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.setExpressionPaused(item, false);
+			await liveWatches?.resolve(item).setExpressionPaused(item, false);
 		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchAddPeripheral', async (node?: unknown) => {
 			const entry = peripheralWatchEntryFromNode(node);
@@ -290,29 +292,32 @@ export function activate(context: vscode.ExtensionContext) {
 					return;
 				}
 			}
-			await liveWatchProvider?.addPeripheral(entry);
-			await vscode.commands.executeCommand(`${LiveWatchProvider.viewType}.focus`);
+			const target = await liveWatches?.pickTarget(`Add ${entry.label} to Live Watch`);
+			if (target && liveWatches) {
+				await target.addPeripheral(entry);
+				await liveWatches.reveal(target);
+			}
 		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchEditExpression', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.editExpression(item);
+			await liveWatches?.resolve(item).editExpression(item);
 		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchCopyValue', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.copyValue(item);
+			await liveWatches?.resolve(item).copyValue(item);
 		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchCopyExpression', async (item?: LiveWatchCommandArgument) => {
-			await liveWatchProvider?.copyExpression(item);
+			await liveWatches?.resolve(item).copyExpression(item);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.liveWatchClearExpressions', async () => {
-			await liveWatchProvider?.clearExpressions();
+			await liveWatches?.sidebar.clearExpressions();
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('aurix-debugger.liveWatchRefresh', async () => {
-			await liveWatchProvider?.refreshNow();
+			await liveWatches?.sidebar.refreshNow();
 		})
 	);
 
@@ -331,17 +336,15 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(instructionStepStatusItem);
 	liveWatchStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
 	liveWatchStatusItem.command = 'aurix-debugger.configureLiveWatch';
-	liveWatchStatusItem.tooltip = 'Configure the Live Watch refresh interval';
+	liveWatchStatusItem.tooltip = 'Configure the global live update interval';
 	context.subscriptions.push(liveWatchStatusItem);
-	context.subscriptions.push(vscode.window.registerWebviewViewProvider(LiveWatchProvider.viewType, liveWatchProvider));
-	// Like the Watch view, the Live Watch updates on every break, also for paused expressions and when
+	// Like the Watch view, every Live Watch updates on a break, also for paused expressions and when
 	// the periodic refresh is off. The adapter's stopped event also covers cores stopping without focus.
 	context.subscriptions.push(
 		vscode.debug.registerDebugAdapterTrackerFactory('aurixdbg', {
 			createDebugAdapterTracker: () => ({
 				onDidSendMessage: (message: { type?: string; event?: string }) => {
 					if (message?.type === 'event' && message.event === 'stopped') {
-						liveWatchProvider?.refreshOnBreak();
 						// Paused live views still update on a halt, the way the Watch view does.
 						notifyLiveUpdateBreak();
 					}
@@ -466,13 +469,13 @@ export function activate(context: vscode.ExtensionContext) {
 				void ensureMemoryInspectorSettings();
 				void syncInstructionSteppingOnSessionStart(session);
 				void syncLiveWatchOnSessionStart(session);
-				void liveWatchProvider?.refreshNow();
+				void liveWatches?.refreshAll();
 			}
 		})
 	);
 	context.subscriptions.push(
 		vscode.debug.onDidChangeActiveDebugSession(() => {
-			void liveWatchProvider?.refreshNow();
+			void liveWatches?.refreshAll();
 		})
 	);
 	context.subscriptions.push(
@@ -1529,7 +1532,10 @@ function updateLiveWatchStatus(visible: boolean): void {
 		return;
 	}
 	liveWatchStatusItem.text = `Live: ${lastLiveWatchIntervalMs}ms`;
-	liveWatchStatusItem.tooltip = `The live views refresh every ${lastLiveWatchIntervalMs} ms while the target runs. A view that is not on screen reads nothing. Click to change.`;
+	const overrides = liveWatches?.hasIntervalOverride()
+		? ' Live Watches with their own interval (set with their gear button) keep it.'
+		: '';
+	liveWatchStatusItem.tooltip = `The live views refresh every ${lastLiveWatchIntervalMs} ms while the target runs.${overrides} A view that is not on screen reads nothing. Click to change.`;
 	if (visible) {
 		liveWatchStatusItem.show();
 	} else {

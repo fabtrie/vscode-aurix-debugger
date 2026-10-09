@@ -1,5 +1,6 @@
 // @ts-check
-// Live Watch webview: renders the rows sent by LiveWatchProvider (src/liveWatchView.ts).
+// Live Watch webview: renders the rows sent by LiveWatchInstance (src/liveWatchView.ts), in the
+// sidebar view or in a panel.
 // Rows are kept by id and only changed parts of the DOM are touched, so an update does not
 // re-create rows (no flickering tooltips or buttons).
 (function () {
@@ -28,8 +29,11 @@
 	const entries = new Map();
 	/** @type {Row[]} */
 	let rows = [];
+	// The instance id is kept in the state so that VS Code can restore a panel after a reload.
+	const instanceId = document.body.dataset.instanceId;
 	/** @type {string | undefined} */
 	let selectedId = (vscode.getState() || {}).selectedId;
+	vscode.setState({ instanceId, selectedId });
 	/** @type {{ id: string, input: HTMLInputElement, valueEl: HTMLElement } | undefined} */
 	let editing;
 
@@ -232,7 +236,7 @@
 		const entry = id !== undefined ? entries.get(id) : undefined;
 		entry?.el.classList.add('selected');
 		entry?.el.scrollIntoView({ block: 'nearest' });
-		vscode.setState({ selectedId });
+		vscode.setState({ instanceId, selectedId });
 		vscode.postMessage({ type: 'select', id });
 	}
 
@@ -421,6 +425,9 @@
 		}
 		event.preventDefault();
 	});
+
+	// The Live Watch used last is the one "Add to Live Watch" offers first.
+	window.addEventListener('focus', () => vscode.postMessage({ type: 'focus' }));
 
 	vscode.postMessage({ type: 'ready' });
 	if (selectedId !== undefined) {

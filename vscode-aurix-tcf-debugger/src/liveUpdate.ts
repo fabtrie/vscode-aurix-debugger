@@ -4,7 +4,8 @@
  * Every view that reads the target while it runs wants the same behaviour, and getting any of it
  * slightly different is what makes a debugger feel unpredictable:
  *
- * - one interval, set in one place, for every live view;
+ * - one interval, set in one place, for every live view - unless a view sets its own (a Live
+ *   Watch instance can), which the global interval then leaves alone;
  * - **nothing is read unless the view is on screen** - a hidden panel costs the target nothing;
  * - pause means "only on halt", not "stop": a paused view still updates when a core stops, the
  *   way the Watch view does;
@@ -51,11 +52,13 @@ export class LiveUpdater implements vscode.Disposable {
 	private visible = false;
 	private sessionActive = false;
 	private pausedFlag = false;
-	private intervalMsValue = defaultIntervalMs;
+	/** The global interval, followed unless `overrideMs` is set. */
+	private sharedMs = defaultIntervalMs;
+	private overrideMs: number | undefined;
 
 	constructor(private readonly opts: LiveUpdateOptions) {
 		updaters.add(this);
-		this.intervalMsValue = sharedIntervalMs;
+		this.sharedMs = sharedIntervalMs;
 		this.sessionActive = sharedSessionActive;
 	}
 
@@ -69,7 +72,12 @@ export class LiveUpdater implements vscode.Disposable {
 	}
 
 	get intervalMs(): number {
-		return this.intervalMsValue;
+		return this.overrideMs ?? this.sharedMs;
+	}
+
+	/** The view's own interval, or undefined when it follows the global one. */
+	get intervalOverrideMs(): number | undefined {
+		return this.overrideMs;
 	}
 
 	get paused(): boolean {
@@ -86,7 +94,7 @@ export class LiveUpdater implements vscode.Disposable {
 		if (!this.sessionActive) {
 			return '';
 		}
-		return this.pausedFlag ? 'paused' : `${this.intervalMsValue} ms`;
+		return this.pausedFlag ? 'paused' : `${this.intervalMs} ms`;
 	}
 
 	setVisible(visible: boolean): void {
@@ -103,8 +111,17 @@ export class LiveUpdater implements vscode.Disposable {
 		this.reschedule(0);
 	}
 
+	/** The global interval changed; a view with its own interval keeps it. */
 	setIntervalMs(ms: number): void {
-		this.intervalMsValue = normalizeIntervalMs(ms);
+		this.sharedMs = normalizeIntervalMs(ms);
+		if (this.overrideMs === undefined) {
+			this.reschedule(0);
+		}
+	}
+
+	/** Gives the view its own interval, or (undefined) makes it follow the global one again. */
+	setIntervalOverride(ms: number | undefined): void {
+		this.overrideMs = ms === undefined ? undefined : normalizeIntervalMs(ms);
 		this.reschedule(0);
 	}
 
@@ -201,7 +218,7 @@ export class LiveUpdater implements vscode.Disposable {
 			this.running = false;
 		}
 		if (!this.timer) {
-			this.reschedule(Math.max(MIN_REFRESH_GAP_MS, this.intervalMsValue - (Date.now() - started)));
+			this.reschedule(Math.max(MIN_REFRESH_GAP_MS, this.intervalMs - (Date.now() - started)));
 		}
 	}
 }
@@ -226,7 +243,7 @@ export function liveUpdateIntervalMs(): number {
 	return sharedIntervalMs;
 }
 
-/** Applies one interval to every live view, so there is a single rate to reason about. */
+/** Applies one interval to every live view that has no interval of its own. */
 export function setLiveUpdateIntervalMs(ms: number): void {
 	sharedIntervalMs = normalizeIntervalMs(ms);
 	for (const u of updaters) {

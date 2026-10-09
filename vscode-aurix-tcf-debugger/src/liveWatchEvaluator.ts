@@ -89,6 +89,11 @@ export class LiveWatchEvaluator {
 	/** Keyed by context + "\n" + expression; insertion order is used to evict the oldest entries. */
 	private readonly roots = new Map<string, RootEntry>();
 	private readonly symbolCache = new Map<string, Promise<unknown>>();
+	/**
+	 * Roots being created, by key: several Live Watch instances can ask for the same new expression
+	 * at once, and each creating its own would leak all but one of them in the agent.
+	 */
+	private readonly creating = new Map<string, Promise<RootEntry>>();
 	private readonly helper: DefaultVariableHelper;
 
 	constructor(private readonly client: TCFClient, private readonly log: (message: string) => void) {
@@ -109,6 +114,7 @@ export class LiveWatchEvaluator {
 			void this.client.sendCommand(new DisposeExpressionsCommand(entry.exprId)).catch(() => undefined);
 		}
 		this.roots.clear();
+		this.creating.clear();
 		this.symbolCache.clear();
 	}
 
@@ -146,9 +152,7 @@ export class LiveWatchEvaluator {
 			}
 		}
 		if (!entry) {
-			entry = await this.createRoot(ctx, expression);
-			this.roots.set(key, entry);
-			this.evictRoots();
+			entry = await this.createRootOnce(ctx, key, expression);
 			variable = await this.createRootVariable(ctx, entry);
 		}
 		if (!variable) {
@@ -158,6 +162,25 @@ export class LiveWatchEvaluator {
 			return { name, expression, value: await formatBits(variable, format), hasChildren: false };
 		}
 		return this.toNode(ctx, variable, name, expression, expanded);
+	}
+
+	/** Creates a root, or joins the creation another request already started for the same key. */
+	private createRootOnce(ctx: string, key: string, expression: string): Promise<RootEntry> {
+		const existing = this.creating.get(key);
+		if (existing) {
+			return existing;
+		}
+		const pending: Promise<RootEntry> = this.createRoot(ctx, expression).then((entry) => {
+			this.roots.set(key, entry);
+			this.evictRoots();
+			return entry;
+		}).finally(() => {
+			if (this.creating.get(key) === pending) {
+				this.creating.delete(key);
+			}
+		});
+		this.creating.set(key, pending);
+		return pending;
 	}
 
 	private async createRoot(ctx: string, expression: string): Promise<RootEntry> {

@@ -99,7 +99,7 @@ Variables and expressions can be watched in the Run and Debug view's **WATCH** s
 
 ### Live Watch View
 
-The Live Watch view periodically refreshes selected global variables. Use the view's Settings button to configure the refresh interval (the minimum enforced value is 200 ms).
+The Live Watch view periodically refreshes selected global variables. Use the view's Settings button to configure its refresh interval (the minimum enforced value is 200 ms), or choose **Use global interval** to follow the interval set in the status bar, which the AUTOSAR OS views also use.
 
 Once configured, the active interval appears in the view header (highlighted in orange). Resume the target to run the cores and observe the selected global variables update automatically.
 
@@ -109,6 +109,15 @@ Once configured, the active interval appears in the view header (highlighted in 
 - **Pause Updates** on an entry moves it to the **Paused** group, which is not refreshed while the target runs. **Resume Updates** moves it back.
 - Paused entries still update like the WATCH section: when the target stops and when you press Refresh.
 - The WATCH section only evaluates while the target is stopped. Use the Live Watch view to follow values while the target runs.
+
+#### Live Watch Panels
+
+Debugging needs room, so a Live Watch can also be opened as an editor tab: click **Open Live Watch Panel...** in the Live Watch view's title bar (or run it from the Command Palette) and create a named panel. Open as many as you need; each has its own expressions and its own refresh interval, and the Live Watch in the sidebar stays as it is.
+
+- A panel is an editor, so it can be dragged out of the window, or moved with **Move Live Watch Panel into New Window** from its title bar menu (VS Code 1.85 or newer), e.g. onto a second monitor.
+- Closing a panel keeps its expressions. Reopen it by name from **Open Live Watch Panel...**, where saved panels can also be renamed or deleted. Panels open when VS Code closes are restored.
+- A panel that is not on screen (a tab in the background) reads nothing from the target. Each visible Live Watch reads at its own rate, so the load on the target adds up.
+- **Add to Live Watch** in the XPeripherals view asks which Live Watch to add to when panels are open.
 
 ![live-watch](media/live-watch.gif)
 

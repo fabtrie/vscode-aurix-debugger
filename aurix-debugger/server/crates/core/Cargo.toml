@@ -1,0 +1,23 @@
+[package]
+name = "aurix-core"
+description = "Protocol-neutral AURIX debug core: adapters, TriCore target, OpenOCD-compatible Tcl engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tas.workspace = true
+jim.workspace = true
+isa.workspace = true
+winidea-sdk = { workspace = true, optional = true }
+
+[features]
+default = ["winidea"]
+# iSYSTEM BlueBox support, through a winIDEA instance driven by the SDK.
+# The DLL is loaded lazily when the driver is selected, so this costs nothing
+# at runtime on the TAS path; it is a feature so a minimal build can drop it.
+winidea = ["dep:winidea-sdk"]
+
+[dev-dependencies]
+openocd-tcl.workspace = true

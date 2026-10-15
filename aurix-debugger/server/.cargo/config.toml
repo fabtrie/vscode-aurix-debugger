@@ -1,0 +1,12 @@
+# Corporate network: crates.io is only reachable through the local proxy.
+# [http]
+# proxy = "http://127.0.0.1:3128"
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:/msys64/mingw64/bin/gcc.exe"
+# Static CRT: aurix-dbg.exe runs without MSYS2 DLLs on PATH.
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+CC_x86_64_pc_windows_gnu = "C:/msys64/mingw64/bin/gcc.exe"
+AR_x86_64_pc_windows_gnu = "C:/msys64/mingw64/bin/ar.exe"

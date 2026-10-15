@@ -1,0 +1,2230 @@
+{
+ "AInAverage": {
+  "AVG_16": 16,
+  "AVG_4": 4,
+  "AVG_8": 8
+ },
+ "AInCompareCondition": {
+  "DO_NOT_MODIFY": 0,
+  "HIGHER_THAN": 2,
+  "LOWER_THAN": 1
+ },
+ "AInSamplingInterval": {
+  "S_100_MS": 6,
+  "S_100_NS": 0,
+  "S_100_US": 3,
+  "S_10_MS": 5,
+  "S_10_US": 2,
+  "S_1_MS": 4,
+  "S_1_S": 7,
+  "S_1_US": 1
+ },
+ "CANBaudrate": {
+  "B_100_KBPS": 1,
+  "B_125_KBPS": 2,
+  "B_1_MBPS": 5,
+  "B_250_KBPS": 3,
+  "B_500_KBPS": 4,
+  "B_50_KBPS": 0
+ },
+ "CANFDBaudrate": {
+  "B_100_KBPS": 1,
+  "B_125_KBPS": 2,
+  "B_1_MBPS": 5,
+  "B_250_KBPS": 3,
+  "B_2_MBPS": 6,
+  "B_4_MBPS": 7,
+  "B_500_KBPS": 4,
+  "B_50_KBPS": 0,
+  "B_8_MBPS": 8
+ },
+ "CANIDLength": {
+  "DO_NOT_MODIFY": 0,
+  "EXTENDED": 2,
+  "STANDARD": 1
+ },
+ "CANInjectedMsgType": {
+  "DATA": 1,
+  "DO_NOT_MODIFY": 0,
+  "REQUEST": 2
+ },
+ "CANMode": {
+  "CAN": 0,
+  "FD_BOSCH": 2,
+  "FD_ISO": 1
+ },
+ "CANTriggerMsgType": {
+  "BOTH": 1,
+  "DATA": 3,
+  "DO_NOT_MODIFY": 0,
+  "REQUEST": 2
+ },
+ "CAccessBatch/EAccessBatchResult": {
+  "Abort": 3,
+  "BadParam": 4,
+  "Fail": 1,
+  "OK": 0,
+  "Timeout": 2
+ },
+ "CAccessBatch/SIn/SItem/EType": {
+  "FTrig": 3,
+  "Poll": 2,
+  "RD": 0,
+  "WR": 1
+ },
+ "CAddressController/EPathSource": {
+  "AUTO": 2,
+  "ELF_FILE": 0,
+  "LOCAL": 1
+ },
+ "CAnalyzerDocController/EAnalysisType": {
+  "EBoth": 3,
+  "ECoverage": 1,
+  "EProfiler": 2,
+  "ETraceOnly": 0
+ },
+ "CAnalyzerDocController/EDocumentType": {
+  "ANALYZER": 0,
+  "CODE_COVERAGE": 1,
+  "PROFILER": 2
+ },
+ "CCPUInfo/E8051": {
+  "v8051_8051": 0,
+  "v8051_Num": 1
+ },
+ "CCPUInfo/EARC": {
+  "vARC_EM5": 1,
+  "vARC_EV7x": 0,
+  "vARC_Num": 2
+ },
+ "CCPUInfo/EARMState": {
+  "sARMv7_ELMask": 3,
+  "sARMv7_PL0": 0,
+  "sARMv7_PL1": 1,
+  "sARMv7_PL2": 2,
+  "sARMv7_Secure": 4,
+  "sARMv8_EL0": 0,
+  "sARMv8_EL1": 1,
+  "sARMv8_EL2": 2,
+  "sARMv8_EL3": 3,
+  "sARMv8_ELMask": 3,
+  "sARMv8_Secure": 4
+ },
+ "CCPUInfo/EARMVariant": {
+  "vARM_Num": 12,
+  "vARM_v3": 0,
+  "vARM_v4T": 1,
+  "vARM_v5TE": 2,
+  "vARM_v5TEJ": 3,
+  "vARM_v6": 4,
+  "vARM_v6M": 8,
+  "vARM_v7A": 5,
+  "vARM_v7M": 7,
+  "vARM_v7R": 6,
+  "vARM_v8A": 9,
+  "vARM_v8M": 11,
+  "vARM_v8R": 10
+ },
+ "CCPUInfo/ECPUFamily": {
+  "cpu_78k": 28,
+  "cpu_8051": 1,
+  "cpu_ARC": 4,
+  "cpu_ARM": 22,
+  "cpu_GTM": 40,
+  "cpu_Generic": 65535,
+  "cpu_Num": 43,
+  "cpu_PowerPC": 18,
+  "cpu_RISCV": 2,
+  "cpu_SPT": 42,
+  "cpu_TIDSP": 6,
+  "cpu_TPU": 34,
+  "cpu_TriCore": 37,
+  "cpu_V850": 25,
+  "cpu_Xtensa": 3,
+  "cpu_x86": 5
+ },
+ "CCPUInfo/ECPUVariant_78k": {
+  "v78k_Num": 1,
+  "v78k_RL78": 0
+ },
+ "CCPUInfo/ECPUVariant_x86": {
+  "vx64": 1,
+  "vx86": 0,
+  "vx86_Num": 2
+ },
+ "CCPUInfo/EEndianOverride": {
+  "Big": 2,
+  "Default": 0,
+  "Little": 1
+ },
+ "CCPUInfo/EFeature_PPC": {
+  "fCACHE_HARVARD": 0,
+  "fCACHE_INSTR_ONLY": 1,
+  "fCACHE_NONE": 3,
+  "fCACHE_UNIFIED": 2
+ },
+ "CCPUInfo/EFeature_RISCV": {
+  "fRISCV_A": 1,
+  "fRISCV_AndesCoDense": 20,
+  "fRISCV_AndesDSP": 24,
+  "fRISCV_AndesINT4VectorLoad": 21,
+  "fRISCV_AndesPerformance": 19,
+  "fRISCV_AndesScalarBFLOAT16Conversion": 22,
+  "fRISCV_AndesVectorBFLOAT16Conversion": 23,
+  "fRISCV_B": 7,
+  "fRISCV_C": 6,
+  "fRISCV_D": 3,
+  "fRISCV_F": 2,
+  "fRISCV_H": 14,
+  "fRISCV_J": 8,
+  "fRISCV_L": 5,
+  "fRISCV_M": 0,
+  "fRISCV_N": 13,
+  "fRISCV_P": 10,
+  "fRISCV_PULP": 11,
+  "fRISCV_Q": 4,
+  "fRISCV_Smaia": 50,
+  "fRISCV_Smepmp": 48,
+  "fRISCV_Smrnmi": 47,
+  "fRISCV_Ssaia": 49,
+  "fRISCV_T": 9,
+  "fRISCV_V": 12,
+  "fRISCV_Zam": 17,
+  "fRISCV_Zba": 25,
+  "fRISCV_Zbb": 26,
+  "fRISCV_Zbc": 27,
+  "fRISCV_Zbkb": 35,
+  "fRISCV_Zbkc": 36,
+  "fRISCV_Zbkx": 37,
+  "fRISCV_Zbs": 28,
+  "fRISCV_Zcb": 29,
+  "fRISCV_Zcd": 30,
+  "fRISCV_Zce": 31,
+  "fRISCV_Zcf": 32,
+  "fRISCV_Zcmp": 33,
+  "fRISCV_Zcmt": 34,
+  "fRISCV_Zdinx": 51,
+  "fRISCV_Zfa": 54,
+  "fRISCV_Zfbfmin": 46,
+  "fRISCV_Zfh": 53,
+  "fRISCV_Zfinx": 52,
+  "fRISCV_ZiCSR": 15,
+  "fRISCV_Zicbom": 43,
+  "fRISCV_Zicbop": 45,
+  "fRISCV_Zicboz": 44,
+  "fRISCV_Zicntr": 57,
+  "fRISCV_Zicond": 56,
+  "fRISCV_Zifencei": 16,
+  "fRISCV_Zihintpause": 55,
+  "fRISCV_Zknd": 38,
+  "fRISCV_Zkne": 39,
+  "fRISCV_Zknh": 40,
+  "fRISCV_Zksed": 41,
+  "fRISCV_Zksh": 42,
+  "fRISCV_Ztso": 18,
+  "fRISCV_Zve32f": 58,
+  "fRISCV_Zve32x": 59,
+  "fRISCV_Zve64d": 60,
+  "fRISCV_Zvfh": 61
+ },
+ "CCPUInfo/EFeature_TriCore": {
+  "Virtualization": 0
+ },
+ "CCPUInfo/EGTM": {
+  "vGTM_Num": 1,
+  "veGTM": 0
+ },
+ "CCPUInfo/EPowerPC": {
+  "vPowerPC_4xx": 0,
+  "vPowerPC_5xx": 1,
+  "vPowerPC_6xx": 2,
+  "vPowerPC_7xx": 3,
+  "vPowerPC_8xx": 4,
+  "vPowerPC_G3": 6,
+  "vPowerPC_G5": 5,
+  "vPowerPC_Num": 7
+ },
+ "CCPUInfo/ERISCV": {
+  "vRISCV_Num": 4,
+  "vRISCV_RV128I": 3,
+  "vRISCV_RV32E": 1,
+  "vRISCV_RV32I": 0,
+  "vRISCV_RV64I": 2
+ },
+ "CCPUInfo/ERX": {
+  "vRX": 0,
+  "vRX_Num": 1
+ },
+ "CCPUInfo/ESPT": {
+  "vSPT_Num": 8,
+  "vSPT_v1": 0,
+  "vSPT_v2": 1,
+  "vSPT_v2_5": 2,
+  "vSPT_v2_8": 3,
+  "vSPT_v3_1": 4,
+  "vSPT_v3_4": 6,
+  "vSPT_v3_5": 5,
+  "vSPT_v3_8": 7
+ },
+ "CCPUInfo/ETIDSP": {
+  "vTIDSP_C28x": 1,
+  "vTIDSP_C29x": 2,
+  "vTIDSP_C7xx": 0,
+  "vTIDSP_Num": 3
+ },
+ "CCPUInfo/ETPU": {
+  "vTPU_Num": 1,
+  "veTPU": 0
+ },
+ "CCPUInfo/ETriCore": {
+  "vTriCore13": 0,
+  "vTriCore16": 1,
+  "vTriCore162P": 4,
+  "vTriCore16E": 2,
+  "vTriCore16P": 3,
+  "vTriCore18": 5,
+  "vTriCore_Num": 6
+ },
+ "CCPUInfo/EV850": {
+  "vV850_Num": 4,
+  "vV850_RH850G4": 2,
+  "vV850_RH850G4KH": 3,
+  "vV850_V850G3K": 0,
+  "vV850_V850G3M": 1
+ },
+ "CCPUInfo/EXtensa": {
+  "vXtensa_Num": 2,
+  "vXtensa_XtensaLX": 0,
+  "vXtensa_XtensaNX": 1
+ },
+ "CCfg_debug_basic/EPresetPC": {
+  "Address": 2,
+  "EntryPoint": 1,
+  "none": 0
+ },
+ "CCoverageController2/ECoverageAreaType": {
+  "EAreaFolder": 0,
+  "EAreaFunction": 2,
+  "EAreaImage": 4,
+  "EAreaModule": 1,
+  "EAreaRange": 3
+ },
+ "CCoverageController2/ECoverageScope": {
+  "EScopeAllDownloadedCode": 0,
+  "EScopeCustom": 2,
+  "EScopeEntireMemory": 1
+ },
+ "CCoverageExportConfig/EExportScope": {
+  "EScopeAll": 0,
+  "EScopeConfigured": 2,
+  "EScopeVisible": 1
+ },
+ "CCoverageFormatBase/EExportFormat": {
+  "EFmtCSV": 3,
+  "EFmtGCOV": 4,
+  "EFmtHTML": 0,
+  "EFmtText": 1,
+  "EFmtXML": 2
+ },
+ "CCoverageSource/ESrcLineCoverageMarkers": {
+  "EAreaExecuted": 0,
+  "EAreaNotExecuted": 1,
+  "EAreaPartiallyExecuted": 2,
+  "EConditionBoth": 3,
+  "EConditionNotExecuted": 5,
+  "EConditionWasAlwaysTrue": 7,
+  "EConditionWasNeverTrue": 6,
+  "EEmpty": 9,
+  "EMixedStateOfMultipleConditions": 4,
+  "EOutOfange": 8
+ },
+ "CCoverageStatistic2/EAreaType": {
+  "EAnyArea": 0,
+  "EAsm": 7,
+  "EFolder": 3,
+  "EFunction": 5,
+  "EImage": 2,
+  "EImages": 1,
+  "EModule": 4,
+  "ERange": 8,
+  "ERanges": 9,
+  "ESrcLine": 6
+ },
+ "CDAQConfig/EMode": {
+  "Auto": 0,
+  "HW": 2,
+  "SW": 1
+ },
+ "CDAQController/EDAQSamplingFlags": {
+  "daqSample100ms": 3,
+  "daqSample10ms": 2,
+  "daqSample1ms": 1,
+  "daqSample1s": 4,
+  "daqSampleMax": 0
+ },
+ "CDataController/ESymbolsType": {
+  "estFunctions": 0,
+  "estGlobalVariables": 1,
+  "estModules": 2
+ },
+ "CDownloadConfiguration/DownloadFileFormats": {
+  "ftAD2500": 12,
+  "ftAXE": 13,
+  "ftBinary": 0,
+  "ftByteCraftCOD": 14,
+  "ftCR16COFF": 24,
+  "ftELF": 22,
+  "ftExtendedTektronix": 4,
+  "ftHiTech": 16,
+  "ftICFOFF": 7,
+  "ftIEEE695": 11,
+  "ftIntelHex": 1,
+  "ftLogitechModula2": 21,
+  "ftMARC4": 23,
+  "ftMicrotek": 10,
+  "ftMotorolaS": 2,
+  "ftMotorolaSymbolic": 15,
+  "ftOMF166": 6,
+  "ftOMF251": 19,
+  "ftOMF51": 8,
+  "ftOMF86": 17,
+  "ftOMF96": 18,
+  "ftProspero": 20,
+  "ftSLOText": 9,
+  "ftStabs": 26,
+  "ftTMSCOFF": 25,
+  "ftTektronix": 3,
+  "ftUBROF": 5,
+  "ftZardoz": 27
+ },
+ "CEMMCController/EFileFormat": {
+  "binFile": 1,
+  "textFile": 0
+ },
+ "CEvaluatorConfig/EAddressDisplay": {
+  "EADHexNoPrefix": 0,
+  "EADHexPrefix": 1
+ },
+ "CEvaluatorConfig/EBinaryDisplay": {
+  "EBDBlanks": 0,
+  "EBDNoBlanksTrailingB": 1
+ },
+ "CEvaluatorConfig/ECharDisplay": {
+  "ECDAscii": 0,
+  "ECDBoth": 2,
+  "ECDInteger": 1
+ },
+ "CEvaluatorConfig/EEnumDisplay": {
+  "EEDBoth": 2,
+  "EEDEnum": 0,
+  "EEDInteger": 1
+ },
+ "CEvaluatorConfig/ETestEvaluatorConfigSectionIds": {
+  "E_EVALUATOR_SECTION_ADDRESS_DISPLAY": 8,
+  "E_EVALUATOR_SECTION_ANSI": 2,
+  "E_EVALUATOR_SECTION_BINARY_DISPLAY": 4,
+  "E_EVALUATOR_SECTION_CHAR_ARRAY_AS_STRING": 6,
+  "E_EVALUATOR_SECTION_CHAR_DISPLAY": 1,
+  "E_EVALUATOR_SECTION_DEREFERENCE_STRING_POINTERS": 7,
+  "E_EVALUATOR_SECTION_DISPLAY_COLLAPSED_ARRAY_STRUCT": 10,
+  "E_EVALUATOR_SECTION_DISPLAY_POINTER_MEM_AREA": 5,
+  "E_EVALUATOR_SECTION_ENUM_DISPLAY": 9,
+  "E_EVALUATOR_SECTION_HEX": 3,
+  "E_EVALUATOR_SECTION_IS_OVERRIDE_WINIDEA_SETTINGS": 0,
+  "E_EVALUATOR_SECTION_IS_USE_DEFAULT_WI_SETTINGS": 12,
+  "E_EVALUATOR_SECTION_VAGUE_FLOAT_PRECISION": 11
+ },
+ "CExecutionController/ETimeoutMode": {
+  "TOUT_100s": 3,
+  "TOUT_10s": 2,
+  "TOUT_1s": 1,
+  "TOUT_INF": 4,
+  "TOUT_NONE": 0
+ },
+ "CIDEController/EAPICategory": {
+  "EAnalyzerAPI": 1,
+  "EDebugAPI": 0,
+  "EiTestAPI": 2
+ },
+ "CIDEController/EHookMode": {
+  "HOOK_ALL": 2,
+  "HOOK_ICONNECT_CALL": 1,
+  "HOOK_NONE": 0
+ },
+ "CIDEController/EPathType": {
+  "WINIDEA_EXE_DIR": 0,
+  "WORKSPACE_DIR": 1,
+  "WORKSPACE_FILE_NAME": 2
+ },
+ "CIDEController/ViewState": {
+  "Closed": 1,
+  "Opened": 0,
+  "Undefined": 2
+ },
+ "CIDEController/ViewType": {
+  "Build": 11,
+  "Callstack": 2,
+  "CoreRegisters": 6,
+  "Disassembly": 5,
+  "Document": 20,
+  "FindInFiles": 12,
+  "FrameworkPlugin": 19,
+  "Locals": 3,
+  "Memory": 17,
+  "NoneView": 22,
+  "Output": 10,
+  "Progress": 15,
+  "Project": 0,
+  "SFR": 18,
+  "SFRs": 9,
+  "Script": 14,
+  "SessionExplorer": 21,
+  "Symbols": 1,
+  "Tasks": 8,
+  "Terminal": 7,
+  "This": 4,
+  "Tools": 13,
+  "Watch": 16
+ },
+ "CInitSequenceAction/EInitAction": {
+  "EIACallScriptFunction": 6,
+  "EIACallTargetFunction": 5,
+  "EIAConnectToCore": 0,
+  "EIADeleteAllBreakpoints": 4,
+  "EIADownload": 1,
+  "EIALoadSymbolsOnly": 7,
+  "EIAReset": 2,
+  "EIARun": 3,
+  "EIAWaitUntilStopped": 8
+ },
+ "CInitSequenceAction/EInitSequenceSectionIds": {
+  "E_INIT_SEQ_ACTION": 1,
+  "E_INIT_SEQ_CORE_ID": 0,
+  "E_INIT_SEQ_PARAMS": 2
+ },
+ "CLineDescription/EFileLocation": {
+  "ELocalHost": 0,
+  "EWinIDEAHost": 1
+ },
+ "CLineDescription/EMatchingType": {
+  "E_MATCH_PLAIN": 0,
+  "E_MATCH_REG_EX": 1,
+  "E_MATCH_TEST_POINT_ID": 2
+ },
+ "CLineDescription/EResourceType": {
+  "E_RESOURCE_ADDRESS": 2,
+  "E_RESOURCE_FILE": 1,
+  "E_RESOURCE_FUNCTION": 0
+ },
+ "CLineDescription/ESearchContext": {
+  "E_SEARCH_ANY": 0,
+  "E_SEARCH_CODE": 1,
+  "E_SEARCH_COMMENT": 2
+ },
+ "CLoaderController/DownloadListType": {
+  "DLIST_PRIMARY": 0,
+  "DLIST_TARGET": 1
+ },
+ "CLogResult/ETestResultSections": {
+  "E_SECTION_AFTER_ASSIGN": 1,
+  "E_SECTION_BEFORE_ASSIGN": 0
+ },
+ "CLogger/LogFileLanguage": {
+  "JAVA": 0,
+  "PYTHON": 1
+ },
+ "CProfilerArea2/EAreaType": {
+  "EAUX": 4,
+  "EFunctionLines": 1,
+  "EFunctions": 0,
+  "EInspector": 6,
+  "EStateAUX": 5,
+  "EStateInspector": 7,
+  "EStateVariables": 3,
+  "EVariables": 2
+ },
+ "CProfilerController2/EDataAreaType": {
+  "EDATLsbExitEntry": 1,
+  "EDATRegular": 3,
+  "EDATState": 0,
+  "EDATZeroExitEntry": 2
+ },
+ "CProfilerController2/ERWMode": {
+  "ERWRead": 0,
+  "ERWReadOrWrite": 2,
+  "ERWWrite": 1
+ },
+ "CProfilerController2/EStateVarDefinition": {
+  "EStateDefDefine": 1,
+  "EStateDefEnum": 2,
+  "EStateDefNone": 0
+ },
+ "CProfilerController2/ETraceMessageType": {
+  "ESingleData": 0,
+  "ESingleData1": 1
+ },
+ "CProfilerExportConfig/EAreaScope": {
+  "EAreaAll": 0,
+  "EAreaFilter": 1
+ },
+ "CProfilerExportConfig/EContextScope": {
+  "EContextAll": 0,
+  "EContextCurrent": 2,
+  "EContextNeutral": 1
+ },
+ "CProfilerExportConfig/EExportPartitionNameMode": {
+  "EPNameAlways": 1,
+  "EPNameAuto": 0,
+  "EPNameConfigName": 3,
+  "EPNameNever": 2
+ },
+ "CProfilerExportConfig/ETimeScope": {
+  "ETimeAll": 0,
+  "ETimeBetweenMarkers": 1
+ },
+ "CProfilerFormatBase/EExportFormat": {
+  "EFmtBTF": 2,
+  "EFmtHTML": 4,
+  "EFmtMDF": 3,
+  "EFmtText1": 1,
+  "EFmtXML": 0
+ },
+ "CProfilerStatistics2/ETimeType": {
+  "ECallTimes": 2,
+  "EGrossTimes": 1,
+  "EInactiveTimes": 4,
+  "ENetTimes": 0,
+  "EOutsideTimes": 4,
+  "EPeriodTimes": 3,
+  "EUnknown": 5
+ },
+ "CProfilerTestResult/ProfilerErrCode": {
+  "ERR_BOTH": 3,
+  "ERR_MAX": 2,
+  "ERR_MIN": 1,
+  "ERR_NONE": 0
+ },
+ "CProfilerTimeEvent/EEventType": {
+  "EEvAny": 0,
+  "EEvEnter": 4,
+  "EEvExit": 5,
+  "EEvResume": 3,
+  "EEvSuspend": 2,
+  "EEvWrite": 1
+ },
+ "CScriptConfig/ETestScriptConfigSectionIds": {
+  "E_SCRIPT_SECTION_EXTENSION_CLASS": 4,
+  "E_SCRIPT_SECTION_MODULES": 1,
+  "E_SCRIPT_SECTION_SYS_PATH": 2,
+  "E_SCRIPT_SECTION_TIMEOUT": 3,
+  "E_SCRIPT_SECTION_WORKING_DIR": 0
+ },
+ "CStackUsageConfig/EStackUsageConfigSections": {
+  "E_SECTION_BASE": 2,
+  "E_SECTION_CORE_ID": 0,
+  "E_SECTION_END": 3,
+  "E_SECTION_IS_ACTIVE": 1,
+  "E_SECTION_PATTERN": 4
+ },
+ "CStackUsageResult/ETestPointResultSections": {
+  "E_SECTION_APPLICATION_USAGE": 2,
+  "E_SECTION_MAX_EXPECTED_SIZE": 3,
+  "E_SECTION_TEST_IDEA_USAGE": 1,
+  "E_SECTION_USAGE_BEFORE_TEST": 0
+ },
+ "CTestAnalyzer/EAnalyzerSectionId": {
+  "E_SECTION_COVERAGE": 9,
+  "E_SECTION_DOC_FILE_NAME": 1,
+  "E_SECTION_IS_CLOSE_AFTER_TEST": 7,
+  "E_SECTION_IS_PREDEF_TRIGGER": 5,
+  "E_SECTION_IS_SAVE_AFTER_TEST": 6,
+  "E_SECTION_IS_SLOW_RUN": 3,
+  "E_SECTION_OPEN_MODE": 2,
+  "E_SECTION_PROFILER": 10,
+  "E_SECTION_RUN_MODE": 0,
+  "E_SECTION_TRACE": 8,
+  "E_SECTION_TRIGGER": 4
+ },
+ "CTestAnalyzer/EOpenMode": {
+  "EAppend": 2,
+  "EUpdate": 0,
+  "EWrite": 1
+ },
+ "CTestAnalyzer/ERunMode": {
+  "M_OFF": 0,
+  "M_START": 1
+ },
+ "CTestAnalyzerCoverage/ECoverageExportFormat": {
+  "EX_CCAsCSV": 2,
+  "EX_CCAsHTML": 0,
+  "EX_CCAsReviewHTML": 4,
+  "EX_CCAsReviewText": 5,
+  "EX_CCAsText": 1,
+  "EX_CCAsXML": 3
+ },
+ "CTestAnalyzerCoverage/ECoverageSectionId": {
+  "E_SECTION_EXFMT_VARIANT": 6,
+  "E_SECTION_EXPORT_FILE": 7,
+  "E_SECTION_EXPORT_FORMAT": 5,
+  "E_SECTION_EXPORT_FUNCTIONS_FILTER": 15,
+  "E_SECTION_EXPORT_MODULES_FILTER": 16,
+  "E_SECTION_IS_ACTIVE": 0,
+  "E_SECTION_IS_ASSEMBLER_INFO": 8,
+  "E_SECTION_IS_EXPORT_ASM": 13,
+  "E_SECTION_IS_EXPORT_FUNCTION_LINES": 12,
+  "E_SECTION_IS_EXPORT_MODULE_LINES": 10,
+  "E_SECTION_IS_EXPORT_RANGES": 14,
+  "E_SECTION_IS_EXPORT_SOURCES": 11,
+  "E_SECTION_IS_IGNORE_UNREACHABLE_CODE": 2,
+  "E_SECTION_IS_LAUNCH_VIEWER": 9,
+  "E_SECTION_IS_MEASURE_ALL_FUNCTIONS": 1,
+  "E_SECTION_MERGE_FILTER": 4,
+  "E_SECTION_MERGE_SCOPE": 3,
+  "E_SECTION_STATISTICS": 17
+ },
+ "CTestAnalyzerCoverage/EMergeScope": {
+  "EAll": 3,
+  "ENone": 0,
+  "ESiblingsAndParent": 2,
+  "ESiblingsOnly": 1
+ },
+ "CTestAnalyzerProfiler/EAreaType": {
+  "CODE_AREA": 1,
+  "DATA_AREA": 0
+ },
+ "CTestAnalyzerProfiler/EProfilerExportFormat": {
+  "EProfilerAsBTF": 5,
+  "EProfilerAsCSV": 2,
+  "EProfilerAsMDF": 6,
+  "EProfilerAsText": 0,
+  "EProfilerAsText1": 3,
+  "EProfilerAsXML": 1,
+  "EProfilerAsXMLBinaryTimeline": 4
+ },
+ "CTestAnalyzerProfiler/EProfilerSectionIds": {
+  "E_SECTION_CODE_AREAS": 7,
+  "E_SECTION_DATA_AREAS": 8,
+  "E_SECTION_EXPORT_FILE": 3,
+  "E_SECTION_EXPORT_FORMAT": 2,
+  "E_SECTION_IS_ACTIVE": 0,
+  "E_SECTION_IS_EXPORT_ACTIVE_AREAS_ONLY": 4,
+  "E_SECTION_IS_MEASURE_ALL_FUNCTIONS": 1,
+  "E_SECTION_IS_PROFILE_AUX": 5,
+  "E_SECTION_IS_SAVE_HISTORY": 6
+ },
+ "CTestAnalyzerTrace/ETraceExportFormat": {
+  "EX_TrcAsBinary": 2,
+  "EX_TrcAsCSV": 1,
+  "EX_TrcAsText": 0,
+  "EX_TrcAsXML": 3
+ },
+ "CTestAnalyzerTrace/ETraceSectionId": {
+  "E_SECTION_EXPORT_FILE": 2,
+  "E_SECTION_EXPORT_FORMAT": 1,
+  "E_SECTION_IS_ACTIVE": 0
+ },
+ "CTestAssert/ESectionAssert": {
+  "E_SECTION_ASSERT_EXPRESSIONS": 1,
+  "E_SECTION_ASSERT_IS_EXPECT_EXCEPTION": 0
+ },
+ "CTestBase/CommentType": {
+  "END_OF_LINE_COMMENT": 1,
+  "NEW_LINE_COMMENT": 0
+ },
+ "CTestBase/EScalarPresence": {
+  "EMandatory": 1,
+  "EMayBeEmpty": 0
+ },
+ "CTestBase/SpecDataType": {
+  "KEY": 0,
+  "LIST_ITEM": 2,
+  "VALUE": 1
+ },
+ "CTestBench/ETestBenchSectionIds": {
+  "E_SECTION_ENV_CONFIG": 0,
+  "E_SECTION_FILTERS": 2,
+  "E_SECTION_GROUPS": 3,
+  "E_SECTION_REPORT_CONFIG": 1,
+  "E_SECTION_TESTS": 4,
+  "E_SECTION_TEST_CASES": 5
+ },
+ "CTestCaseTargetInitConfig/ETestCaseTargetInitSectionIds": {
+  "E_TEST_CASE_SECTION_IS_DL_ON_TC_INIT": 0,
+  "E_TEST_CASE_SECTION_IS_RESET_ON_TC_INIT": 1,
+  "E_TEST_CASE_SECTION_IS_RUN_ON_TC_INIT": 2,
+  "E_TEST_CASE_SECTION_STOP_FUNC_ON_TC_INIT": 3
+ },
+ "CTestCoverageResult/ESectionCoverageResult": {
+  "E_SECTION_BYTES_ALL": 0,
+  "E_SECTION_CONDITIONS_ALL": 2,
+  "E_SECTION_COVERAGE_STATS_EXPECTED": 3,
+  "E_SECTION_COVERAGE_STATS_MEASURED": 4,
+  "E_SECTION_LINES_ALL": 1
+ },
+ "CTestCoverageStatistics/ECoverageStatSectionId": {
+  "E_SECTION_BRANCH_BOTH": 6,
+  "E_SECTION_BRANCH_EXECUTED": 3,
+  "E_SECTION_BRANCH_NOT_TAKEN": 5,
+  "E_SECTION_BRANCH_TAKEN": 4,
+  "E_SECTION_BYTES_EXECUTED": 1,
+  "E_SECTION_CALL_COUNT": 8,
+  "E_SECTION_EXECUTION_COUNT": 7,
+  "E_SECTION_FUNC_NAME": 0,
+  "E_SECTION_MC_DC": 9,
+  "E_SECTION_SOURCE_LINES_EXECUTED": 2
+ },
+ "CTestDiagramConfig/EDiagType": {
+  "ECustom": 5,
+  "ECustomAsync": 6,
+  "EFlameGraph": 4,
+  "EFlowChart": 0,
+  "ERuntimeCallGraph": 2,
+  "ESequenceDiagram": 1,
+  "EStaticCallGraph": 3
+ },
+ "CTestDiagramConfig/ETestDiagramSections": {
+  "E_SECTION_DIAG_CFG_DATA_FORMAT": 7,
+  "E_SECTION_DIAG_CFG_DIAG_TYPE": 1,
+  "E_SECTION_DIAG_CFG_EXTERNAL_VIEWER": 8,
+  "E_SECTION_DIAG_CFG_IS_ACTIVE": 0,
+  "E_SECTION_DIAG_CFG_IS_ADD_TO_REPORT": 5,
+  "E_SECTION_DIAG_CFG_OUT_FILE_NAME": 4,
+  "E_SECTION_DIAG_CFG_PARAMS": 3,
+  "E_SECTION_DIAG_CFG_SCRIPT": 2,
+  "E_SECTION_DIAG_CFG_VIEWER_TYPE": 6
+ },
+ "CTestDiagramConfig/EViewFormat": {
+  "EBitmap": 1,
+  "EByExtension": 0,
+  "ESVG": 2
+ },
+ "CTestDiagramConfig/EViewerType": {
+  "EExternal": 2,
+  "EMultipage": 0,
+  "ENone": 3,
+  "ESinglePage": 1
+ },
+ "CTestDiagrams/ETestDiagramsSections": {
+  "E_SECTION_DIAG_CONFIGS": 1,
+  "E_SECTION_DIAG_IS_ACTIVE": 0
+ },
+ "CTestDryRun/EDryRunSectionIds": {
+  "E_SECTION_ASSIGN": 0,
+  "E_SECTION_PROFILER_MULTIPLIER": 3,
+  "E_SECTION_PROFILER_OFFSET": 4,
+  "E_SECTION_UPDATE_COVERAGE": 1,
+  "E_SECTION_UPDATE_PROFILER": 2
+ },
+ "CTestEnvironmentConfig/EBreakpointsType": {
+  "EKeepWinIDEASetting": 0,
+  "EUseHWBPs": 1,
+  "EUseHWBPsForInitThenSWBPs": 3,
+  "EUseSWBPs": 2
+ },
+ "CTestEnvironmentConfig/EEnvConfigSections": {
+  "E_SECTION_ALWAYS_RUN_INIT_SEQ": 10,
+  "E_SECTION_AUTO_ID_FORMAT_STRING": 7,
+  "E_SECTION_BREAKPOINTS_TYPE": 13,
+  "E_SECTION_CHECK_TARGET_STATE_BEFORE_RUN": 20,
+  "E_SECTION_CORE_IDS": 5,
+  "E_SECTION_DEFAULT_RET_VAL_NAME": 8,
+  "E_SECTION_DELETE_BPS": 27,
+  "E_SECTION_DISABLE_INTERRUPTS": 11,
+  "E_SECTION_EVALUATOR": 17,
+  "E_SECTION_INIT_SEQUENCE": 14,
+  "E_SECTION_IS_AUTO_CONNECT": 6,
+  "E_SECTION_IS_DOWNLOAD_ON_INIT": 23,
+  "E_SECTION_IS_RESET_ON_INIT": 24,
+  "E_SECTION_IS_RUN_ON_INIT": 25,
+  "E_SECTION_LOG_PARAMETERS": 9,
+  "E_SECTION_SCRIPT": 15,
+  "E_SECTION_STACK_USAGE": 19,
+  "E_SECTION_STACK_USAGE_DEPR": 22,
+  "E_SECTION_STOP_FUNCTION": 26,
+  "E_SECTION_TARGET_INIT": 18,
+  "E_SECTION_TEST_TIMEOUT": 12,
+  "E_SECTION_TOOLS_CONFIG": 16,
+  "E_SECTION_USE_QUALIFIED_FUNC_NAME": 2,
+  "E_SECTION_VERIFY_SYMBOLS_BEFORE_RUN": 21,
+  "E_SECTION_VERSION": 0,
+  "E_SECTION_WINIDEA_ADDRESS": 3,
+  "E_SECTION_WINIDEA_PORT": 4,
+  "E_SECTION_WINIDEA_WORKSPACE_FILE_NAME": 1
+ },
+ "CTestEvalAssignStep/EStepSectionIds": {
+  "E_SECTION_ASSIGN": 1,
+  "E_SECTION_EXPECT": 0,
+  "E_SECTION_NEXT_INDEX": 3,
+  "E_SECTION_SCRIPT_PARAMS": 2
+ },
+ "CTestExprResult/ESectionAssert": {
+  "E_SECTION_EXPR_RESULT_EXPR": 0,
+  "E_SECTION_EXPR_RESULT_IS_ERROR": 2,
+  "E_SECTION_EXPR_RESULT_SUBEXPRS": 1
+ },
+ "CTestFilter/EFilterTypes": {
+  "BUILT_IN_FILTER": 0,
+  "SCRIPT_FILTER": 1
+ },
+ "CTestFilter/ETestFilterSectionIds": {
+  "E_SECTION_CORE_ID": 2,
+  "E_SECTION_EXCLUDED_FUNCTIONS": 8,
+  "E_SECTION_EXCLUDED_IDS": 6,
+  "E_SECTION_FILTER_ID": 0,
+  "E_SECTION_FILTER_TYPE": 1,
+  "E_SECTION_INCLUDED_FUNCTIONS": 7,
+  "E_SECTION_INCLUDED_IDS": 5,
+  "E_SECTION_IS_OR_TAGS_1": 13,
+  "E_SECTION_IS_OR_TAGS_2": 14,
+  "E_SECTION_IS_OR_TAGS_3": 15,
+  "E_SECTION_MODULES": 4,
+  "E_SECTION_MUST_HAVE_ALL_TAGS": 9,
+  "E_SECTION_MUST_HAVE_ONE_OF_TAGS": 10,
+  "E_SECTION_MUST_NOT_HAVE_ALL_TAGS": 11,
+  "E_SECTION_MUST_NOT_HAVE_ONE_OF_TAGS": 12,
+  "E_SECTION_PARTITIONS": 3,
+  "E_SECTION_SCRIPT_FUNCTION": 16,
+  "E_SECTION_SCRIPT_FUNCTION_PARAMS": 17
+ },
+ "CTestFunction/ESection": {
+  "E_SECTION_FUNC_NAME": 0,
+  "E_SECTION_PARAMS": 1,
+  "E_SECTION_RET_VAL_NAME": 2
+ },
+ "CTestGroup/EGroupType": {
+  "ECore": 0,
+  "ECustom": 4,
+  "EFunction": 3,
+  "EModule": 2,
+  "EPartition": 1
+ },
+ "CTestGroup/ESectionCTestGroup": {
+  "E_SECTION_CHILDREN": 11,
+  "E_SECTION_CLOSE_ANALYZER_FILE": 5,
+  "E_SECTION_COVERAGE_ALL_CODE_IN_GROUP": 7,
+  "E_SECTION_COVERAGE_EXPORT": 6,
+  "E_SECTION_COVERAGE_TEST_CASES_ONLY": 8,
+  "E_SECTION_DESCRIPTION": 2,
+  "E_SECTION_FILTER": 3,
+  "E_SECTION_GROUP_END_SCRIPT": 10,
+  "E_SECTION_GROUP_ID": 0,
+  "E_SECTION_GROUP_INIT_SCRIPT": 9,
+  "E_SECTION_IS_EXECUTE": 1,
+  "E_SECTION_MERGED_ANALYZER_FILE": 4
+ },
+ "CTestGroupResult/EGroupResultSection": {
+  "E_AVG_TCS_FOR_FUNCTION": 31,
+  "E_CVRG_DOCUMENT": 40,
+  "E_CVRG_EXPORT_FILE": 41,
+  "E_CVRG_STAT_FOR_ALL_ITEMS": 42,
+  "E_CVRG_STAT_FOR_TESTED_ITEMS": 43,
+  "E_ERROR_FUNCTIONS": 10,
+  "E_ERROR_MODULES": 13,
+  "E_ERROR_PARTITIONS": 16,
+  "E_ERROR_TCS": 7,
+  "E_EXCEPTION_MSG": 4,
+  "E_FAILED_ASSERT": 18,
+  "E_FAILED_COVERAGE": 19,
+  "E_FAILED_FUNCTIONS": 9,
+  "E_FAILED_MODULES": 12,
+  "E_FAILED_PARTITIONS": 15,
+  "E_FAILED_PRECOND": 17,
+  "E_FAILED_PROFILER_CODE": 20,
+  "E_FAILED_PROFILER_DATA": 21,
+  "E_FAILED_STACK_USAGE": 24,
+  "E_FAILED_STUB": 22,
+  "E_FAILED_TARGET_EXCEPTIONS": 25,
+  "E_FAILED_TCS": 6,
+  "E_FAILED_TEST_POINT": 23,
+  "E_FUNCTIONS_W_TEST_CASES": 33,
+  "E_FUNC_STATS": 45,
+  "E_MAX_TCS_FOR_FUNCTION": 32,
+  "E_MIN_TCS_FOR_FUNCTION": 30,
+  "E_MODULES_W_TEST_CASES": 34,
+  "E_NO_OF_FUNCTIONS_IN_GROUP": 1,
+  "E_NO_OF_MODULES_IN_GROUP": 2,
+  "E_NO_OF_PARTITIONS_IN_GROUP": 3,
+  "E_NO_OF_TEST_CASES_IN_GROUP": 0,
+  "E_PARTITIONS_W_TEST_CASES": 35,
+  "E_PASSED_FUNCTIONS": 8,
+  "E_PASSED_MODULES": 11,
+  "E_PASSED_PARTITIONS": 14,
+  "E_PASSED_TCS": 5,
+  "E_SCRIPT_ERRORS": 36,
+  "E_SCRIPT_OUTPUT": 37,
+  "E_SECTION_DEFAULT_DOWNLOAD_FILE": 27,
+  "E_SECTION_DIAGRAMS": 29,
+  "E_SECTION_RESULT_COMMENT": 26,
+  "E_SECTION_STACK_USAGE_RESULTS": 28,
+  "E_SRC_LINE_CVRG": 44,
+  "E_TCS_PER_MODULE": 38,
+  "E_TCS_PER_PARTITION": 39
+ },
+ "CTestGrpFuncStat/ESectionFuncTestStats": {
+  "E_CVRG_BYTES_ALL": 4,
+  "E_CVRG_BYTES_EXECUTED": 5,
+  "E_CVRG_COND_ALL": 6,
+  "E_CVRG_COND_BOTH": 9,
+  "E_CVRG_COND_FALSE": 7,
+  "E_CVRG_COND_TRUE": 8,
+  "E_CVRG_EXECUTION_COUNT": 10,
+  "E_QUAL_FUNC_NAME": 0,
+  "E_TESTS_ERROR": 3,
+  "E_TESTS_FAILED": 2,
+  "E_TESTS_PASSED": 1
+ },
+ "CTestHIL/ETestHILSections": {
+  "E_SECTION_HIL_PARAMS": 0
+ },
+ "CTestImportSources/ESectionSources": {
+  "E_SECTION_IS_INHERIT": 0,
+  "E_SECTION_TEST_IDS": 1
+ },
+ "CTestLocation/ETestLocationSections": {
+  "E_SECTION_IS_SEARCH": 4,
+  "E_SECTION_LINE": 3,
+  "E_SECTION_LINES_RANGE": 5,
+  "E_SECTION_LINE_OFFSET": 9,
+  "E_SECTION_MATCH_TYPE": 7,
+  "E_SECTION_NUM_STEPS": 10,
+  "E_SECTION_PATTERN": 8,
+  "E_SECTION_RESOURCE_NAME": 1,
+  "E_SECTION_RESOURCE_TYPE": 0,
+  "E_SECTION_SEARCH_CONTEXT": 6,
+  "E_SECTION_SRC_FILE_LOCATION": 2
+ },
+ "CTestLog/ESectionsLog": {
+  "E_SECTION_AFTER": 1,
+  "E_SECTION_BEFORE": 0
+ },
+ "CTestMinMax/EMinMaxSectionIds": {
+  "E_SECTION_MAX": 1,
+  "E_SECTION_MIN": 0
+ },
+ "CTestObject/ETestObjType": {
+  "ETestBase": 5,
+  "ETestBaseList": 6,
+  "EYAMLBool": 1,
+  "EYAMLEnum": 2,
+  "EYAMLMap": 4,
+  "EYAMLScalar": 0,
+  "EYAMLSeqence": 3
+ },
+ "CTestPersistentVars/EPersistVarsSections": {
+  "E_SECTION_DECL": 0,
+  "E_SECTION_DELETE": 1,
+  "E_SECTION_IS_DELETE_ALL": 2
+ },
+ "CTestPoint/ETestPointSections": {
+  "E_SECTION_CONDITION_COUNT": 3,
+  "E_SECTION_CONDITION_EXPR": 4,
+  "E_SECTION_HIT_LIMITS": 8,
+  "E_SECTION_IS_ACTIVE": 1,
+  "E_SECTION_IS_CUSTOM_ACTIVATION": 2,
+  "E_SECTION_LOCATION": 6,
+  "E_SECTION_LOG": 7,
+  "E_SECTION_SCRIPT_FUNC": 5,
+  "E_SECTION_STEPS": 9,
+  "E_SECTION_TEST_POINT_ID": 0
+ },
+ "CTestPointResult/EExecStatus": {
+  "CONDITION_FALSE": 1,
+  "EXECUTED": 0,
+  "HIT_COUNT_FALSE": 2
+ },
+ "CTestPointResult/ETestPointResultSections": {
+  "E_SECTION_EXEC_STATUS": 2,
+  "E_SECTION_EXPR_ERRORS": 8,
+  "E_SECTION_HIT_NO": 3,
+  "E_SECTION_LOCATION": 1,
+  "E_SECTION_LOG_RESULT": 5,
+  "E_SECTION_SCRIPT_INFO_VAR": 6,
+  "E_SECTION_SCRIPT_RET_VAL": 7,
+  "E_SECTION_STEP_IDX": 4,
+  "E_SECTION_TEST_POINT_ID": 0
+ },
+ "CTestProfilerStatistics/EProfilerStatisticsSectionId": {
+  "E_SECTION_AREA_NAME": 0,
+  "E_SECTION_AREA_VALUE": 1,
+  "E_SECTION_CALL_TIME": 4,
+  "E_SECTION_GROSS_TIME": 3,
+  "E_SECTION_HITS": 7,
+  "E_SECTION_MAX_AREA_TIME": 9,
+  "E_SECTION_MIN_AREA_TIME": 8,
+  "E_SECTION_NET_TIME": 2,
+  "E_SECTION_OUTSIDE_TIME": 6,
+  "E_SECTION_PERIOD_TIME": 5,
+  "E_SECTION_TOTAL_AREA_TIME": 10
+ },
+ "CTestProfilerTime/EProfilerTimeSectionId": {
+  "E_SECTION_AVERAGE_TIME": 7,
+  "E_SECTION_MAX_END_TIME": 5,
+  "E_SECTION_MAX_START_TIME": 4,
+  "E_SECTION_MAX_TIME": 3,
+  "E_SECTION_MIN_END_TIME": 2,
+  "E_SECTION_MIN_START_TIME": 1,
+  "E_SECTION_MIN_TIME": 0,
+  "E_SECTION_TOTAL_TIME": 6
+ },
+ "CTestReportConfig/EHTMLViewMode": {
+  "HTML_VIEW_ALL": 0,
+  "HTML_VIEW_ERROS_ONLY": 1
+ },
+ "CTestReportConfig/EOutputFormat": {
+  "FMT_CSV": 2,
+  "FMT_XLS": 3,
+  "FMT_XLSX": 4,
+  "FMT_XML": 0,
+  "FMT_YAML": 1
+ },
+ "CTestReportConfig/EReportContents": {
+  "RCONFIG_ERRORS_ONLY": 1,
+  "RCONFIG_FULL": 0
+ },
+ "CTestReportConfig/ETestReportConfigSectionIds": {
+  "E_SECTION_CSS_FILE": 10,
+  "E_SECTION_CSV_IS_HEADER_LINE": 14,
+  "E_SECTION_CSV_SEPARATOR": 13,
+  "E_SECTION_FILE_NAME": 4,
+  "E_SECTION_HTML_VIEW_MODE": 19,
+  "E_SECTION_IS_ABS_PATHS_FOR_LINK": 18,
+  "E_SECTION_IS_ABS_PATHS_FOR_LINK_TYPO": 17,
+  "E_SECTION_IS_CREATE_HTML": 12,
+  "E_SECTION_IS_EMBED_XML_XSLT_CSS": 11,
+  "E_SECTION_IS_INCLUDE_TEST_SPEC": 16,
+  "E_SECTION_IS_USE_CUSTOM_TIME": 21,
+  "E_SECTION_IYAML_FILE_NAME": 5,
+  "E_SECTION_OUTPUT_FORMAT": 3,
+  "E_SECTION_REPORT_CONTENTS": 2,
+  "E_SECTION_TEST_IDEA_VERSION": 0,
+  "E_SECTION_TEST_INFO": 20,
+  "E_SECTION_WIN_IDEA_VERSION": 1,
+  "E_SECTION_XLS_IS_VERTICAL_HEADER": 15,
+  "E_SECTION_XML_LOGO_IMAGE": 8,
+  "E_SECTION_XML_REPORT_HEADER": 9,
+  "E_SECTION_XML_XSLT_FOR_ERRORS": 7,
+  "E_SECTION_XML_XSLT_FOR_FULL_REPORT": 6
+ },
+ "CTestResult/ETestResultSection": {
+  "E_SECTION_ASSERT": 7,
+  "E_SECTION_DEFAULT_DOWNLOAD_FILE": 1,
+  "E_SECTION_DIAGRAMS": 10,
+  "E_SECTION_DRY_RUN_ASSIGNMENTS": 9,
+  "E_SECTION_LOG": 8,
+  "E_SECTION_PRE_CONDITION": 6,
+  "E_SECTION_RESULT_COMMENT": 0,
+  "E_SECTION_SCRIPT_ERRORS": 11,
+  "E_SECTION_SCRIPT_OUTPUT": 12,
+  "E_SECTION_STACK_USAGE_RESULTS": 4,
+  "E_SECTION_STUB_RESULTS": 2,
+  "E_SECTION_TARGET_EXCEPTION": 5,
+  "E_SECTION_TEST_POINT_RESULTS": 3
+ },
+ "CTestSpecification/ETestScope": {
+  "E_SYSTEM_TEST": 1,
+  "E_UNIT_TEST": 0
+ },
+ "CTestSpecification/SectionIds": {
+  "E_SECTION_ANALYZER": 27,
+  "E_SECTION_ASSERT": 24,
+  "E_SECTION_BASE_ID": 2,
+  "E_SECTION_BEGIN_STOP_CONDITION": 11,
+  "E_SECTION_CORE_ID": 15,
+  "E_SECTION_COVERAGE": 34,
+  "E_SECTION_DESC": 5,
+  "E_SECTION_DIAGRAMS": 30,
+  "E_SECTION_DRY_RUN": 29,
+  "E_SECTION_ENDFUNC": 18,
+  "E_SECTION_END_STOP_CONDITION": 12,
+  "E_SECTION_EXPECT": 36,
+  "E_SECTION_FUNC": 13,
+  "E_SECTION_HIL": 28,
+  "E_SECTION_ID": 0,
+  "E_SECTION_IMPORTS": 4,
+  "E_SECTION_INIT": 10,
+  "E_SECTION_INITFUNC": 17,
+  "E_SECTION_INIT_TARGET": 16,
+  "E_SECTION_LOCALS": 9,
+  "E_SECTION_LOG": 26,
+  "E_SECTION_OPTIONS": 7,
+  "E_SECTION_PARAMS_PRIVATE": 32,
+  "E_SECTION_PERSIST_VARS": 8,
+  "E_SECTION_PRE_CONDITION": 23,
+  "E_SECTION_PROFILER": 35,
+  "E_SECTION_RESTORE_TARGET": 19,
+  "E_SECTION_RUN": 3,
+  "E_SECTION_STACK_USAGE": 25,
+  "E_SECTION_STUBS": 20,
+  "E_SECTION_TAGS": 6,
+  "E_SECTION_TESTS": 31,
+  "E_SECTION_TEST_POINTS": 22,
+  "E_SECTION_TEST_SCOPE": 1,
+  "E_SECTION_TIMEOUT": 14,
+  "E_SECTION_TRACE": 33,
+  "E_SECTION_USER_STUBS": 21
+ },
+ "CTestStackUsage/ETestStackUsageSections": {
+  "E_SECTION_MAX_SIZE": 1,
+  "E_SECTION_MIN_SIZE": 0
+ },
+ "CTestStopCondition/EStopCondSections": {
+  "E_SECTION_BP_CONDITION_COUNT": 3,
+  "E_SECTION_BP_CONDITION_EXPR": 4,
+  "E_SECTION_BP_LOCATION": 5,
+  "E_SECTION_RT_EXPRESSION": 2,
+  "E_SECTION_STOP_TYPE": 0,
+  "E_SECTION_TIMEOUT": 1
+ },
+ "CTestStopCondition/EStopType": {
+  "E_BREAKPOINT": 0,
+  "E_NO_RUN": 3,
+  "E_RT_EXPRESSION": 2,
+  "E_STOP": 1
+ },
+ "CTestStub/EStubSectionIds": {
+  "E_SECTION_ASSIGN": 10,
+  "E_SECTION_ASSIGN_STEPS": 8,
+  "E_SECTION_FUNC": 9,
+  "E_SECTION_HIT_LIMITS": 6,
+  "E_SECTION_IS_ACTIVE": 1,
+  "E_SECTION_IS_CUSTOM_ACTIVATION": 2,
+  "E_SECTION_LOG": 7,
+  "E_SECTION_PARAM_NAMES": 3,
+  "E_SECTION_RET_VAL_NAME": 4,
+  "E_SECTION_SCRIPT": 11,
+  "E_SECTION_SCRIPT_FUNCTION": 5,
+  "E_SECTION_STUBBED_FUNC": 0
+ },
+ "CTestStubController/EStubType": {
+  "E_RT_EMPTY_STUB": 2,
+  "E_RT_USER_STUB": 1,
+  "E_SCRIPT_STUB": 0
+ },
+ "CTestUserStub/EUserStubSections": {
+  "E_SECTION_IS_ACTIVE": 1,
+  "E_SECTION_REPLACEMENT_FUNC_NAME": 2,
+  "E_SECTION_STUBBED_FUNC_NAME": 0
+ },
+ "CToolsConfig/EToolsConfigSections": {
+  "E_SECTION_ANALYZER_FNAME": 1,
+  "E_SECTION_IS_AUTO_SET_ANALYZER_FNAME": 0,
+  "E_SECTION_IS_SET_TEST_ID_ON_PASTE": 2
+ },
+ "CTraceBinExportFormat/EHeaderVersion": {
+  "EHeaderVer1": 1,
+  "EHeaderVer2": 2
+ },
+ "CTraceBinExportFormat/EPresenceFlags": {
+  "EAUXItem": 128,
+  "EAddressItem": 2,
+  "EBusStatusItem": 16,
+  "EDataItem": 1,
+  "EMemAreaItem": 4,
+  "EOCDItem": 64,
+  "EPresenceFlagsItem": 256,
+  "ESampleIndexItem": 32,
+  "ETimeStampItem": 8,
+  "ETraceSourceIdItem": 512
+ },
+ "CTraceConfigWizard/EAccessType": {
+  "ERead": 0,
+  "EReadWrite": 2,
+  "EWrite": 1
+ },
+ "CTraceConfigWizard/EDataWidthType": {
+  "EWidth1": 1,
+  "EWidth2": 2,
+  "EWidth4": 3,
+  "EWidthAny": 0
+ },
+ "CTraceConfigWizard/EEdgeType": {
+  "EAUXState": 2,
+  "EFallingEdge": 1,
+  "ERisingEdge": 0
+ },
+ "CTraceConfigWizard/ERecordingContent": {
+  "ERecordDataAccess": 2,
+  "ERecordEverything": 0,
+  "ERecordInstrumentationMsgs": 3,
+  "ERecordProgramFlow": 1
+ },
+ "CTraceConfigWizard/ERecordingDuration": {
+  "EAllTheTime": 0,
+  "EBetweenTwoEvents": 1
+ },
+ "CTraceConfigWizard/ESamplesOffset": {
+  "ESamplesAfter": 1,
+  "ESamplesBefore": 0,
+  "ESamplesBeforeAndAfter": 2
+ },
+ "CTraceExportConfig/ETimeScope": {
+  "ETimeAll": 0,
+  "ETimeBetweenMarkers": 1
+ },
+ "CTraceFormatBase/EExportFormat": {
+  "EFmtBinary": 2,
+  "EFmtCSV": 1,
+  "EFmtText": 0,
+  "EFmtXML": 3
+ },
+ "CValueType/EResultFormat": {
+  "EChar": 2,
+  "EDecimal": 0,
+  "EHex": 1
+ },
+ "ConnectionMgr/EVersionControl": {
+  "EVersionError": 2,
+  "EVersionIgnore": 0,
+  "EVersionWarning": 1
+ },
+ "EAccessResult": {
+  "Access_Fail": 128,
+  "Access_OK": 0
+ },
+ "EBPType": {
+  "HW": 2,
+  "SW": 1,
+  "Unknown": 0
+ },
+ "ECAN": {
+  "Both": 5,
+  "CAN": 0,
+  "CAN_FD_BOSCH": 2,
+  "CAN_FD_ISO": 1,
+  "Data": 7,
+  "Extended": 4,
+  "Request": 6,
+  "Standard": 3
+ },
+ "ECPUModes": {
+  "cpumodeAll": 4294967295
+ },
+ "ECPUModesARM": {
+  "cpumodeAbortMode": 16,
+  "cpumodeFIQ": 2,
+  "cpumodeIRQ": 4,
+  "cpumodeSupervisor": 8,
+  "cpumodeSystem": 32,
+  "cpumodeUndefined": 64,
+  "cpumodeUser": 1
+ },
+ "EEndian": {
+  "endianBig": 1,
+  "endianLittle": 0
+ },
+ "EErrorCode": {
+  "ICONNECT_E_ALREADY_CONNECTED": 2147745794,
+  "ICONNECT_E_ALREADY_EXISTS": 2147745804,
+  "ICONNECT_E_BAD_ID": 2147745798,
+  "ICONNECT_E_BUSY": 2147745807,
+  "ICONNECT_E_CAN_NOT_ACCESS": 2147745797,
+  "ICONNECT_E_CONNECT_FAILED": 2147745792,
+  "ICONNECT_E_ERROR": 2147745800,
+  "ICONNECT_E_FILE_NOT_FOUND": 2147745796,
+  "ICONNECT_E_LICENSE": 2147745806,
+  "ICONNECT_E_MSG_FAIL": 262160,
+  "ICONNECT_E_NOT_AVAILABLE": 2147745802,
+  "ICONNECT_E_NOT_CONNECTED": 2147745795,
+  "ICONNECT_E_NOT_SIMPLE_TYPE": 2147745799,
+  "ICONNECT_E_NO_BREAKPOINT": 2147745801,
+  "ICONNECT_E_ROUTING": 2147745809,
+  "ICONNECT_E_SIZE": 2147745803,
+  "ICONNECT_E_TIMEOUT": 2147745805,
+  "ICONNECT_E_UMI_FAIL": 2147811328,
+  "ICONNECT_E_VERSION_CONFLICT": 2147745793,
+  "ICONNECT_S_MSG_FAIL": 262144,
+  "ICONNECT_S_MSG_WARN": 262153,
+  "ICONNECT_S_SIZE": 262155,
+  "ICONNECT_S_STATUS_1": 262145,
+  "ICONNECT_S_STATUS_2": 262146,
+  "ICONNECT_S_STATUS_3": 262147,
+  "ICONNECT_S_STATUS_4": 262148,
+  "ICONNECT_S_STATUS_FLAGSMASK": 65280,
+  "ICONNECT_UMI_EXC_ERR_MASK": 255
+ },
+ "EInterfaceIndexEclipse": {
+  "indxEclipse": 589824
+ },
+ "EMMUType": {
+  "none": 0,
+  "z1": 1,
+  "z3": 2,
+  "z4": 3,
+  "z6": 4,
+  "z7": 5
+ },
+ "EMemArea78k": {
+  "maER78k": 1,
+  "maPhysical78k": 0
+ },
+ "EMemArea8051": {
+  "maBDATA31": 3,
+  "maCODE31": 0,
+  "maDATA31": 1,
+  "maIDATA31": 2,
+  "maPDATA31": 5,
+  "maSFR31": 6,
+  "maXDATA31": 4
+ },
+ "EMemAreaARC": {
+  "maAuxilliaryARC": 1,
+  "maVP_ARC": 3,
+  "maVV_ARC": 2,
+  "maVirtualARC": 0
+ },
+ "EMemAreaARM": {
+  "maCPARM": 2,
+  "maCPARM_Index": 12,
+  "maEL1N_ARM": 7,
+  "maEL1S_ARM": 6,
+  "maEL2N_ARM": 8,
+  "maEL3S_ARM": 9,
+  "maIPA_ARM": 1,
+  "maNCP_ARM": 11,
+  "maNP_ARM": 5,
+  "maPL1N_ARM": 7,
+  "maPL1S_ARM": 6,
+  "maPL2N_ARM": 8,
+  "maSCP_ARM": 10,
+  "maSP_ARM": 4,
+  "maVFPARM": 3,
+  "maVirtualARM": 0
+ },
+ "EMemAreaGTM": {
+  "maVirtualGTM": 0
+ },
+ "EMemAreaPowerPC": {
+  "maDCRPowerPC": 2,
+  "maPMRPowerPC": 4,
+  "maPPhysicalPowerPC": 0,
+  "maSPRPowerPC": 1,
+  "maTLBPowerPC": 3,
+  "maVirtualPowerPC": 0
+ },
+ "EMemAreaRISCV": {
+  "maCSRRISCV": 2,
+  "maVFPRISCV": 1,
+  "maVirtualRISCV": 0
+ },
+ "EMemAreaSPT": {
+  "maOP_RAM": 1,
+  "maTW_RAM": 2,
+  "maVirtualSPT": 0
+ },
+ "EMemAreaTIC28x": {
+  "maCodeTIC28x": 0,
+  "maDataTIC28x": 1,
+  "maIOTIC28x": 2,
+  "maPeripheralTIC28x": 3,
+  "maRegister2TIC28x": 5,
+  "maRegisterTIC28x": 4
+ },
+ "EMemAreaTIC29x": {
+  "maVirtualTIC29x": 0
+ },
+ "EMemAreaTIDSP": {
+  "maCPUTIDSP": 1,
+  "maVirtualTIDSP": 0
+ },
+ "EMemAreaTPU": {
+  "maSCMTPU": 0,
+  "maSPRAMTPU": 1
+ },
+ "EMemAreaTriCore": {
+  "maPhysicalTriCore": 0,
+  "maVirtualTriCore": 0
+ },
+ "EMemAreaV850": {
+  "maPhysicalV850": 0,
+  "maSysRegV850": 1
+ },
+ "EMemAreaXtensa": {
+  "maARx": 3,
+  "maSpecialRegistersXtensa": 1,
+  "maUserRegistersXtensa": 2,
+  "maVirtualXtensa": 0
+ },
+ "EMemAreax86": {
+  "maVirtualx86": 0
+ },
+ "EMemPropertyARM": {
+  "mempISA_ARM_A32": 0,
+  "mempISA_ARM_A64": 2,
+  "mempISA_ARM_T": 1,
+  "mempModeARMThumb": 0
+ },
+ "EMemPropertyPowerPC": {
+  "mempISA_PPC_PPC": 0,
+  "mempISA_PPC_VLE": 1,
+  "mempModePowerPCVLE": 0
+ },
+ "EMemoryProperty": {
+  "mempISA0": 0,
+  "mempISA1": 1,
+  "mempISA2": 2,
+  "mempISA3": 3,
+  "mempISAMask": 3,
+  "mempISANum": 4,
+  "mempMode0": 0,
+  "mempMode1": 1,
+  "mempNum": 2
+ },
+ "EOperation": {
+  "CONTINUOUS": 1,
+  "SINGLE_SHOT": 0
+ },
+ "EOptionFlags": {
+  "ofAdd": 16777216,
+  "ofCall": 67108864,
+  "ofCommit": 1073741824,
+  "ofDestAuto": 240,
+  "ofDestDocument": 16,
+  "ofDestIDE": 0,
+  "ofDestIOPEN": 32,
+  "ofDestMask": 240,
+  "ofDestPlugin": 48,
+  "ofExact": 268435456,
+  "ofGet": 2147483648,
+  "ofGetDescriptor": 536870912,
+  "ofGetEnum": 100663296,
+  "ofGetMenu": 4194304,
+  "ofGetObjectMask": 541065216,
+  "ofGetSize": 50331648,
+  "ofGetType": 83886080,
+  "ofMask": 2399141888,
+  "ofRemove": 33554432,
+  "ofReservedBit0": 1048576,
+  "ofReservedBit1": 2097152,
+  "ofReservedMask": 3145728,
+  "ofSet": 0,
+  "ofUseDescriptor": 8388608,
+  "ofValBuffer": 14,
+  "ofValFloat": 3,
+  "ofValInt": 2,
+  "ofValMask": 15,
+  "ofValNode": 15,
+  "ofValNone": 0,
+  "ofValString": 1,
+  "ofValStringInt": 4
+ },
+ "EOptions": {
+  "optBitField": 8192,
+  "optBitFieldMask": 40960,
+  "optBitFieldOffs_Num": 6,
+  "optBitFieldOffs_Pos": 20,
+  "optBitFieldSize_Num": 6,
+  "optBitFieldSize_Pos": 26,
+  "optBitMask": 32768,
+  "optDebug": 524288,
+  "optDisabled": 256,
+  "optHex": 4096,
+  "optHidden": 1024,
+  "optKindColor": 48,
+  "optKindDefault": 0,
+  "optKindFilePath": 16,
+  "optKindFilePath_Open": 1,
+  "optKindFilePath_Overwrite": 2,
+  "optKindFilePath_RelEXE": 8,
+  "optKindFilePath_RelMacro": 12,
+  "optKindFilePath_RelMask": 12,
+  "optKindFilePath_RelWorkspace": 4,
+  "optKindFolder": 80,
+  "optKindFont": 64,
+  "optKindMask": 240,
+  "optKindSymbol": 32,
+  "optKindUser": 240,
+  "optMiscValMask": 15,
+  "optNoSerialize": 2048,
+  "optRDOnly": 512,
+  "optReserved16": 65536,
+  "optReserved17": 131072,
+  "optReserved18": 262144,
+  "optValueSet": 16384
+ },
+ "EProfilerEventSource": {
+  "srcCPULoad": 5,
+  "srcDAQ": 1,
+  "srcDependencies": 6,
+  "srcInspectors": 4,
+  "srcNetwork": 2,
+  "srcSampling": 3,
+  "srcTrace": 0,
+  "src_NUM": 7
+ },
+ "EProfilerLevel": {
+  "plApplication": 13,
+  "plIRQ_Highest": 5,
+  "plIRQ_Lowest": 2,
+  "plNone": 0,
+  "plNum": 20,
+  "plRunnable": 14,
+  "plSWAT": 19,
+  "plServiceTrace": 18,
+  "plSignal": 15,
+  "plSpecial": 16,
+  "plSpinlock": 17,
+  "plTask": 1
+ },
+ "ERecord": {
+  "ALL": 2,
+  "INPUTS": 1,
+  "NONE": 0
+ },
+ "EStatus_Core": {
+  "stDetached": 0,
+  "stHalted": 4,
+  "stIdle": 5,
+  "stInaccessible": 1,
+  "stRunning": 3,
+  "stStopped": 2,
+  "stSuspended": 6
+ },
+ "EStatus_SoC": {
+  "ATTACHED": 4,
+  "ATTACHING": 3,
+  "DETACHED": 0,
+  "NOPOWER": 1,
+  "RESET": 2
+ },
+ "EStorageDevice": {
+  "EMMCDevice": 1,
+  "EmbeddedFlashDevice": 0,
+  "HyperFlash": 3,
+  "SPIDevice": 2
+ },
+ "ETristate": {
+  "E_DEFAULT": 2,
+  "E_FALSE": 0,
+  "E_TRUE": 1
+ },
+ "ICodeCache/ECopyMergeFlags": {
+  "cfData": 1,
+  "cfNoData": 0
+ },
+ "ICodeCache/EDifFlags": {
+  "dfReportAll": 15,
+  "dfReportAllDif": 14,
+  "dfReportDif": 8,
+  "dfReportEqual": 1,
+  "dfReportNotIn1": 2,
+  "dfReportNotIn2": 4
+ },
+ "ICodeCache/EDifType": {
+  "dtDif": 3,
+  "dtEqual": 0,
+  "dtNotIn1": 1,
+  "dtNotIn2": 2
+ },
+ "ICodeCache/EParam": {
+  "AI_FAIL": 1,
+  "AI_OK": 0
+ },
+ "ICodeCache/EReportFlags": {
+  "rfAlign": 8,
+  "rfAppend": 4,
+  "rfTypeDif": 1,
+  "rfTypeMask": 3,
+  "rfTypeNormal": 0
+ },
+ "ICodeCache/ESaveLoadFlags": {
+  "lAllowOverlap": 16,
+  "lFormatAuto": 0,
+  "lFormatBinary": 3,
+  "lFormatELF": 4,
+  "lFormatIntelHex": 2,
+  "lFormatMask": 15,
+  "lFormatMotorolaS": 1,
+  "lFormatPE": 5,
+  "lOptionELF_Addr_Mask": 768,
+  "lOptionELF_Addr_PH_Physical": 256,
+  "lOptionELF_Addr_PH_Virtual": 0,
+  "lOptionELF_IgnoreZeros": 1024,
+  "lOptionMask": 65280,
+  "lSaveBytes10": 0,
+  "lSaveBytes20": 32,
+  "lSaveBytes40": 64,
+  "lSaveBytes80": 96,
+  "lSaveBytesMask": 96
+ },
+ "ICodeCache/ESaveLoadReturn": {
+  "E_ADDRESSRANGE": 2147745795,
+  "E_FORMAT": 2147745793,
+  "E_NOTSUPPORTED": 2147745796,
+  "E_OPEN": 2147745792,
+  "E_OVERLAPPING": 2147745794
+ },
+ "ICodeCache/ESerializeFlags": {
+  "sfAddressMask": 3,
+  "sfAddressSize4": 2,
+  "sfAddressSize8": 3,
+  "sfData": 4,
+  "sfMAUSize": 8
+ },
+ "IConnect/EDetachFlags": {
+  "dfCloseAutoSaveAll": 16,
+  "dfCloseAutoSaveDefault": 0,
+  "dfCloseAutoSaveMask": 48,
+  "dfCloseAutoSaveNone": 32,
+  "dfCloseServerIfLastClient": 1,
+  "dfCloseServerMask": 15,
+  "dfCloseServerNone": 0,
+  "dfCloseServerUnconditional": 2
+ },
+ "IConnect/EExeType": {
+  "eWinIDEA": 0,
+  "eWinIDEAc": 1
+ },
+ "IConnect/ELaunchFlags": {
+  "lfDiag_1": 268435456,
+  "lfShowDefault": 0,
+  "lfShowHidden": 768,
+  "lfShowMask": 768,
+  "lfShowMaximized": 512,
+  "lfShowMinimized": 256,
+  "lfStartAlways": 2,
+  "lfStartEnumerate": 4,
+  "lfStartExisting": 3,
+  "lfStartIfRequired": 1,
+  "lfStartMask": 15,
+  "lfStartNever": 0,
+  "lfUseIPCDiscovery": 128,
+  "lfWait100ms": 32,
+  "lfWait10s": 96,
+  "lfWait1s": 64,
+  "lfWait300ms": 48,
+  "lfWait30ms": 16,
+  "lfWait30s": 112,
+  "lfWait3s": 80,
+  "lfWaitDefault": 0,
+  "lfWaitMask": 112
+ },
+ "IConnectDebug/EAccessFlags": {
+  "fAccessFlagsMask": 255,
+  "fCacheCode": 48,
+  "fCacheDefault": 16,
+  "fCacheMask": 48,
+  "fCacheNever": 0,
+  "fCacheStop": 32,
+  "fCore": 0,
+  "fDirect": 128,
+  "fMemMask": 3,
+  "fModule": 12,
+  "fMonitor": 0,
+  "fNoRefresh": 64,
+  "fRealTime": 1,
+  "fRegMask": 12,
+  "fSFR": 4,
+  "fSoC": 8
+ },
+ "IConnectDebug/EBreakpointFlags": {
+  "bAddrMask": 3,
+  "bAddress": 0,
+  "bAll": 64,
+  "bClear": 16,
+  "bDisable": 48,
+  "bEnable": 32,
+  "bHW": 8,
+  "bHW_DataLSB0": 256,
+  "bHW_DataLSB1": 512,
+  "bHW_DataLSB2": 1024,
+  "bHW_DataLSB3": 2048,
+  "bHW_DataLSB4": 4096,
+  "bHW_DataLSB5": 8192,
+  "bHW_DataLSB6": 16384,
+  "bHW_DataLSB7": 32768,
+  "bHW_DataMask": 65280,
+  "bHW_EntireObject": 524288,
+  "bHW_Size1": 1048576,
+  "bHW_Size2": 2097152,
+  "bHW_Size4": 3145728,
+  "bHW_Size8": 4194304,
+  "bHW_SizeDefault": 0,
+  "bHW_SizeMask": 15728640,
+  "bHW_accAny": 0,
+  "bHW_accFetch": 262144,
+  "bHW_accMask": 458752,
+  "bHW_accRD": 65536,
+  "bHW_accRW": 196608,
+  "bHW_accWR": 131072,
+  "bReapply": 128,
+  "bSet": 0,
+  "bSetMask": 240,
+  "bSource": 2,
+  "bSymbol": 1
+ },
+ "IConnectDebug/EEvaluate": {
+  "efAllowTernaryOperator": 131072,
+  "efDefaultMemAreaDisplay": 0,
+  "efIgnorePointerAssignType": 1024,
+  "efNoMemAreaDisplay": 16777472,
+  "efType2": 65536,
+  "efVagueFloatEqual": 512
+ },
+ "IConnectDebug/EGetAddressFlags": {
+  "gafEnumIndexMask": 16711680,
+  "gafEnumIndexOfs": 16,
+  "gafEnumMask": 61440,
+  "gafExpression": 0,
+  "gafFileMask": 2130706432,
+  "gafFileOfs": 24,
+  "gafFunctions": 16384,
+  "gafLabels": 8192,
+  "gafType2": 65536,
+  "gafUseFile": 2147483648,
+  "gafVariables": 4096
+ },
+ "IConnectDebug/ERunControlFlags": {
+  "rAttach": 18,
+  "rDetach": 19,
+  "rDownload": 3,
+  "rDownloadNoCode": 17,
+  "rGoto": 14,
+  "rNothing": 0,
+  "rPollingMask": 768,
+  "rPollingOff": 256,
+  "rPollingOn": 512,
+  "rReset": 1,
+  "rResetAndRun": 2,
+  "rRun": 5,
+  "rRunMask": 63,
+  "rRunUntil": 12,
+  "rRunUntilReturn": 13,
+  "rSlowRunOff": 20,
+  "rSlowRunOn": 21,
+  "rSnapshot": 15,
+  "rStep": 6,
+  "rStepHigh": 10,
+  "rStepInst": 8,
+  "rStepOver": 7,
+  "rStepOverHigh": 11,
+  "rStepOverInst": 9,
+  "rStop": 4,
+  "rTargetHWConnectMask": 49152,
+  "rTargetHWConnectOff": 16384,
+  "rTargetHWConnectOn": 32768,
+  "rTristateMask": 12288,
+  "rTristateOff": 4096,
+  "rTristateOn": 8192,
+  "rVerify": 16,
+  "rWaitForStop": 128,
+  "rWaitTimeout100s": 2048,
+  "rWaitTimeout10s": 0,
+  "rWaitTimeout1s": 1024,
+  "rWaitTimeout3s": 1024,
+  "rWaitTimeoutInf": 3072,
+  "rWaitTimeoutMask": 3072
+ },
+ "IConnectDebug/ESymbolFlags": {
+  "sConstants": 16,
+  "sFunctions": 4,
+  "sLabels": 2,
+  "sLines": 8,
+  "sScopeExact": 0,
+  "sScopeMask": 49152,
+  "sScopeNarrow": 16384,
+  "sScopeWide": 32768,
+  "sSourceCode": 128,
+  "sVariables": 1
+ },
+ "IConnectDebug2/ECodeCacheOp": {
+  "ccNoData": 524288,
+  "ccOpGet": 1024,
+  "ccOpLoad": 512,
+  "ccOpMask": 65280,
+  "ccOpRead": 0,
+  "ccOpSave": 768,
+  "ccOpVerify": 1280,
+  "ccOpVerifySave": 1536,
+  "ccOpWrite": 256,
+  "ccSaveBytes10": 0,
+  "ccSaveBytes20": 16777216,
+  "ccSaveBytes40": 33554432,
+  "ccSaveBytes80": 50331648,
+  "ccSaveBytesMask": 50331648,
+  "ccSaveFormatBinary": 3145728,
+  "ccSaveFormatIntelHex": 2097152,
+  "ccSaveFormatMask": 15728640,
+  "ccSaveFormatMotorolaS37": 1048576,
+  "ccSrcFiltered": 131072,
+  "ccSrcInFiles": 65536,
+  "ccSrcLoaded": 0,
+  "ccSrcMask": 458752
+ },
+ "IConnectEclipse/EDisassemblyFlags": {
+  "dfNextAll": 12,
+  "dfNextImm": 4,
+  "dfNextMask": 12,
+  "dfNextNone": 0,
+  "dfSymMask": 3,
+  "dfSymNone": 0,
+  "dfSymSymbols": 1,
+  "dfSymSymbolsAndValues": 2
+ },
+ "IConnectEclipse/EGetCPUSFR": {
+  "gcsAreas": 4,
+  "gcsGPRs": 2,
+  "gcsSFRs": 1
+ },
+ "IConnectEclipse/EGetGlobalsFlags": {
+  "gvfFunctions": 8,
+  "gvfInstructions": 128,
+  "gvfLabels": 2,
+  "gvfMacros": 64,
+  "gvfMask": 4095,
+  "gvfModules": 4,
+  "gvfPartitionCurrent": 2097152,
+  "gvfPartitionDefault": 1048576,
+  "gvfPartitionMask": 3145728,
+  "gvfPartitionSpecify": 0,
+  "gvfSortAddress": 65536,
+  "gvfSortMask": 983040,
+  "gvfSortName": 131072,
+  "gvfTypedefs": 32,
+  "gvfTypes": 16,
+  "gvfVariables": 1
+ },
+ "IConnectEclipse/EGetStackFrameInfoFlags": {
+  "sfiAbsolutePath": 2,
+  "sfiActiveFrameOnly": 1
+ },
+ "IConnectEclipse/ESFRValue": {
+  "svErrorInfo": 32,
+  "svNoRefresh": 16,
+  "svRead": 1,
+  "svWrite": 2,
+  "svWriteThenRead": 3
+ },
+ "IConnectIDE/EDocumentExportParameter": {
+  "deFormatMask": 255,
+  "deScopeAll": 0,
+  "deScopeMask": 3840,
+  "deScopeSelection": 256
+ },
+ "IConnectIDE/EDocumentResetParameter": {
+  "drConfigAll": 16,
+  "drConfigMask": 240,
+  "drConfigPresetApply": 64,
+  "drConfigPresetInit": 48,
+  "drConfigSelected": 32,
+  "drContent": 1,
+  "drItem": 2,
+  "drItemMask": 4278190080
+ },
+ "IConnectProfiler/EConfigFlags": {
+  "cfTimeStampCycles": 0,
+  "cfTimeStampM0": 16,
+  "cfTimeStampM1": 17,
+  "cfTimeStampM2": 18,
+  "cfTimeStampM3": 19,
+  "cfTimeStampM4": 20,
+  "cfTimeStampM5": 21,
+  "cfTimeStampM6": 22,
+  "cfTimeStampM7": 23,
+  "cfTimeStampM8": 24,
+  "cfTimeStampM9": 25,
+  "cfTimeStampMask": 255,
+  "cfTimeStampTime": 1
+ },
+ "IConnectProfiler/EGetStatusFlags": {
+  "gsfNumAnalyzed": 1,
+  "gsfNumMask": 7,
+  "gsfNumRecorded": 0
+ },
+ "IConnectProject/EOptionFlags": {
+  "ofaAdd": 262144,
+  "ofaEnum": 131072,
+  "ofaEnumIndexMask": 65535,
+  "ofaGet": 65536,
+  "ofaMask": 983040,
+  "ofaMov": 393216,
+  "ofaRelativePaths": 1048576,
+  "ofaRmv": 327680,
+  "ofaSet": 196608
+ },
+ "IConnectTest/ECreateVariableExFlags": {
+  "cvePersistentVariable": 2,
+  "cveRegularVariable": 1
+ },
+ "IConnectTest/EEvaluateFlags": {
+  "efIgnoreLocalScope": 2,
+  "efModifyParameter": 8,
+  "efUseRealTimeAccess": 4,
+  "efVagueFloatEqual": 1
+ },
+ "IConnectTest/EState": {
+  "stateAborted": 7,
+  "stateEnded": 4,
+  "stateException": 12,
+  "stateInitialized": 2,
+  "stateOffline": 1,
+  "statePaused": 8,
+  "statePersistentReady": 9,
+  "stateRunning": 3,
+  "stateStop": 11,
+  "stateStub": 5,
+  "stateSystemTest": 10,
+  "stateTimeOut": 13,
+  "stateUnexpectedStop": 6
+ },
+ "IConnectTest/EStatusFlags": {
+  "sfException": 5,
+  "sfQueryStub": 2,
+  "sfQueryTestCase": 1,
+  "sfStub": 4,
+  "sfTestCase": 3
+ },
+ "IConnectTest/EStubFlags": {
+  "sfeAutoBreakpoints": 0,
+  "sfeCustomBreakpoints": 1
+ },
+ "IConnectTest/EStubState": {
+  "stateStubActive": 2,
+  "stateStubNotActive": 1
+ },
+ "IConnectUMI/EOperationFlags": {
+  "wCheckIfOpAvailable": 8192,
+  "wFileFormatAuto": 0,
+  "wFileFormatBin": 65536,
+  "wFileFormatHex": 196608,
+  "wFileFormatMask": 983040,
+  "wFileFormatS": 131072,
+  "wOpBlankCheck": 1280,
+  "wOpErase": 768,
+  "wOpFill": 3072,
+  "wOpFlush": 512,
+  "wOpGetID": 3328,
+  "wOpGetLastError": 2816,
+  "wOpMask": 3840,
+  "wOpRead": 256,
+  "wOpReadHASH": 2304,
+  "wOpReadPgmState": 2560,
+  "wOpSecure": 1536,
+  "wOpSecureCheck": 2048,
+  "wOpUnsecure": 1792,
+  "wOpVerify": 1024,
+  "wOpWrite": 0,
+  "wOverrideSafety": 32768,
+  "wProgCache": 16384,
+  "wProgDevice": 0,
+  "wProgMask": 16384,
+  "wScopeDevice": 4096
+ },
+ "IDataDescriptor/EContainer": {
+  "cIDArray": 1,
+  "cNone": 0
+ },
+ "IDataDescriptor/EType": {
+  "tBOOL": 1,
+  "tENUM": 5,
+  "tFLOAT": 4,
+  "tIDataBase": 10,
+  "tINT": 2,
+  "tSPath": 9,
+  "tSTRING": 7,
+  "tSTRUCT": 6,
+  "tUINT": 3,
+  "tbool": 0,
+  "tstdString": 8
+ },
+ "IEmitter/EObjectType": {
+  "ETestReport": 2,
+  "ETestReportConfig": 0,
+  "ETestReportStatistics": 1
+ },
+ "IEmitter/EYamlStyle": {
+  "EYAML_ANY_STYLE": 0,
+  "EYAML_BLOCK_STYLE": 2,
+  "EYAML_FLOW_STYLE": 1
+ },
+ "IMenuItem/EType": {
+  "tItem": 0,
+  "tMenu": 1,
+  "tSeparator": 2
+ },
+ "IODirection": {
+  "IN_DIR": 0,
+  "OUT_DIR": 1
+ },
+ "IOLevels": {
+  "VL_1_8V": 0,
+  "VL_2_5V": 1,
+  "VL_3_3V": 2,
+  "VL_5V": 3
+ },
+ "IOPatternType": {
+  "CONTINUOUS": 2,
+  "DO_NOT_MODIFY": 0,
+  "SINGLE_SHOT": 1
+ },
+ "IORecordMode": {
+  "ALL": 2,
+  "INPUTS": 1,
+  "NONE": 0
+ },
+ "IOState": {
+  "DO_NOT_MODIFY": 2,
+  "HIGH": 1,
+  "LOW": 0
+ },
+ "IOTriggerSignalState": {
+  "ANY": 0,
+  "HIGH": 2,
+  "LOW": 1
+ },
+ "ISFR/EProperties": {
+  "pFloat": 16,
+  "pRead": 1,
+  "pSubReg": 4,
+  "pWrite": 2
+ },
+ "IVariable/EType": {
+  "tArray": 3,
+  "tClass": 6,
+  "tFunction": 7,
+  "tPointer": 1,
+  "tReference": 2,
+  "tSimple": 0,
+  "tStruct": 4,
+  "tUnion": 5
+ },
+ "LINBaudrate": {
+  "B_19200_BPS": 2,
+  "B_20000_BPS": 3,
+  "B_2400_BPS": 0,
+  "B_9600_BPS": 1
+ },
+ "PathTransformer/EConvDirection": {
+  "eUnixToWin": 1,
+  "eWinToUnix": 0
+ },
+ "PowerSenseShunt": {
+  "SHUNT_0_11_OHM": 2,
+  "SHUNT_0_26_OHM": 1,
+  "SHUNT_1_OHM": 0
+ },
+ "SAddressInfo/EDest": {
+  "bus": 1,
+  "core": 0,
+  "module": 2
+ },
+ "SBatchAccessHeader/EFlags": {
+  "baDomainDefault": 0,
+  "baDomainEmulator": 32,
+  "baDomainHost": 16,
+  "baDomainMask": 240,
+  "flAbortIfTooSlow": 2,
+  "flRealTime": 4,
+  "flStopResume": 8,
+  "flWantTimeStamp": 1
+ },
+ "SBatchAccessItem/EFlags": {
+  "flAccessSize1MAU": 16,
+  "flAccessSize2MAU": 32,
+  "flAccessSize4MAU": 48,
+  "flAccessSize8MAU": 64,
+  "flAccessSizeAuto": 0,
+  "flAccessSizeMask": 112,
+  "flRead": 0,
+  "flTimeOffsetRel": 8,
+  "flWrite": 1
+ },
+ "SBatchAccessItem/ELimitations": {
+  "MAX_DATA_SIZE": 8
+ },
+ "SBatchAccessItemResult/EResult": {
+  "resAccess": 1,
+  "resOK": 0,
+  "resTimeout": 2
+ },
+ "SMSID/ELevel": {
+  "App": 0,
+  "HV": 2,
+  "Sys": 3,
+  "VM": 1
+ },
+ "SNodeInfo/ENodeType": {
+  "ADIO": 2,
+  "AP": 4,
+  "CANLIN": 3,
+  "Hub": 1,
+  "Root": 0
+ },
+ "SNodeInfo/SIPInfo/EType": {
+  "AIN": 4,
+  "AOUT": 5,
+  "CAN": 8,
+  "COUNTER": 0,
+  "DIO": 1,
+  "I2C": 7,
+  "LIN": 9,
+  "SPI": 6,
+  "mDIO7": 3,
+  "mDIO_AP": 2
+ },
+ "SPICSName": {
+  "CS0": 1,
+  "CS1": 2,
+  "CS2": 3,
+  "CS3": 4,
+  "DO_NOT_MODIFY": 0
+ },
+ "SPIDataEndian": {
+  "DO_NOT_MODIFY": 0,
+  "ISYS_BIG_ENDIAN": 2,
+  "ISYS_LITTLE_ENDIAN": 1
+ },
+ "SPIDataStream": {
+  "DO_NOT_MODIFY": 0,
+  "MISO": 1,
+  "MOSI": 2
+ },
+ "SPISamplePhase": {
+  "DO_NOT_MODIFY": 0,
+  "FIRST_EDGE": 1,
+  "SECOND_EDGE": 2
+ },
+ "SProfilerStartingPoint/EEvent": {
+  "eAnything": 0,
+  "eExecution": 1
+ },
+ "SType/EType": {
+  "tAddress": 4,
+  "tCompound": 255,
+  "tFloat": 3,
+  "tSigned": 2,
+  "tUndefined": 0,
+  "tUnsigned": 1
+ },
+ "SType2/EType2": {
+  "t2Array": 8,
+  "t2BitField": 1,
+  "t2Class": 5,
+  "t2Enum": 2,
+  "t2Function": 9,
+  "t2Pointer": 6,
+  "t2Reference": 7,
+  "t2Regular": 0,
+  "t2Struct": 3,
+  "t2Union": 4
+ },
+ "Ssymbol_FQN/EEncode": {
+  "eFile": 1,
+  "eFull": 511,
+  "eFunc": 2,
+  "eInstance": 4,
+  "eModifier": 256,
+  "eNaked": 16,
+  "eNamespace": 8,
+  "ePartition": 64,
+  "eProcess": 128,
+  "eSignature": 32,
+  "eSymbol": 56,
+  "eSymbolFQN": 255,
+  "eSymbolQN": 63
+ },
+ "TriState": {
+  "DO_NOT_MODIFY": 0,
+  "FALSE_TS": 1,
+  "TRUE_TS": 2
+ }
+}

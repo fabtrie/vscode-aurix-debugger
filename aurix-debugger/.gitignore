@@ -1,0 +1,6 @@
+/bin
+/server/target
+/third_party
+/.venv
+__pycache__/
+*.egg-info/

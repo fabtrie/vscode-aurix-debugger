@@ -1,0 +1,13 @@
+[package]
+name = "symbols"
+description = "DWARF symbol and line information for TriCore ELF files (GHS and GCC)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gimli.workspace = true
+object.workspace = true
+memmap2.workspace = true
+isa.workspace = true

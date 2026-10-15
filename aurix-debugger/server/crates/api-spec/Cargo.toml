@@ -1,0 +1,12 @@
+[package]
+name = "api-spec"
+description = "The aurix-dbg REST/MCP API definition: operations, types and their documentation, and the OpenAPI and Python generators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+schemars = "1.2"

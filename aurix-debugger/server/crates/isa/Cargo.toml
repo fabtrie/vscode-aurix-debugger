@@ -1,0 +1,9 @@
+[package]
+name = "isa"
+description = "Instruction set tables for the AURIX auxiliary cores (GTM MCS)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

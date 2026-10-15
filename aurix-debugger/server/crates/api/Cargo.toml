@@ -1,0 +1,26 @@
+[package]
+name = "api"
+description = "REST, MCP and Swagger frontend for the aurix-dbg core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aurix-core.workspace = true
+tcf.workspace = true
+symbols.workspace = true
+orti.workspace = true
+jim.workspace = true
+api-spec.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
+futures-util = { version = "0.3", default-features = false }
+swagger-ui-dist = "5"
+
+[build-dependencies]
+api-spec.workspace = true
+
+[dev-dependencies]
+openocd-tcl.workspace = true

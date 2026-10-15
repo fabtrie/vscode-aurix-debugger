@@ -1,0 +1,43 @@
+//! Protocol-neutral debug core.
+//!
+//! Layering follows OpenOCD: an [`adapter::Adapter`] provides memory access
+//! (TAS), [`tricore::Tricore`] implements the target, and the Jim Tcl
+//! interpreter runs the unchanged OpenOCD cfg scripts through the commands in
+//! [`commands`]. All target access and Tcl evaluation happen on one thread
+//! ([`server::Server`]); frontends talk to it through [`server::ServerHandle`].
+
+pub mod log;
+
+pub mod adapter;
+pub mod arch;
+pub mod commands;
+pub mod cortex_m;
+pub mod daq;
+pub mod gtm_mcs;
+pub mod ctx;
+pub mod error;
+pub mod events;
+pub mod flash;
+pub mod image;
+pub mod ops;
+pub mod server;
+pub mod sim;
+pub mod sim_mcs;
+pub mod target;
+pub mod tas_adapter;
+#[cfg(feature = "winidea")]
+pub mod winidea_adapter;
+#[cfg(feature = "winidea")]
+pub mod winidea_regs;
+#[cfg(feature = "winidea")]
+pub mod winidea_session;
+pub mod telnet;
+pub mod tricore;
+pub mod unwind;
+pub mod unwind_arm;
+pub mod util;
+
+pub use ctx::{Ctx, Cx, Shared};
+pub use error::{Error, Result};
+pub use events::Event;
+pub use server::{Server, ServerHandle};

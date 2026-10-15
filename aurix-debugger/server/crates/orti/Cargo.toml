@@ -1,0 +1,10 @@
+[package]
+name = "orti"
+description = "OSEK Run Time Interface (ORTI) files: the OS awareness description an AUTOSAR generator emits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+symbols.workspace = true

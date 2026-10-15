@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+# Listed explicitly: a glob would also pick up crate directories left behind by other branches
+# (untracked files keep them alive), which have no manifest here and break the build.
+members = [
+    "crates/api",
+    "crates/api-spec",
+    "crates/aurix-dbg",
+    "crates/core",
+    "crates/isa",
+    "crates/jim",
+    "crates/jimtcl",
+    "crates/openocd-tcl",
+    "crates/orti",
+    "crates/symbols",
+    "crates/tas",
+    "crates/tcf",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+tas = { path = "crates/tas" }
+jim = { path = "crates/jim" }
+jimtcl = { path = "crates/jimtcl" }
+openocd-tcl = { path = "crates/openocd-tcl" }
+aurix-core = { path = "crates/core" }
+tcf = { path = "crates/tcf" }
+symbols = { path = "crates/symbols" }
+orti = { path = "crates/orti" }
+isa = { path = "crates/isa" }
+api-spec = { path = "crates/api-spec" }
+api = { path = "crates/api" }
+winidea-sdk = { path = "crates/winidea-sdk" }
+serde_json = "1"
+base64 = "0.22"
+gimli = "0.34"
+object = "0.40"
+memmap2 = "0.9"
+
+# Loading a 138 MB ELF with DWARF is far too slow unoptimized.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.symbols]
+opt-level = 2

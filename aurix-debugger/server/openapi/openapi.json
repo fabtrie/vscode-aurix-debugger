@@ -1,0 +1,3320 @@
+{
+  "components": {
+    "schemas": {
+      "AddBreakpointRequest": {
+        "additionalProperties": false,
+        "description": "Where a breakpoint is: exactly one of `address`, `symbol` or `file` with `line`.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Code address."
+          },
+          "file": {
+            "default": null,
+            "description": "Source file (with `line`); needs the symbols loaded by a VS Code debug session.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "default": null,
+            "description": "Source line in `file`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "symbol": {
+            "default": null,
+            "description": "Function name; needs the symbols loaded by a VS Code debug session.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targets": {
+            "default": null,
+            "description": "Targets (names or indices) to break on; default: all examined targets.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AddWatchpointRequest": {
+        "additionalProperties": false,
+        "description": "Watchpoint arguments.",
+        "properties": {
+          "access": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WatchAccess"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Triggering access (default `write`)."
+          },
+          "address": {
+            "anyOf": [
+              {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                "type": "string"
+              }
+            ],
+            "description": "Data address."
+          },
+          "length": {
+            "default": null,
+            "description": "Watched bytes (default 4).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "address"
+        ],
+        "type": "object"
+      },
+      "ApiError": {
+        "description": "Error of an operation (HTTP error responses, MCP tool errors).",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode",
+            "description": "What went wrong, for programs."
+          },
+          "message": {
+            "description": "What went wrong, for people.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ApiEvent": {
+        "description": "An event of the stream `GET /api/v1/events` (server-sent events; the SSE event name is\n`type`). Includes the actions of all clients, e.g. a halt from VS Code.",
+        "oneOf": [
+          {
+            "description": "A target halted.",
+            "properties": {
+              "pc": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Halt reason (`breakpoint`, `debug-request`, `single-step`, ...).",
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              },
+              "type": {
+                "const": "halted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "target",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A target runs.",
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "type": {
+                "const": "resumed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A device reset was noticed.",
+            "properties": {
+              "type": {
+                "const": "reset_detected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A requested reset finished.",
+            "properties": {
+              "type": {
+                "const": "reset_done",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A target became accessible.",
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "type": {
+                "const": "examined",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A target has not been accessible for a while (e.g. not powered).",
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "type": {
+                "const": "unreachable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Memory written through this API.",
+            "properties": {
+              "address": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "length": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target": {
+                "description": "Core view used, if any.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "memory_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "address",
+              "length"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A register written through this API.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              },
+              "type": {
+                "const": "register_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "target",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Breakpoints added, changed or removed by any client.",
+            "properties": {
+              "added": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "changed": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "removed": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "breakpoints_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "added",
+              "changed",
+              "removed"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A log line of the debug server.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "log",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The client did not keep up: this many events were dropped.",
+            "properties": {
+              "missed": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "missed"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BreakpointInfo": {
+        "description": "A breakpoint and its state.",
+        "properties": {
+          "address": {
+            "description": "Requested code address.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "error": {
+            "description": "Why it is not planted (e.g. symbols not loaded yet: it is planted once they are).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Requested source file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hits": {
+            "description": "Number of hits reported to debugger clients.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "Breakpoint ID.",
+            "type": "string"
+          },
+          "instances": {
+            "description": "Where it is planted.",
+            "items": {
+              "$ref": "#/components/schemas/BreakpointInstance"
+            },
+            "type": "array"
+          },
+          "line": {
+            "description": "Source line (the actual line with code, for a file/line breakpoint).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "owner": {
+            "$ref": "#/components/schemas/BreakpointOwner"
+          },
+          "symbol": {
+            "description": "Requested function name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "owner",
+          "enabled",
+          "instances",
+          "hits"
+        ],
+        "type": "object"
+      },
+      "BreakpointInstance": {
+        "description": "Where a breakpoint is planted on one target.",
+        "properties": {
+          "address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "description": "Why it could not be planted (e.g. no free hardware breakpoint).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Source file of the address, when the symbols are loaded (by a VS Code debug session).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "description": "Source line of the address in `file`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "description": "Target name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BreakpointList": {
+        "description": "The breakpoints of all clients.",
+        "properties": {
+          "breakpoints": {
+            "items": {
+              "$ref": "#/components/schemas/BreakpointInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "breakpoints"
+        ],
+        "type": "object"
+      },
+      "BreakpointOwner": {
+        "description": "Who set a breakpoint.",
+        "oneOf": [
+          {
+            "const": "api",
+            "description": "This API (REST, MCP, Python): stays until removed.",
+            "type": "string"
+          },
+          {
+            "const": "client",
+            "description": "A debugger client (VS Code): removed when it disconnects.",
+            "type": "string"
+          }
+        ]
+      },
+      "BreakpointRef": {
+        "additionalProperties": false,
+        "description": "A breakpoint.",
+        "properties": {
+          "id": {
+            "description": "Breakpoint ID.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "CommandOutput": {
+        "description": "Output of a command.",
+        "properties": {
+          "output": {
+            "description": "Log output and result.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "type": "object"
+      },
+      "ErrorCode": {
+        "description": "Error kind.",
+        "oneOf": [
+          {
+            "const": "bad_request",
+            "description": "Invalid arguments.",
+            "type": "string"
+          },
+          {
+            "const": "not_found",
+            "description": "Unknown target, register, breakpoint or operation.",
+            "type": "string"
+          },
+          {
+            "const": "not_halted",
+            "description": "The target must be halted (or running) for this.",
+            "type": "string"
+          },
+          {
+            "const": "not_examined",
+            "description": "The target has not been examined (not accessible yet).",
+            "type": "string"
+          },
+          {
+            "const": "busy",
+            "description": "Another client is using the target, e.g. a source-level step from VS Code runs.",
+            "type": "string"
+          },
+          {
+            "const": "timeout",
+            "description": "The target did not reach the requested state in time.",
+            "type": "string"
+          },
+          {
+            "const": "memory",
+            "description": "Memory access failed (bus error, protection).",
+            "type": "string"
+          },
+          {
+            "const": "adapter",
+            "description": "Debug adapter (TAS) connection or protocol error.",
+            "type": "string"
+          },
+          {
+            "const": "device_locked",
+            "description": "The device is locked (debug access disabled).",
+            "type": "string"
+          },
+          {
+            "const": "device_access",
+            "description": "The device is not accessible (power-down, reset active).",
+            "type": "string"
+          },
+          {
+            "const": "resource",
+            "description": "Out of a resource, e.g. hardware breakpoints.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The operation failed.",
+            "type": "string"
+          }
+        ]
+      },
+      "FlashVerifyRequest": {
+        "additionalProperties": false,
+        "description": "Flash verification arguments.",
+        "properties": {
+          "file": {
+            "description": "Image file on the debug server's machine.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "type": "object"
+      },
+      "FlashWriteRequest": {
+        "additionalProperties": false,
+        "description": "Flash programming arguments.",
+        "properties": {
+          "erase": {
+            "default": false,
+            "description": "Erase programmed sectors first (needed unless they are erased).",
+            "type": "boolean"
+          },
+          "files": {
+            "description": "Image files (ELF, Intel HEX) on the debug server's machine; later files win where they\noverlap.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "incremental": {
+            "default": false,
+            "description": "Skip sectors that already hold the image data.",
+            "type": "boolean"
+          },
+          "verify": {
+            "default": false,
+            "description": "Read back and compare after programming.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "LoadOrtiRequest": {
+        "description": "Which ORTI file to load.",
+        "properties": {
+          "file": {
+            "description": "Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.",
+            "type": "string"
+          },
+          "target": {
+            "default": null,
+            "description": "Target whose symbols resolve the attribute expressions, and whose memory view is read.\nDefault: the first core that has symbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "type": "object"
+      },
+      "LoadSymbolsRequest": {
+        "additionalProperties": false,
+        "description": "Symbol files to load.",
+        "properties": {
+          "files": {
+            "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "default": null,
+            "description": "Targets (names or indices) to load them for; default: all cores.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "MemoryData": {
+        "description": "Memory contents.",
+        "properties": {
+          "address": {
+            "description": "Start address.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data": {
+            "description": "The bytes as hex string.",
+            "pattern": "^([0-9a-fA-F]{2})*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "data"
+        ],
+        "type": "object"
+      },
+      "MemoryWritten": {
+        "description": "A written memory range.",
+        "properties": {
+          "address": {
+            "description": "Start address.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "length": {
+            "description": "Number of bytes written.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "length"
+        ],
+        "type": "object"
+      },
+      "NoArgs": {
+        "additionalProperties": false,
+        "description": "No arguments.",
+        "type": "object"
+      },
+      "OsAttributeInfo": {
+        "description": "One attribute of an ORTI object type.",
+        "properties": {
+          "description": {
+            "description": "The description the generator gave it, suitable as a column header.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`ctype` (a number), `enum` (a name from a fixed list) or `string` (literal text).",
+            "type": "string"
+          },
+          "live": {
+            "description": "The value can change while the target runs, so it is worth re-reading.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name as the ORTI file declares it, e.g. `RUNNINGTASK`, `vs_HomePriority`.",
+            "type": "string"
+          },
+          "per_core": {
+            "description": "Declared `NAME[]`: it has one value per logical core. This is the ORTI 2.3 SMP extension.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "kind",
+          "per_core",
+          "live"
+        ],
+        "type": "object"
+      },
+      "OsAttributeValue": {
+        "description": "One attribute value of one object.",
+        "properties": {
+          "core": {
+            "description": "Logical core, for an attribute declared per core.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "description": "Why the value could not be read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "description": "The ORTI object this value points at, when the enumerator names one, e.g. the stack of a\ntask or the owner of a spinlock.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "number": {
+            "description": "The raw integer behind `value`, when there is one.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "value": {
+            "description": "The value to display: an enumerator name, a number, or literal text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "OsInfo": {
+        "description": "The loaded OS awareness description.",
+        "properties": {
+          "cores": {
+            "description": "Logical cores the file describes.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "errors": {
+            "description": "Attributes that could not be planned, with the reason. They are read again on demand, so\nentries here are usually attributes planned while the board was not reachable.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file": {
+            "description": "The ORTI file, or null when none is loaded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "implementation": {
+            "description": "The `IMPLEMENTATION` name, e.g. `Vector_ORTI`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "description": "The target whose symbols the attribute expressions were resolved against.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "types": {
+            "items": {
+              "$ref": "#/components/schemas/OsTypeInfo"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "ORTI semantics version. `2.3` is the unofficial SMP extension, where the OS attributes\nare arrays indexed by logical core.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "cores",
+          "types",
+          "errors"
+        ],
+        "type": "object"
+      },
+      "OsObject": {
+        "description": "One object instance and its attribute values.",
+        "properties": {
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/OsAttributeValue"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "attributes"
+        ],
+        "type": "object"
+      },
+      "OsObjectList": {
+        "description": "Objects of one ORTI type, read now.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "objects": {
+            "items": {
+              "$ref": "#/components/schemas/OsObject"
+            },
+            "type": "array"
+          },
+          "reads": {
+            "description": "Bus accesses this call made. Constants and literal text cost none.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "objects",
+          "reads"
+        ],
+        "type": "object"
+      },
+      "OsObjectsRequest": {
+        "description": "Which objects to read.",
+        "properties": {
+          "kind": {
+            "description": "The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...",
+            "type": "string"
+          },
+          "live_only": {
+            "default": null,
+            "description": "Skip attributes that cannot change, for a cheaper refresh. Default: false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "default": null,
+            "description": "Only this object, by name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "OsStack": {
+        "description": "One stack's coverage.",
+        "properties": {
+          "base": {
+            "description": "Lowest address of the region.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "direction": {
+            "description": "`DOWN` or `UP`: which end keeps the fill pattern.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why it could not be measured, e.g. a region the memory protection hides from the debugger.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "free": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "pattern": {
+            "description": "The word the OS fills the stack with at startup.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "percent": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "size": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "used": {
+            "description": "Bytes ever used (the high-water mark). Absent when it could not be measured.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "base",
+          "size",
+          "direction",
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "OsStackList": {
+        "description": "Stack coverage.",
+        "properties": {
+          "reads": {
+            "description": "Bus accesses this call made. Measuring is the expensive part of OS awareness.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stacks": {
+            "items": {
+              "$ref": "#/components/schemas/OsStack"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "stacks",
+          "reads"
+        ],
+        "type": "object"
+      },
+      "OsStacksRequest": {
+        "description": "Which stacks to measure.",
+        "properties": {
+          "names": {
+            "default": null,
+            "description": "Measure only these stacks, by name. Default: every stack the ORTI file describes.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OsTypeInfo": {
+        "description": "One ORTI object type.",
+        "properties": {
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/OsAttributeInfo"
+            },
+            "type": "array"
+          },
+          "count": {
+            "description": "Object instances of this type.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "description": "The description the generator gave the collection, e.g. `Stacks`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "`OS`, `TASK`, `STACK`, `vs_SPINLOCK`, ... Generators invent their own types, so this is\nwhatever the file declared.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "count",
+          "attributes"
+        ],
+        "type": "object"
+      },
+      "ReadMemoryRequest": {
+        "additionalProperties": false,
+        "description": "Memory read arguments.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                "type": "string"
+              }
+            ],
+            "description": "Start address."
+          },
+          "length": {
+            "description": "Number of bytes (at most 65536).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target": {
+            "default": null,
+            "description": "Read as this core sees memory (HSM-private memory, MCS program RAM); default: the\nsystem bus.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "address",
+          "length"
+        ],
+        "type": "object"
+      },
+      "ReadRegistersRequest": {
+        "additionalProperties": false,
+        "description": "Register list arguments.",
+        "properties": {
+          "group": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegisterGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only this group (default `core`)."
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "RegisterGroup": {
+        "description": "Register group.",
+        "oneOf": [
+          {
+            "const": "core",
+            "description": "Core registers (data, address, PC, PSW, ...); need a halted core.",
+            "type": "string"
+          },
+          {
+            "const": "debug",
+            "description": "Debug registers (DBGSR, trigger registers, ...); accessible while running.",
+            "type": "string"
+          }
+        ]
+      },
+      "RegisterList": {
+        "description": "Register values of a target.",
+        "properties": {
+          "registers": {
+            "items": {
+              "$ref": "#/components/schemas/RegisterValue"
+            },
+            "type": "array"
+          },
+          "target": {
+            "description": "Target name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "registers"
+        ],
+        "type": "object"
+      },
+      "RegisterRef": {
+        "additionalProperties": false,
+        "description": "A register.",
+        "properties": {
+          "name": {
+            "description": "Register name (e.g. `pc`, `d4`, `a10`, `psw`; aliases like `sp` work).",
+            "type": "string"
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "name"
+        ],
+        "type": "object"
+      },
+      "RegisterValue": {
+        "description": "A register value.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "group": {
+            "$ref": "#/components/schemas/RegisterGroup"
+          },
+          "name": {
+            "description": "Register name.",
+            "type": "string"
+          },
+          "value": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "value",
+          "group",
+          "description"
+        ],
+        "type": "object"
+      },
+      "ResetMode": {
+        "description": "Reset mode.",
+        "oneOf": [
+          {
+            "const": "run",
+            "description": "Reset and let the cores run.",
+            "type": "string"
+          },
+          {
+            "const": "halt",
+            "description": "Reset and halt the cores at their first instruction.",
+            "type": "string"
+          },
+          {
+            "const": "init",
+            "description": "Like `halt`, then run the `reset-init` handlers of the configuration.",
+            "type": "string"
+          }
+        ]
+      },
+      "ResetRequest": {
+        "additionalProperties": false,
+        "description": "Reset arguments.",
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResetMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Reset mode (default `halt`)."
+          }
+        },
+        "type": "object"
+      },
+      "ResumeRequest": {
+        "additionalProperties": false,
+        "description": "Resume arguments.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Continue at this address instead of the current PC."
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "RunState": {
+        "description": "Run state of a target.",
+        "oneOf": [
+          {
+            "enum": [
+              "unknown",
+              "running",
+              "halted",
+              "debug_running"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "reset",
+            "description": "Held in reset.",
+            "type": "string"
+          }
+        ]
+      },
+      "SymbolsForTarget": {
+        "description": "The symbol files of one target.",
+        "properties": {
+          "files": {
+            "description": "Loaded files, primary first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "functions": {
+            "description": "Functions with debug information.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "globals": {
+            "description": "Global and static variables that have a fixed address.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_files": {
+            "description": "Source files in the line table.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target": {
+            "description": "Target name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "files",
+          "functions",
+          "globals",
+          "source_files"
+        ],
+        "type": "object"
+      },
+      "SymbolsInfo": {
+        "description": "The symbol files loaded per target.",
+        "properties": {
+          "load_seconds": {
+            "description": "How long the load took.",
+            "format": "double",
+            "type": "number"
+          },
+          "targets": {
+            "description": "Only targets that have symbols.",
+            "items": {
+              "$ref": "#/components/schemas/SymbolsForTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "targets",
+          "load_seconds"
+        ],
+        "type": "object"
+      },
+      "TargetInfo": {
+        "description": "A target (core) and its state.",
+        "properties": {
+          "arch": {
+            "description": "Core architecture (`tricore`, `cortex_m`, `gtm_mcs`).",
+            "type": "string"
+          },
+          "examined": {
+            "description": "The target has been examined (is accessible and under debug control).",
+            "type": "boolean"
+          },
+          "index": {
+            "description": "Index of the target (usable instead of the name).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "Target name (e.g. `tc37x.cpu0`).",
+            "type": "string"
+          },
+          "pc": {
+            "description": "Program counter, when halted.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reachable": {
+            "description": "False while the target has not been accessible for a while (e.g. not powered).",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why the target halted (`breakpoint`, `debug-request`, `single-step`, `reset`, ...),\n`not halted` while running.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunState"
+          }
+        },
+        "required": [
+          "index",
+          "name",
+          "arch",
+          "state",
+          "reason",
+          "examined",
+          "reachable"
+        ],
+        "type": "object"
+      },
+      "TargetList": {
+        "description": "The targets.",
+        "properties": {
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "targets"
+        ],
+        "type": "object"
+      },
+      "TargetRef": {
+        "additionalProperties": false,
+        "description": "A target (core).",
+        "properties": {
+          "target": {
+            "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "TclRequest": {
+        "additionalProperties": false,
+        "description": "Tcl command arguments.",
+        "properties": {
+          "command": {
+            "description": "Command line, as typed in the telnet console (e.g. `mdw 0x70000000 4`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "WaitFor": {
+        "description": "State to wait for.",
+        "enum": [
+          "halted",
+          "running"
+        ],
+        "type": "string"
+      },
+      "WaitRequest": {
+        "additionalProperties": false,
+        "description": "Wait arguments.",
+        "properties": {
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaitFor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "State to wait for (default `halted`)."
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "default": null,
+            "description": "Maximum wait in milliseconds (default 5000, at most 600000).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "WatchAccess": {
+        "description": "Access that triggers a watchpoint.",
+        "oneOf": [
+          {
+            "enum": [
+              "read",
+              "write"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "access",
+            "description": "Read or write.",
+            "type": "string"
+          }
+        ]
+      },
+      "WatchpointInfo": {
+        "description": "A watchpoint.",
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/WatchAccess"
+          },
+          "address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "length": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target": {
+            "description": "Target name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "target",
+          "address",
+          "length",
+          "access"
+        ],
+        "type": "object"
+      },
+      "WatchpointList": {
+        "description": "The watchpoints of all targets.",
+        "properties": {
+          "watchpoints": {
+            "items": {
+              "$ref": "#/components/schemas/WatchpointInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "watchpoints"
+        ],
+        "type": "object"
+      },
+      "WatchpointRef": {
+        "additionalProperties": false,
+        "description": "A watchpoint by target and address.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                "type": "string"
+              }
+            ],
+            "description": "Data address."
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "address"
+        ],
+        "type": "object"
+      },
+      "WriteMemoryRequest": {
+        "additionalProperties": false,
+        "description": "Memory write arguments.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                "type": "string"
+              }
+            ],
+            "description": "Start address."
+          },
+          "data": {
+            "description": "The bytes as hex string (at most 65536 bytes).",
+            "pattern": "^([0-9a-fA-F]{2})*$",
+            "type": "string"
+          },
+          "target": {
+            "default": null,
+            "description": "Write as this core sees memory (HSM-private memory, MCS program RAM); default: the\nsystem bus.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "address",
+          "data"
+        ],
+        "type": "object"
+      },
+      "WriteRegisterRequest": {
+        "additionalProperties": false,
+        "description": "Register write arguments.",
+        "properties": {
+          "name": {
+            "description": "Register name.",
+            "type": "string"
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                "type": "string"
+              }
+            ],
+            "description": "New value."
+          }
+        },
+        "required": [
+          "target",
+          "name",
+          "value"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nThe API shares its session with the other frontends: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream.\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
+    "title": "aurix-dbg API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/breakpoints": {
+      "get": {
+        "description": "List the breakpoints of all clients (this API and VS Code).",
+        "operationId": "list_breakpoints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BreakpointList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the breakpoints of all clients (this API and VS Code).",
+        "tags": [
+          "breakpoints"
+        ]
+      },
+      "post": {
+        "description": "Set a hardware breakpoint at an address, function or source line.\n\nThe breakpoint is shared with the connected debugger clients: VS Code reports its hits.\nA function or source line breakpoint needs the symbols a VS Code debug session loaded;\nbefore that it is pending (see `error`) and is planted when they are loaded.",
+        "operationId": "add_breakpoint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Where a breakpoint is: exactly one of `address`, `symbol` or `file` with `line`.",
+                "properties": {
+                  "address": {
+                    "anyOf": [
+                      {
+                        "anyOf": [
+                          {
+                            "maximum": 4294967295,
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Code address."
+                  },
+                  "file": {
+                    "default": null,
+                    "description": "Source file (with `line`); needs the symbols loaded by a VS Code debug session.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "line": {
+                    "default": null,
+                    "description": "Source line in `file`.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "symbol": {
+                    "default": null,
+                    "description": "Function name; needs the symbols loaded by a VS Code debug session.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "targets": {
+                    "default": null,
+                    "description": "Targets (names or indices) to break on; default: all examined targets.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BreakpointInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Set a hardware breakpoint at an address, function or source line.",
+        "tags": [
+          "breakpoints"
+        ]
+      }
+    },
+    "/api/v1/breakpoints/{id}": {
+      "delete": {
+        "description": "Remove a breakpoint (also one set in VS Code). Returns the remaining breakpoints.",
+        "operationId": "remove_breakpoint",
+        "parameters": [
+          {
+            "description": "Breakpoint ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BreakpointList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Remove a breakpoint (also one set in VS Code).",
+        "tags": [
+          "breakpoints"
+        ]
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "description": "An event of the stream `GET /api/v1/events` (server-sent events; the SSE event name is\n`type`). Includes the actions of all clients, e.g. a halt from VS Code.",
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEvent"
+                }
+              }
+            },
+            "description": "One SSE event per target event"
+          }
+        },
+        "summary": "Event stream (server-sent events).",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/v1/flash/verify": {
+      "post": {
+        "description": "Compare flash contents with an image file (`verify_image`).",
+        "operationId": "flash_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Flash verification arguments.",
+                "properties": {
+                  "file": {
+                    "description": "Image file on the debug server's machine.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOutput"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Compare flash contents with an image file (`verify_image`).",
+        "tags": [
+          "flash"
+        ]
+      }
+    },
+    "/api/v1/flash/write": {
+      "post": {
+        "description": "Program image files into flash (`flash write_images`).\n\nNeeds a preceding halting reset (`reset` with mode `halt`): the flash is protected\notherwise. UCB data in the images is skipped. Only the sectors the images touch are\nerased. Blocks the debug server while it runs.",
+        "operationId": "flash_write",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Flash programming arguments.",
+                "properties": {
+                  "erase": {
+                    "default": false,
+                    "description": "Erase programmed sectors first (needed unless they are erased).",
+                    "type": "boolean"
+                  },
+                  "files": {
+                    "description": "Image files (ELF, Intel HEX) on the debug server's machine; later files win where they\noverlap.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "incremental": {
+                    "default": false,
+                    "description": "Skip sectors that already hold the image data.",
+                    "type": "boolean"
+                  },
+                  "verify": {
+                    "default": false,
+                    "description": "Read back and compare after programming.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "files"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOutput"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Program image files into flash (`flash write_images`).",
+        "tags": [
+          "flash"
+        ]
+      }
+    },
+    "/api/v1/memory": {
+      "get": {
+        "description": "Read memory (at most 65536 bytes per call).\n\nReads through the system bus, or with `target` as that core sees memory (HSM-private\nmemory, MCS program RAM). Some areas are protected at runtime (e.g. by the application's\nmemory protection) and fail with `memory`.",
+        "operationId": "read_memory",
+        "parameters": [
+          {
+            "description": "Start address.",
+            "in": "query",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 4294967295,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          {
+            "description": "Number of bytes (at most 65536).",
+            "in": "query",
+            "name": "length",
+            "required": true,
+            "schema": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Read as this core sees memory (HSM-private memory, MCS program RAM); default: the\nsystem bus.",
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read memory (at most 65536 bytes per call).",
+        "tags": [
+          "memory"
+        ]
+      },
+      "put": {
+        "description": "Write memory (at most 65536 bytes per call). PFLASH is written with `flash_write`.\n\nConnected debugger clients (VS Code) are told to refresh their views.",
+        "operationId": "write_memory",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Memory write arguments.",
+                "properties": {
+                  "address": {
+                    "anyOf": [
+                      {
+                        "maximum": 4294967295,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      {
+                        "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                        "type": "string"
+                      }
+                    ],
+                    "description": "Start address."
+                  },
+                  "data": {
+                    "description": "The bytes as hex string (at most 65536 bytes).",
+                    "pattern": "^([0-9a-fA-F]{2})*$",
+                    "type": "string"
+                  },
+                  "target": {
+                    "default": null,
+                    "description": "Write as this core sees memory (HSM-private memory, MCS program RAM); default: the\nsystem bus.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "address",
+                  "data"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryWritten"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Write memory (at most 65536 bytes per call).",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/os": {
+      "get": {
+        "description": "The loaded ORTI file: its object types, their attributes and how many cores it describes.\n\nObject types are whatever the file declared. A MICROSAR file adds `vs_ISR`, `vs_SPINLOCK`,\n`vs_EVENT` and `vs_OS_CONFIG` to the standard OSEK ones.",
+        "operationId": "os",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The loaded ORTI file: its object types, their attributes and how many cores it describes.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/os/objects/{kind}": {
+      "get": {
+        "description": "Read the objects of one ORTI type with their current attribute values.\n\nValues come from the target as it is now. Attributes that are constants (a stack address,\na `sizeof`) or literal text (an alarm action) cost no bus access.",
+        "operationId": "os_objects",
+        "parameters": [
+          {
+            "description": "The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Skip attributes that cannot change, for a cheaper refresh. Default: false.",
+            "in": "query",
+            "name": "live_only",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only this object, by name.",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsObjectList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read the objects of one ORTI type with their current attribute values.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/os/orti": {
+      "post": {
+        "description": "Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.\n\nEvery attribute is parsed as a C expression and resolved against the loaded symbols, so\n`load_symbols` (or a VS Code debug session) has to have run first. Attributes that cannot\nbe resolved are reported in `errors` and retried when they are first read, so loading\nbefore the board is powered is harmless.",
+        "operationId": "load_orti",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Which ORTI file to load.",
+                "properties": {
+                  "file": {
+                    "description": "Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.",
+                    "type": "string"
+                  },
+                  "target": {
+                    "default": null,
+                    "description": "Target whose symbols resolve the attribute expressions, and whose memory view is read.\nDefault: the first core that has symbols.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/os/stacks": {
+      "get": {
+        "description": "Measure stack coverage: how much of each OS stack has ever been used.\n\nThe OS fills every stack with a pattern at startup, so the high-water mark is the far end\nof the region that still holds it. Finding it means reading the untouched part of every\nstack, so this is on demand and never part of a refresh - prefer `names` to narrow it.\n\nA stack the debugger cannot read (a region the memory protection hides) is reported with\nits `error` rather than as unused.",
+        "operationId": "os_stacks",
+        "parameters": [
+          {
+            "description": "Measure only these stacks, by name. Default: every stack the ORTI file describes.",
+            "in": "query",
+            "name": "names",
+            "required": false,
+            "schema": {
+              "default": null,
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OsStackList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Measure stack coverage: how much of each OS stack has ever been used.",
+        "tags": [
+          "os"
+        ]
+      }
+    },
+    "/api/v1/reset": {
+      "post": {
+        "description": "Reset the device through the debug adapter and run the reset handlers of the\nconfiguration (OpenOCD `reset run|halt|init`).\n\nFlash programming needs a preceding halting reset. Fails with `busy` while VS Code does\na source-level step.",
+        "operationId": "reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Reset arguments.",
+                "properties": {
+                  "mode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/ResetMode"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Reset mode (default `halt`)."
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Reset the device through the debug adapter and run the reset handlers of the configuration (OpenOCD `reset run|halt|init`).",
+        "tags": [
+          "run_control"
+        ]
+      }
+    },
+    "/api/v1/symbols": {
+      "get": {
+        "description": "The symbol files loaded per target (by this API or by a VS Code debug session).",
+        "operationId": "symbols",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The symbol files loaded per target (by this API or by a VS Code debug session).",
+        "tags": [
+          "symbols"
+        ]
+      },
+      "post": {
+        "description": "Load symbol files (ELF) for the targets, as a VS Code debug session does.\n\nMakes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a\nDAQ session work without VS Code. Breakpoints that were pending are planted.\n\nThere is one symbol set per core, and the last writer wins: a VS Code debug session\nstarted afterwards replaces what was loaded here, and the other way round.",
+        "operationId": "load_symbols",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Symbol files to load.",
+                "properties": {
+                  "files": {
+                    "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "targets": {
+                    "default": null,
+                    "description": "Targets (names or indices) to load them for; default: all cores.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "files"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolsInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Load symbol files (ELF) for the targets, as a VS Code debug session does.",
+        "tags": [
+          "symbols"
+        ]
+      }
+    },
+    "/api/v1/targets": {
+      "get": {
+        "description": "List the targets (cores) with their run state.",
+        "operationId": "targets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the targets (cores) with their run state.",
+        "tags": [
+          "targets"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}": {
+      "get": {
+        "description": "Get the run state of a target (and its PC when halted).",
+        "operationId": "state",
+        "parameters": [
+          {
+            "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get the run state of a target (and its PC when halted).",
+        "tags": [
+          "targets"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}/halt": {
+      "post": {
+        "description": "Halt a target. Returns once it is halted (up to one second).\n\nDoes nothing if it is already halted. A source-level step from VS Code running on it is\ncancelled, like the VS Code pause button does.",
+        "operationId": "halt",
+        "parameters": [
+          {
+            "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Halt a target.",
+        "tags": [
+          "run_control"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}/registers": {
+      "get": {
+        "description": "Read the registers of a target (the core registers need a halted target).",
+        "operationId": "read_registers",
+        "parameters": [
+          {
+            "description": "Only this group (default `core`).",
+            "in": "query",
+            "name": "group",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/RegisterGroup"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read the registers of a target (the core registers need a halted target).",
+        "tags": [
+          "registers"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}/registers/{name}": {
+      "get": {
+        "description": "Read one register.",
+        "operationId": "read_register",
+        "parameters": [
+          {
+            "description": "Register name (e.g. `pc`, `d4`, `a10`, `psw`; aliases like `sp` work).",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterValue"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read one register.",
+        "tags": [
+          "registers"
+        ]
+      },
+      "put": {
+        "description": "Write one register. Core registers need a halted target.\n\nConnected debugger clients (VS Code) are told to refresh their views.",
+        "operationId": "write_register",
+        "parameters": [
+          {
+            "description": "Register name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Register write arguments.",
+                "properties": {
+                  "value": {
+                    "anyOf": [
+                      {
+                        "maximum": 4294967295,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      {
+                        "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                        "type": "string"
+                      }
+                    ],
+                    "description": "New value."
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterValue"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Write one register.",
+        "tags": [
+          "registers"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}/resume": {
+      "post": {
+        "description": "Resume a halted target, optionally at another address.\n\nFails with `busy` while VS Code does a source-level step on it.",
+        "operationId": "resume",
+        "parameters": [
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Resume arguments.",
+                "properties": {
+                  "address": {
+                    "anyOf": [
+                      {
+                        "anyOf": [
+                          {
+                            "maximum": 4294967295,
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Continue at this address instead of the current PC."
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Resume a halted target, optionally at another address.",
+        "tags": [
+          "run_control"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}/step": {
+      "post": {
+        "description": "Execute one instruction on a halted target.\n\nFails with `busy` while VS Code does a source-level step on it.",
+        "operationId": "step",
+        "parameters": [
+          {
+            "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Execute one instruction on a halted target.",
+        "tags": [
+          "run_control"
+        ]
+      }
+    },
+    "/api/v1/targets/{target}/wait": {
+      "get": {
+        "description": "Wait until a target is halted (or running), e.g. after `resume` until a breakpoint hits.\n\nFails with `timeout` if the state is not reached in time. Other clients are not blocked\nwhile waiting.",
+        "operationId": "wait_state",
+        "parameters": [
+          {
+            "description": "State to wait for (default `halted`).",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WaitFor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum wait in milliseconds (default 5000, at most 600000).",
+            "in": "query",
+            "name": "timeout_ms",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Wait until a target is halted (or running), e.g.",
+        "tags": [
+          "run_control"
+        ]
+      }
+    },
+    "/api/v1/tcl": {
+      "post": {
+        "description": "Run a command of the OpenOCD-compatible Tcl console (like the telnet console).",
+        "operationId": "tcl",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Tcl command arguments.",
+                "properties": {
+                  "command": {
+                    "description": "Command line, as typed in the telnet console (e.g. `mdw 0x70000000 4`).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOutput"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Run a command of the OpenOCD-compatible Tcl console (like the telnet console).",
+        "tags": [
+          "tcl"
+        ]
+      }
+    },
+    "/api/v1/watchpoints": {
+      "delete": {
+        "description": "Remove a watchpoint. Returns the remaining watchpoints.",
+        "operationId": "remove_watchpoint",
+        "parameters": [
+          {
+            "description": "Data address.",
+            "in": "query",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 4294967295,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "query",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchpointList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Remove a watchpoint.",
+        "tags": [
+          "watchpoints"
+        ]
+      },
+      "get": {
+        "description": "List the watchpoints (data breakpoints) of all targets.",
+        "operationId": "list_watchpoints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchpointList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the watchpoints (data breakpoints) of all targets.",
+        "tags": [
+          "watchpoints"
+        ]
+      },
+      "post": {
+        "description": "Set a watchpoint: the target halts when it accesses the address.",
+        "operationId": "add_watchpoint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Watchpoint arguments.",
+                "properties": {
+                  "access": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/WatchAccess"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Triggering access (default `write`)."
+                  },
+                  "address": {
+                    "anyOf": [
+                      {
+                        "maximum": 4294967295,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      {
+                        "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                        "type": "string"
+                      }
+                    ],
+                    "description": "Data address."
+                  },
+                  "length": {
+                    "default": null,
+                    "description": "Watched bytes (default 4).",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "description": "Target name or index.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "address"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchpointInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Set a watchpoint: the target halts when it accesses the address.",
+        "tags": [
+          "watchpoints"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080"
+    }
+  ]
+}

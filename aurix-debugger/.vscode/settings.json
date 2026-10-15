@@ -1,0 +1,10 @@
+{
+    "memory-inspector.debugTypes": [
+        "gdb",
+        "embedded-debug",
+        "arm-debugger",
+        "gdbtarget",
+        "aurix-tcf",
+        "aurixdbg"
+    ]
+}

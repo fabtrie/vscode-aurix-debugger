@@ -1,9 +1,15 @@
-// Copies aurix-dbg.exe into bin/ so it is packaged with the extension.
+// Copies aurix-dbg.exe and OpenOCD's Tcl scripts into bin/ so they are packaged
+// with the extension.
 //
-// Source, first match wins:
+// aurix-dbg.exe, first match wins:
 //   1. the environment variable AURIX_DBG_EXE
 //   2. ../aurix-debugger/server/target/release/aurix-dbg.exe
 //   3. ../aurix-debugger/server/target/debug/aurix-dbg.exe
+//
+// OpenOCD scripts (tcl/, COPYING, LICENSES/) -> bin/openocd/, first match wins:
+//   1. the environment variable AURIX_OPENOCD_DIR (a folder containing tcl/)
+//   2. ../aurix-debugger/server/target/openocd-tcl (fetched by the server build,
+//      crate openocd-tcl)
 const fs = require('fs');
 const path = require('path');
 
@@ -23,6 +29,22 @@ function main() {
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.copyFileSync(src, dest);
 	console.log(`Copied ${src} -> ${dest}`);
+
+	const openocdSrc = process.env.AURIX_OPENOCD_DIR
+		? path.resolve(process.env.AURIX_OPENOCD_DIR)
+		: path.join(serverTarget, 'openocd-tcl');
+	if (!fs.existsSync(path.join(openocdSrc, 'tcl'))) {
+		console.error(`OpenOCD scripts not found in ${openocdSrc}\nBuild the server (cargo build) or set AURIX_OPENOCD_DIR to a folder containing tcl/.`);
+		process.exit(1);
+	}
+	const openocdDest = path.join(projectRoot, 'bin', 'openocd');
+	fs.rmSync(openocdDest, { recursive: true, force: true });
+	for (const name of ['tcl', 'COPYING', 'LICENSES']) {
+		if (fs.existsSync(path.join(openocdSrc, name))) {
+			fs.cpSync(path.join(openocdSrc, name), path.join(openocdDest, name), { recursive: true });
+		}
+	}
+	console.log(`Copied ${openocdSrc} -> ${openocdDest}`);
 }
 
 main();

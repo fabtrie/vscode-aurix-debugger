@@ -906,6 +906,13 @@ async function startAurixDbg(session: vscode.DebugSession, config: vscode.DebugC
 	};
 
 	const args: string[] = [];
+	// OpenOCD's scripts bundled with the extension, so "board/infineon/..." works without
+	// configuration. Passed first: aurix-dbg searches the last -s folder first, so the
+	// user's searchDirs take precedence.
+	const bundledTcl = path.join(extensionContext.extensionPath, 'bin', 'openocd', 'tcl');
+	if (fs.existsSync(bundledTcl)) {
+		args.push('-s', bundledTcl);
+	}
 	for (const dir of asList(config.searchDirs)) {
 		args.push('-s', resolveConfigPath(session, dir) ?? dir);
 	}

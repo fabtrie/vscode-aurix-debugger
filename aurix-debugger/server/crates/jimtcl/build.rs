@@ -50,31 +50,26 @@ fn main() {
     fs::create_dir_all(&gen).unwrap();
 
     let target = env::var("TARGET").unwrap();
-    let autoconf = match env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-        _ if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") => {
-            panic!("jimtcl: no Jim Tcl configuration for target {target} (only Windows is supported)")
-        }
-        Ok("gnu") => AUTOCONF_MINGW,
-        // Jim's Windows I/O code is MinGW-only before 0.84 (msteveb/jimtcl#321).
-        Ok("msvc") if JIM_VERSION >= "0.84" => AUTOCONF_MSVC,
-        Ok("msvc") => panic!("jimtcl: Jim Tcl {JIM_VERSION} does not build with MSVC (needs 0.84); use the GNU toolchain"),
-        _ => panic!("jimtcl: no Jim Tcl configuration for target {target}"),
-    };
-    write_config_headers(&gen, autoconf);
+    let windows_gnu = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu");
+    if !windows_gnu {
+        panic!("jimtcl: no Jim Tcl configuration for target {target} (only Windows with MinGW is supported)");
+    }
+    write_config_headers(&gen, AUTOCONF_MINGW);
     write_load_static_exts(&gen);
     for ext in TCL_EXTS {
         write_tcl_ext(&src, &gen, ext);
     }
 
     let mut b = cc::Build::new();
-    b.include(&gen).include(&src).define("_WIN32_WINNT", "0x0601").opt_level(2).warnings(false);
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        b.define("_CRT_SECURE_NO_WARNINGS", None);
-    } else {
-        b.flag_if_supported("-Wno-deprecated-declarations")
-            .flag_if_supported("-fno-unwind-tables")
-            .flag_if_supported("-fno-asynchronous-unwind-tables");
-    }
+    b.include(&gen)
+        .include(&src)
+        .define("_WIN32_WINNT", "0x0601")
+        .flag_if_supported("-Wno-deprecated-declarations")
+        .flag_if_supported("-fno-unwind-tables")
+        .flag_if_supported("-fno-asynchronous-unwind-tables")
+        .opt_level(2)
+        .warnings(false);
     for f in CORE_SOURCES {
         b.file(src.join(f));
     }
@@ -280,27 +275,4 @@ const AUTOCONF_MINGW: &str = "\
 #define TCL_PLATFORM_PATH_SEPARATOR \";\"
 #define TCL_PLATFORM_PLATFORM \"windows\"
 #define _FILE_OFFSET_BITS 64
-";
-
-/// Hand-written equivalent for MSVC (Jim 0.84+), which jimtcl's configure does not support.
-/// `exec` runs commands but cannot capture their output (its Windows pipe code
-/// is MinGW-only).
-const AUTOCONF_MSVC: &str = "\
-#define HAVE_DLOPEN_COMPAT 1
-#define HAVE_LONG_LONG 1
-#define HAVE_MKDIR_ONE_ARG 1
-#define HAVE_SYSTEM 1
-#define JIM_MATH_FUNCTIONS 1
-#define JIM_REFERENCES 1
-#define JIM_REGEXP 1
-#define JIM_STATICLIB 1
-#define SIZEOF_INT 4
-#define TCL_LIBRARY \"/usr/local/lib/jim\"
-#define TCL_PLATFORM_OS \"windows\"
-#define TCL_PLATFORM_PATH_SEPARATOR \";\"
-#define TCL_PLATFORM_PLATFORM \"windows\"
-/* jim-eventloop.c only provides usleep() for MinGW */
-#define HAVE_USLEEP 1
-__declspec(dllimport) void __stdcall Sleep(unsigned long ms);
-#define usleep(US) Sleep((US) / 1000)
 ";

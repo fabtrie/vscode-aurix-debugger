@@ -1,0 +1,210 @@
+/*
+ * The OS Profile panel.
+ *
+ * The task colours are a five-slot categorical set validated against the VS Code dark surface:
+ * inside the OKLCH lightness band, above the chroma floor, worst adjacent CVD separation ΔE 9.3
+ * (deuteranopia), normal-vision separation 18.3, all above 3:1 contrast. Idle is a deliberate
+ * neutral outside the set, and every block is labelled where it is wide enough, so colour is
+ * never the only encoding.
+ */
+
+:root {
+	--task-0: #3e8ad8;
+	--task-1: #12a97f;
+	--task-2: #c08a00;
+	--task-3: #e85c7a;
+	--task-4: #9a6be8;
+	--task-idle: #3a3a3a;
+	--task-other: #6b6b6b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+	margin: 0;
+	padding: 0 0 12px 0;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	color: var(--vscode-foreground);
+	background: var(--vscode-editor-background);
+}
+
+.sr {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+}
+
+h2.h {
+	margin: 14px 14px 8px 14px;
+	font-size: 0.84em;
+	font-weight: 400;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+}
+
+h2.h .sub { text-transform: none; letter-spacing: 0; opacity: 0.8; }
+
+#toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#toolbar button {
+	font: inherit;
+	padding: 3px 11px;
+	color: var(--vscode-button-secondaryForeground);
+	background: var(--vscode-button-secondaryBackground);
+	border: none;
+	border-radius: 2px;
+	cursor: pointer;
+}
+
+#toolbar button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+
+#toolbar select {
+	font: inherit;
+	padding: 2px 4px;
+	color: var(--vscode-dropdown-foreground);
+	background: var(--vscode-dropdown-background);
+	border: 1px solid var(--vscode-dropdown-border, transparent);
+	border-radius: 2px;
+}
+
+#stats, .note { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+
+.note.wrap { margin: 10px 14px 0 0; line-height: 1.5; max-width: 46em; }
+
+.spacer { flex: 1 1 auto; }
+
+#message {
+	padding: 8px 14px 0 14px;
+	color: var(--vscode-editorWarning-foreground);
+}
+
+#message:empty { display: none; }
+
+#lanes { padding: 0 14px; }
+
+.lane {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding-bottom: 3px;
+}
+
+.lane .name {
+	width: 52px;
+	flex: 0 0 auto;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 0.86em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.lane .track {
+	position: relative;
+	flex: 1 1 auto;
+	height: 26px;
+	border-radius: 3px;
+	background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.12));
+	overflow: hidden;
+}
+
+.blk {
+	position: absolute;
+	top: 0;
+	height: 100%;
+	border-radius: 3px;
+	/* A 2px gap between fills, so neighbouring blocks read as separate. */
+	border-right: 2px solid var(--vscode-editor-background);
+	overflow: hidden;
+	white-space: nowrap;
+	font-size: 10px;
+	line-height: 26px;
+	padding: 0 4px;
+	color: #06121f;
+}
+
+.blk.idle { background: var(--task-idle); color: transparent; border-right-color: transparent; }
+.blk.c0 { background: var(--task-0); }
+.blk.c1 { background: var(--task-1); }
+.blk.c2 { background: var(--task-2); }
+.blk.c3 { background: var(--task-3); }
+.blk.c4 { background: var(--task-4); }
+.blk.cx { background: var(--task-other); color: #ffffff; }
+
+#axis {
+	display: flex;
+	justify-content: space-between;
+	margin: 4px 14px 0 76px;
+	font-size: 0.8em;
+	color: var(--vscode-descriptionForeground);
+}
+
+#legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 16px;
+	padding: 12px 14px 0 76px;
+	font-size: 0.86em;
+}
+
+#legend span.item { display: inline-flex; align-items: center; gap: 6px; }
+
+#legend .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+#bottom {
+	display: flex;
+	gap: 24px;
+	align-items: flex-start;
+	border-top: 1px solid var(--vscode-panel-border);
+	margin-top: 14px;
+}
+
+#sharesBox { flex: 1 1 auto; min-width: 0; }
+
+#loadBox { flex: 0 0 340px; padding-right: 14px; }
+
+.share {
+	display: grid;
+	grid-template-columns: minmax(120px, 260px) 1fr 52px;
+	align-items: center;
+	gap: 10px;
+	padding: 1px 14px;
+	font-size: 0.9em;
+}
+
+.share .n {
+	font-family: var(--vscode-editor-font-family);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.share .track { height: 10px; border-radius: 5px; background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.18)); }
+
+.share .fill { height: 10px; border-radius: 5px; }
+
+.share .v { text-align: right; font-family: var(--vscode-editor-font-family); }
+
+.share.head { color: var(--vscode-descriptionForeground); font-size: 0.82em; letter-spacing: 0.04em; padding-top: 6px; }
+
+#load { display: flex; gap: 22px; padding: 0 14px; }
+
+.gauge .big { font-size: 26px; font-weight: 600; line-height: 1; }
+
+.gauge .pct { font-size: 13px; color: var(--vscode-descriptionForeground); margin-left: 4px; }
+
+.gauge .meter { width: 108px; height: 5px; border-radius: 3px; background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.18)); margin-top: 6px; }
+
+.gauge .meter span { display: block; height: 5px; border-radius: 3px; background: var(--task-0); }
+
+.gauge .who { font-family: var(--vscode-editor-font-family); font-size: 0.82em; color: var(--vscode-descriptionForeground); padding-top: 5px; }
+
+code { font-family: var(--vscode-editor-font-family); }

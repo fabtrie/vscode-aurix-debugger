@@ -1,0 +1,215 @@
+/* Live Watch view: mirrors the look of VS Code's Watch view (debug pane tree rows). */
+
+body {
+	margin: 0;
+	padding: 0;
+	color: var(--vscode-foreground);
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	user-select: none;
+}
+
+.tree {
+	outline: none;
+}
+
+.row {
+	display: flex;
+	align-items: center;
+	box-sizing: border-box;
+	height: 22px;
+	line-height: 22px;
+	padding-right: 4px;
+	white-space: nowrap;
+	overflow: hidden;
+	cursor: pointer;
+}
+
+.row:hover {
+	background-color: var(--vscode-list-hoverBackground);
+	color: var(--vscode-list-hoverForeground);
+}
+
+.row.selected {
+	background-color: var(--vscode-list-inactiveSelectionBackground);
+	color: var(--vscode-list-inactiveSelectionForeground);
+}
+
+.tree:focus-within .row.selected {
+	background-color: var(--vscode-list-activeSelectionBackground);
+	color: var(--vscode-list-activeSelectionForeground);
+	outline: 1px solid var(--vscode-list-focusOutline);
+	outline-offset: -1px;
+}
+
+.twistie {
+	display: flex;
+	flex-shrink: 0;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 22px;
+	padding-right: 6px;
+}
+
+.twistie svg {
+	width: 16px;
+	height: 16px;
+	fill: currentColor;
+	visibility: hidden;
+	transition: transform 0.1s ease-out;
+}
+
+.twistie.collapsible svg {
+	visibility: visible;
+}
+
+.twistie.expanded svg {
+	transform: rotate(90deg);
+}
+
+.contents {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.expression {
+	display: flex;
+	align-items: center;
+	overflow: hidden;
+	font-family: var(--monaco-monospace-font, "SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace);
+	font-size: 13px;
+}
+
+.expression .name,
+.expression .value {
+	min-width: 0;
+	overflow: hidden;
+	white-space: pre;
+	text-overflow: ellipsis;
+}
+
+.expression .name {
+	flex-shrink: 1;
+	color: var(--vscode-debugTokenExpression-name);
+}
+
+.expression .value {
+	flex-shrink: 10;
+	margin-left: 4px;
+	padding: 0 2px;
+	border-radius: 3px;
+	color: var(--vscode-debugTokenExpression-value);
+	/* Fade-out of the changed highlight, once .changed is removed. */
+	transition: background-color 1s ease-out, box-shadow 1s ease-out;
+}
+
+.expression .value.number {
+	color: var(--vscode-debugTokenExpression-number);
+}
+
+.expression .value.boolean {
+	color: var(--vscode-debugTokenExpression-boolean);
+}
+
+.expression .value.string {
+	color: var(--vscode-debugTokenExpression-string);
+}
+
+.expression .value.error {
+	color: var(--vscode-debugTokenExpression-error);
+}
+
+.tree:focus-within .row.selected .expression .name,
+.tree:focus-within .row.selected .expression .value {
+	color: inherit;
+}
+
+/*
+ * Recently changed value: a translucent tint of the theme's value-changed color, so the value keeps
+ * its token color and stays readable. Shown without transition while the value keeps changing;
+ * liveWatch.js removes the class 3 s after the last change, which starts the fade-out above.
+ */
+.expression .value.changed {
+	transition: none;
+	background-color: var(--vscode-editor-findMatchHighlightBackground);
+	background-color: color-mix(in srgb, var(--vscode-debugView-valueChangedHighlight) 22%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-debugView-valueChangedHighlight) 45%, transparent);
+}
+
+/* Group row ("Paused") */
+.group-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.description {
+	margin-left: 0.5em;
+	font-size: 0.9em;
+	opacity: 0.7;
+}
+
+.edit {
+	flex: 1;
+	min-width: 0;
+	box-sizing: border-box;
+	height: 20px;
+	margin-left: 6px;
+	padding: 0 4px;
+	border: 1px solid var(--vscode-focusBorder);
+	outline: none;
+	color: var(--vscode-input-foreground);
+	background-color: var(--vscode-input-background);
+	font: inherit;
+}
+
+.edit.expression-edit {
+	margin-left: 0;
+}
+
+.actions {
+	display: none;
+	flex-shrink: 0;
+	align-items: center;
+}
+
+.row:hover .actions,
+.row.selected .actions {
+	display: flex;
+}
+
+.action {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	margin-left: 2px;
+	padding: 0;
+	border: none;
+	border-radius: 5px;
+	color: inherit;
+	background: none;
+	cursor: pointer;
+}
+
+.action svg {
+	width: 16px;
+	height: 16px;
+	fill: currentColor;
+}
+
+.action:hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.action:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+}
+
+.empty {
+	padding: 4px 20px;
+	color: var(--vscode-descriptionForeground);
+	white-space: normal;
+}

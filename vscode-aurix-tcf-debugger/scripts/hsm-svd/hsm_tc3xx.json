@@ -1,0 +1,544 @@
+{
+	"$comment": [
+		"AURIX TC3xx HSM registers.",
+		"Input of scripts/gen-hsm-svd.js, which writes bin/svd/HSM_TC3xx.svd.",
+		"Addresses are HSM addresses; the bridge registers have the same address on the host.",
+		"Register: n name, o offset, r reset (omitted: undefined), a access ro|rw|wo (default rw), d description,",
+		"  dim/inc/idx expand '%s' in n and d (idx default 0..dim-1), readAction, mwv modifiedWriteValues, f fields.",
+		"Field: n name, b 'msb:lsb' or 'bit', a access, d description, e [[value, name, description], ...].",
+		"Never mark a field of a readable register write-only: the peripheral viewer then skips the whole register.",
+		"Peripheral merge=false: kept out of the XPeripherals view of TriCore sessions (see README)."
+	],
+	"device": {
+		"vendor": "Infineon",
+		"name": "HSM_TC3xx",
+		"series": "AURIX TC3xx",
+		"version": "2.0",
+		"description": "Hardware Security Module (HSM) of the AURIX TC3xx family (Cortex-M3 r2p0). HSM-internal peripherals (0xE0000000-0xEFFFFFFF) are reached by the host through the HSM debug window and only while DBGCTRL.HSM is set by the HSM firmware.",
+		"cpu": {
+			"name": "CM3",
+			"revision": "r2p0",
+			"endian": "little",
+			"mpuPresent": true,
+			"fpuPresent": false,
+			"nvicPrioBits": 3,
+			"vendorSystickConfig": false
+		}
+	},
+	"peripherals": [
+		{
+			"name": "HSM_BRIDGE",
+			"description": "HSM bridge, host side (HSM TS 9.3.1, 9.4). Only 32-bit aligned accesses. DBGBASE and HSMOTGB are only accessible while HSM debugging is enabled (DBGCTRL.HSM).",
+			"base": "0xF0040000",
+			"size": "0x1100",
+			"registers": [
+				{ "n": "HSM_ID", "o": "0x008", "r": "0x00BEC002", "rm": "0xFFFFFF00", "a": "ro", "d": "Module Identifier Register (for the whole HSM)",
+					"f": [
+						{ "n": "MOD_NUMBER", "b": "31:16", "d": "Module number (00BEH = HSM)" },
+						{ "n": "MOD_TYPE", "b": "15:8", "d": "Module type (C0H = 32-bit module)" },
+						{ "n": "MOD_REV", "b": "7:0", "d": "Module revision number" }
+					] },
+				{ "n": "HT2HSMF", "o": "0x020", "r": "0", "mwv": "oneToSet", "d": "Host to HSM Flag Register. The host sets flags (write 1) to request an HSM interrupt; the HSM resets them.",
+					"f": [ { "n": "HT2HSMF", "b": "31:0", "d": "Host to HSM flags" } ] },
+				{ "n": "HSM2HTF", "o": "0x028", "r": "0", "mwv": "oneToClear", "d": "HSM to Host Flag Register. The HSM sets flags to request a host interrupt; the host resets them (write 1).",
+					"f": [ { "n": "HSM2HTF", "b": "31:0", "d": "HSM to host flags" } ] },
+				{ "n": "HSM2HTIE", "o": "0x02C", "r": "0", "d": "HSM to Host Interrupt Enable",
+					"f": [ { "n": "HSM2HTIE", "b": "31:0", "d": "Interrupt enable per HSM2HTF flag" } ] },
+				{ "n": "HSM2HTIS", "o": "0x030", "r": "0", "d": "HSM to Host Interrupt Select",
+					"f": [ { "n": "HSM2HTIS", "b": "31:0", "d": "Set: flag mapped to host interrupt 1, otherwise host interrupt 0" } ] },
+				{ "n": "HSM2HTS", "o": "0x034", "r": "0", "a": "ro", "d": "HSM to Host Status (written by the HSM; BOS status, HSM TS 11.3)",
+					"f": [ { "n": "HSM2HTS", "b": "31:0", "d": "HSM internal status for the host" } ] },
+				{ "n": "HT2HSMS", "o": "0x038", "r": "0", "d": "Host to HSM Status",
+					"f": [ { "n": "HT2HSMS", "b": "31:0", "d": "Host software status for the HSM" } ] },
+				{ "n": "HSMCTRL", "o": "0x1000", "r": "0x00000003", "mwv": "oneToSet", "d": "HSM Control Register (HSM reset / end of memory BIST). Bits can only be set.",
+					"f": [
+						{ "n": "EOMBT", "b": "1:0", "d": "End of Memory BIST test (redundant encoding)",
+							"e": [ [0, "MON", "MBIST mode activated"], [1, "MOFF1", "MBIST mode deactivated"], [2, "MOFF2", "MBIST mode deactivated"], [3, "MOFF3", "MBIST mode deactivated, start of HSM subsystem"] ] }
+					] },
+				{ "n": "DBGBASE", "o": "0x1010", "r": "0", "a": "ro", "d": "Debug Base Address Register: upper 16 bits of the HSM address shown in the debug window. Written by the debug server before every window access (read-only here).",
+					"f": [ { "n": "BASE", "b": "31:16", "d": "Base address of the debug memory window" } ] },
+				{ "n": "HSMOTGB", "o": "0x1020", "r": "0", "d": "OCDS Suspend and Trigger Bus Control (cleared by application reset)",
+					"f": [
+						{ "n": "TG_P", "b": "3", "d": "TGS, TGB write protection: TGS and TGB are only written if TG_P is set in the same access. Reads as 0." },
+						{ "n": "TGB", "b": "2", "d": "OTGB0/1 bus select", "e": [ [0, "BUS0", "Trigger set on OTGB0"], [1, "BUS1", "Trigger set on OTGB1"] ] },
+						{ "n": "TGS", "b": "1:0", "d": "Trigger set for OTGB0/1", "e": [ [0, "NOTS", "No trigger set output"], [1, "TS1", "Trigger set 1"], [2, "TS2", "No trigger set output"], [3, "TS3", "Trigger set 1"] ] }
+					] }
+			]
+		},
+		{
+			"name": "HSM_BRIDGE_HSMSIDE",
+			"merge": false,
+			"description": "HSM bridge, registers accessible by the HSM only (HSM TS 9.3.1-9.3.7). A host access gives a bus error; a debugger access through the HSM debug window reaches a host address through the HSM (possible SPB bus conflict, HSM TS 12.3.6).",
+			"base": "0xF0040000",
+			"size": "0x100",
+			"interrupts": [ [3, "HSM_BRIDGE_SRV", "HSM bridge service interrupt"], [4, "HSM_BRIDGE_ERR", "HSM bridge error interrupt"], [5, "HSM_SENSOR", "Sensor interrupt"], [6, "HSM_EXT", "External peripheral interrupt"] ],
+			"registers": [
+				{ "n": "HT2HSMIE", "o": "0x024", "r": "0", "d": "Host to HSM Interrupt Enable",
+					"f": [ { "n": "HT2HSMIE", "b": "31:0", "d": "Interrupt enable per HT2HSMF flag" } ] },
+				{ "n": "CLKCTRL", "o": "0x040", "r": "0", "d": "Clock Control Register",
+					"f": [ { "n": "CLKDIV", "b": "1:0", "d": "Clock divider of the HSM subsystem", "e": [ [0, "DIV1", "Maximum clock frequency"], [1, "DIV2", "Half of the maximum clock frequency"], [2, "DIV4", "Quarter of the maximum clock frequency"], [3, "RFU", "Reserved, maximum clock frequency"] ] } ] },
+				{ "n": "DBGCTRL", "o": "0x060", "rm": "0", "d": "Debug Control Register (debug and trace access of host and HSM, redundant encoding)",
+					"f": [
+						{ "n": "TRDATA", "b": "10", "d": "Type of trace information", "e": [ [0, "TRADDR", "Trace addresses only"], [1, "TRDATA", "Trace addresses and data"] ] },
+						{ "n": "TREN", "b": "9:8", "d": "Host side tracing of HSM accesses on SPB", "e": [ [0, "TRACEDIS0", "Tracing disabled"], [1, "TRACEDIS1", "Tracing disabled"], [2, "TRACEDIS2", "Tracing disabled"], [3, "TRACEEN", "Tracing enabled"] ] },
+						{ "n": "HOST", "b": "5:4", "d": "Debug control for the host system", "e": [ [0, "HTDDIS0", "Host debug disabled"], [1, "HTDDIS1", "Host debug disabled"], [2, "HTDDIS2", "Host debug disabled"], [3, "HTDEN", "Host debug enabled"] ] },
+						{ "n": "HSM", "b": "1:0", "d": "Debug control for the HSM subsystem and debug memory window", "e": [ [0, "HSMDDIS0", "HSM debug disabled"], [1, "HSMDDIS1", "HSM debug disabled"], [2, "HSMDDIS2", "HSM debug disabled"], [3, "HSMDEN", "HSM debug enabled"] ] }
+					] },
+				{ "n": "PINCTRL", "o": "0x064", "r": "0", "d": "Pin Control Register (writable until LOCK is set, then read-only until reset)",
+					"f": [
+						{ "n": "LOCK", "b": "31", "d": "Register lock", "e": [ [0, "UNLOCKED", "Writable"], [1, "LOCKED", "Read-only until next reset"] ] },
+						{ "n": "OEN1", "b": "3", "d": "Pin 1 (HSM2) output enable" },
+						{ "n": "VAL1", "b": "2", "d": "Pin 1 (HSM2) output value" },
+						{ "n": "OEN0", "b": "1", "d": "Pin 0 (HSM1) output enable" },
+						{ "n": "VAL0", "b": "0", "d": "Pin 0 (HSM1) output value" }
+					] },
+				{ "n": "ERRCTRL", "o": "0x080", "r": "0", "mwv": "oneToClear", "d": "Error Control Register (error flags, cleared by writing 1)",
+					"f": [
+						{ "n": "XDBG", "b": "31", "a": "ro", "d": "External debugger active" },
+						{ "n": "ROMON", "b": "29:28", "d": "ROM switch (can only be cleared)", "e": [ [0, "ROFF", "ROM switched off"], [1, "RON1", "ROM on"], [2, "RON2", "ROM on"], [3, "RON3", "ROM on"] ] },
+						{ "n": "ECCPKCROM", "b": "20:19", "d": "ECC errors of PKC ROM (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ADPKCSCM", "b": "18", "d": "Address error of PKC SCM" },
+						{ "n": "ECCPKCSCM", "b": "17:16", "d": "ECC errors of PKC SCM (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ADPKCTCM", "b": "15", "d": "Address error of PKC TCM" },
+						{ "n": "ECCPKCTCM", "b": "14:13", "d": "ECC errors of PKC TCM (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ADCT", "b": "12", "d": "Address error of cache tag field" },
+						{ "n": "ECCCT", "b": "11:10", "d": "ECC errors of cache tag field (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ADCD", "b": "9", "d": "Address error of cache data" },
+						{ "n": "ECCCD", "b": "8:7", "d": "ECC errors of cache data (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ADRAM", "b": "6", "d": "Address error of local RAM" },
+						{ "n": "ECCRAM", "b": "5:4", "d": "ECC errors of local RAM (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ECCROM", "b": "3:2", "d": "ECC errors of HSM boot ROM (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "BERR", "b": "0", "d": "Host system bus error due to an HSM access" }
+					] },
+				{ "n": "ERRIE", "o": "0x084", "r": "0", "d": "Error Interrupt Enable Register",
+					"f": [
+						{ "n": "ECCPKCROMIE", "b": "20:19", "d": "PKC ROM ECC error interrupt enable (1: correctable, 2: uncorrectable, 3: both)" },
+						{ "n": "ADPKCSCMIE", "b": "18", "d": "PKC SCM address error interrupt enable" },
+						{ "n": "ECCPKCSCMIE", "b": "17:16", "d": "PKC SCM ECC error interrupt enable" },
+						{ "n": "ADPKCTCMIE", "b": "15", "d": "PKC TCM address error interrupt enable" },
+						{ "n": "ECCPKCTCMIE", "b": "14:13", "d": "PKC TCM ECC error interrupt enable" },
+						{ "n": "ADCTIE", "b": "12", "d": "Cache tag address error interrupt enable" },
+						{ "n": "ECCCTIE", "b": "11:10", "d": "Cache tag ECC error interrupt enable" },
+						{ "n": "ADCDIE", "b": "9", "d": "Cache data address error interrupt enable" },
+						{ "n": "ECCCDIE", "b": "8:7", "d": "Cache data ECC error interrupt enable" },
+						{ "n": "ADRAMIE", "b": "6", "d": "Local RAM address error interrupt enable" },
+						{ "n": "ECCRAMIE", "b": "5:4", "d": "Local RAM ECC error interrupt enable" },
+						{ "n": "ECCROMIE", "b": "3:2", "d": "Boot ROM ECC error interrupt enable" },
+						{ "n": "BERRIE", "b": "0", "d": "Bus error interrupt enable" }
+					] },
+				{ "n": "ERRADDR", "o": "0x088", "r": "0", "a": "ro", "d": "Error Address Register (address of the last bus error)",
+					"f": [ { "n": "ADDR", "b": "31:0", "d": "Error address" } ] },
+				{ "n": "EXTIF", "o": "0x0A0", "r": "0", "mwv": "oneToClear", "d": "External Interrupt Flag Register",
+					"f": [ { "n": "EXTIF", "b": "31:0", "d": "External interrupt flags" } ] },
+				{ "n": "EXTIE", "o": "0x0A4", "r": "0", "d": "External Interrupt Enable",
+					"f": [ { "n": "EXTIE", "b": "31:0", "d": "Interrupt enable per EXTIF flag" } ] },
+				{ "n": "SAHBASE", "o": "0x0C0", "r": "0xF0000000", "d": "Single Access to Host Base Address Register",
+					"f": [ { "n": "BASE", "b": "31:16", "d": "Base address of the single access to host window (Fxxx: window off)" } ] },
+				{ "n": "RSTCTRL", "o": "0x0E0", "r": "0", "d": "Reset Control Register (writable only while RSTPWD holds 55AA00FFH)",
+					"f": [
+						{ "n": "SYSRST", "b": "1", "d": "Trigger a system reset" },
+						{ "n": "APPRST", "b": "0", "d": "Trigger an application reset" }
+					] },
+				{ "n": "RSTPWD", "o": "0x0E4", "r": "0", "a": "wo", "d": "Reset Password Register",
+					"f": [ { "n": "PASSWD", "b": "31:0", "d": "55AA00FFH makes RSTCTRL writable" } ] },
+				{ "n": "SENSIF", "o": "0x0F0", "r": "0", "mwv": "oneToClear", "d": "Sensor Interrupt Flag Register",
+					"f": [ { "n": "SENSIF", "b": "9:0", "d": "Sensor flags" } ] },
+				{ "n": "SENSIE", "o": "0x0F4", "r": "0", "d": "Sensor Interrupt Enable Register",
+					"f": [ { "n": "SENSIE", "b": "9:0", "d": "Sensor interrupt enable" } ] },
+				{ "n": "SENSAPPRST", "o": "0x0F8", "r": "0", "d": "Sensor Application Reset Enable Register",
+					"f": [ { "n": "AREN", "b": "9:0", "d": "Application reset enable per sensor flag" } ] },
+				{ "n": "SENSSYSRST", "o": "0x0FC", "r": "0", "d": "Sensor System Reset Enable Register",
+					"f": [ { "n": "SREN", "b": "9:0", "d": "System reset enable per sensor flag" } ] }
+			]
+		},
+		{
+			"name": "HSM_AES",
+			"description": "AES-128 module (HSM TS 4.4). Only 32-bit accesses; unused addresses give a bus error. Not suspended in HALT mode.",
+			"base": "0xE8000000",
+			"size": "0x400",
+			"registers": [
+				{ "n": "AESIN%s", "dim": 4, "inc": 4, "o": "0x00", "r": "0", "d": "AES input register %s (key, IV, plain or cipher text)",
+					"f": [ { "n": "IN_B3", "b": "31:24", "d": "Input byte 4n+3" }, { "n": "IN_B2", "b": "23:16", "d": "Input byte 4n+2" }, { "n": "IN_B1", "b": "15:8", "d": "Input byte 4n+1" }, { "n": "IN_B0", "b": "7:0", "d": "Input byte 4n" } ] },
+				{ "n": "AESCTRL", "o": "0x10", "r": "0x00013000", "d": "AES Control Register (writing triggers the operation)",
+					"f": [
+						{ "n": "OPC", "b": "16:12", "d": "Operation code",
+							"e": [ [0, "ECB_ENC", "ECB encrypt"], [1, "ECB_DEC", "ECB decrypt"], [2, "CBC_ENC", "CBC encrypt"], [3, "CBC_DEC", "CBC decrypt"], [4, "CTR", "CTR en-/decrypt"], [5, "OFB", "OFB en-/decrypt"], [6, "CFB_ENC", "CFB encrypt"], [7, "CFB_DEC", "CFB decrypt"], [8, "GCM_ENC", "GCM encrypt"], [9, "GCM_DEC", "GCM decrypt"], [10, "GCM_MAC", "G-hash input"], [11, "XTS_ENC", "XTS encrypt"], [12, "XTS_DEC", "XTS decrypt"], [16, "WK", "Write input to key register KEYNR"], [17, "LK", "Lock key register K0 or K1"], [18, "WCV", "Write input to chaining variable CVNR"], [19, "RCV", "Copy chaining variable CVNR to output"] ] },
+						{ "n": "KEYNR", "b": "8:4", "d": "Key number (0-7; 1FH = OLDKEY, key of the last operation)" },
+						{ "n": "CVNR", "b": "2:0", "d": "Chaining variable number (0-4)" }
+					] },
+				{ "n": "AESSTAT", "o": "0x14", "r": "0x00000006", "a": "ro", "d": "AES Status Register",
+					"f": [
+						{ "n": "LOCK1", "b": "2", "d": "Key K1 locked", "e": [ [0, "K1WENABLED", "K1 writable"], [1, "K1LOCKED", "K1 locked"] ] },
+						{ "n": "LOCK0", "b": "1", "d": "Key K0 locked", "e": [ [0, "K0WENABLED", "K0 writable"], [1, "K0LOCKED", "K0 locked"] ] },
+						{ "n": "BSY", "b": "0", "d": "Busy flag", "e": [ [0, "IDLE", "Idle"], [1, "BUSY", "Operation running"] ] }
+					] },
+				{ "n": "AESOUT%s", "dim": 4, "inc": 4, "o": "0x20", "r": "0", "a": "ro", "d": "AES output register %s",
+					"f": [ { "n": "OUT_B3", "b": "31:24", "d": "Output byte 4n+3" }, { "n": "OUT_B2", "b": "23:16", "d": "Output byte 4n+2" }, { "n": "OUT_B1", "b": "15:8", "d": "Output byte 4n+1" }, { "n": "OUT_B0", "b": "7:0", "d": "Output byte 4n" } ] },
+				{ "n": "AESOUTSAVE%s", "dim": 4, "inc": 4, "o": "0x30", "r": "0", "a": "ro", "d": "AES output save register %s (output of the previous operation)",
+					"f": [ { "n": "OUTSAVE_B3", "b": "31:24", "d": "Output byte 4n+3" }, { "n": "OUTSAVE_B2", "b": "23:16", "d": "Output byte 4n+2" }, { "n": "OUTSAVE_B1", "b": "15:8", "d": "Output byte 4n+1" }, { "n": "OUTSAVE_B0", "b": "7:0", "d": "Output byte 4n" } ] }
+			]
+		},
+		{
+			"name": "HSM_HASH",
+			"description": "Hash module MD5/SHA-1/SHA-224/SHA-256 (HSM TS 5.3). Only 32-bit accesses; reading a write-only register gives a bus error.",
+			"base": "0xE8000400",
+			"size": "0x400",
+			"registers": [
+				{ "n": "HASH_CFG", "o": "0x00", "r": "0", "d": "HASH Configuration Register",
+					"f": [
+						{ "n": "BEND_IN", "b": "7", "d": "Input byte endianness", "e": [ [0, "BIG", "MSB left-most"], [1, "LIT", "MSB right-most"] ] },
+						{ "n": "BEND_OUT", "b": "6", "d": "Output byte endianness", "e": [ [0, "BIG", "MSB left-most"], [1, "LIT", "MSB right-most"] ] },
+						{ "n": "ORDER_OUT", "b": "4", "d": "Output word order", "e": [ [0, "LSW_FIRST", "Least significant word first"], [1, "MSW_FIRST", "Most significant word first"] ] },
+						{ "n": "IV_MODE", "b": "3", "d": "Initialization value mode", "e": [ [0, "NO_IV", "Default starting state"], [1, "USE_IV", "Start from HASH_IVIN value"] ] },
+						{ "n": "ALGO", "b": "1:0", "d": "Hash algorithm", "e": [ [0, "NONE", "No hash function"], [1, "MD5", "MD-5"], [2, "SHA1", "SHA-1"], [3, "SHA256", "SHA-256"] ] }
+					] },
+				{ "n": "HASH_STAT", "o": "0x04", "r": "0x00000004", "a": "ro", "d": "HASH Status Register",
+					"f": [
+						{ "n": "CNT", "b": "11:8", "d": "Result counter: 32-bit words left in HASH_VAL" },
+						{ "n": "DF_NF", "b": "2", "d": "Data FIFO not full", "e": [ [0, "FIFO_FULL", "FIFO full"], [1, "FIFO_NOTFULL", "Data can be written"] ] },
+						{ "n": "IV_OK", "b": "1", "d": "Initialization vector valid" },
+						{ "n": "BSY", "b": "0", "d": "Busy flag", "e": [ [0, "HASH_IDLE", "No operation"], [1, "HASH_BUSY", "Hashing or initialization ongoing"] ] }
+					] },
+				{ "n": "HASH_IVIN", "o": "0x08", "r": "0", "a": "wo", "d": "Hash Initialization Value Register (consecutive writes; a read gives a bus error)",
+					"f": [ { "n": "HASH_INIT_VEC", "b": "31:0", "d": "Initialization value word" } ] },
+				{ "n": "HASH_VAL", "o": "0x0C", "r": "0", "a": "ro", "readAction": "modify", "d": "Hash Output Value Register. Each read returns the next result word and decrements HASH_STAT.CNT, so it is not read automatically.",
+					"f": [ { "n": "HASH_VAL", "b": "31:0", "d": "Hash output word" } ] },
+				{ "n": "HASH_DATA", "o": "0x10", "r": "0", "a": "wo", "d": "Hash Data Input Register (fills the FIFO; a read gives a bus error)",
+					"f": [ { "n": "HASH_DATA", "b": "31:0", "d": "Input data word" } ] }
+			]
+		},
+		{
+			"name": "HSM_PKC",
+			"description": "Public Key Cryptography module, control and status (HSM TS 6.4.1). Only 32-bit accesses.",
+			"base": "0xE8003C00",
+			"size": "0x10",
+			"interrupts": [ [8, "HSM_PKC_RDY", "PKC ready interrupt"], [9, "HSM_PKC_ERR", "PKC error interrupt"] ],
+			"registers": [
+				{ "n": "PKC_CONFIG", "o": "0x00", "r": "0", "d": "PKC Configuration Register (operand pointers into the SCM)",
+					"f": [
+						{ "n": "OPPTRC", "b": "20:16", "d": "Pointer for operand/result C (PKC_SCM_Ri)" },
+						{ "n": "OPPTRB", "b": "12:8", "d": "Pointer for operand B (PKC_SCM_Ri)" },
+						{ "n": "OPPTRA", "b": "4:0", "d": "Pointer for operand A (PKC_SCM_Ri)" }
+					] },
+				{ "n": "PKC_CMD", "o": "0x04", "r": "0", "d": "PKC Command Register",
+					"f": [
+						{ "n": "CALCR2", "b": "31", "d": "Calculate R^2 mod N before the next operation (cleared by hardware)" },
+						{ "n": "SIGNB", "b": "30", "d": "Sign of parameter b in Y^2 = X^3 +- aX +- b (1: negative)" },
+						{ "n": "SIGNA", "b": "29", "d": "Sign of parameter a in Y^2 = X^3 +- aX +- b (1: negative)" },
+						{ "n": "SIZE", "b": "15:8", "d": "Operand size in multiples of 64 bits (1-4)" },
+						{ "n": "FIELD", "b": "7", "d": "Field", "e": [ [0, "Z", "Z or Z/p"], [1, "F2X", "F2[X] or F2[X]/(f)"] ] },
+						{ "n": "TYPE", "b": "6:0", "d": "Type of operation",
+							"e": [ [1, "ADDN", "Modular addition"], [2, "SUBN", "Modular subtraction"], [3, "MULTN", "Modular multiplication"], [4, "RED", "Modular reduction"], [5, "DIVN", "Modular division"], [6, "INV", "Modular inversion"], [8, "MULT", "Multiplication"], [9, "INV2", "Modular inversion (n even)"], [10, "RED2", "Modular reduction (n even)"], [16, "EXP", "Modular exponentiation"], [32, "PDBL", "Point doubling"], [33, "PADD", "Point addition"], [34, "SMULT", "Scalar multiplication"], [35, "CHECKAB", "Check parameters a, b"], [36, "CHECKN", "Check order n"], [37, "CHECKPXY", "Check point coordinates"], [40, "SMULT25519", "Scalar multiplication Curve25519"], [41, "XRECOVER", "X coordinate recovery Ed25519"], [42, "SMULTED25519", "Scalar multiplication Ed25519"], [43, "CHECKVALID", "Check S*PB = h*PA + PR"] ] }
+					] },
+				{ "n": "PKC_CTRL", "o": "0x08", "r": "0", "d": "PKC Control Register",
+					"f": [ { "n": "START", "b": "0", "d": "Start the command in PKC_CMD (cleared when finished)" } ] },
+				{ "n": "PKC_STATUS", "o": "0x0C", "r": "0", "a": "ro", "d": "PKC Status Register",
+					"f": [
+						{ "n": "BUSY", "b": "16", "d": "PKC busy: no SCM access allowed" },
+						{ "n": "NOTINV", "b": "11", "d": "Parameter not invertible" },
+						{ "n": "ABNV", "b": "10", "d": "Parameters a, b not valid" },
+						{ "n": "SIGNV", "b": "9", "d": "Signature not valid" },
+						{ "n": "NNV", "b": "7", "d": "Parameter n (curve order) not valid" },
+						{ "n": "XYNV", "b": "6", "d": "Coordinates not reduced" },
+						{ "n": "INFTY", "b": "5", "d": "Point at infinity occurred" },
+						{ "n": "FLADD", "b": "3:0", "d": "Fail address of the last invalid point" }
+					] }
+			]
+		},
+		{
+			"name": "HSM_PKC_SCM",
+			"description": "PKC Shared Crypto Memory: 32 long integer registers of 256 bits (HSM TS 6.4.2). Only expand while PKC_STATUS.BUSY = 0: the SCM must not be accessed while the PKC is working.",
+			"base": "0xE8004000",
+			"size": "0x400",
+			"clusters": [
+				{ "n": "R%s", "dim": 32, "inc": 32, "o": "0x00", "d": "Shared crypto memory register %s (W0 = bits 31:0 ... W7 = bits 255:224)",
+					"registers": [
+						{ "n": "W%s", "dim": 8, "inc": 4, "o": "0x00", "rm": "0", "d": "Word %s",
+							"f": [ { "n": "DATA", "b": "31:0", "d": "Parameters, keys, operands or results" } ] }
+					] }
+			]
+		},
+		{
+			"name": "HSM_TIM",
+			"description": "Timer module, timer 0 and timer 1 (HSM TS 7.4). 16-bit registers, addressed wordwise. Suspended in HALT mode.",
+			"base": "0xEC000000",
+			"size": "0x100",
+			"interrupts": [ [0, "HSM_TIM0", "Timer 0 overflow interrupt"], [1, "HSM_TIM1", "Timer 1 overflow interrupt"] ],
+			"registers": [
+				{ "n": "TIM_CTRL", "o": "0x00", "r": "0", "d": "Timer Control Register",
+					"f": [
+						{ "n": "TSRC1", "b": "12:11", "d": "Timer 1 clock source (0-3)" },
+						{ "n": "UNLOCK_TF1", "b": "10", "d": "Write enable for TF1 in the same access. Reads as 0." },
+						{ "n": "TF1", "b": "9", "d": "Timer 1 overflow flag" },
+						{ "n": "TR1", "b": "8", "d": "Timer 1 run" },
+						{ "n": "TSRC0", "b": "4:3", "d": "Timer 0 clock source (0-3)" },
+						{ "n": "UNLOCK_TF0", "b": "2", "d": "Write enable for TF0 in the same access. Reads as 0." },
+						{ "n": "TF0", "b": "1", "d": "Timer 0 overflow flag" },
+						{ "n": "TR0", "b": "0", "d": "Timer 0 run" }
+					] },
+				{ "n": "TIM_CFG", "o": "0x04", "r": "0", "d": "Timer Configuration Register (prescalers; change only while the timer is stopped)",
+					"f": [
+						{ "n": "TPR_DIS1", "b": "11", "d": "Timer 1 prescaler disable" },
+						{ "n": "TPR1", "b": "9:8", "d": "Timer 1 prescaler", "e": [ [0, "DIV4", "4"], [1, "DIV16", "16"], [2, "DIV64", "64"], [3, "DIV512", "512"] ] },
+						{ "n": "TPR_DIS0", "b": "3", "d": "Timer 0 prescaler disable" },
+						{ "n": "TPR0", "b": "1:0", "d": "Timer 0 prescaler", "e": [ [0, "DIV4", "4"], [1, "DIV16", "16"], [2, "DIV64", "64"], [3, "DIV512", "512"] ] }
+					] },
+				{ "n": "TIM_CNT%s", "dim": 2, "inc": 4, "o": "0x10", "a": "ro", "d": "Timer counter %s register",
+					"f": [ { "n": "COUNTER_VALUE", "b": "15:0", "d": "Current counter value" } ] },
+				{ "n": "TIM_RLD%s", "dim": 2, "inc": 4, "o": "0x20", "d": "Timer reload %s register",
+					"f": [ { "n": "RELOAD_VALUE", "b": "15:0", "d": "Reload value" } ] }
+			]
+		},
+		{
+			"name": "HSM_WDT",
+			"description": "HSM watchdog timer (HSM TS 8.4). 16-bit registers, addressed wordwise. Suspended in HALT mode; its interrupt is the NMI.",
+			"base": "0xEC000100",
+			"size": "0x100",
+			"registers": [
+				{ "n": "WDT_CTRL", "o": "0x00", "r": "0x0000C000", "d": "Watchdog Timer Control Register",
+					"f": [
+						{ "n": "PERIOD", "b": "15:12", "d": "Watchdog period" },
+						{ "n": "INC_SRV", "b": "8", "d": "Increment service", "e": [ [0, "ISN", "Service with 000AH"], [1, "IS1", "Service value incremented with each access"] ] },
+						{ "n": "CLK_SEL", "b": "4", "d": "Clock select (stop the watchdog before changing)" },
+						{ "n": "ACT_WDT", "b": "0", "d": "Watchdog running" }
+					] },
+				{ "n": "WDT_VAL", "o": "0x10", "a": "ro", "d": "Watchdog Timer Value Register",
+					"f": [ { "n": "WDT_VAL", "b": "15:0", "d": "Current watchdog timer value" } ] },
+				{ "n": "WDT_RELOAD", "o": "0x14", "d": "Watchdog Timer Reload Register",
+					"f": [ { "n": "RELOAD_VAL", "b": "15:0", "d": "Reload value" } ] },
+				{ "n": "WDT_SRV", "o": "0x18", "r": "0x0000000A", "d": "Watchdog Service Register. A wrong value triggers a checkpoint mismatch; do not update by read-increment-write.",
+					"f": [ { "n": "SRV_CNT", "b": "11:0", "d": "Service counter" } ] },
+				{ "n": "WDT_SRV_INI", "o": "0x1C", "a": "wo", "d": "Watchdog Service Initialization Register",
+					"f": [ { "n": "SRV_CNT_INI", "b": "11:0", "d": "Initial value of WDT_SRV" } ] },
+				{ "n": "WDT_ACC_CTRL", "o": "0x40", "r": "0x00000003", "d": "Watchdog Timer Access Control Register",
+					"f": [
+						{ "n": "DATA_ACC", "b": "1", "d": "Level for the data registers", "e": [ [0, "PRIV", "Privileged"], [1, "USER", "User"] ] },
+						{ "n": "CTRL_ACC", "b": "0", "d": "Level for the control registers", "e": [ [0, "PRIV", "Privileged"], [1, "USER", "User"] ] }
+					] }
+			]
+		},
+		{
+			"name": "HSM_TRNG",
+			"description": "True random number generator (HSM TS 3.4). Suspended in HALT mode.",
+			"base": "0xEC000200",
+			"size": "0x100",
+			"interrupts": [ [2, "HSM_TRNG", "True random number generator interrupt"] ],
+			"registers": [
+				{ "n": "TRNG_DATA32", "o": "0x00", "a": "ro", "readAction": "modify", "d": "True RNG Data Register. A read consumes the random word (clears DTA_RDY), so it is not read automatically.",
+					"f": [ { "n": "DATA", "b": "31:0", "d": "Random data" } ] },
+				{ "n": "TRNG_STAT", "o": "0x0C", "rm": "0x00000000", "d": "TRNG Status Register",
+					"f": [
+						{ "n": "UNLOCK_WARN", "b": "10", "d": "Write enable for WARN in the same access. Reads as 0." },
+						{ "n": "WARN", "b": "9", "d": "Quality warning", "e": [ [0, "GOOD", "No warning"], [1, "LOW", "Random data quality inadequate"] ] },
+						{ "n": "UNLOCK_FIPS_ERR", "b": "3", "d": "Write enable for FIPS_ERR in the same access. Reads as 0." },
+						{ "n": "FIPS_ERR", "b": "2", "d": "FIPS error", "e": [ [0, "OK", "No error"], [1, "ERROR", "Data identical to the previous word"] ] },
+						{ "n": "DTA_RDY", "b": "0", "d": "Random data ready", "e": [ [0, "BUSY", "No data"], [1, "RDY", "Data ready"] ] }
+					] },
+				{ "n": "TRNG_CTRL", "o": "0x10", "r": "0x00000002", "d": "TRNG Control Register",
+					"f": [
+						{ "n": "DIS", "b": "2", "d": "Disable (stops oscillators and logic)" },
+						{ "n": "DBS", "b": "1:0", "d": "Data block size", "e": [ [0, "BYTE", "8 bits"], [1, "HW", "16 bits"], [2, "WORD", "32 bits"] ] }
+					] }
+			]
+		},
+		{
+			"name": "HSM_CACHE",
+			"description": "HSM unified cache (HSM TS 2.5.3). Privileged access only. The command registers are write-only and trigger cache operations.",
+			"base": "0xE008A000",
+			"size": "0x120",
+			"registers": [
+				{ "n": "CACHE_CONFIG", "o": "0x000", "r": "0x00060404", "a": "ro", "d": "Cache Configuration Register",
+					"f": [
+						{ "n": "SETBITS", "b": "23:16", "d": "Number of set bits (2^SETBITS sets)" },
+						{ "n": "WAYS", "b": "15:8", "d": "Number of ways" },
+						{ "n": "BLKBITS", "b": "7:0", "d": "Number of block bits (04H: 16-byte lines)" }
+					] },
+				{ "n": "CACHE_CTRL", "o": "0x004", "r": "0", "d": "Cache Control Register",
+					"f": [ { "n": "DAPCA", "b": "0", "d": "Disable parallel cache accesses", "e": [ [0, "EN", "Parallel accesses possible"], [1, "DIS", "Parallel accesses disabled"] ] } ] },
+				{ "n": "CACHE_AC", "o": "0x100", "r": "0", "a": "wo", "d": "Cache All Clean Register (write: clean and invalidate all blocks)",
+					"f": [ { "n": "MASK", "b": "31:0", "d": "Mask" } ] },
+				{ "n": "CACHE_SC", "o": "0x104", "r": "0", "a": "wo", "d": "Cache Set Clean Register (write: clean the set of ADDR[9:4])",
+					"f": [ { "n": "ADDR", "b": "31:0", "d": "Set address" } ] },
+				{ "n": "CACHE_BC", "o": "0x110", "r": "0", "a": "wo", "d": "Cache Block Clean Register",
+					"f": [ { "n": "ADDR", "b": "31:0", "d": "Block address (bits 3:0 ignored)" } ] },
+				{ "n": "CACHE_BT", "o": "0x114", "r": "0", "a": "wo", "d": "Cache Block Touch Register",
+					"f": [ { "n": "ADDR", "b": "31:0", "d": "Block address (bits 3:0 ignored)" } ] },
+				{ "n": "CACHE_BL", "o": "0x118", "r": "0", "a": "wo", "d": "Cache Block Lock Register",
+					"f": [ { "n": "ADDR", "b": "31:0", "d": "Block address (bits 3:0 ignored)" } ] },
+				{ "n": "CACHE_BU", "o": "0x11C", "r": "0", "a": "wo", "d": "Cache Block Unlock Register",
+					"f": [ { "n": "ADDR", "b": "31:0", "d": "Block address (bits 3:0 ignored)" } ] }
+			]
+		},
+		{
+			"name": "HSM_SCNSCB",
+			"description": "Cortex-M3 system control, not in the SCB (ARMv7-M).",
+			"base": "0xE000E000",
+			"size": "0x10",
+			"registers": [
+				{ "n": "ICTR", "o": "0x004", "a": "ro", "d": "Interrupt Controller Type Register",
+					"f": [ { "n": "INTLINESNUM", "b": "3:0", "d": "Number of interrupt lines / 32 - 1" } ] },
+				{ "n": "ACTLR", "o": "0x008", "r": "0", "d": "Auxiliary Control Register",
+					"f": [ { "n": "DISFOLD", "b": "2", "d": "Disable IT folding" }, { "n": "DISDEFWBUF", "b": "1", "d": "Disable write buffer for default memory map" }, { "n": "DISMCYCINT", "b": "0", "d": "Disable interruption of multi-cycle instructions" } ] }
+			]
+		},
+		{
+			"name": "HSM_SYSTICK",
+			"description": "Cortex-M3 SysTick timer. Reference clock: SPB clock / 16. Suspended in HALT mode (HSM TS 2.2.2).",
+			"base": "0xE000E010",
+			"size": "0x10",
+			"registers": [
+				{ "n": "CTRL", "o": "0x0", "r": "0", "d": "SysTick Control and Status Register",
+					"f": [ { "n": "COUNTFLAG", "b": "16", "a": "ro", "d": "Counted to 0 since last read (cleared on read)" }, { "n": "CLKSOURCE", "b": "2", "d": "Clock source", "e": [ [0, "REF", "Reference clock (SPB/16)"], [1, "CORE", "HSM system clock"] ] }, { "n": "TICKINT", "b": "1", "d": "SysTick exception request enable" }, { "n": "ENABLE", "b": "0", "d": "Counter enable" } ] },
+				{ "n": "LOAD", "o": "0x4", "d": "SysTick Reload Value Register",
+					"f": [ { "n": "RELOAD", "b": "23:0", "d": "Reload value" } ] },
+				{ "n": "VAL", "o": "0x8", "d": "SysTick Current Value Register (any write clears it)",
+					"f": [ { "n": "CURRENT", "b": "23:0", "d": "Current counter value" } ] },
+				{ "n": "CALIB", "o": "0xC", "r": "0x0000F424", "rm": "0x00FFFFFF", "a": "ro", "d": "SysTick Calibration Value Register (62500 = 10 ms at 100 MHz SPB)",
+					"f": [ { "n": "NOREF", "b": "31", "d": "No reference clock" }, { "n": "SKEW", "b": "30", "d": "TENMS not exact" }, { "n": "TENMS", "b": "23:0", "d": "Reload value for 10 ms" } ] }
+			]
+		},
+		{
+			"name": "HSM_NVIC",
+			"description": "Cortex-M3 NVIC: 10 interrupts, 8 priority levels (3 bits, 7:5 of each priority byte). HSM TS 2.3.",
+			"base": "0xE000E100",
+			"size": "0xE04",
+			"irqBits": [ [0, "TIM0", "Timer 0"], [1, "TIM1", "Timer 1"], [2, "TRNG", "TRNG"], [3, "BRIDGE_SRV", "Bridge service"], [4, "BRIDGE_ERR", "Bridge error"], [5, "SENSOR", "Sensor"], [6, "EXT", "External peripheral"], [8, "PKC_RDY", "PKC ready"], [9, "PKC_ERR", "PKC error"] ],
+			"registers": [
+				{ "n": "ISER0", "o": "0x000", "r": "0", "mwv": "oneToSet", "irqFields": true, "d": "Interrupt Set-Enable Register" },
+				{ "n": "ICER0", "o": "0x080", "r": "0", "mwv": "oneToClear", "irqFields": true, "d": "Interrupt Clear-Enable Register (reads the enable state)" },
+				{ "n": "ISPR0", "o": "0x100", "r": "0", "mwv": "oneToSet", "irqFields": true, "d": "Interrupt Set-Pending Register" },
+				{ "n": "ICPR0", "o": "0x180", "r": "0", "mwv": "oneToClear", "irqFields": true, "d": "Interrupt Clear-Pending Register (reads the pending state)" },
+				{ "n": "IABR0", "o": "0x200", "r": "0", "a": "ro", "irqFields": true, "d": "Interrupt Active Bit Register" },
+				{ "n": "IPR0", "o": "0x300", "r": "0", "d": "Interrupt Priority Register 0",
+					"f": [ { "n": "PRI_TIM0", "b": "7:0", "d": "Priority of IRQ 0 (bits 7:5 implemented)" }, { "n": "PRI_TIM1", "b": "15:8", "d": "Priority of IRQ 1" }, { "n": "PRI_TRNG", "b": "23:16", "d": "Priority of IRQ 2" }, { "n": "PRI_BRIDGE_SRV", "b": "31:24", "d": "Priority of IRQ 3" } ] },
+				{ "n": "IPR1", "o": "0x304", "r": "0", "d": "Interrupt Priority Register 1",
+					"f": [ { "n": "PRI_BRIDGE_ERR", "b": "7:0", "d": "Priority of IRQ 4" }, { "n": "PRI_SENSOR", "b": "15:8", "d": "Priority of IRQ 5" }, { "n": "PRI_EXT", "b": "23:16", "d": "Priority of IRQ 6" }, { "n": "PRI_7", "b": "31:24", "d": "Priority of IRQ 7 (not connected)" } ] },
+				{ "n": "IPR2", "o": "0x308", "r": "0", "d": "Interrupt Priority Register 2",
+					"f": [ { "n": "PRI_PKC_RDY", "b": "7:0", "d": "Priority of IRQ 8" }, { "n": "PRI_PKC_ERR", "b": "15:8", "d": "Priority of IRQ 9" } ] },
+				{ "n": "STIR", "o": "0xE00", "a": "wo", "d": "Software Trigger Interrupt Register",
+					"f": [ { "n": "INTID", "b": "8:0", "d": "Interrupt to trigger" } ] }
+			]
+		},
+		{
+			"name": "HSM_SCB",
+			"description": "Cortex-M3 System Control Block (ARMv7-M, HSM TS 2.2).",
+			"base": "0xE000ED00",
+			"size": "0x40",
+			"registers": [
+				{ "n": "CPUID", "o": "0x00", "r": "0x492FC230", "rm": "0xFFFFFFF0", "a": "ro", "d": "CPUID Base Register",
+					"f": [ { "n": "IMPLEMENTER", "b": "31:24", "d": "Implementer (49H on the HSM)" }, { "n": "VARIANT", "b": "23:20", "d": "Variant (r2)" }, { "n": "CONSTANT", "b": "19:16", "d": "Architecture (FH)" }, { "n": "PARTNO", "b": "15:4", "d": "Part number (C23H = Cortex-M3)" }, { "n": "REVISION", "b": "3:0", "d": "Revision (p0)" } ] },
+				{ "n": "ICSR", "o": "0x04", "r": "0", "d": "Interrupt Control and State Register",
+					"f": [ { "n": "NMIPENDSET", "b": "31", "d": "NMI pending" }, { "n": "PENDSVSET", "b": "28", "d": "PendSV pending" }, { "n": "PENDSVCLR", "b": "27", "d": "Clear PendSV pending. Reads as 0." }, { "n": "PENDSTSET", "b": "26", "d": "SysTick pending" }, { "n": "PENDSTCLR", "b": "25", "d": "Clear SysTick pending. Reads as 0." }, { "n": "ISRPREEMPT", "b": "23", "a": "ro", "d": "Pending exception serviced on exit from debug halt" }, { "n": "ISRPENDING", "b": "22", "a": "ro", "d": "External interrupt pending" }, { "n": "VECTPENDING", "b": "21:12", "a": "ro", "d": "Highest priority pending exception" }, { "n": "RETTOBASE", "b": "11", "a": "ro", "d": "No other active exception" }, { "n": "VECTACTIVE", "b": "8:0", "a": "ro", "d": "Active exception number" } ] },
+				{ "n": "VTOR", "o": "0x08", "r": "0", "d": "Vector Table Offset Register (bits 31:30 added for vector tables in flash, HSM TS 2.3.2)",
+					"f": [ { "n": "TBLOFF", "b": "31:7", "d": "Vector table base address bits 31:7" } ] },
+				{ "n": "AIRCR", "o": "0x0C", "r": "0xFA050000", "d": "Application Interrupt and Reset Control Register. Do not set SYSRESETREQ or VECTRESET on the HSM (undefined behaviour, HSM TS 2.2.5).",
+					"f": [ { "n": "VECTKEY", "b": "31:16", "d": "Write 05FAH; reads FA05H" }, { "n": "ENDIANNESS", "b": "15", "a": "ro", "d": "Data endianness (0: little)" }, { "n": "PRIGROUP", "b": "10:8", "d": "Priority grouping" }, { "n": "SYSRESETREQ", "b": "2", "d": "System reset request (do not use)" }, { "n": "VECTCLRACTIVE", "b": "1", "d": "Clear active state (debug only)" }, { "n": "VECTRESET", "b": "0", "d": "Local reset (do not use)" } ] },
+				{ "n": "SCR", "o": "0x10", "r": "0", "d": "System Control Register",
+					"f": [ { "n": "SEVONPEND", "b": "4", "d": "Send event on pending" }, { "n": "SLEEPDEEP", "b": "2", "d": "Deep sleep (no effect on the HSM except SysTick stop)" }, { "n": "SLEEPONEXIT", "b": "1", "d": "Sleep on exit from handler" } ] },
+				{ "n": "CCR", "o": "0x14", "r": "0x00000200", "d": "Configuration and Control Register",
+					"f": [ { "n": "STKALIGN", "b": "9", "d": "8-byte stack alignment on exception entry" }, { "n": "BFHFNMIGN", "b": "8", "d": "Ignore precise bus faults in HardFault/NMI" }, { "n": "DIV_0_TRP", "b": "4", "d": "Trap divide by zero" }, { "n": "UNALIGN_TRP", "b": "3", "d": "Trap unaligned accesses" }, { "n": "USERSETMPEND", "b": "1", "d": "Unprivileged access to STIR" }, { "n": "NONBASETHRDENA", "b": "0", "d": "Enter thread mode with active exceptions" } ] },
+				{ "n": "SHPR1", "o": "0x18", "r": "0", "d": "System Handler Priority Register 1",
+					"f": [ { "n": "PRI_6", "b": "23:16", "d": "UsageFault priority" }, { "n": "PRI_5", "b": "15:8", "d": "BusFault priority" }, { "n": "PRI_4", "b": "7:0", "d": "MemManage priority" } ] },
+				{ "n": "SHPR2", "o": "0x1C", "r": "0", "d": "System Handler Priority Register 2",
+					"f": [ { "n": "PRI_11", "b": "31:24", "d": "SVCall priority" } ] },
+				{ "n": "SHPR3", "o": "0x20", "r": "0", "d": "System Handler Priority Register 3",
+					"f": [ { "n": "PRI_15", "b": "31:24", "d": "SysTick priority" }, { "n": "PRI_14", "b": "23:16", "d": "PendSV priority" } ] },
+				{ "n": "SHCSR", "o": "0x24", "r": "0", "d": "System Handler Control and State Register",
+					"f": [ { "n": "USGFAULTENA", "b": "18", "d": "UsageFault enable" }, { "n": "BUSFAULTENA", "b": "17", "d": "BusFault enable" }, { "n": "MEMFAULTENA", "b": "16", "d": "MemManage enable" }, { "n": "SVCALLPENDED", "b": "15", "d": "SVCall pending" }, { "n": "BUSFAULTPENDED", "b": "14", "d": "BusFault pending" }, { "n": "MEMFAULTPENDED", "b": "13", "d": "MemManage pending" }, { "n": "USGFAULTPENDED", "b": "12", "d": "UsageFault pending" }, { "n": "SYSTICKACT", "b": "11", "d": "SysTick active" }, { "n": "PENDSVACT", "b": "10", "d": "PendSV active" }, { "n": "MONITORACT", "b": "8", "d": "Debug monitor active" }, { "n": "SVCALLACT", "b": "7", "d": "SVCall active" }, { "n": "USGFAULTACT", "b": "3", "d": "UsageFault active" }, { "n": "BUSFAULTACT", "b": "1", "d": "BusFault active" }, { "n": "MEMFAULTACT", "b": "0", "d": "MemManage active" } ] },
+				{ "n": "CFSR", "o": "0x28", "r": "0", "mwv": "oneToClear", "d": "Configurable Fault Status Register (MMFSR, BFSR, UFSR; write 1 to clear)",
+					"f": [ { "n": "DIVBYZERO", "b": "25", "d": "Divide by zero UsageFault" }, { "n": "UNALIGNED", "b": "24", "d": "Unaligned access UsageFault" }, { "n": "NOCP", "b": "19", "d": "No coprocessor UsageFault" }, { "n": "INVPC", "b": "18", "d": "Invalid PC load UsageFault" }, { "n": "INVSTATE", "b": "17", "d": "Invalid state UsageFault" }, { "n": "UNDEFINSTR", "b": "16", "d": "Undefined instruction UsageFault" }, { "n": "BFARVALID", "b": "15", "d": "BFAR valid" }, { "n": "STKERR", "b": "12", "d": "BusFault on exception entry stacking" }, { "n": "UNSTKERR", "b": "11", "d": "BusFault on exception return unstacking" }, { "n": "IMPRECISERR", "b": "10", "d": "Imprecise data bus error" }, { "n": "PRECISERR", "b": "9", "d": "Precise data bus error" }, { "n": "IBUSERR", "b": "8", "d": "Instruction bus error" }, { "n": "MMARVALID", "b": "7", "d": "MMFAR valid" }, { "n": "MSTKERR", "b": "4", "d": "MemManage fault on stacking" }, { "n": "MUNSTKERR", "b": "3", "d": "MemManage fault on unstacking" }, { "n": "DACCVIOL", "b": "1", "d": "Data access violation" }, { "n": "IACCVIOL", "b": "0", "d": "Instruction access violation" } ] },
+				{ "n": "HFSR", "o": "0x2C", "r": "0", "mwv": "oneToClear", "d": "HardFault Status Register (write 1 to clear)",
+					"f": [ { "n": "DEBUGEVT", "b": "31", "d": "Debug event" }, { "n": "FORCED", "b": "30", "d": "Forced HardFault (escalated)" }, { "n": "VECTTBL", "b": "1", "d": "Vector table read fault" } ] },
+				{ "n": "DFSR", "o": "0x30", "r": "0", "a": "ro", "d": "Debug Fault Status Register (cleared by the debug server; read-only here)",
+					"f": [ { "n": "EXTERNAL", "b": "4", "d": "External debug request" }, { "n": "VCATCH", "b": "3", "d": "Vector catch" }, { "n": "DWTTRAP", "b": "2", "d": "DWT match" }, { "n": "BKPT", "b": "1", "d": "Breakpoint" }, { "n": "HALTED", "b": "0", "d": "Halt request or step" } ] },
+				{ "n": "MMFAR", "o": "0x34", "d": "MemManage Fault Address Register",
+					"f": [ { "n": "ADDRESS", "b": "31:0", "d": "Fault address (valid if CFSR.MMARVALID)" } ] },
+				{ "n": "BFAR", "o": "0x38", "d": "BusFault Address Register",
+					"f": [ { "n": "ADDRESS", "b": "31:0", "d": "Fault address (valid if CFSR.BFARVALID)" } ] },
+				{ "n": "AFSR", "o": "0x3C", "r": "0", "d": "Auxiliary Fault Status Register",
+					"f": [ { "n": "IMPDEF", "b": "31:0", "d": "Implementation defined" } ] }
+			]
+		},
+		{
+			"name": "HSM_MPU",
+			"description": "Cortex-M3 memory protection unit, 8 regions (PMSAv7; C, S and TEX are ignored on the HSM, HSM TS 2.4).",
+			"base": "0xE000ED90",
+			"size": "0x2C",
+			"registers": [
+				{ "n": "TYPE", "o": "0x00", "r": "0x00000800", "a": "ro", "d": "MPU Type Register",
+					"f": [ { "n": "IREGION", "b": "23:16", "d": "Instruction regions (0: unified)" }, { "n": "DREGION", "b": "15:8", "d": "Number of regions" }, { "n": "SEPARATE", "b": "0", "d": "Separate instruction/data maps" } ] },
+				{ "n": "CTRL", "o": "0x04", "r": "0", "d": "MPU Control Register",
+					"f": [ { "n": "PRIVDEFENA", "b": "2", "d": "Default memory map for privileged accesses" }, { "n": "HFNMIENA", "b": "1", "d": "MPU enabled in HardFault/NMI" }, { "n": "ENABLE", "b": "0", "d": "MPU enable" } ] },
+				{ "n": "RNR", "o": "0x08", "d": "MPU Region Number Register",
+					"f": [ { "n": "REGION", "b": "7:0", "d": "Region shown in RBAR/RASR" } ] },
+				{ "n": "RBAR", "o": "0x0C", "d": "MPU Region Base Address Register",
+					"f": [ { "n": "ADDR", "b": "31:5", "d": "Region base address" }, { "n": "VALID", "b": "4", "d": "Write: use REGION instead of RNR. Reads as 0." }, { "n": "REGION", "b": "3:0", "d": "Region number" } ] },
+				{ "n": "RASR", "o": "0x10", "d": "MPU Region Attribute and Size Register",
+					"f": [ { "n": "XN", "b": "28", "d": "Execute never" }, { "n": "AP", "b": "26:24", "d": "Access permissions" }, { "n": "TEX", "b": "21:19", "d": "Type extension (ignored on the HSM)" }, { "n": "S", "b": "18", "d": "Shareable (ignored)" }, { "n": "C", "b": "17", "d": "Cacheable (ignored)" }, { "n": "B", "b": "16", "d": "Bufferable" }, { "n": "SRD", "b": "15:8", "d": "Subregion disable" }, { "n": "SIZE", "b": "5:1", "d": "Region size 2^(SIZE+1)" }, { "n": "ENABLE", "b": "0", "d": "Region enable" } ] },
+				{ "n": "RBAR_A%s", "dim": 3, "inc": 8, "idx": [1, 2, 3], "o": "0x14", "d": "Alias %s of RBAR",
+					"f": [ { "n": "RBAR", "b": "31:0", "d": "Same as RBAR" } ] },
+				{ "n": "RASR_A%s", "dim": 3, "inc": 8, "idx": [1, 2, 3], "o": "0x18", "d": "Alias %s of RASR",
+					"f": [ { "n": "RASR", "b": "31:0", "d": "Same as RASR" } ] }
+			]
+		},
+		{
+			"name": "HSM_COREDEBUG",
+			"description": "Cortex-M3 core debug registers. Used by the debug server for run control; read-only here.",
+			"base": "0xE000EDF0",
+			"size": "0x10",
+			"registers": [
+				{ "n": "DHCSR", "o": "0x0", "rm": "0", "a": "ro", "d": "Debug Halting Control and Status Register (reading clears S_RESET_ST and S_RETIRE_ST)",
+					"f": [ { "n": "S_RESET_ST", "b": "25", "d": "Core reset since last read" }, { "n": "S_RETIRE_ST", "b": "24", "d": "Instruction retired since last read" }, { "n": "S_LOCKUP", "b": "19", "d": "Core locked up" }, { "n": "S_SLEEP", "b": "18", "d": "Core sleeping" }, { "n": "S_HALT", "b": "17", "d": "Core halted" }, { "n": "S_REGRDY", "b": "16", "d": "Register transfer complete" }, { "n": "C_SNAPSTALL", "b": "5", "d": "Break a stalled load/store" }, { "n": "C_MASKINTS", "b": "3", "d": "Mask interrupts while stepping" }, { "n": "C_STEP", "b": "2", "d": "Step" }, { "n": "C_HALT", "b": "1", "d": "Halt" }, { "n": "C_DEBUGEN", "b": "0", "d": "Halting debug enabled (HSM SW may only set it when HSM debugging is enabled)" } ] },
+				{ "n": "DCRSR", "o": "0x4", "a": "wo", "d": "Debug Core Register Selector Register",
+					"f": [ { "n": "REGWNR", "b": "16", "d": "1: write, 0: read" }, { "n": "REGSEL", "b": "4:0", "d": "Core register" } ] },
+				{ "n": "DCRDR", "o": "0x8", "a": "ro", "d": "Debug Core Register Data Register",
+					"f": [ { "n": "DBGTMP", "b": "31:0", "d": "Core register transfer data" } ] },
+				{ "n": "DEMCR", "o": "0xC", "r": "0", "a": "ro", "d": "Debug Exception and Monitor Control Register",
+					"f": [ { "n": "TRCENA", "b": "24", "d": "DWT enable" }, { "n": "MON_REQ", "b": "19", "d": "Monitor request" }, { "n": "MON_STEP", "b": "18", "d": "Monitor step" }, { "n": "MON_PEND", "b": "17", "d": "Monitor pending" }, { "n": "MON_EN", "b": "16", "d": "Debug monitor enable" }, { "n": "VC_HARDERR", "b": "10", "d": "Vector catch HardFault" }, { "n": "VC_INTERR", "b": "9", "d": "Vector catch exception entry/return fault" }, { "n": "VC_BUSERR", "b": "8", "d": "Vector catch BusFault" }, { "n": "VC_STATERR", "b": "7", "d": "Vector catch UsageFault state error" }, { "n": "VC_CHKERR", "b": "6", "d": "Vector catch UsageFault check error" }, { "n": "VC_NOCPERR", "b": "5", "d": "Vector catch UsageFault coprocessor" }, { "n": "VC_MMERR", "b": "4", "d": "Vector catch MemManage" }, { "n": "VC_CORERESET", "b": "0", "d": "Vector catch core reset" } ] }
+			]
+		},
+		{
+			"name": "HSM_DWT",
+			"description": "Cortex-M3 data watchpoint and trace unit, 4 comparators. The comparators are used by the debug server for watchpoints; read-only here.",
+			"base": "0xE0001000",
+			"size": "0x60",
+			"registers": [
+				{ "n": "CTRL", "o": "0x00", "r": "0x40000000", "rm": "0xF0000000", "d": "DWT Control Register",
+					"f": [ { "n": "NUMCOMP", "b": "31:28", "a": "ro", "d": "Number of comparators" }, { "n": "NOTRCPKT", "b": "27", "a": "ro", "d": "No trace packets" }, { "n": "NOEXTTRIG", "b": "26", "a": "ro", "d": "No external match signals" }, { "n": "NOCYCCNT", "b": "25", "a": "ro", "d": "No cycle counter" }, { "n": "NOPRFCNT", "b": "24", "a": "ro", "d": "No profiling counters" }, { "n": "CYCEVTENA", "b": "22", "d": "POSTCNT underflow event" }, { "n": "FOLDEVTENA", "b": "21", "d": "Folded instruction count event" }, { "n": "LSUEVTENA", "b": "20", "d": "LSU count event" }, { "n": "SLEEPEVTENA", "b": "19", "d": "Sleep count event" }, { "n": "EXCEVTENA", "b": "18", "d": "Exception overhead count event" }, { "n": "CPIEVTENA", "b": "17", "d": "CPI count event" }, { "n": "EXCTRCENA", "b": "16", "d": "Exception trace" }, { "n": "PCSAMPLENA", "b": "12", "d": "PC sampling" }, { "n": "SYNCTAP", "b": "11:10", "d": "Synchronization packet rate" }, { "n": "CYCTAP", "b": "9", "d": "POSTCNT tap" }, { "n": "POSTINIT", "b": "8:5", "d": "POSTCNT initial value" }, { "n": "POSTPRESET", "b": "4:1", "d": "POSTCNT reload value" }, { "n": "CYCCNTENA", "b": "0", "d": "Cycle counter enable" } ] },
+				{ "n": "CYCCNT", "o": "0x04", "d": "Cycle Count Register", "f": [ { "n": "CYCCNT", "b": "31:0", "d": "Processor clock cycles" } ] },
+				{ "n": "CPICNT", "o": "0x08", "d": "CPI Count Register", "f": [ { "n": "CPICNT", "b": "7:0", "d": "Additional instruction cycles" } ] },
+				{ "n": "EXCCNT", "o": "0x0C", "d": "Exception Overhead Count Register", "f": [ { "n": "EXCCNT", "b": "7:0", "d": "Exception overhead cycles" } ] },
+				{ "n": "SLEEPCNT", "o": "0x10", "d": "Sleep Count Register", "f": [ { "n": "SLEEPCNT", "b": "7:0", "d": "Sleep cycles" } ] },
+				{ "n": "LSUCNT", "o": "0x14", "d": "LSU Count Register", "f": [ { "n": "LSUCNT", "b": "7:0", "d": "Load/store extra cycles" } ] },
+				{ "n": "FOLDCNT", "o": "0x18", "d": "Folded-instruction Count Register", "f": [ { "n": "FOLDCNT", "b": "7:0", "d": "Folded instructions" } ] },
+				{ "n": "PCSR", "o": "0x1C", "a": "ro", "d": "Program Counter Sample Register", "f": [ { "n": "EIASAMPLE", "b": "31:0", "d": "Sampled instruction address" } ] },
+				{ "n": "COMP%s", "dim": 4, "inc": 16, "o": "0x20", "a": "ro", "d": "Comparator Register %s", "f": [ { "n": "COMP", "b": "31:0", "d": "Reference value" } ] },
+				{ "n": "MASK%s", "dim": 4, "inc": 16, "o": "0x24", "a": "ro", "d": "Mask Register %s", "f": [ { "n": "MASK", "b": "4:0", "d": "Ignored address bits" } ] },
+				{ "n": "FUNCTION%s", "dim": 4, "inc": 16, "o": "0x28", "r": "0", "a": "ro", "d": "Function Register %s (reading clears MATCHED)",
+					"f": [ { "n": "MATCHED", "b": "24", "d": "Comparator matched since last read" }, { "n": "DATAVADDR1", "b": "19:16", "d": "Second linked comparator" }, { "n": "DATAVADDR0", "b": "15:12", "d": "Linked address comparator" }, { "n": "DATAVSIZE", "b": "11:10", "d": "Data value size" }, { "n": "LNK1ENA", "b": "9", "d": "Second linked comparator supported" }, { "n": "DATAVMATCH", "b": "8", "d": "Data value match" }, { "n": "CYCMATCH", "b": "7", "d": "Cycle count match" }, { "n": "EMITRANGE", "b": "5", "d": "Emit address offset trace packets" }, { "n": "FUNCTION", "b": "3:0", "d": "Function (4: PC, 5: read, 6: write, 7: access watchpoint)" } ] }
+			]
+		},
+		{
+			"name": "HSM_FPB",
+			"description": "Cortex-M3 flash patch and breakpoint unit, 6 usable code comparators with the HSM's FP_COMPHx extension for 32-bit addresses (HSM TS 12.4.1). Used by the debug server for breakpoints; read-only here.",
+			"base": "0xE0002000",
+			"size": "0x1000",
+			"registers": [
+				{ "n": "FP_CTRL", "o": "0x000", "a": "ro", "d": "Flash Patch Control Register",
+					"f": [ { "n": "NUM_CODE2", "b": "14:12", "d": "Code comparators, bits 6:4" }, { "n": "NUM_LIT", "b": "11:8", "d": "Literal comparators" }, { "n": "NUM_CODE1", "b": "7:4", "d": "Code comparators, bits 3:0" }, { "n": "KEY", "b": "1", "d": "Write key (must be 1 on writes). Reads as 0." }, { "n": "ENABLE", "b": "0", "d": "FPB enable" } ] },
+				{ "n": "FP_REMAP", "o": "0x004", "a": "ro", "d": "Flash Patch Remap Register",
+					"f": [ { "n": "REMAP", "b": "28:5", "d": "Remap base address" } ] },
+				{ "n": "FP_COMP%s", "dim": 8, "inc": 4, "o": "0x008", "r": "0", "a": "ro", "d": "Flash Patch Comparator Register %s (6 and 7 are literal comparators, unused on the HSM)",
+					"f": [ { "n": "REPLACE", "b": "31:30", "d": "Breakpoint on lower/upper halfword or both" }, { "n": "COMP", "b": "28:2", "d": "Comparison address bits 28:2" }, { "n": "ENABLE", "b": "0", "d": "Comparator enable" } ] },
+				{ "n": "FP_COMPH%s", "dim": 8, "inc": 4, "o": "0x028", "r": "0", "a": "ro", "d": "Flash Patch Comparator High Register %s (HSM extension)",
+					"f": [ { "n": "COMPH", "b": "2:0", "d": "Comparison address bits 31:29" } ] },
+				{ "n": "PID4", "o": "0xFD0", "r": "0", "a": "ro", "d": "Peripheral Identification Register 4", "f": [ { "n": "PID", "b": "31:0", "d": "PID value" } ] },
+				{ "n": "PID0", "o": "0xFE0", "r": "0x00000001", "a": "ro", "d": "Peripheral Identification Register 0", "f": [ { "n": "PID", "b": "31:0", "d": "PID value" } ] },
+				{ "n": "PID1", "o": "0xFE4", "r": "0x00000010", "a": "ro", "d": "Peripheral Identification Register 1", "f": [ { "n": "PID", "b": "31:0", "d": "PID value" } ] },
+				{ "n": "PID2", "o": "0xFE8", "r": "0x0000001C", "a": "ro", "d": "Peripheral Identification Register 2", "f": [ { "n": "PID", "b": "31:0", "d": "PID value" } ] },
+				{ "n": "PID3", "o": "0xFEC", "r": "0x00000001", "a": "ro", "d": "Peripheral Identification Register 3", "f": [ { "n": "PID", "b": "31:0", "d": "PID value" } ] },
+				{ "n": "CID%s", "dim": 4, "inc": 4, "o": "0xFF0", "a": "ro", "d": "Component Identification Register %s", "f": [ { "n": "CID", "b": "7:0", "d": "Component ID byte" } ] }
+			]
+		}
+	]
+}

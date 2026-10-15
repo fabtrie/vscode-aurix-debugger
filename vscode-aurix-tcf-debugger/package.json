@@ -1,0 +1,1013 @@
+{
+	"name": "aurix-debugger",
+	"description": "AURIX™ debugger for VS Code, based on the aurix-dbg debug server (Infineon TAS, OpenOCD cfg scripts)",
+	"displayName": "AURIX™ Debugger",
+	"icon": "media/debugger-icon.png",
+	"publisher": "fabtrie",
+	"version": "0.1.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/ZeZhan/vscode-aurix-tcf-debugger.git"
+	},
+	"homepage": "https://github.com/ZeZhan/vscode-aurix-tcf-debugger",
+	"bugs": {
+		"url": "https://github.com/ZeZhan/vscode-aurix-tcf-debugger/issues"
+	},
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.79.0"
+	},
+	"categories": [
+		"Debuggers"
+	],
+	"keywords": [
+		"aurix",
+		"tricore",
+		"embedded",
+		"debugger",
+		"vscode",
+		"vscode-extension",
+		"infineon"
+	],
+	"activationEvents": [
+		"onDebug",
+		"onDebugResolve:aurixdbg",
+		"onWebviewPanel:aurixLiveWatchPanel"
+	],
+	"extensionDependencies": [
+		"mcu-debug.peripheral-viewer",
+		"eclipse-cdt.memory-inspector"
+	],
+	"main": "./out/extension.js",
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": "limited",
+			"description": "Path mapper function execution may be disabled."
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile && npm run copy-agent",
+		"compile": "tsc -p ./ && node ./scripts/copy-static-assets.js",
+		"watch": "tsc -watch -p ./",
+		"svd:compress": "node ./scripts/compress-svd.js --delete",
+		"svd:hsm": "node ./scripts/gen-hsm-svd.js",
+		"pretest": "npm run compile && npm run lint",
+		"lint": "eslint src --ext ts",
+		"test": "node ./out/test/runTest.js",
+		"test:stress": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-stress.ps1",
+		"package": "npx vsce package --no-rewrite-relative-links -o aurix-debugger.vsix",
+		"copy-agent": "node ./scripts/copy-agent.js"
+	},
+	"devDependencies": {
+		"@types/mocha": "^10.0.6",
+		"@types/node": "20.x",
+		"@types/vscode": "^1.79.0",
+		"@typescript-eslint/eslint-plugin": "^6.13.2",
+		"@typescript-eslint/parser": "^6.13.2",
+		"@vscode/test-electron": "^2.3.8",
+		"@vscode/vsce": "^2.22.0",
+		"eslint": "^8.55.0",
+		"mocha": "^10.8.2",
+		"mocha-junit-reporter": "^2.2.0",
+		"typescript": "^5.3.3"
+	},
+	"dependencies": {
+		"@vscode/debugadapter": "1.64.0",
+		"@vscode/debugprotocol": "1.64.0"
+	},
+	"contributes": {
+		"commands": [
+			{
+				"command": "aurix-debugger.resetTarget",
+				"title": "Reset",
+				"category": "AURIX™ Debugger",
+				"icon": {
+					"light": "media/reset-halt-light.svg",
+					"dark": "media/reset-halt-dark.svg"
+				}
+			},
+			{
+				"command": "aurix-debugger.flashTarget",
+				"title": "Flash Target",
+				"category": "AURIX™ Debugger",
+				"icon": "$(desktop-download)"
+			},
+			{
+				"command": "aurix-debugger.showActions",
+				"title": "Debugger Actions",
+				"category": "AURIX™ Debugger",
+				"icon": "$(tools)"
+			},
+			{
+				"command": "aurix-debugger.runAction",
+				"title": "Run Debugger Action",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.showResetCapabilities",
+				"title": "Show Reset Capabilities",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.toggleInstructionStepping",
+				"title": "Toggle Instruction Stepping",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.enableInstructionStepping",
+				"title": "Enable Instruction Stepping",
+				"category": "AURIX™ Debugger",
+				"icon": {
+					"light": "media/instr-step-on-light.svg",
+					"dark": "media/instr-step-on-dark.svg"
+				}
+			},
+			{
+				"command": "aurix-debugger.disableInstructionStepping",
+				"title": "Disable Instruction Stepping",
+				"category": "AURIX™ Debugger",
+				"icon": {
+					"light": "media/instr-step-off-light.svg",
+					"dark": "media/instr-step-off-dark.svg"
+				}
+			},
+			{
+				"command": "aurix-debugger.disassemblyGoTo",
+				"title": "Go to Address or Symbol in Disassembly",
+				"category": "AURIX™ Debugger",
+				"icon": "$(search)"
+			},
+			{
+				"command": "aurix-debugger.configureLiveWatch",
+				"title": "Configure Global Live Update Interval",
+				"category": "AURIX™ Debugger",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchAddExpression",
+				"title": "Add Live Watch Expression",
+				"category": "AURIX™ Debugger",
+				"icon": "$(add)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchRemoveExpression",
+				"title": "Remove Live Watch Expression",
+				"category": "AURIX™ Debugger",
+				"icon": "$(close)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchClearExpressions",
+				"title": "Clear Live Watch Expressions",
+				"category": "AURIX™ Debugger",
+				"icon": "$(clear-all)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchRefresh",
+				"title": "Refresh Live Watch",
+				"category": "AURIX™ Debugger",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchSetValue",
+				"title": "Set Live Watch Value",
+				"category": "AURIX™ Debugger",
+				"icon": "$(edit)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPauseExpression",
+				"title": "Pause Updates",
+				"category": "AURIX™ Debugger",
+				"icon": "$(debug-pause)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchResumeExpression",
+				"title": "Resume Updates",
+				"category": "AURIX™ Debugger",
+				"icon": "$(debug-start)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchCopyValue",
+				"title": "Copy Value",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchCopyExpression",
+				"title": "Copy as Expression",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchEditExpression",
+				"title": "Edit Expression",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchAddPeripheral",
+				"title": "Add to Live Watch",
+				"category": "AURIX™ Debugger",
+				"icon": "$(eye)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchOpenPanel",
+				"title": "Open Live Watch Panel...",
+				"category": "AURIX™ Debugger",
+				"icon": "$(multiple-windows)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchConfigureInterval",
+				"title": "Configure Live Watch Refresh Interval",
+				"category": "AURIX™ Debugger",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelAddExpression",
+				"title": "Add Live Watch Expression",
+				"category": "AURIX™ Debugger",
+				"icon": "$(add)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelRefresh",
+				"title": "Refresh Live Watch",
+				"category": "AURIX™ Debugger",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelConfigureInterval",
+				"title": "Configure Live Watch Refresh Interval",
+				"category": "AURIX™ Debugger",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelClearExpressions",
+				"title": "Clear Live Watch Expressions",
+				"category": "AURIX™ Debugger",
+				"icon": "$(clear-all)"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelRename",
+				"title": "Rename Live Watch Panel",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchPanelMoveToNewWindow",
+				"title": "Move Live Watch Panel into New Window",
+				"category": "AURIX™ Debugger",
+				"icon": "$(empty-window)"
+			},
+			{
+				"command": "aurix-debugger.osRefresh",
+				"title": "Refresh AUTOSAR OS",
+				"category": "AURIX™ Debugger",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "aurix-debugger.osLoadFile",
+				"title": "Load ORTI File…",
+				"category": "AURIX™ Debugger",
+				"icon": "$(folder-opened)"
+			},
+			{
+				"command": "aurix-debugger.osShowObjects",
+				"title": "Show AUTOSAR OS Objects",
+				"category": "AURIX™ Debugger",
+				"icon": "$(table)"
+			},
+			{
+				"command": "aurix-debugger.osBreakInTask",
+				"title": "Halt Only in Task…",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.resetDebugLayout",
+				"title": "Reset Debug Layout",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.osShowProfile",
+				"title": "Show OS Profile",
+				"category": "AURIX™ Debugger",
+				"icon": "$(graph)"
+			},
+			{
+				"command": "aurix-debugger.osTogglePause",
+				"title": "Pause AUTOSAR OS Updates",
+				"category": "AURIX™ Debugger",
+				"icon": "$(debug-pause)"
+			}
+		],
+		"views": {
+			"debug": [
+				{
+					"type": "webview",
+					"id": "aurixLiveWatch",
+					"name": "Live Watch",
+					"icon": "media/debugger-icon.png",
+					"when": "debugType == aurixdbg"
+				},
+				{
+					"type": "tree",
+					"id": "aurixAutosarOs",
+					"name": "AUTOSAR OS",
+					"icon": "media/debugger-icon.png",
+					"when": "debugType == aurixdbg"
+				}
+			]
+		},
+		"menus": {
+			"debug/toolBar": [
+				{
+					"command": "aurix-debugger.flashTarget",
+					"when": "debugType == aurixdbg",
+					"group": "navigation"
+				},
+				{
+					"command": "aurix-debugger.resetTarget",
+					"when": "debugType == aurixdbg",
+					"group": "navigation"
+				},
+				{
+					"command": "aurix-debugger.showActions",
+					"when": "debugType == aurixdbg && aurix-debugger.hasActions",
+					"group": "navigation"
+				},
+				{
+					"command": "aurix-debugger.enableInstructionStepping",
+					"when": "debugType == aurixdbg && !aurix-debugger.instructionStepping",
+					"group": "navigation"
+				},
+				{
+					"command": "aurix-debugger.disableInstructionStepping",
+					"when": "debugType == aurixdbg && aurix-debugger.instructionStepping",
+					"group": "navigation"
+				}
+			],
+			"editor/title": [
+				{
+					"command": "aurix-debugger.disassemblyGoTo",
+					"when": "debugType == aurixdbg && debugState == stopped && activeEditor == workbench.debug.disassemblyView",
+					"group": "navigation"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelAddExpression",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRefresh",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@3"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelConfigureInterval",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@4"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelClearExpressions",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "navigation@9"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRename",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "1_liveWatch@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelMoveToNewWindow",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'",
+					"group": "1_liveWatch@2"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "aurix-debugger.disassemblyGoTo",
+					"when": "debugType == aurixdbg && debugState == stopped"
+				},
+				{
+					"command": "aurix-debugger.showActions",
+					"when": "debugType == aurixdbg"
+				},
+				{
+					"command": "aurix-debugger.runAction",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPauseExpression",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchResumeExpression",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchSetValue",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchRemoveExpression",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchCopyValue",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchCopyExpression",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchEditExpression",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchAddPeripheral",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelAddExpression",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRefresh",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelConfigureInterval",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelClearExpressions",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelRename",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPanelMoveToNewWindow",
+					"when": "activeWebviewPanelId == 'aurixLiveWatchPanel'"
+				}
+			],
+			"view/title": [
+				{
+					"command": "aurix-debugger.liveWatchAddExpression",
+					"when": "view == aurixLiveWatch",
+					"group": "navigation@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchRefresh",
+					"when": "view == aurixLiveWatch",
+					"group": "navigation@3"
+				},
+				{
+					"command": "aurix-debugger.liveWatchConfigureInterval",
+					"when": "view == aurixLiveWatch",
+					"group": "navigation@4"
+				},
+				{
+					"command": "aurix-debugger.liveWatchOpenPanel",
+					"when": "view == aurixLiveWatch",
+					"group": "navigation@5"
+				},
+				{
+					"command": "aurix-debugger.liveWatchClearExpressions",
+					"when": "view == aurixLiveWatch",
+					"group": "navigation@9"
+				},
+				{
+					"command": "aurix-debugger.osShowObjects",
+					"when": "view == aurixAutosarOs",
+					"group": "navigation@1"
+				},
+				{
+					"command": "aurix-debugger.osRefresh",
+					"when": "view == aurixAutosarOs",
+					"group": "navigation@2"
+				},
+				{
+					"command": "aurix-debugger.osLoadFile",
+					"when": "view == aurixAutosarOs",
+					"group": "navigation@3"
+				},
+				{
+					"command": "aurix-debugger.osShowProfile",
+					"when": "view == aurixAutosarOs",
+					"group": "navigation@2"
+				},
+				{
+					"command": "aurix-debugger.osTogglePause",
+					"when": "view == aurixAutosarOs",
+					"group": "navigation@4"
+				}
+			],
+			"webview/context": [
+				{
+					"command": "aurix-debugger.liveWatchEditExpression",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root\\.(live|paused)$/",
+					"group": "1_edit@0"
+				},
+				{
+					"command": "aurix-debugger.liveWatchSetValue",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root\\.(live|paused)(\\.register)?|child)$/",
+					"group": "1_edit@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchCopyValue",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/",
+					"group": "2_copy@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchCopyExpression",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/",
+					"group": "2_copy@2"
+				},
+				{
+					"command": "aurix-debugger.liveWatchPauseExpression",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root\\.live/",
+					"group": "3_updates@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchResumeExpression",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root\\.paused/",
+					"group": "3_updates@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchRemoveExpression",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.root/",
+					"group": "4_remove@1"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "aurix-debugger.liveWatchAddPeripheral",
+					"when": "view == mcu-debug.peripheral-viewer.svd && debugType == aurixdbg && viewItem =~ /^(register|registerRW|registerRO|field|fieldRO)$/",
+					"group": "aurix@1"
+				}
+			],
+			"editor/context": [
+				{
+					"command": "aurix-debugger.osBreakInTask",
+					"when": "debugType == aurixdbg && editorTextFocus",
+					"group": "debug@1"
+				}
+			]
+		},
+		"keybindings": [
+			{
+				"command": "aurix-debugger.disassemblyGoTo",
+				"key": "ctrl+g",
+				"when": "debugType == aurixdbg && debugState == stopped && disassemblyViewFocus"
+			}
+		],
+		"configuration": {
+			"title": "AURIX™ Debugger",
+			"properties": {
+				"aurix-debugger.executePathMapper": {
+					"type": "boolean",
+					"default": true,
+					"description": "Execute path mapper function, if defined in launch configuration."
+				},
+				"aurix-debugger.agentPath": {
+					"type": "string",
+					"description": "Path to aurix-dbg.exe. Overrides the aurix-dbg bundled with the extension (launch configuration \"agentPath\" takes precedence)."
+				},
+				"aurix-debugger.autoStartAgent": {
+					"type": "boolean",
+					"default": false,
+					"description": "Automatically start aurix-dbg when a debug session starts."
+				},
+				"aurix-debugger.rememberDebugLayout": {
+					"type": "boolean",
+					"default": true,
+					"description": "When the last AURIX debug session ends, remember where the debug tabs were (Disassembly, Live Watch panels, OS panels, Memory Inspector editors), close them, and reopen them in the same editor groups and sizes when the next session starts. \"Reset Debug Layout\" forgets the remembered layout."
+				},
+				"aurix-debugger.autoOpenDisassemblyView": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically open the VS Code Disassembly view when an AURIX debug session starts."
+				},
+				"aurix-debugger.disassembly.opcodeBytes": {
+					"type": "string",
+					"enum": [
+						"left",
+						"right",
+						"hidden"
+					],
+					"enumDescriptions": [
+						"Show the opcode bytes between the address and the instruction.",
+						"Show the opcode bytes after the instruction.",
+						"Do not show the opcode bytes."
+					],
+					"default": "left",
+					"description": "Where the Disassembly view shows the opcode bytes of each instruction. Applies to instructions loaded after the change (after the next stop)."
+				},
+				"aurix-debugger.autoLockDisassemblyView": {
+					"type": "boolean",
+					"default": true,
+					"description": "Lock the Disassembly view editor group after opening it."
+				},
+				"aurix-debugger.autoEvenEditorWidths": {
+					"type": "boolean",
+					"default": true,
+					"description": "Evenly size editor groups after opening the Disassembly view."
+				},
+				"aurix-debugger.instructionSteppingDefault": {
+					"type": "boolean",
+					"default": false,
+					"description": "Default state for instruction-level stepping when a debug session starts."
+				},
+				"aurix-debugger.liveWatch.intervalMs": {
+					"type": "number",
+					"default": 1000,
+					"minimum": 200,
+					"description": "How often the live views re-read the target while it runs: the Live Watch, the AUTOSAR OS view and the OS Objects panel. A Live Watch can have its own interval (its gear button), which this one then leaves alone. A view that is not on screen reads nothing."
+				}
+			}
+		},
+		"languages": [
+			{
+				"id": "gtm-mcs-asm",
+				"aliases": [
+					"GTM MCS Assembler"
+				],
+				"extensions": [
+					".asm"
+				]
+			}
+		],
+		"breakpoints": [
+			{
+				"language": "c"
+			},
+			{
+				"language": "cpp"
+			},
+			{
+				"language": "gtm-mcs-asm"
+			}
+		],
+		"debuggers": [
+			{
+				"type": "aurixdbg",
+				"label": "AURIX™ Debugger",
+				"configurationAttributes": {
+					"launch": {
+						"required": [],
+						"properties": {
+							"symbolFiles": {
+								"description": "Symbol files: the application ELF plus e.g. bootmanager, FBL, HSM ELF files and GTM MCS assembler sources. Symbols only: they are never flashed (see flashFiles). Without \"cores\", a file applies to every core of its architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM, a .asm file to the MCS channels); \"cores\" limits it to the named cores (context ID or target name, * and ? as wildcards, e.g. \"tc37x.cpu0\", \"cpu0\" or \"mcs0.*\").",
+								"type": "array",
+								"items": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "object",
+											"required": [
+												"path"
+											],
+											"properties": {
+												"path": {
+													"type": "string",
+													"description": "Path to the ELF file or GTM MCS assembler source (.asm)"
+												},
+												"cores": {
+													"type": "array",
+													"items": {
+														"type": "string"
+													},
+													"description": "Cores the file applies to (context ID or target name, * and ? as wildcards)"
+												}
+											}
+										}
+									]
+								}
+							},
+							"flashFiles": {
+								"description": "Images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX or binary). The files are merged into one image first; where they overlap, later files win. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"enableFlashing": {
+								"description": "If true, programs flashFiles with aurix-dbg's 'flash write_images' before the debug session, then resets the target (resetType, resetSuspend)",
+								"type": "boolean",
+								"default": false
+							},
+							"resetType": {
+								"description": "ContextReset type used by the Reset and Flash Target toolbar buttons and after flashing (see the debug server's reset types). Falls back to 'reset' if this type fails.",
+								"type": "string"
+							},
+							"resetSuspend": {
+								"description": "If true, the target halts at the reset vector after a reset (Reset and Flash Target toolbar buttons, after flashing). If false, it runs after the reset; the toolbar buttons then pause all cores.",
+								"type": "boolean",
+								"default": false
+							},
+							"verifyFlash": {
+								"description": "Read the programmed sectors back after flashing and compare them with the image (unchanged sectors are compared while flashing anyway).",
+								"type": "boolean",
+								"default": true
+							},
+							"workspace": {
+								"description": "Workspace or project path",
+								"type": "string"
+							},
+							"sourceFileMap": {
+								"markdownDescription": "Maps source path prefixes in the debug information onto local folders, e.g. `{ \"c:/git/project\": \"${workspaceFolder}\" }` when a compiler cache (ccache) supplied objects built in another checkout. Applied before anything else, also when the original path exists. Breakpoints in mapped files are found in objects of either checkout.",
+								"type": "object",
+								"additionalProperties": {
+									"type": "string"
+								},
+								"default": {}
+							},
+							"sourceSearchPaths": {
+								"markdownDescription": "Folders searched for a source whose debug-information path does not exist: the path without its leading folders is tried under each folder (`c:/git/project/app/x.c` → `<folder>/project/app/x.c`, `<folder>/app/x.c`, …). The first hit is remembered as a mapping for the other files of that checkout. Default: `workspace` and the detected project root.",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"device": {
+								"description": "AURIX™ device; selects the bundled SVD file for the XPeripherals view.",
+								"type": "string",
+								"enum": [
+									"TC22x",
+									"TC23x",
+									"TC26x",
+									"TC27x",
+									"TC29x",
+									"TC33x",
+									"TC33xEXT",
+									"TC35x",
+									"TC36x",
+									"TC37x",
+									"TC37xEXT",
+									"TC38x",
+									"TC39x",
+									"TC4Dx"
+								],
+								"enumDescriptions": [
+									"AURIX™ TC22x",
+									"AURIX™ TC23x",
+									"AURIX™ TC26x",
+									"AURIX™ TC27x",
+									"AURIX™ TC29x",
+									"AURIX™ TC33x",
+									"AURIX™ TC33x emulation device (EXT)",
+									"AURIX™ TC35x",
+									"AURIX™ TC36x",
+									"AURIX™ TC37x",
+									"AURIX™ TC37x emulation device (EXT)",
+									"AURIX™ TC38x",
+									"AURIX™ TC39x",
+									"AURIX™ TC4Dx"
+								]
+							},
+							"ppuElfPath": {
+								"description": "Path to the PPU ELF executable",
+								"type": "string"
+							},
+							"cdspElfPaths": {
+								"description": "List of CDSP ELF executables (12 cores)",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"scrElfPath": {
+								"description": "Path to the SCR ELF executable",
+								"type": "string"
+							},
+							"additionalAgentOptions": {
+								"description": "Additional aurix-dbg command-line options, appended after the generated ones (e.g. \"-d3 -l aurix-dbg.log\")",
+								"type": "string",
+								"default": ""
+							},
+							"liveWatchIntervalMs": {
+								"description": "Refresh interval in milliseconds for the Live Watch view while the target runs. Minimum 200ms+ is recommended and enforced.",
+								"type": "number",
+								"default": 1000,
+								"minimum": 200
+							},
+							"enableConsoleLog": {
+								"description": "Show the messages exchanged with the debug server in the Debug Console",
+								"type": "boolean",
+								"default": false
+							},
+							"autoStartAgent": {
+								"description": "Start aurix-dbg before connecting (reuses an instance that is already running). If false, connects to an aurix-dbg that is already listening on host:port.",
+								"type": "boolean",
+								"default": false
+							},
+							"agentPath": {
+								"description": "Path to aurix-dbg.exe. Defaults to the aurix-dbg bundled with the extension (or the aurix-debugger.agentPath setting).",
+								"type": "string"
+							},
+							"host": {
+								"description": "Host of the debug server",
+								"type": "string",
+								"default": "127.0.0.1"
+							},
+							"port": {
+								"description": "Port of the debug server",
+								"type": "number",
+								"default": 1534
+							},
+							"searchDirs": {
+								"description": "Script search directories (OpenOCD -s), e.g. the OpenOCD tcl directory",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"configFiles": {
+								"description": "OpenOCD configuration scripts (OpenOCD -f), in order",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"configCommands": {
+								"description": "Additional Tcl commands (OpenOCD -c), run after the configuration files",
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"actions": {
+								"description": "Custom Tcl commands offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu, an entry with 'tcl' is an action.",
+								"type": "array",
+								"items": {
+									"type": "object",
+									"required": [
+										"label"
+									],
+									"properties": {
+										"id": {
+											"type": "string",
+											"description": "Identifier for the command 'aurix-debugger.runAction' (e.g. keybindings with args { \"id\": \"...\" })"
+										},
+										"label": {
+											"type": "string",
+											"description": "Name shown in the action list"
+										},
+										"description": {
+											"type": "string",
+											"description": "Text shown next to the label"
+										},
+										"detail": {
+											"type": "string",
+											"description": "Text shown below the label"
+										},
+										"icon": {
+											"type": "string",
+											"description": "Codicon name, e.g. 'trash'"
+										},
+										"items": {
+											"type": "array",
+											"description": "Submenu entries (same format as 'actions')",
+											"items": {
+												"type": "object",
+												"required": [
+													"label"
+												],
+												"properties": {
+													"id": {
+														"type": "string",
+														"description": "Identifier for the command 'aurix-debugger.runAction'"
+													},
+													"label": {
+														"type": "string",
+														"description": "Name shown in the action list"
+													},
+													"description": {
+														"type": "string",
+														"description": "Text shown next to the label"
+													},
+													"detail": {
+														"type": "string",
+														"description": "Text shown below the label"
+													},
+													"icon": {
+														"type": "string",
+														"description": "Codicon name, e.g. 'trash'"
+													},
+													"items": {
+														"type": "array",
+														"description": "Submenu entries (same format as 'actions')"
+													},
+													"tcl": {
+														"type": [
+															"string",
+															"array"
+														],
+														"items": {
+															"type": "string"
+														},
+														"description": "Tcl command(s) run in order on the debug server; stops at the first error"
+													},
+													"confirm": {
+														"type": "string",
+														"description": "Confirmation text shown before running"
+													},
+													"resetAfter": {
+														"type": "boolean",
+														"default": false,
+														"description": "Reset the target afterwards like the Reset toolbar button"
+													},
+													"showOutput": {
+														"type": "boolean",
+														"default": false,
+														"description": "Show the Tcl output in a notification (always written to the Debug Console)"
+													},
+													"timeout": {
+														"type": "number",
+														"default": 900,
+														"description": "Timeout per Tcl command in seconds"
+													}
+												}
+											}
+										},
+										"tcl": {
+											"type": [
+												"string",
+												"array"
+											],
+											"items": {
+												"type": "string"
+											},
+											"description": "Tcl command(s) run in order on the debug server; stops at the first error"
+										},
+										"confirm": {
+											"type": "string",
+											"description": "Confirmation text shown before running"
+										},
+										"resetAfter": {
+											"type": "boolean",
+											"default": false,
+											"description": "Reset the target afterwards like the Reset toolbar button"
+										},
+										"showOutput": {
+											"type": "boolean",
+											"default": false,
+											"description": "Show the Tcl output in a notification (always written to the Debug Console)"
+										},
+										"timeout": {
+											"type": "number",
+											"default": 900,
+											"description": "Timeout per Tcl command in seconds"
+										}
+									}
+								}
+							},
+							"core": {
+								"description": "Core number to focus (memory access, instruction breakpoints)",
+								"type": "number"
+							},
+							"stopOnEntry": {
+								"description": "Pause after connecting",
+								"type": "boolean",
+								"default": false
+							},
+							"ortiFile": {
+								"type": "string",
+								"description": "ORTI file (.ORT) the AUTOSAR OS generator wrote beside the ELF. Loaded after the symbols; enables the AUTOSAR OS view and task names in the Call Stack."
+							}
+						}
+					}
+				},
+				"configurationSnippets": [
+					{
+						"label": "AURIX™ Debugger: Launch",
+						"description": "Debug an AURIX™ program with aurix-dbg over Infineon TAS using OpenOCD configuration scripts",
+						"body": {
+							"type": "aurixdbg",
+							"request": "launch",
+							"name": "Debug AURIX™ Program",
+							"autoStartAgent": true,
+							"searchDirs": [
+								"^\"\\${workspaceFolder}/tcl\""
+							],
+							"configFiles": [
+								"board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"
+							],
+							"device": "TC37x",
+							"symbolFiles": [
+								"^\"\\${workspaceFolder}/build/program.elf\""
+							],
+							"flashFiles": [
+								"^\"\\${workspaceFolder}/build/program.elf\""
+							],
+							"host": "127.0.0.1",
+							"port": 1534,
+							"core": 0,
+							"enableFlashing": false,
+							"enableConsoleLog": false
+						}
+					}
+				]
+			}
+		]
+	}
+}

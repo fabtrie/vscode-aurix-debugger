@@ -1,0 +1,574 @@
+/*
+Copyright (C) 2022, 2023 Intel Corporation
+SPDX-License-Identifier: MIT
+*/
+// Core TCF client base
+// - Owns the TCP connection, handshake, and packet parsing
+// - Sends commands and receives responses/events
+// - Provide basic RunControl and Breakpoints commands
+import { split, splitBuffer, SimpleCommand, PromiseSuccess, PromiseError, TimeoutError, EMPTY_BUFFER, TCF_END_OF_PACKET_MARKER, ServiceNotSupportedError } from './tcf/tcfutils';
+import { TCFContextData, SuspendRunControlCommand, ResumeRunControlCommand, GetContextRunControlCommand, Modes, asNullableTCFContextData, GetChildrenRunControlCommand } from './tcf/runcontrol';
+import { AddBreakpointsCommand, BreakpointData, RemoveBreakpointsCommand, SetBreakpointsCommand } from './tcf/breakpoints';
+import { HelloLocatorEvent, parseHelloLocatorEvent } from './tcf/locator';
+import { CONTEXT_QUERY_SERVICE, QueryCommand } from './tcf/contextquery';
+
+import * as net from "net";
+import { TCFError, TCFErrorCodes } from './tcf/error';
+
+export interface TCFLogger {
+    //TCF message sent to server
+    sent(message: string): void;
+    //TCF response received from server
+    received(message: string): void;
+
+    log(message: string): void;
+    error(message: string): void;
+    stdout(message: string): void;
+}
+
+//XXX: This could also be a lifecycle handler with preSend method
+export interface SimpleCommandStamper {
+    createToken(c: SimpleCommand<any>): string;
+}
+
+/**
+ * Incrementally sets token ID per command. Each TCF service gets a separate counter starting with 0.
+ */
+export abstract class AbstractCommandStamper implements SimpleCommandStamper {
+    counters: Map<String, number> = new Map();
+
+    createToken(command: SimpleCommand<any>): string {
+        const service = command.service();
+        let id = this.counters.get(service);
+        if (id === undefined) {
+            id = 0;
+        } else {
+            id++;
+        }
+        this.counters.set(service, id);
+
+        return this.createTokenWithID(command, id);
+    }
+
+    protected abstract createTokenWithID(command: SimpleCommand<any>, id: number): string;
+}
+
+export class DebugCommandStamper extends AbstractCommandStamper {
+    protected createTokenWithID(command: SimpleCommand<any>, id: number) {
+        return command.debugDescription(id);
+    }
+}
+
+export class SmallCommandStamper extends AbstractCommandStamper {
+    protected createTokenWithID(command: SimpleCommand<any>, id: number): string {
+        return `${command.service()}/${id}`;
+    }
+}
+
+type ResponseParser = (response: Buffer[], success: PromiseSuccess<any>, error: PromiseError<any>) => void;
+type PromiseResult = { service: string, command: string, success: PromiseSuccess<any>, error: PromiseError<any>, parseResponse: ResponseParser };
+
+const DEFAULT_COMMAND_TIMEOUT_MS = 30 * 1000; //30 seconds
+
+export abstract class AbstractTCFClient {
+    console: TCFLogger;
+    contextInfo: { [key: string]: TCFContextData } = {};
+    tokenIdGenerator: SimpleCommandStamper;
+    commandTimeout: number = DEFAULT_COMMAND_TIMEOUT_MS;
+    supportedServices: string[] | null = null;
+
+    constructor(logger: TCFLogger, tokenIdGenerator: SimpleCommandStamper) {
+        this.console = logger;
+        this.tokenIdGenerator = tokenIdGenerator;
+    }
+
+    /**
+     * Sets the TCF command timeout.
+     * 
+     * @param ms timeout in milliseconds
+     */
+    setCommandTimeout(ms: number) {
+        this.commandTimeout = ms;
+    }
+
+    protected abstract onEvent(service: string, event: string, datas: Buffer[]): void;
+
+    async removeBreakpoints(ids: string[]) {
+        if (ids.length === 0) {
+            return; //noop
+        }
+        await this.sendCommand(new RemoveBreakpointsCommand(ids));
+    }
+
+    async addBreakpoints(path: string, clientLines: number[], ids: string[]) {
+        if (clientLines.length === 0) {
+            return; //noop
+        }
+        const breakpoints = this.createBreakpoints(path, clientLines, ids);
+        return Promise.all(breakpoints.map(breakpoint => this.sendCommand(new AddBreakpointsCommand(breakpoint))));
+    }
+
+    createBreakpoints(path: string, clientLines: number[], ids: string[]): BreakpointData[] {
+        if (ids.length !== clientLines.length) {
+            throw new Error("Breakpoint lines and ids must have same length");
+        }
+        const breakpoints = clientLines.map((line, i) => {
+            /* eslint-disable @typescript-eslint/naming-convention */
+            return {
+                ID: ids[i],
+                Enabled: true,
+                File: path,
+                Line: line
+            } as BreakpointData;
+            /* eslint-enable */
+        });
+        return breakpoints;
+    }
+
+    async setBreakpoints(path: string, clientLines: number[], ids: string[]) {
+        //allowing empty list of breakpoints since it may clear they breakpoints
+        const breakpoints = this.createBreakpoints(path, clientLines, ids);
+        await this.setBreakpointsList(breakpoints);
+    }
+
+    async setBreakpointsList(breakpoints: BreakpointData[]) {
+        //allowing empty list of breakpoints since it may clear they breakpoints
+        await this.sendCommand(new SetBreakpointsCommand(breakpoints));
+    }
+
+    async pause(targetContext?: string) {
+        const errors = [];
+        const targets = targetContext ? [targetContext] : this.getTopLevelSuspendableContexts();
+        for (const context of targets) {
+            try {
+                await this.sendCommand(new SuspendRunControlCommand(context));
+            } catch (e) {
+                if (e instanceof SyntaxError) {
+                    errors.push(e);
+                } else {
+                    const error = e as TCFError;
+
+                    switch (error?.Code) {
+                        //'{"Code":10,"Time":1671108147403,"Format":"Already stopped"}'
+                        case TCFErrorCodes.ALREADY_STOPPED:
+                            //this is fine, can't suspend something already stopped
+                            break;
+                        default:
+                            errors.push(error);
+                            break;
+                    }
+                }
+            }
+        }
+
+        if (errors.length > 0) {
+            throw errors;
+        }
+    }
+
+    private isSuspendableContext(contextID: string): boolean {
+        return Boolean(this.contextInfo[contextID]?.CanSuspend && this.contextInfo[contextID]?.HasState);
+    }
+
+    private getAllSuspendableContexts(): string[] {
+        return Object.keys(this.contextInfo).filter(ctx => this.isSuspendableContext(ctx));
+    }
+
+    private getTopLevelSuspendableContexts(): string[] {
+        // When doing a global suspend/resume (no explicit target), avoid sending commands to both
+        // a container and its child contexts. Pick the highest-level suspendable context.
+        return this.getAllSuspendableContexts().filter(context => {
+            const parentID = this.contextInfo[context]?.ParentID;
+            if (!parentID) {
+                return true;
+            }
+            if (this.contextInfo[parentID]?.IsContainer && this.isSuspendableContext(parentID)) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     *
+     * @param contextID Step over a single instruction.
+     * If the instruction is a function call then don't stop until the function returns.
+     */
+    async nextInstruction(contextID: string | undefined) {
+        await this.resume(contextID, Modes.nextInstruction);
+    }
+
+    /**
+     *
+     * @param contextID if undefined, resume everything. Otherwise resume the given context 
+     * until control reaches instruction that belongs to a different line of source code
+     */
+    async next(contextID: string | undefined) {
+        await this.resume(contextID, Modes.nextLine);
+    }
+
+    /**
+     *
+     * @param contextID resumes execution of given context until control reaches instruction that belongs 
+     * to a different line of source code. If a function is called, stop at first line of 
+     * the function code. Error is returned if line number information not available.
+     */
+    async stepIn(contextID: string | undefined) {
+        await this.resume(contextID, Modes.stepIn);
+    }
+
+    /**
+     *
+     * @param contextID  resume execution of given context until control returns from current function
+     */
+    async stepOut(contextID: string | undefined) {
+        await this.resume(contextID, Modes.stepOut);
+    }
+
+    /**
+     *
+     * @param contextID if undefined, resume everything. Otherwise resume only this specific context
+     */
+    async continue(contextID: string | undefined,) {
+        await this.resume(contextID, Modes.normalExecution);
+    }
+
+    private async resume(contextID: string | undefined, mode: Modes) {
+        // If a specific context is requested, send the command to that context directly.
+        // Some targets expose both container contexts and per-core/per-thread contexts; blocking
+        // on "top-level only" can make Continue/Step a no-op.
+
+        const targets = contextID ? [contextID] : this.getTopLevelSuspendableContexts();
+
+        const errors = [];
+        for (const context of targets) {
+            try {
+                await this.sendCommand(new ResumeRunControlCommand(context, mode));
+            } catch (e) {
+                if (e instanceof SyntaxError) {
+                    errors.push(e);
+                } else {
+                    const error = e as TCFError;
+
+                    switch (error?.Code) {
+                        //'{"Code":12,"Time":1671105409824,"Format":"Already running"}'
+                        case TCFErrorCodes.ALREADY_RUNNING:
+                            //this is acceptable, there is nothing to resume since it's running
+                            break;
+                        default:
+                            errors.push(error);
+                            break;
+                    }
+                }
+            }
+        }
+
+        if (errors.length > 0) {
+            throw errors;
+        }
+    }
+
+    socket: net.Socket | null = null;
+
+    //each key has a FIFO queue to allow duplicate keys (although not recommended...)
+    //NOTE: this is also used for waiting on events!
+    asyncSends: { [key: string]: PromiseResult[] } = {};
+
+    eventKey(service: string, event: string): string {
+        return `event/${service}/${event}`;
+    }
+
+    private addAsync(key: string, p: PromiseResult): void {
+        if (this.asyncSends[key]) {
+            this.console.error(`Command with token ${key} already exists and waiting reply. Please use a more unique token value`);
+        } else {
+            this.asyncSends[key] = [];
+        }
+        this.asyncSends[key].push(p);
+    }
+
+    private deleteAsync(key: string): PromiseResult | undefined {
+        const r = this.asyncSends[key];
+        if (!r) {
+            return undefined; //nothing to do
+        }
+        const first = r.shift();
+        if (r.length === 0) {
+            delete this.asyncSends[key];
+        }
+
+        return first;
+    }
+
+    waitEvent(service: string, event: string): Promise<Buffer[]> {
+        var p = new Promise((success, error) => {
+            this.addAsync(this.eventKey(service, event), { service, command: event, success, error, parseResponse: (buffers: Buffer[], success, error) => { success(buffers); } });
+        });
+
+        const self = this;
+        let timer: NodeJS.Timeout;
+
+        //TODO: add helper method for timedout promise with a cleanup
+        return (Promise.race([
+            p,
+            new Promise((s, err) => {
+                function cleanUp() {
+                    self.console.error(`Wait on event timeout ${service} ${event}`);
+
+                    self.deleteAsync(self.eventKey(service, event));
+                    err(new TimeoutError("timeout"));
+                }
+
+                timer = setTimeout(cleanUp, this.commandTimeout);
+            }) as Promise<Buffer[]>
+        ]) as Promise<Buffer[]>).finally(() => clearTimeout(timer));
+    }
+
+    sendCommand<T>(c: SimpleCommand<T>): Promise<T> {
+        if (!this.supportedServices?.includes(c.service())){
+            return Promise.reject(new ServiceNotSupportedError(`Service ${c.service()} not supported by the debug server`));
+        }
+
+        return this.sendCommandNow(c);
+    }
+
+    private sendCommandNow<T>(c: SimpleCommand<T>): Promise<T> {
+        const token = this.tokenIdGenerator.createToken(c);
+
+        var promiseconnectSuccess = new Promise((success, error) => {
+            this.addAsync(token, { service: c.service(), command: c.command(), success, error, parseResponse: c.result.bind(c) });
+        });
+
+        this.send(c.toBuffer(token));
+
+        const self = this;
+        let timer: NodeJS.Timeout;
+
+        return (Promise.race([
+            promiseconnectSuccess,
+            new Promise((s, err) => {
+                function cleanUp() {
+                    self.console.error("Command timeout " + token);
+
+                    self.deleteAsync(token);
+                    err(new TimeoutError(`timeout for ${token}`));
+                }
+
+                timer = setTimeout(cleanUp, this.commandTimeout);
+            }) as Promise<T>
+        ]) as Promise<T>).finally(() => clearTimeout(timer));
+    }
+
+    private send(rawHttpRequest: Buffer) {
+        this.console.sent(`➡️ Sending ${rawHttpRequest.toString()}`);
+        if (!this.socket || !this.socket.writable) {
+            throw new Error("No socket");
+        }
+        this.socket.write(rawHttpRequest);
+    }
+
+    async connect(host: string, port: number) {
+        await this.rawConnect(host, port);
+        await this.handshake();
+    }
+
+    async handshake() {
+        const hello = new HelloLocatorEvent();
+        this.send(hello.toBuffer());
+        const r = await this.waitEvent(hello.service(), hello.event()); //using the hello methods to avoid hardcoding the service/event names
+
+        this.supportedServices = parseHelloLocatorEvent(r); //may throw
+
+        let contexts: string[];
+        if (this.supportedServices?.includes(CONTEXT_QUERY_SERVICE)) {
+            contexts = await this.sendCommand(new QueryCommand("*"));
+        } else {
+            //fallback to RunControl
+            contexts = await this.loadRunControlChildren(null);
+        }
+
+        for (const context of contexts) {
+            await this.sendCommand(new GetContextRunControlCommand(context));
+        }
+    }
+
+    async loadRunControlChildren(contextId: string | null) {
+        const topLevel: string[] = await this.sendCommand(new GetChildrenRunControlCommand(contextId)) || [];
+
+        let result: string[] = [];
+        for (const context of topLevel) {
+            const children = await this.loadRunControlChildren(context);
+            result.push(...children);
+        }
+
+        return [...topLevel, ...result];
+    }
+
+    protected onSocketError(err: any) {
+        this.console.error(`Connection error ${err}`);
+    }
+
+    rawConnect(host: string, port: number): Promise<any> {
+        const socket = new net.Socket();
+        this.socket = socket;
+
+        let connectSuccess: ((v: any) => void);
+        let connectError: ((v: any) => void);
+        var promiseconnectSuccess = new Promise((success, error) => {
+            connectSuccess = success; connectError = error;
+        });
+
+        socket.setKeepAlive(true);
+        socket.setNoDelay(true);
+        //XXX: by default a socket will have no timeout. Considering we have a TCF command (configurable) timeout should the socket have a timeout too? Seems pointless at the moment but worth considering later on.
+
+        socket.on('connect', () => {
+            this.console.log(`Connected!`);
+            connectSuccess("connected");
+        });
+        socket.on('error', (err) => {
+            connectError(err); //TODO: this call only makes sense if the initial connection fail, not on a later disconnect
+            //TODO: reconnect?
+            this.onSocketError(err);
+        });
+
+        let prevData = EMPTY_BUFFER;
+        socket.on('data', data => {
+            data = Buffer.concat([prevData, data]);
+
+            const isPacketType = (b: number) => {
+                // TCF packet types we handle: Command, Event, Result, Flow-control, etc.
+                return b === "C".charCodeAt(0)
+                    || b === "E".charCodeAt(0)
+                    || b === "R".charCodeAt(0)
+                    || b === "P".charCodeAt(0)
+                    || b === "F".charCodeAt(0)
+                    || b === "N".charCodeAt(0);
+            };
+
+            const findPacketStart = (buf: Buffer): number => {
+                // A well-formed packet starts with '<Type>\0...'
+                for (let i = 0; i + 1 < buf.length; i++) {
+                    if (buf[i + 1] === 0 && isPacketType(buf[i])) {
+                        return i;
+                    }
+                }
+                return -1;
+            };
+
+            while (true) {
+                const start = findPacketStart(data);
+                if (start === -1) {
+                    // No recognizable start yet; keep a small tail to handle split type byte.
+                    prevData = data.length > 1 ? data.subarray(data.length - 1) : data;
+                    return;
+                }
+
+                if (start > 0) {
+                    // Drop any stray bytes before a packet start.
+                    this.console.log(`Dropping ${start} stray byte(s) before packet start`);
+                    data = data.subarray(start);
+                }
+
+                const eom = data.indexOf(TCF_END_OF_PACKET_MARKER);
+                if (eom === -1) {
+                    //this buffer has no EOM. Either we read it all or we stil need to receive more data
+                    prevData = data;
+                    return;
+                }
+
+                const packet = data.subarray(0, eom);
+                prevData = data.subarray(eom + 2);
+                data = packet;
+
+                //this.console.log("DATA:");
+                //this.console.log(data.toString());
+                //this.console.log(data.toJSON().toString());
+
+                switch (data[0]) {
+                    case "C".charCodeAt(0):
+                        //could be a command
+                        const buffers: Buffer[] = splitBuffer(data, 4);
+                        const [_, token, service, command, arg] = buffers;
+
+                        this.console.received(`⬅️ Received ${token.toString()} ${service.toString()} ${command.toString()}`);
+                        break;
+                    case "E".charCodeAt(0):
+                        //could be an event 
+                        const [E, evtService, event, ...rawEventDatas] = split(data);
+                        //this.console.log("Parsing JSON: ");
+                        //this.console.log(rawEventData.toString());
+                        this.console.received(`⬅️ Received ${evtService.toString()} ${event.toString()} ${rawEventDatas[0]}`);
+
+                        const z = this.deleteAsync(this.eventKey(evtService.toString(), event.toString()));
+
+                        if (z) {
+                            z.parseResponse(rawEventDatas, z.success, z.error);
+                        } else {
+                            //Note that onEvent will not get all events, only those that were not explicitly waited on.
+                            this.onEvent(evtService.toString(), event.toString(), rawEventDatas);
+                        }
+
+                        break;
+                    case "F".charCodeAt(0):
+                        //could be flow control
+                        //ignore 
+                        break;
+                    case "N".charCodeAt(0):
+                        break;
+                    case "R".charCodeAt(0):
+                    case "P".charCodeAt(0):
+                        //could be a result
+                        const [R, resultToken, ...resultRest] = split(data);
+                        const resultTokenStr = resultToken.toString();
+
+                        if (R.toString() === "R") {
+                            const z = this.deleteAsync(resultTokenStr);
+
+                            if (z) {
+                                this.console.received(`⬅️ Parsing async result ${resultTokenStr}`);
+                                z.parseResponse(resultRest, z.success, z.error);
+
+                                if ("RunControl" === z.service && "getContext" === z.command) {
+                                    const resultData = asNullableTCFContextData(JSON.parse(resultRest[1].toString()));
+                                    if (resultData !== null) {
+                                        this.contextInfo[resultData.ID] = resultData;
+                                    }
+                                }
+
+                            } else {
+                                this.console.error(`Received unexpected response. No command with this token was sent: ${resultTokenStr}`);
+                                //TODO: Other alternatives on unexpected replies would be to just disconnect or throw and error here.
+                            }
+                        }
+
+                        this.console.received(`⬅️ Received Result ${resultTokenStr} ${JSON.stringify(resultRest.map(x => x.toString()))}`);
+                        break;
+                    default:
+                        throw new Error("Got unexpected data" + data[0]);
+                }
+
+                // Continue parsing any remaining buffered data
+                data = prevData;
+            }
+
+            // socket.destroy();
+        });
+
+        socket.connect(port, host);
+
+        return promiseconnectSuccess;
+    }
+
+    disconnect() {
+        if (this.socket) {
+            this.socket.end();
+        }
+        //fail all pending commands
+        Object.keys(this.asyncSends).forEach(k => {
+            const pr = this.deleteAsync(k);
+            pr?.error(new TimeoutError("disconected"));
+        });
+    }
+
+}

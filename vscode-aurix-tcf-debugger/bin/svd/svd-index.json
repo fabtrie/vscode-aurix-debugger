@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "TC22XPD",
+      "device": "TC22x",
+      "label": "TC22XPD",
+      "path": "bin/svd/TC22XPD.svd.gz"
+    },
+    {
+      "id": "TC23XPD",
+      "device": "TC23x",
+      "label": "TC23XPD",
+      "path": "bin/svd/TC23XPD.svd.gz"
+    },
+    {
+      "id": "TC26XBPD",
+      "device": "TC26x",
+      "label": "TC26XBPD",
+      "path": "bin/svd/TC26XBPD.svd.gz"
+    },
+    {
+      "id": "TC27XDPD",
+      "device": "TC27x",
+      "label": "TC27XDPD",
+      "path": "bin/svd/TC27XDPD.svd.gz"
+    },
+    {
+      "id": "TC29XBPD",
+      "device": "TC29x",
+      "label": "TC29XBPD",
+      "path": "bin/svd/TC29XBPD.svd.gz"
+    },
+    {
+      "id": "TC33XEXTPD",
+      "device": "TC33xEXT",
+      "label": "TC33XEXTPD",
+      "path": "bin/svd/TC33XEXTPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC33XPD",
+      "device": "TC33x",
+      "label": "TC33XPD",
+      "path": "bin/svd/TC33XPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC35XPD",
+      "device": "TC35x",
+      "label": "TC35XPD",
+      "path": "bin/svd/TC35XPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC36XPD",
+      "device": "TC36x",
+      "label": "TC36XPD",
+      "path": "bin/svd/TC36XPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC37XEXTPD",
+      "device": "TC37xEXT",
+      "label": "TC37XEXTPD",
+      "path": "bin/svd/TC37XEXTPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC37XPD",
+      "device": "TC37x",
+      "label": "TC37XPD",
+      "path": "bin/svd/TC37XPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC38XPD",
+      "device": "TC38x",
+      "label": "TC38XPD",
+      "path": "bin/svd/TC38XPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC39XBPD",
+      "device": "TC39x",
+      "label": "TC39XBPD",
+      "path": "bin/svd/TC39XBPD.svd.gz",
+      "extraSvd": [{"path": "bin/svd/HSM_TC3xx.svd.gz", "replace": ["HSM"], "exclude": ["HSM_BRIDGE_HSMSIDE"]}]
+    },
+    {
+      "id": "TC4DXAPD",
+      "device": "TC4Dx",
+      "label": "TC4DXAPD",
+      "path": "bin/svd/TC4DXAPD.svd.gz"
+    }
+  ]
+}

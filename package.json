@@ -1,0 +1,12 @@
+{
+  "name": "aurix-debugger-workspace",
+  "private": true,
+  "description": "Builds the aurix-dbg server and packages the VS Code extension with it",
+  "scripts": {
+    "postinstall": "npm --prefix vscode-aurix-tcf-debugger install",
+    "build:server": "node ./scripts/build-server.js",
+    "build:extension": "npm --prefix vscode-aurix-tcf-debugger run compile",
+    "build": "npm run build:server && npm run build:extension",
+    "package": "npm run build:server && npm --prefix vscode-aurix-tcf-debugger run package"
+  }
+}

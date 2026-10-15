@@ -9,6 +9,7 @@ members = [
     "crates/core",
     "crates/isa",
     "crates/jim",
+    "crates/jimtcl",
     "crates/orti",
     "crates/symbols",
     "crates/tas",
@@ -23,6 +24,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 tas = { path = "crates/tas" }
 jim = { path = "crates/jim" }
+jimtcl = { path = "crates/jimtcl" }
 aurix-core = { path = "crates/core" }
 tcf = { path = "crates/tcf" }
 symbols = { path = "crates/symbols" }

@@ -4,6 +4,9 @@
 //! that a command may re-enter the interpreter (e.g. `resume` firing an event
 //! handler that calls `mww`), keep mutable state in `RefCell`s.
 
+// Links libjimtcl, which the C shim calls into.
+use jimtcl as _;
+
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};

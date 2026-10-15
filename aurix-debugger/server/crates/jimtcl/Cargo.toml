@@ -1,0 +1,14 @@
+[package]
+name = "jimtcl"
+description = "Builds the Jim Tcl C library from the upstream GitHub release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+links = "jimtcl"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
+sha2 = "0.10"

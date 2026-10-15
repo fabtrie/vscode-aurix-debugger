@@ -1,6 +1,6 @@
 [package]
 name = "jim"
-description = "Minimal bindings to the Jim Tcl interpreter vendored with OpenOCD"
+description = "Minimal bindings to the Jim Tcl interpreter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ publish = false
 links = "jim"
 
 [dependencies]
+jimtcl.workspace = true
 
 [build-dependencies]
 cc = "1"

@@ -495,9 +495,15 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, un
     let (img, ucb_skipped) = skip_ucbs(img, unlock, "flash write_image")?;
     let img = &img;
     let banks = cx.with(|c| c.flash_banks.clone());
+    // A section may span adjacent banks (merged images, e.g. pfls0 into pfls1): every byte must be
+    // in some bank. The loop below writes each bank's part of the image.
     for s in &img.sections {
-        if !banks.iter().any(|b| b.contains(s.addr, s.end())) {
-            return Err(other(format!("no flash bank for image data at 0x{:08x} ({} bytes)", s.addr, s.data.len())));
+        let mut a = s.addr as u64;
+        while a < s.end() {
+            match banks.iter().find(|b| b.contains(a as u32, a + 1)) {
+                Some(b) => a = b.base as u64 + b.size as u64,
+                None => return Err(other(format!("no flash bank for image data at 0x{a:08x} (section 0x{:08x}, {} bytes)", s.addr, s.data.len()))),
+            }
         }
     }
     halt_all(cx)?;

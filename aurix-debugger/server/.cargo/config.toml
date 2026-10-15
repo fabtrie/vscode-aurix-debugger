@@ -1,6 +1,6 @@
 # Corporate network: crates.io is only reachable through the local proxy.
-[http]
-proxy = "http://127.0.0.1:3128"
+# [http]
+# proxy = "http://127.0.0.1:3128"
 
 [target.x86_64-pc-windows-gnu]
 linker = "C:/msys64/mingw64/bin/gcc.exe"

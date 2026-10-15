@@ -5,7 +5,7 @@
 //! version   := "VERSION" "{" ( ident "=" str ("," str)* ";" )* "}" ";"
 //! impl      := "IMPLEMENTATION" ident "{" objdecl* "}" ";"
 //! objdecl   := ident "{" attrdecl* "}" "," str ";"
-//! attrdecl  := "TOTRACE"? ( "ENUM" str "[" enums "]" | "CTYPE" str | "STRING" )
+//! attrdecl  := "TOTRACE"? ( "ENUM" str? "[" enums "]" | "CTYPE" str? | "STRING" )
 //!              ident ( "[" "]" )? "," str ";"
 //! enums     := enum ( "," enum )*                       -- a trailing comma is tolerated
 //! enum      := str ( ":" ident )? "=" ( int | str )
@@ -165,7 +165,8 @@ impl Parser<'_> {
     fn attr_decl(&mut self) -> Result<AttrDecl, ParseError> {
         let totrace = self.eat_word("TOTRACE");
         let (kind, ctype, enums) = if self.eat_word("ENUM") {
-            let ctype = self.string()?;
+            // The type is optional: RTA-OS writes a bare `ENUM [ ... ]`.
+            let ctype = if self.is_punct('[') { None } else { Some(self.string()?) };
             self.expect_punct('[')?;
             let mut enums = Vec::new();
             while !self.is_punct(']') {
@@ -175,9 +176,11 @@ impl Parser<'_> {
                 }
             }
             self.expect_punct(']')?;
-            (AttrKind::Enum, Some(ctype), enums)
+            (AttrKind::Enum, ctype, enums)
         } else if self.eat_word("CTYPE") {
-            (AttrKind::CType, Some(self.string()?), Vec::new())
+            // Untyped (`CTYPE ALARMTIME, ...`) in RTA-OS output.
+            let ctype = if matches!(self.peek(), Some(Tok::Str(_))) { Some(self.string()?) } else { None };
+            (AttrKind::CType, ctype, Vec::new())
         } else if self.eat_word("STRING") {
             (AttrKind::String, None, Vec::new())
         } else {

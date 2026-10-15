@@ -267,3 +267,12 @@ fn every_expression_attribute_parses_as_c() {
         }
     }
 }
+
+#[test]
+fn untyped_enum_is_accepted() {
+    let src = r#"IMPLEMENTATION X { OS { TOTRACE ENUM [ "a" = "&b[0]", "idle" = "0" ] RUNNINGTASK, "Running Task"; }, "OS"; };"#;
+    let f = crate::parse::parse(src).expect("parses");
+    let a = &f.decls[0].attrs[0];
+    assert_eq!(a.ctype, None);
+    assert_eq!(a.enums.len(), 2);
+}

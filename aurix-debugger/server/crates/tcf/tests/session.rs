@@ -24,7 +24,7 @@ fn server() -> ServerHandle {
         let s = Server::new();
         s.cx().with(|c| {
             c.adapter_override = Some("sim".into());
-            c.search_dirs.push(repo().join("third_party/openocd/tcl"));
+            c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
         });
         s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
         s.interp

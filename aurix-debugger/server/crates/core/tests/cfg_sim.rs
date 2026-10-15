@@ -19,7 +19,7 @@ fn server() -> Server {
     let s = Server::new();
     s.cx().with(|c| {
         c.adapter_override = Some("sim".into());
-        c.search_dirs.push(repo().join("third_party/openocd/tcl"));
+        c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
     });
     s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
     s.interp
@@ -53,22 +53,22 @@ fn loads_real_cfg_and_inits() {
     let s = server();
     let i = &s.interp;
     let names = i.eval("target names").unwrap();
-    assert!(names.starts_with("tc37x.cpu0 tc37x.cpu1 tc37x.cpu2 tc37x.hsm tc37x.mcs0.ch0 tc37x.mcs0.ch1"), "{names}");
-    assert!(names.ends_with("tc37x.mcs1.ch7"), "{names}");
-    assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
+    assert!(names.starts_with("tc37x_ext.cpu0 tc37x_ext.cpu1 tc37x_ext.cpu2 tc37x_ext.hsm tc37x_ext.mcs0.ch0 tc37x_ext.mcs0.ch1"), "{names}");
+    assert!(names.ends_with("tc37x_ext.mcs1.ch7"), "{names}");
+    assert_eq!(i.eval("target current").unwrap(), "tc37x_ext.cpu0");
     // pfls0/1 from the target cfg, dfls0/1 from tc37x_ocds_init.cfg.
     assert_eq!(i.eval("flash banks").unwrap().lines().count(), 4);
-    assert_eq!(i.eval("tc37x.cpu1 cget -dbgbase").unwrap(), "0xf8820000");
-    assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap().trim(), "tc3xx_on_examine");
+    assert_eq!(i.eval("tc37x_ext.cpu1 cget -dbgbase").unwrap(), "0xf8820000");
+    assert_eq!(i.eval("tc37x_ext.cpu0 cget -event examine-end").unwrap().trim(), "tc3xx_on_examine");
     i.eval("init").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "CBS_TL1ST not written: {w:08x?}");
     assert!(w.contains(&(0xF000_0498, 2)), "CBS_TLCHE not written");
     assert!(w.contains(&(0xF000_0420, 0x100)), "CBS_TRC0 not written");
-    assert_eq!(i.eval("tc37x.cpu2 curstate").unwrap(), "running");
-    assert_eq!(i.eval("tc37x.cpu1 tricore tl1_halt").unwrap(), "tl1_halt on");
-    assert_eq!(i.eval("tc37x.cpu2 tricore tl1_step").unwrap(), "tl1_step on");
-    assert!(i.eval("targets").unwrap().contains("tc37x.cpu0"));
+    assert_eq!(i.eval("tc37x_ext.cpu2 curstate").unwrap(), "running");
+    assert_eq!(i.eval("tc37x_ext.cpu1 tricore tl1_halt").unwrap(), "tl1_halt on");
+    assert_eq!(i.eval("tc37x_ext.cpu2 tricore tl1_step").unwrap(), "tl1_step on");
+    assert!(i.eval("targets").unwrap().contains("tc37x_ext.cpu0"));
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn halt_and_resume_follow_cfg_event_order() {
     for d in DBGSR {
         assert!(!w.contains(&(d, 0x10)), "SUSP asserted for {d:08x} in run mode: {w:08x?}");
     }
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
 
     s.interp.eval("resume").unwrap();
     let w = take_writes(&s);
@@ -99,7 +99,7 @@ fn halt_and_resume_follow_cfg_event_order() {
     let p_clear = pos(&w, (DBGSR[0], 0));
     let pend = pos(&w, (CBS_TLCHS, 2));
     assert!(p1 < p0 && p2 < p0 && p0 < p_clear && p_clear < pend, "resume-start / resume / resume-end order wrong: {w:08x?}");
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "running");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "running");
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn step_without_tl1_step_runs_only_the_stepping_core() {
     let s = server();
     s.interp.eval("init").unwrap();
     s.interp.eval("halt 1000").unwrap();
-    s.interp.eval("tc37x.cpu0 tricore tl1_step off").unwrap();
+    s.interp.eval("tc37x_ext.cpu0 tricore tl1_step off").unwrap();
     take_writes(&s);
     s.interp.eval("step").unwrap();
     let w = take_writes(&s);
@@ -184,7 +184,7 @@ fn icr_hw(s: &Server) -> u32 {
 fn irq_mask_clears_ie_while_stepping_and_restores_it_on_resume() {
     let s = server();
     s.interp.eval("init").unwrap();
-    assert_eq!(s.interp.eval("tc37x.cpu0 tricore irq_mask").unwrap(), "irq_mask step step_over step_out");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 tricore irq_mask").unwrap(), "irq_mask step step_over step_out");
     s.interp.eval("halt 1000").unwrap();
     s.interp.eval(&format!("mww {ICR0:#x} 0x8000")).unwrap();
 
@@ -196,7 +196,7 @@ fn irq_mask_clears_ie_while_stepping_and_restores_it_on_resume() {
     s.interp.eval("resume").unwrap();
     assert_eq!(icr_hw(&s), 0x8000, "IE not restored on resume");
 
-    s.interp.eval("tc37x.cpu0 tricore irq_mask off").unwrap();
+    s.interp.eval("tc37x_ext.cpu0 tricore irq_mask off").unwrap();
     s.interp.eval("halt 1000").unwrap();
     s.interp.eval("step").unwrap();
     assert_eq!(icr_hw(&s), 0x8000, "IE masked although irq_mask is off");
@@ -243,7 +243,7 @@ fn external_reset_reexamines_and_reruns_examine_end() {
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "examine-end handler did not run again");
     assert_eq!(with_sim(&s, |sim| sim.ostate & 1), 1, "OCDS not re-enabled");
-    assert_eq!(s.interp.eval("tc37x.cpu0 was_examined").unwrap(), "1");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 was_examined").unwrap(), "1");
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn boot_halted_core_does_not_fire_halted_handler() {
         !w.iter().any(|&(a, v)| DBGSR.contains(&a) && v == 0x10),
         "SUSP asserted because of a boot-halted core: {w:08x?}"
     );
-    assert_eq!(s.interp.eval("tc37x.cpu2 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu2 curstate").unwrap(), "halted");
     let (_, reason) = ops::state(&s.cx(), 2);
     assert_eq!(reason.name(), "boot-halt");
     // A real debug halt of cpu0 still runs the handler (visible through its SUSP writes in "frozen").
@@ -284,7 +284,7 @@ fn reset_halt_runs_reset_sequence() {
     let s = server();
     s.interp.eval("init").unwrap();
     s.interp.eval("reset halt").unwrap();
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
     assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
 }
 
@@ -296,7 +296,7 @@ fn halting_reset_is_repeated_until_the_sbc_reset_loop_ends() {
     with_sim(&s, |sim| sim.sbc_loop_resets = 3);
     s.interp.eval("reset halt").unwrap();
     assert_eq!(with_sim(&s, |sim| sim.sbc_loop_resets), 0, "SBC loop not run to its end");
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
     assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
     // The loop's resets belong to the reset: none is reported as detected afterwards.
     assert_eq!(with_sim(&s, |sim| sim.pending_resets), 0);
@@ -309,7 +309,7 @@ fn halting_reset_without_sbc_reset_loop_is_done_once() {
     s.interp.eval("init").unwrap();
     take_writes(&s);
     s.interp.eval("reset halt").unwrap();
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
     let w = take_writes(&s);
     let setups = w.iter().filter(|x| **x == (0xF000_0494, 0xB000_003F)).count();
     assert_eq!(setups, 1, "reset repeated: {w:08x?}");
@@ -326,7 +326,7 @@ fn connect_reset_halt_leaves_cores_halted_with_setup() {
     take_writes(&s);
     s.interp.eval("tc3xx_connect_reset_halt").unwrap();
     let w = take_writes(&s);
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
     assert!(w.contains(&(0xF000_10E8, 0x1200_0000)), "STM suspend not applied: {w:08x?}");
 }
 
@@ -349,7 +349,7 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     let bp = pos(&w, (0xF005_2008, 0));
     let run = pos(&w, (0xF005_EDF0, 0xA05F_0001));
     assert!(latch < dbgbase && dbgbase < bp && bp < run, "HSM release order: {w:08x?}");
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
 
     s.interp.eval("reset run").unwrap();
     let w = take_writes(&s);
@@ -367,18 +367,18 @@ const HSM_DHCSR: u32 = 0xF005_EDF0;
 fn hsm_is_examined_through_the_debug_window() {
     let s = server();
     let i = &s.interp;
-    assert_eq!(i.eval("tc37x.hsm cget -type").unwrap(), "cortex_m");
-    assert_eq!(i.eval("tc37x.hsm cget -coreid").unwrap(), "6");
+    assert_eq!(i.eval("tc37x_ext.hsm cget -type").unwrap(), "cortex_m");
+    assert_eq!(i.eval("tc37x_ext.hsm cget -coreid").unwrap(), "6");
     i.eval("init").unwrap();
-    assert_eq!(i.eval("tc37x.hsm was_examined").unwrap(), "1");
-    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "running");
-    assert_eq!(i.eval("tc37x.hsm cortex_m tl1_halt").unwrap(), "tl1_halt on");
+    assert_eq!(i.eval("tc37x_ext.hsm was_examined").unwrap(), "1");
+    assert_eq!(i.eval("tc37x_ext.hsm curstate").unwrap(), "running");
+    assert_eq!(i.eval("tc37x_ext.hsm cortex_m tl1_halt").unwrap(), "tl1_halt on");
     // Debugging enabled (C_DEBUGEN) and DWT on (DEMCR.TRCENA), through DBGBASE + window.
     let w = take_writes(&s);
     let base = pos(&w, (HSM_DBGBASE, 0xE000_0000));
     assert!(base < pos(&w, (HSM_DHCSR, 0xA05F_0001)), "{w:08x?}");
     assert!(with_sim(&s, |sim| sim.hsm.writes.contains(&(0xE000_EDFC, 1 << 24))));
-    assert!(i.eval("tc37x.hsm cortex_m triggers").unwrap().contains("FP_COMP5: off"));
+    assert!(i.eval("tc37x_ext.hsm cortex_m triggers").unwrap().contains("FP_COMP5: off"));
 }
 
 /// The HSM bridge only takes aligned word accesses: host reads and writes of it are split into
@@ -476,12 +476,12 @@ fn hsm_without_debug_access_stays_unexamined_and_is_retried() {
     let s = server();
     with_sim(&s, |sim| sim.hsm.debug_enabled = false);
     s.interp.eval("init").unwrap();
-    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "0");
-    assert_eq!(s.interp.eval("tc37x.cpu0 was_examined").unwrap(), "1");
+    assert_eq!(s.interp.eval("tc37x_ext.hsm was_examined").unwrap(), "0");
+    assert_eq!(s.interp.eval("tc37x_ext.cpu0 was_examined").unwrap(), "1");
     // The HSM firmware enables debugging later: the background poll examines it.
     with_sim(&s, |sim| sim.hsm.debug_enabled = true);
     ops::poll_all(&s.cx());
-    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
+    assert_eq!(s.interp.eval("tc37x_ext.hsm was_examined").unwrap(), "1");
 }
 
 /// A target whose poll fails right after every successful re-examination (the HSM while the device
@@ -490,7 +490,7 @@ fn hsm_without_debug_access_stays_unexamined_and_is_retried() {
 fn target_failing_after_each_reexamination_is_retried_slowly() {
     let s = server();
     s.interp.eval("init").unwrap();
-    let hsm = s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x.hsm").unwrap());
+    let hsm = s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x_ext.hsm").unwrap());
     let entry = |s: &Server| s.cx().with(|c| (c.targets[hsm].poll_failures, c.targets[hsm].recovering, c.targets[hsm].flapping));
     let access = |s: &Server, on: bool| with_sim(s, |sim| sim.hsm.debug_enabled = on);
     let poll_until_failed = |s: &Server| {
@@ -513,7 +513,7 @@ fn target_failing_after_each_reexamination_is_retried_slowly() {
     // Examined again, but the polls fail again: still the same failure.
     access(&s, true);
     ops::poll_all(&s.cx());
-    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
+    assert_eq!(s.interp.eval("tc37x_ext.hsm was_examined").unwrap(), "1");
     assert!(entry(&s).1.is_some());
     access(&s, false);
     poll_until_failed(&s);
@@ -522,13 +522,13 @@ fn target_failing_after_each_reexamination_is_retried_slowly() {
     // Not re-examined before FLAP_RETRY.
     access(&s, true);
     ops::poll_all(&s.cx());
-    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "0");
+    assert_eq!(s.interp.eval("tc37x_ext.hsm was_examined").unwrap(), "0");
     // Recovered once a poll after the re-examination succeeds.
     s.cx().with(|c| c.targets[hsm].last_examine = None);
     ops::poll_all(&s.cx());
     ops::poll_all(&s.cx());
     assert_eq!(entry(&s), (0, None, false));
-    assert_eq!(s.interp.eval("tc37x.hsm was_examined").unwrap(), "1");
+    assert_eq!(s.interp.eval("tc37x_ext.hsm was_examined").unwrap(), "1");
 }
 
 /// A target inaccessible for UNREACHABLE_TIME is flagged for the frontends until it is examined
@@ -537,7 +537,7 @@ fn target_failing_after_each_reexamination_is_retried_slowly() {
 fn inaccessible_target_is_flagged_unreachable() {
     let s = server();
     s.interp.eval("init").unwrap();
-    let hsm = s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x.hsm").unwrap());
+    let hsm = s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x_ext.hsm").unwrap());
     let unreachable = |s: &Server| s.cx().with(|c| c.targets[hsm].unreachable);
     with_sim(&s, |sim| sim.hsm.debug_enabled = false);
     let t0 = std::time::Instant::now();
@@ -558,7 +558,7 @@ fn hsm_halt_registers_step_and_resume() {
     let s = server();
     let i = &s.interp;
     i.eval("init").unwrap();
-    i.eval("targets tc37x.hsm").unwrap();
+    i.eval("targets tc37x_ext.hsm").unwrap();
     take_writes(&s);
     i.eval("halt 1000").unwrap();
     let w = take_writes(&s);
@@ -594,7 +594,7 @@ fn hsm_halt_registers_step_and_resume() {
     let hold = pos(&w, (CBS_TLCHS, 2));
     assert!(others < run && run < hold, "{w:08x?}");
     assert!(with_sim(&s, |sim| sim.hsm.writes.contains(&(0xE000_ED30, 0x1F))));
-    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "running");
+    assert_eq!(i.eval("tc37x_ext.hsm curstate").unwrap(), "running");
 }
 
 #[test]
@@ -602,7 +602,7 @@ fn hsm_breakpoint_above_512_mb_and_watchpoint() {
     let s = server();
     let i = &s.interp;
     i.eval("init").unwrap();
-    i.eval("targets tc37x.hsm").unwrap();
+    i.eval("targets tc37x_ext.hsm").unwrap();
     i.eval("halt 1000").unwrap();
     i.eval("bp 0x80028602 2").unwrap();
     // Highest comparator first (the boot ROM uses FP_COMP0); upper half-word, COMPH = 4.
@@ -632,7 +632,7 @@ fn hsm_memory_goes_through_the_window_after_a_cache_clean() {
     // Local RAM while the HSM runs: refused (no cache clean while running).
     let e = ops::read_memory_as(&cx, HSM, 0x2000_1000, 4).unwrap_err().to_string();
     assert!(e.contains("halted"), "{e}");
-    s.interp.eval("tc37x.hsm arp_halt").unwrap();
+    s.interp.eval("tc37x_ext.hsm arp_halt").unwrap();
     ops::poll_all(&cx);
     assert_eq!(ops::read_memory_as(&cx, HSM, 0x2000_1001, 2).unwrap(), vec![0x22, 0x33]);
     assert_eq!(with_sim(&s, |sim| (sim.hsm.cache_cleans, sim.hsm.uncleaned_reads)), (64, 0));
@@ -652,16 +652,16 @@ fn tricore_resume_releases_a_halted_hsm() {
     let s = server();
     let i = &s.interp;
     i.eval("init").unwrap();
-    i.eval("tc37x.hsm arp_halt").unwrap();
+    i.eval("tc37x_ext.hsm arp_halt").unwrap();
     i.eval("halt 1000").unwrap();
     ops::poll_all(&s.cx());
-    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "halted");
+    assert_eq!(i.eval("tc37x_ext.hsm curstate").unwrap(), "halted");
     take_writes(&s);
     i.eval("resume").unwrap();
     let w = take_writes(&s);
     assert!(pos(&w, (HSM_DHCSR, 0xA05F_0001)) < pos(&w, (CBS_TLCHS, 2)), "{w:08x?}");
     ops::poll_all(&s.cx());
-    assert_eq!(i.eval("tc37x.hsm curstate").unwrap(), "running");
+    assert_eq!(i.eval("tc37x_ext.hsm curstate").unwrap(), "running");
 }
 
 #[test]
@@ -669,17 +669,17 @@ fn reset_halt_keeps_the_hsm_breakpoints_after_the_release() {
     let s = server();
     let i = &s.interp;
     i.eval("init").unwrap();
-    i.eval("targets tc37x.hsm").unwrap();
+    i.eval("targets tc37x_ext.hsm").unwrap();
     i.eval("halt 1000").unwrap();
     i.eval("bp 0x80028700 2").unwrap();
-    i.eval("targets tc37x.cpu0").unwrap();
+    i.eval("targets tc37x_ext.cpu0").unwrap();
     with_sim(&s, |sim| sim.hsm.writes.clear());
     i.eval("reset halt").unwrap();
     let w = with_sim(&s, |sim| std::mem::take(&mut sim.hsm.writes));
     // Restored in FP_COMP5 while the boot ROM breakpoint (FP_COMP0) is deleted by the release.
     assert!(w.contains(&(0xE000_201C, 0x0002_8700 | 1 << 30 | 1)), "{w:08x?}");
     assert!(w.contains(&(0xE000_2008, 0)), "{w:08x?}");
-    assert_eq!(i.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(i.eval("tc37x_ext.cpu0 curstate").unwrap(), "halted");
 }
 
 // --- GTM MCS channels -------------------------------------------------------------------------
@@ -749,16 +749,16 @@ fn mcs_channels_are_examined_with_the_gtm_and_listed_once_used() {
     let s = server();
     let i = &s.interp;
     i.eval("init").unwrap();
-    assert_eq!(i.eval("tc37x.mcs0.ch0 was_examined").unwrap(), "0");
+    assert_eq!(i.eval("tc37x_ext.mcs0.ch0 was_examined").unwrap(), "0");
     with_sim(&s, |sim| {
         sim.gtm.enabled = true;
         sim.gtm.load(0, &mcs_program());
         sim.gtm.modules[0].ch[0].en = true;
     });
     ops::poll_all(&s.cx());
-    assert_eq!(i.eval("tc37x.mcs0.ch0 was_examined").unwrap(), "1");
-    assert_eq!(i.eval("tc37x.mcs0.ch2 was_examined").unwrap(), "1");
-    assert_eq!(curstate(&s, "tc37x.mcs0.ch0"), "running");
+    assert_eq!(i.eval("tc37x_ext.mcs0.ch0 was_examined").unwrap(), "1");
+    assert_eq!(i.eval("tc37x_ext.mcs0.ch2 was_examined").unwrap(), "1");
+    assert_eq!(curstate(&s, "tc37x_ext.mcs0.ch0"), "running");
     s.cx().with(|c| {
         assert!(c.targets[MCS0_CH0].core.visible());
         // Never enabled and still at its reset PC: not shown.
@@ -771,20 +771,20 @@ fn mcs_channels_are_examined_with_the_gtm_and_listed_once_used() {
 fn mcs_halt_register_access_and_resume() {
     let s = mcs_server();
     let i = &s.interp;
-    i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
+    i.eval("tc37x_ext.mcs0.ch0 arp_halt").unwrap();
     ops::poll_all(&s.cx());
-    assert_eq!(curstate(&s, "tc37x.mcs0.ch0"), "halted");
+    assert_eq!(curstate(&s, "tc37x_ext.mcs0.ch0"), "halted");
     assert!(!with_sim(&s, |sim| sim.gtm.modules[0].ch[0].en));
     // The other channel of the module keeps running.
-    assert_eq!(curstate(&s, "tc37x.mcs0.ch1"), "running");
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    assert_eq!(curstate(&s, "tc37x_ext.mcs0.ch1"), "running");
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     let r0 = with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[0]);
     assert_eq!(i.eval("reg r0").unwrap(), format!("r0 (/32): 0x{r0:08x}"));
     i.eval("reg r3 0x1234").unwrap();
     assert_eq!(with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[3]), 0x1234);
     i.eval("resume").unwrap();
     assert!(with_sim(&s, |sim| sim.gtm.modules[0].ch[0].en));
-    assert_eq!(curstate(&s, "tc37x.mcs0.ch0"), "running");
+    assert_eq!(curstate(&s, "tc37x_ext.mcs0.ch0"), "running");
 }
 
 #[test]
@@ -792,33 +792,33 @@ fn mcs_breakpoint_is_a_shared_self_jump_and_is_stepped_over_on_resume() {
     let s = mcs_server();
     let i = &s.interp;
     let orig = ram_word(&s, 0x60);
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     i.eval("bp 0x60 4").unwrap();
-    i.eval("targets tc37x.mcs0.ch1").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch1").unwrap();
     i.eval("bp 0x60 4").unwrap();
     assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
     // Debugger reads show the instruction under the breakpoint.
     assert_eq!(ops::read_memory_as(&s.cx(), MCS0_CH0, 0x60, 4).unwrap(), orig.to_le_bytes().to_vec());
 
-    poll_until(&s, "breakpoint hit", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    poll_until(&s, "breakpoint hit", |s| curstate(s, "tc37x_ext.mcs0.ch0") == "halted");
     assert_eq!(ops::state(&s.cx(), MCS0_CH0).1.name(), "breakpoint");
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000060");
-    assert_eq!(curstate(&s, "tc37x.mcs0.ch1"), "running");
+    assert_eq!(curstate(&s, "tc37x_ext.mcs0.ch1"), "running");
 
     // Removed on one channel only: still planted for the other.
-    i.eval("targets tc37x.mcs0.ch1").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch1").unwrap();
     i.eval("rbp 0x60").unwrap();
     assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
 
     // Resume executes the instruction under the breakpoint and plants it again.
     let r2 = with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[2]);
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     i.eval("resume").unwrap();
     assert_eq!(with_sim(&s, |sim| sim.gtm.modules[0].ch[0].r[2]), r2 + 1);
     assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
     assert_eq!(ram_word(&s, 0x64), asm("RET", &[]), "step trap removed");
-    poll_until(&s, "second hit", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    poll_until(&s, "second hit", |s| curstate(s, "tc37x_ext.mcs0.ch0") == "halted");
     i.eval("rbp 0x60").unwrap();
     assert_eq!(ram_word(&s, 0x60), orig);
 }
@@ -828,9 +828,9 @@ fn mcs_step_into_over_and_return() {
     let s = mcs_server();
     let i = &s.interp;
     let cx = s.cx();
-    i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
+    i.eval("tc37x_ext.mcs0.ch0 arp_halt").unwrap();
     ops::poll_all(&cx);
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     i.eval("reg pc 0x2c").unwrap();
     i.eval("step").unwrap();
     assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000060", "step into the call");
@@ -852,12 +852,12 @@ fn mcs_halt_of_a_waiting_channel_takes_effect_after_the_wait() {
     let s = mcs_server();
     let i = &s.interp;
     poll_until(&s, "channel 1 waiting", |s| with_sim(s, |sim| sim.gtm.modules[0].ch[1].waiting));
-    i.eval("tc37x.mcs0.ch1 arp_halt").unwrap();
+    i.eval("tc37x_ext.mcs0.ch1 arp_halt").unwrap();
     ops::poll_all(&s.cx());
-    assert_eq!(curstate(&s, "tc37x.mcs0.ch1"), "running");
+    assert_eq!(curstate(&s, "tc37x_ext.mcs0.ch1"), "running");
     with_sim(&s, |sim| sim.gtm.modules[0].strg |= 1);
-    poll_until(&s, "channel 1 stopped", |s| curstate(s, "tc37x.mcs0.ch1") == "halted");
-    i.eval("targets tc37x.mcs0.ch1").unwrap();
+    poll_until(&s, "channel 1 stopped", |s| curstate(s, "tc37x_ext.mcs0.ch1") == "halted");
+    i.eval("targets tc37x_ext.mcs0.ch1").unwrap();
     assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000048");
 }
 
@@ -865,7 +865,7 @@ fn mcs_halt_of_a_waiting_channel_takes_effect_after_the_wait() {
 fn mcs_breakpoint_is_planted_again_after_the_program_is_reloaded() {
     let s = mcs_server();
     let i = &s.interp;
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     i.eval("bp 0x30 4").unwrap();
     // The application loads the program again (e.g. after its own re-initialisation).
     with_sim(&s, |sim| sim.gtm.load(0, &mcs_program()));
@@ -888,14 +888,14 @@ fn mcs_breakpoint_opens_the_ram_write_protection_and_restores_it() {
         md.cls_prot = true;
     });
     i.eval("mww 0xF0138060 0").unwrap_err();
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     i.eval("bp 0x60 4").unwrap();
     assert_eq!(ram_word(&s, 0x60), 0xE000_0060);
     let (arp, cls) = with_sim(&s, |sim| (sim.gtm.modules[0].arp, sim.gtm.modules[0].cls_prot));
     assert_eq!(&arp[..4], &arps);
     assert!(cls);
     // Stepping over the breakpoint writes traps and the instruction through the same path.
-    poll_until(&s, "breakpoint hit", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    poll_until(&s, "breakpoint hit", |s| curstate(s, "tc37x_ext.mcs0.ch0") == "halted");
     i.eval("resume").unwrap();
     assert_eq!(ram_word(&s, 0x64), asm("RET", &[]));
     i.eval("rbp 0x60").unwrap();
@@ -907,16 +907,16 @@ fn mcs_breakpoint_opens_the_ram_write_protection_and_restores_it() {
 fn mcs_halt_all_handler_pulses_tl1_only_for_breakpoints() {
     let s = mcs_server();
     let i = &s.interp;
-    i.eval("tc37x.mcs0.ch0 configure -event halted {tc3xx_mcs_halt_all tc37x.mcs0.ch0}").unwrap();
+    i.eval("tc37x_ext.mcs0.ch0 configure -event halted {tc3xx_mcs_halt_all tc37x_ext.mcs0.ch0}").unwrap();
     take_writes(&s);
-    i.eval("tc37x.mcs0.ch0 arp_halt").unwrap();
+    i.eval("tc37x_ext.mcs0.ch0 arp_halt").unwrap();
     ops::poll_all(&s.cx());
     assert!(!take_writes(&s).contains(&(CBS_TLC, 0x30)), "a pause of the channel does not halt the cores");
-    i.eval("tc37x.mcs0.ch0 arp_resume").unwrap();
-    i.eval("targets tc37x.mcs0.ch0").unwrap();
+    i.eval("tc37x_ext.mcs0.ch0 arp_resume").unwrap();
+    i.eval("targets tc37x_ext.mcs0.ch0").unwrap();
     i.eval("bp 0x28 4").unwrap();
     take_writes(&s);
-    poll_until(&s, "breakpoint", |s| curstate(s, "tc37x.mcs0.ch0") == "halted");
+    poll_until(&s, "breakpoint", |s| curstate(s, "tc37x_ext.mcs0.ch0") == "halted");
     assert!(take_writes(&s).contains(&(CBS_TLC, 0x30)));
 }
 
@@ -926,7 +926,7 @@ fn mcs_halt_all_handler_pulses_tl1_only_for_breakpoints() {
 fn generic_setup_follows_the_target_cfg() {
     aurix_core::log::set_debug_level(1);
     let s = Server::new();
-    s.cx().with(|c| c.search_dirs.push(repo().join("third_party/openocd/tcl")));
+    s.cx().with(|c| c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR)));
     let i = &s.interp;
     i.eval_global("adapter driver sim; script target/infineon/tc39x.cfg").unwrap();
     i.eval_global("set tc3xx_mcs_modules {0 9}; set tc3xx_mcs_ramsize 0x1800").unwrap();
@@ -954,7 +954,7 @@ mod backend_guard {
         let s = Server::new();
         s.cx().with(|c| {
             c.adapter_override = Some(driver.into());
-            c.search_dirs.push(repo().join("third_party/openocd/tcl"));
+            c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
         });
         s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
         s.interp
@@ -969,10 +969,10 @@ mod backend_guard {
         let i = &s.interp;
         assert_eq!(i.eval("adapter name").unwrap(), "sim");
         assert_eq!(i.eval("tc3xx_ocds_available").unwrap(), "1");
-        assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap(), "tc3xx_on_examine");
-        assert_eq!(i.eval("tc37x.cpu0 cget -event reset-end").unwrap(), "tc3xx_on_reset_end");
-        assert_eq!(i.eval("tc37x.cpu1 cget -event halted").unwrap(), "tc3xx_on_halted tc37x.cpu1");
-        assert_eq!(i.eval("tc37x.cpu0 cget -event step-start").unwrap(), "tc3xx_on_step_start tc37x.cpu0");
+        assert_eq!(i.eval("tc37x_ext.cpu0 cget -event examine-end").unwrap(), "tc3xx_on_examine");
+        assert_eq!(i.eval("tc37x_ext.cpu0 cget -event reset-end").unwrap(), "tc3xx_on_reset_end");
+        assert_eq!(i.eval("tc37x_ext.cpu1 cget -event halted").unwrap(), "tc3xx_on_halted tc37x_ext.cpu1");
+        assert_eq!(i.eval("tc37x_ext.cpu0 cget -event step-start").unwrap(), "tc3xx_on_step_start tc37x_ext.cpu0");
     }
 
     /// The winIDEA backend skips the OCDS handlers and leaves the HSM to
@@ -990,23 +990,23 @@ mod backend_guard {
 
         // No OCDS event handler is wired, reset-end included.
         for (target, event) in [
-            ("tc37x.cpu0", "examine-end"),
-            ("tc37x.cpu0", "reset-end"),
-            ("tc37x.cpu0", "halted"),
-            ("tc37x.cpu0", "resume-start"),
-            ("tc37x.cpu0", "resume-end"),
-            ("tc37x.cpu0", "step-start"),
-            ("tc37x.cpu1", "halted"),
+            ("tc37x_ext.cpu0", "examine-end"),
+            ("tc37x_ext.cpu0", "reset-end"),
+            ("tc37x_ext.cpu0", "halted"),
+            ("tc37x_ext.cpu0", "resume-start"),
+            ("tc37x_ext.cpu0", "resume-end"),
+            ("tc37x_ext.cpu0", "step-start"),
+            ("tc37x_ext.cpu1", "halted"),
         ] {
             let got = i.eval(&format!("{target} cget -event {event}")).unwrap();
             assert_eq!(got, "", "{target} still has a {event} handler");
         }
 
         let names = i.eval("target names").unwrap();
-        assert!(!names.contains("tc37x.hsm"), "the HSM is winIDEA's core here: {names}");
+        assert!(!names.contains("tc37x_ext.hsm"), "the HSM is winIDEA's core here: {names}");
         // MCS channels are polled through memory reads, ~5 ms each over winIDEA.
         assert!(!names.contains(".mcs"), "no MCS targets on winIDEA: {names}");
-        for t in ["tc37x.cpu0", "tc37x.cpu1", "tc37x.cpu2"] {
+        for t in ["tc37x_ext.cpu0", "tc37x_ext.cpu1", "tc37x_ext.cpu2"] {
             assert!(names.contains(t), "{t} missing from: {names}");
         }
         assert_eq!(i.eval("llength $tc3xx_mcs_targets").unwrap(), "0");

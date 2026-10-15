@@ -22,3 +22,5 @@ swagger-ui-dist = "5"
 [build-dependencies]
 api-spec.workspace = true
 
+[dev-dependencies]
+openocd-tcl.workspace = true

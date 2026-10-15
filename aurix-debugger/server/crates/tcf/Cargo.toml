@@ -19,3 +19,4 @@ capstone = { version = "0.14", default-features = false, features = ["full", "st
 
 [dev-dependencies]
 jim.workspace = true
+openocd-tcl.workspace = true

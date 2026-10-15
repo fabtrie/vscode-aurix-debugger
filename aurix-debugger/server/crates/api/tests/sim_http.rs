@@ -30,7 +30,7 @@ fn server() -> ServerHandle {
         let s = Server::new();
         s.cx().with(|c| {
             c.adapter_override = Some("sim".into());
-            c.search_dirs.push(repo().join("third_party/openocd/tcl"));
+            c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
         });
         s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
         s.interp
@@ -292,7 +292,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     }
     let sse = http.events();
     let c0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
-    const CPU0: &str = "tc37x.cpu0";
+    const CPU0: &str = "tc37x_ext.cpu0";
 
     // Generated routes and the spec.
     let targets = http.ok("GET", "/api/v1/targets", None);

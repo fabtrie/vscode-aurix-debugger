@@ -9,7 +9,9 @@ Compared with OpenOCD + gdb + cppdbg, this gives VS Code writable registers and 
 Requirements (Windows):
 - rustup with the `stable-x86_64-pc-windows-gnu` toolchain (pinned in `rust-toolchain.toml`);
 - MSYS2 mingw64 gcc in `C:\msys64\mingw64\bin`, which builds Jim Tcl and Capstone;
-- network access through the proxy set in `.cargo/config.toml` / `env.ps1`.
+- network access through the proxy set in `.cargo/config.toml` / `env.ps1`. The build downloads Jim Tcl
+  (crate `jimtcl`) and OpenOCD's Tcl scripts (crate `openocd-tcl`, into `target/openocd-tcl/`) from
+  GitHub; set `JIMTCL_SRC_DIR` / `OPENOCD_TCL_DIR` to local copies to build offline.
 
 ```powershell
 cd server
@@ -26,9 +28,11 @@ The command-line options are the same as OpenOCD's:
 
 ```powershell
 cd C:\workspace\test\aurix-debugger
-.\server\target\debug\aurix-dbg.exe -s third_party/openocd/tcl `
+.\server\target\debug\aurix-dbg.exe -s server/target/openocd-tcl/tcl `
     -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3] [-l log.txt]
 ```
+
+`server/target/openocd-tcl/tcl` holds OpenOCD's board/target scripts, fetched by `cargo build`. The VS Code extension ships the same folder and passes it as a search directory itself.
 
 | Option | Meaning |
 |---|---|
@@ -100,8 +104,8 @@ Python ([python/](../python)): `pip install -e python`, then:
 ```python
 from aurix_dbg import Client
 dbg = Client("http://127.0.0.1:8080")
-dbg.halt("tc37x.cpu0")
-print(hex(dbg.read_register("tc37x.cpu0", "pc").value))
+dbg.halt("tc37x_ext.cpu0")
+print(hex(dbg.read_register("tc37x_ext.cpu0", "pc").value))
 data = dbg.read_bytes(0x70000000, 256)   # any length, split into 64 KB calls
 for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients
 ```
@@ -331,7 +335,9 @@ A conditional attribute's read set depends on which branch is live, so an attrib
 | Crate | Responsibility |
 |---|---|
 | `tas` | Pure-Rust TAS client: batched PL0 reads and writes, device connect/reset, user pins (SRST). |
-| `jim` | Jim Tcl 0.83 (OpenOCD's copy) built with `cc`, with a safe `Interp` API. |
+| `jimtcl` | Builds Jim Tcl 0.83 from the upstream release (download, generated `configure` output, `cc`). |
+| `jim` | Safe `Interp` API over Jim Tcl. |
+| `openocd-tcl` | Fetches OpenOCD's Tcl scripts (pinned commit of the tricore-oss fork) into `target/openocd-tcl/`; used by the tests and packaged with the VS Code extension. |
 | `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, periodic sampling (DAQ), CSA unwinder, flash driver and image loader. |
 | `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
 | `orti` | ORTI files: the AUTOSAR/OSEK OS awareness description a generator emits. Parser (generic over the object types a file declares), and planning each attribute into the reads it costs. |
@@ -400,7 +406,7 @@ winidea status
 ### Example
 
 ```powershell
-aurix-dbg.exe --adapter winidea -s third_party/openocd/tcl `
+aurix-dbg.exe --adapter winidea -s server/target/openocd-tcl/tcl `
     -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg `
     -c "winidea workspace C:/ws/app.xjrf" -c "init"
 ```

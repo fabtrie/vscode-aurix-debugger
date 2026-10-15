@@ -215,7 +215,8 @@ impl SimAdapter {
             pending_resets: 0,
             sbc_loop_resets: 0,
             sbc_reset_at: None,
-            device_id: 0x1020_7083,
+            // TC37x EXT (TC377TX), as expected by OpenOCD's tc37x_EXT.cfg.
+            device_id: 0x1020_8083,
             hsm: SimHsm::new(),
             gtm: SimGtm::new(),
             initialized: false,

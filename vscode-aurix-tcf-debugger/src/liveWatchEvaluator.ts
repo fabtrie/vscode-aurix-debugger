@@ -12,7 +12,7 @@
 import { TCFClient, decodeEvaluatedValue } from './tcfclient';
 import { CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, EvaluateResult, GetContextExpressionsCommand } from './tcf/expressions';
 import { GetMemoryCommand } from './tcf/memory';
-import { GetChildrenSymbolsCommand, GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from './tcf/symbols';
+import { FindByAddrSymbolsCommand, GetChildrenSymbolsCommand, GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from './tcf/symbols';
 import { SimpleCommand, TCFPartialResultError } from './tcf/tcfutils';
 import { ArrayVariable } from './variables/array';
 import { CompositeVariable } from './variables/composite';
@@ -360,6 +360,9 @@ export class LiveWatchEvaluator {
 			key = `context:${c.contextID}`;
 		} else if (c instanceof GetChildrenSymbolsCommand) {
 			key = `children:${c.contextID}`;
+		} else if (c instanceof FindByAddrSymbolsCommand) {
+			// A function pointer's target, looked up on every refresh otherwise.
+			key = `addr:${c.contextID}:${c.address}`;
 		}
 		if (!key) {
 			return this.client.sendCommand(c);

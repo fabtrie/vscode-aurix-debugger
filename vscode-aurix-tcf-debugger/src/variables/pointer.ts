@@ -3,7 +3,7 @@ Copyright (C) 2023 Intel Corporation
 SPDX-License-Identifier: MIT
 */
 import assert = require("assert");
-import { GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from "../tcf-all";
+import { FindByAddrSymbolsCommand, GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from "../tcf-all";
 import { AbstractVariable, ClientVariable, FixedNameProvider, NameProvider, RawValueProvider, UndefinedRawValueProvider, VariableHelper } from "./types";
 
 export class PointerVariable extends AbstractVariable {
@@ -85,7 +85,30 @@ export class PointerVariable extends AbstractVariable {
         //TODO: actually read memory and load that type?
         //const expr = "*(${" + typeDetails[0].ID + "})" + (variableRawValue.toString('hex'));
         //const v = new EvaluateExpressionCommand(expr);
-        return value;
+        const target = await this.functionAt(Number(value));
+        return target ? `${value} <${target}>` : value;
+    }
+
+    /** For a function pointer: the function at `address` (`name` or `name+0x10`). */
+    private async functionAt(address: number): Promise<string | undefined> {
+        if (!this.type.BaseTypeID || !address || !Number.isSafeInteger(address)) {
+            return undefined;
+        }
+        try {
+            const base = await this.helper.sendCommand(new GetContextSymbolsCommand(this.type.BaseTypeID));
+            if (base.TypeClass !== TCFTypeClass.function) {
+                return undefined;
+            }
+            const id = await this.helper.sendCommand(new FindByAddrSymbolsCommand('', address));
+            const fn = id ? await this.helper.sendCommand(new GetContextSymbolsCommand(id)) : undefined;
+            if (!fn?.Name) {
+                return undefined;
+            }
+            const offset = fn.Address !== undefined ? address - fn.Address : 0;
+            return offset > 0 ? `${fn.Name}+0x${offset.toString(16)}` : fn.Name;
+        } catch {
+            return undefined; // no code there
+        }
     }
 
 }

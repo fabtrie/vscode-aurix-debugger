@@ -5,7 +5,8 @@ import type { TCFClient } from '../../tcfclient';
 import { DefaultVariableHelper } from '../../variables/helper';
 import { ArrayVariable } from '../../variables/array';
 import { FixedNameProvider } from '../../variables/types';
-import { GetChildrenSymbolsCommand } from '../../tcf/symbols';
+import { FindByAddrSymbolsCommand, GetChildrenSymbolsCommand } from '../../tcf/symbols';
+import { PointerVariable } from '../../variables/pointer';
 import type { SimpleCommand } from '../../tcf/tcfutils';
 
 /**
@@ -105,5 +106,36 @@ suite('ArrayVariable', () => {
 		assert.strictEqual(elems.length, 2);
 		const fields = await (elems[1] as any).getChildren();
 		assert.deepStrictEqual(fields.map((f: any) => f.name()), ['a', 'b']);
+	});
+});
+
+suite('PointerVariable', () => {
+	test('a function pointer shows the function it points to', async () => {
+		const symbols: Record<string, unknown> = {
+			fnType: { ID: 'fnType', Class: 4, TypeClass: 8, Size: 0 },
+			fn: { ID: 'fn', Class: 3, TypeClass: 8, Name: 'COSI_DOOR_state_init', Address: 0x803017a4, Size: 110 },
+		};
+		const helper = new class extends DefaultVariableHelper {
+			log(): void { }
+			async sendCommand<T>(c: SimpleCommand<T>): Promise<T> {
+				if (c instanceof FindByAddrSymbolsCommand) {
+					if (c.address < 0x803017a4 || c.address >= 0x803017a4 + 110) {
+						throw new Error('No symbol');
+					}
+					return 'fn' as T;
+				}
+				return symbols[(c as any).contextID] as T;
+			}
+		}();
+		const type = { ID: 'ptr', Class: 4, TypeClass: 4, Size: 4, BaseTypeID: 'fnType' } as any;
+		const show = (addr: number) => {
+			const raw = Buffer.alloc(4);
+			raw.writeUInt32LE(addr);
+			return new PointerVariable(type, undefined, new FixedNameProvider('p'), { value: async () => raw, isBigEndian: () => false }, helper).displayValue();
+		};
+		assert.strictEqual(await show(0x803017a4), '0x803017a4 <COSI_DOOR_state_init>');
+		assert.strictEqual(await show(0x803017b0), '0x803017b0 <COSI_DOOR_state_init+0xc>');
+		assert.strictEqual(await show(0x90000000), '0x90000000');
+		assert.strictEqual(await show(0), '0x0');
 	});
 });

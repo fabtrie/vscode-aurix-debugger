@@ -72,8 +72,23 @@ class BufferValueProvider implements RawValueProvider {
 	}
 }
 
-/** C expression of a child node below a parent expression. */
-export function liveWatchChildExpression(parentExpr: string, childName: string): string {
+/**
+ * A Live Watch expression with an optional core: `expr@N` is evaluated on TriCore core N (e.g. a
+ * variable in core-local memory, which every core has its own copy of).
+ */
+export function splitLiveWatchCore(expression: string): { expression: string; core?: number } {
+	const m = /^(.*\S)\s*@\s*(\d+)$/.exec(expression.trim());
+	return m ? { expression: m[1], core: Number(m[2]) } : { expression: expression.trim() };
+}
+
+/** C expression of a child node below a parent expression; a core (`@N`) carries over. */
+export function liveWatchChildExpression(parentExpression: string, childName: string): string {
+	const { expression: parentExpr, core } = splitLiveWatchCore(parentExpression);
+	const child = childExpression(parentExpr, childName);
+	return core === undefined ? child : `${child}@${core}`;
+}
+
+function childExpression(parentExpr: string, childName: string): string {
 	const simple = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*$/.test(parentExpr);
 	const p = simple ? parentExpr : `(${parentExpr})`;
 	if (childName === '*') {
@@ -96,7 +111,12 @@ export class LiveWatchEvaluator {
 	private readonly creating = new Map<string, Promise<RootEntry>>();
 	private readonly helper: DefaultVariableHelper;
 
-	constructor(private readonly client: TCFClient, private readonly log: (message: string) => void) {
+	/** `coreContext`: the context of TriCore core N, for `expr@N`. */
+	constructor(
+		private readonly client: TCFClient,
+		private readonly log: (message: string) => void,
+		private readonly coreContext: (core: number) => Promise<string | undefined> = async () => undefined,
+	) {
 		const self = this;
 		this.helper = new class extends DefaultVariableHelper {
 			log(message: string): void {
@@ -139,12 +159,21 @@ export class LiveWatchEvaluator {
 	}
 
 	private async evaluateRoot(ctx: string, name: string, expression: string, expanded: Set<string>, format?: LiveWatchRequestItem): Promise<LiveWatchNode> {
+		const { expression: text, core } = splitLiveWatchCore(expression);
+		if (core !== undefined) {
+			const coreCtx = await this.coreContext(core);
+			if (!coreCtx) {
+				throw new Error(`No core ${core}`);
+			}
+			ctx = coreCtx;
+		}
+		const explicitCore = core !== undefined;
 		const key = `${ctx}\n${expression}`;
 		let entry = this.roots.get(key);
 		let variable: ClientVariable | undefined;
 		if (entry) {
 			try {
-				variable = await this.createRootVariable(ctx, entry);
+				variable = await this.createRootVariable(ctx, entry, explicitCore);
 			} catch {
 				// The cached expression may have become invalid (e.g. a reset); create it again.
 				this.dropRoot(key);
@@ -152,8 +181,8 @@ export class LiveWatchEvaluator {
 			}
 		}
 		if (!entry) {
-			entry = await this.createRootOnce(ctx, key, expression);
-			variable = await this.createRootVariable(ctx, entry);
+			entry = await this.createRootOnce(ctx, key, text);
+			variable = await this.createRootVariable(ctx, entry, explicitCore);
 		}
 		if (!variable) {
 			throw new Error(`'${expression}' has no displayable value`);
@@ -212,8 +241,8 @@ export class LiveWatchEvaluator {
 		}
 	}
 
-	private async createRootVariable(ctx: string, entry: RootEntry): Promise<ClientVariable | undefined> {
-		const value = new BufferValueProvider(await this.readValue(ctx, entry), entry.bigEndian);
+	private async createRootVariable(ctx: string, entry: RootEntry, explicitCore: boolean): Promise<ClientVariable | undefined> {
+		const value = new BufferValueProvider(await this.readValue(ctx, entry, explicitCore), entry.bigEndian);
 		const nameProvider = new FixedNameProvider(entry.symbol?.Name ?? '');
 		const variable = this.helper.createVariable(entry.type, entry.symbol, nameProvider, value);
 		if (!variable && !entry.symbol && entry.type.TypeClass === TCFTypeClass.composite) {
@@ -223,14 +252,16 @@ export class LiveWatchEvaluator {
 		return variable;
 	}
 
-	private async readValue(ctx: string, entry: RootEntry): Promise<Buffer | undefined> {
+	/** `explicitCore`: read with `ctx` (`expr@N`) even if the symbol belongs to another core. */
+	private async readValue(ctx: string, entry: RootEntry, explicitCore: boolean): Promise<Buffer | undefined> {
 		const symbol = entry.symbol;
 		if (symbol?.Value) {
 			return Buffer.from(symbol.Value, 'base64');
 		}
 		if (symbol?.Address && symbol.Size) {
-			// A symbol owned by one core (e.g. an HSM variable) is read with that core's memory view.
-			const owner = typeof symbol.OwnerID === 'string' && /\.C\d+$/.test(symbol.OwnerID) ? symbol.OwnerID : ctx;
+			// A symbol owned by one core (e.g. an HSM variable, or one in the core-local memory of the
+			// core that runs its ELF) is read with that core's memory view.
+			const owner = !explicitCore && typeof symbol.OwnerID === 'string' && /\.C\d+$/.test(symbol.OwnerID) ? symbol.OwnerID : ctx;
 			const r = await this.client.sendCommand(new GetMemoryCommand(owner, symbol.Address, 1, symbol.Size));
 			return Buffer.from(r.base64, 'base64');
 		}

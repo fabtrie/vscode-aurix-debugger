@@ -106,6 +106,9 @@ pub struct SymbolStore {
     /// Path -> (modification time, length, ELF number).
     cache: HashMap<PathBuf, (Option<SystemTime>, u64, usize)>,
     sets: HashMap<String, Arc<SymbolSet>>,
+    /// TriCore core IDs that run an ELF (`symbolFiles` entry `path@N`), by ELF number: their
+    /// core-local memory holds the ELF's variables linked to the local DSPR/PSPR alias.
+    run_cores: HashMap<usize, Vec<u32>>,
 }
 
 impl SymbolStore {
@@ -115,6 +118,22 @@ impl SymbolStore {
 
     pub fn set(&self, ctx: &str) -> Option<Arc<SymbolSet>> {
         self.sets.get(ctx).cloned()
+    }
+
+    /// The TriCore core IDs that run ELF `n`, first the one whose core-local memory is meant on
+    /// the other cores (empty: not configured).
+    pub fn run_cores(&self, n: usize) -> &[u32] {
+        self.run_cores.get(&n).map_or(&[], Vec::as_slice)
+    }
+
+    /// Sets the cores that run the loaded ELF `path` (see [`Self::run_cores`]).
+    pub fn set_run_cores(&mut self, path: &Path, cores: Vec<u32>) {
+        let Some(&(_, _, n)) = self.cache.get(path) else { return };
+        if cores.is_empty() {
+            self.run_cores.remove(&n);
+        } else {
+            self.run_cores.insert(n, cores);
+        }
     }
 
     /// Contexts with a symbol set.
@@ -191,6 +210,25 @@ mod tests {
         assert_eq!(split_elf_id("E10/LV:21.3803@S0.D0.C0.F2"), Some((10, "LV:21.3803@S0.D0.C0.F2")));
         assert_eq!(split_elf_id("GV:12"), None);
         assert_eq!(split_elf_id("EX/GV:1"), None);
+    }
+
+    /// `symbolFiles` `path@N`: the cores are kept per loaded file, and an empty list clears them.
+    #[test]
+    fn run_cores_by_file() {
+        let dir = std::env::temp_dir().join(format!("aurix-runcores-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.asm"), dir.join("b.asm"));
+        std::fs::write(&a, "start:\n  jmp start\n").unwrap();
+        std::fs::write(&b, "start:\n  jmp start\n").unwrap();
+        let mut store = SymbolStore::default();
+        store.assign("S0.D0.C0", &[a.clone(), b.clone()]).unwrap();
+        store.set_run_cores(&b, vec![1, 2]);
+        store.set_run_cores(&dir.join("unknown.asm"), vec![3]);
+        assert_eq!(store.run_cores(0), &[] as &[u32]);
+        assert_eq!(store.run_cores(1), &[1, 2]);
+        store.set_run_cores(&b, Vec::new());
+        assert!(store.run_cores(1).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A disassembly window that starts in data (an MCS `.var`) still gets the source lines of the

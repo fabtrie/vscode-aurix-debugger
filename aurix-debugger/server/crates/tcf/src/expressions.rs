@@ -24,7 +24,9 @@ use symbols::expr::{Eval, Place, SymbolRef, Target, Value, Write};
 use symbols::types::{TypeClass, TypeId};
 use symbols::{DieRef, Symbols, PC_REGISTER};
 
-use crate::contexts::{cores, find_core, CoreInfo, CONTAINER};
+use aurix_core::tricore::local_address;
+
+use crate::contexts::{core_id, cores, find_core, CoreInfo, CONTAINER};
 use crate::symstore::{elf_id, split_elf_id, Elf};
 use crate::Shared;
 
@@ -161,6 +163,8 @@ struct TcfTarget<'a> {
     sh: &'a Shared,
     /// Target index of the scope's core.
     core: usize,
+    /// Target index for the core-local memory (see [`local_core`]).
+    local: usize,
     /// ELF the expression is evaluated with.
     elf: usize,
     pc: Option<u32>,
@@ -175,7 +179,7 @@ impl Target for TcfTarget<'_> {
         self.regs.get(r as usize).copied().flatten()
     }
     fn read(&mut self, addr: u32, len: usize) -> Result<Vec<u8>, String> {
-        read_mem(self.sh, self.core, addr, len)
+        read_mem(self.sh, if local_address(addr) { self.local } else { self.core }, addr, len)
     }
     fn symbol(&mut self, id: &str) -> Option<SymbolRef> {
         // Symbols of another ELF do not exist in this one.
@@ -188,7 +192,19 @@ impl Target for TcfTarget<'_> {
 }
 
 fn target<'a>(sh: &'a Shared, elf: usize, s: &Scope) -> TcfTarget<'a> {
-    TcfTarget { sh, core: s.core.idx, elf, pc: s.pc, regs: s.regs }
+    TcfTarget { sh, core: s.core.idx, local: local_core(sh, elf, s), elf, pc: s.pc, regs: s.regs }
+}
+
+/// The target whose core-local memory (`0xD000_0000` DSPR / `0xC000_0000` PSPR alias) an
+/// expression of ELF `elf` means: the scope's core when it runs the ELF (it is one of the cores
+/// configured for it, or executes its code), else the first configured one.
+fn local_core(sh: &Shared, elf: usize, s: &Scope) -> usize {
+    let runs = sh.symbols.lock().unwrap().run_cores(elf).to_vec();
+    let Some(&home) = runs.first() else { return s.core.idx };
+    if runs.iter().any(|&c| core_id(c) == s.core.id) || s.pc.is_some_and(|pc| sh.elf(elf).is_some_and(|e| e.function_at(pc).is_some())) {
+        return s.core.idx;
+    }
+    cores(&sh.handle).into_iter().find(|c| c.id == core_id(home)).map_or(s.core.idx, |c| c.idx)
 }
 
 /// ELF files to evaluate an expression of `ctx` with, in lookup order: an ELF named by a
@@ -324,12 +340,12 @@ pub fn symbol_context(sh: &Shared, full_id: &str) -> Res<Json> {
         }
         SymbolRef::Global(i) => {
             let g = syms.globals.get(*i).ok_or_else(not_found)?;
-            let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n), "Name": g.name, "Class": 2, "Address": g.addr, "Flags": 0 });
+            let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n, g.addr), "Name": g.name, "Class": 2, "Address": g.addr, "Flags": 0 });
             type_fields(n, &syms, &syms.var_type(g.die_ref()), &mut ctx);
             Ok(ctx)
         }
         SymbolRef::Object(t, a) => {
-            let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n), "Class": 2, "Address": a, "Flags": 0 });
+            let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n, *a), "Class": 2, "Address": a, "Flags": 0 });
             type_fields(n, &syms, t, &mut ctx);
             Ok(ctx)
         }
@@ -423,7 +439,14 @@ fn evaluate_entry(sh: &Shared, parent: &str, text: &str, symbol: &Option<String>
 
 /// Owner of a symbol of ELF `n`: the core context if the ELF belongs to exactly one core (its
 /// memory view applies, e.g. HSM RAM), otherwise the chip.
-fn owner_of(sh: &Shared, n: usize) -> String {
+/// The context a variable of ELF `n` at `addr` belongs to: for core-local memory the first core
+/// configured to run the ELF, else the only core with the ELF loaded, else the chip.
+fn owner_of(sh: &Shared, n: usize, addr: u32) -> String {
+    if local_address(addr) {
+        if let Some(&home) = sh.symbols.lock().unwrap().run_cores(n).first() {
+            return core_id(home);
+        }
+    }
     let owners: Vec<String> = cores(&sh.handle)
         .into_iter()
         .filter(|c| sh.symbols_for(&c.id).is_some_and(|s| s.elfs.iter().any(|e| e.0 == n)))
@@ -521,6 +544,7 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
     let idx = scope.core.idx;
     match write {
         Write::Memory(addr, bytes) => {
+            let idx = if local_address(addr) { local_core(sh, n, &scope) } else { idx };
             let expect = bytes.clone();
             sh.handle
                 .call(move |cx| ops::write_memory_as(cx, idx, addr, &bytes).map_err(|e| e.to_string()))

@@ -3,6 +3,7 @@ Copyright (C) 2023 Intel Corporation
 SPDX-License-Identifier: MIT
 */
 import { GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from "../tcf-all";
+import { CompositeVariable } from "./composite";
 import { AbstractVariable, ClientVariable, NameProvider, RawValueProvider, VariableHelper } from "./types";
 
 function isCharLikeType(type: TCFSymbolContextData): boolean {
@@ -114,7 +115,10 @@ export class ArrayVariable extends AbstractVariable {
                 }
             }();
 
-            const v = this.helper.createVariable(baseTypeDetails, undefined, nameProvider, valueProvider); //TODO: do array elements even have symbols?
+            // Elements have no symbol: a struct element takes its field layout from the struct type.
+            const v = baseTypeDetails.TypeClass === TCFTypeClass.composite
+                ? new CompositeVariable(baseTypeDetails, baseTypeDetails, this.helper, nameProvider, valueProvider)
+                : this.helper.createVariable(baseTypeDetails, undefined, nameProvider, valueProvider);
 
             if (v !== undefined) {
                 children.push(v);

@@ -329,7 +329,16 @@ impl Channel {
                 }
                 if !files.is_empty() {
                     let ctx = owning_core(&ctx).unwrap_or(ctx);
-                    self.shared.symbols.lock().unwrap().assign(&ctx, &files).map_err(|e| err(ERR_OTHER, e))?;
+                    let mut store = self.shared.symbols.lock().unwrap();
+                    store.assign(&ctx, &files).map_err(|e| err(ERR_OTHER, e))?;
+                    // "LocalCores": the TriCore cores that run the file (`symbolFiles` `path@N`).
+                    for m in map.as_array().into_iter().flatten() {
+                        if let Some(f) = m.get("FileName").and_then(Value::as_str) {
+                            let cores = m.get("LocalCores").and_then(Value::as_array).into_iter().flatten();
+                            store.set_run_cores(Path::new(f), cores.filter_map(Value::as_u64).map(|c| c as u32).collect());
+                        }
+                    }
+                    drop(store);
                     self.shared.stacks.lock().unwrap().clear();
                     self.shared.reresolve_breakpoints();
                 }

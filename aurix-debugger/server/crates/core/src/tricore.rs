@@ -14,6 +14,31 @@ use crate::error::{other, Error, Result};
 use crate::log_info;
 use crate::target::{DebugReason, PollOps, RunCfg, RunMode, TargetState, Transition};
 
+/// Global base of each core's DSPR by core id (TC3xx); its PSPR follows at `+ 0x10_0000`.
+const SCRATCHPAD_BASE: [u32; 6] = [0x7000_0000, 0x6000_0000, 0x5000_0000, 0x4000_0000, 0x3000_0000, 0x1000_0000];
+/// The core-local aliases of the own DSPR and PSPR (1 MB windows each).
+const LOCAL_DSPR: u32 = 0xD000_0000;
+const LOCAL_PSPR: u32 = 0xC000_0000;
+const LOCAL_WINDOW: u32 = 0x10_0000;
+
+/// Whether `addr` is in the core-local DSPR/PSPR alias, which has no meaning on the system bus.
+pub fn local_address(addr: u32) -> bool {
+    addr.wrapping_sub(LOCAL_DSPR) < LOCAL_WINDOW || addr.wrapping_sub(LOCAL_PSPR) < LOCAL_WINDOW
+}
+
+/// The global address core `coreid` reaches at `addr`: its own DSPR/PSPR for the local aliases
+/// (variables linked to `0xD000_0000`), `addr` itself otherwise.
+pub fn global_address(coreid: u32, addr: u32) -> u32 {
+    let Some(&base) = SCRATCHPAD_BASE.get(coreid as usize) else { return addr };
+    if addr.wrapping_sub(LOCAL_DSPR) < LOCAL_WINDOW {
+        base + (addr - LOCAL_DSPR)
+    } else if addr.wrapping_sub(LOCAL_PSPR) < LOCAL_WINDOW {
+        base + LOCAL_WINDOW + (addr - LOCAL_PSPR)
+    } else {
+        addr
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Trigger {
     pub enable: bool,
@@ -743,6 +768,18 @@ fn irq_step_effect(word: Option<u32>, ie: bool, hw_ie: bool, new_context: bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_scratchpad_aliases_map_to_the_own_core() {
+        assert_eq!(global_address(0, 0xD003_7E90), 0x7003_7E90);
+        assert_eq!(global_address(1, 0xD000_0000), 0x6000_0000);
+        assert_eq!(global_address(3, 0xC000_0100), 0x4010_0100);
+        assert_eq!(global_address(5, 0xD000_0004), 0x1000_0004);
+        assert_eq!(global_address(0, 0xD010_0000), 0xD010_0000, "outside the DSPR window");
+        assert_eq!(global_address(0, 0x7000_0000), 0x7000_0000);
+        assert_eq!(global_address(9, 0xD000_0000), 0xD000_0000, "unknown core");
+        assert!(local_address(0xD00F_FFFF) && local_address(0xC000_0000) && !local_address(0xB000_0000));
+    }
 
     #[test]
     fn stale_evtsrc_of_an_unarmed_trigger_is_no_breakpoint() {

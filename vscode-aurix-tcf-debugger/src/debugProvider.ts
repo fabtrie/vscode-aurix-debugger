@@ -59,7 +59,7 @@ import { DisassembleDisassemblyCommand, GetCapabilitiesDisassemblyCommand } from
 import { GetMemoryCommand, MemoryErrorAddress, SetMemoryCommand } from './tcf/memory';
 import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/linenumbers';
 import { GetInfoOsCommand, GetObjectsOsCommand, GetRunningOsCommand, GetProfileOsCommand, GetStacksOsCommand, LoadOsCommand, parseTaskFilter, StartProfileOsCommand, StopProfileOsCommand, TaskFilter } from './tcf/osaware';
-import { LiveWatchEvaluator, LiveWatchRequestItem } from './liveWatchEvaluator';
+import { LiveWatchEvaluator, LiveWatchRequestItem, splitLiveWatchCore } from './liveWatchEvaluator';
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 
@@ -366,6 +366,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private disassemblyCapabilities = new Map<string, string[]>();
 	// Core context of the frame focused last (scopes request): disassembly decodes with its ISA.
 	private focusedCoreContext: string | undefined;
+	/** Context IDs of the TriCore cores by core number (`expr@N`). */
+	private readonly coreContextIds = new Map<number, string>();
 	/** A core paused on its own (MCS channel) whose coming suspend event should take the focus. */
 	private pendingFocusContext: string | undefined;
 	/**
@@ -491,7 +493,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				outer.sendEvent(new TerminatedEvent());
 			}
 		}(this.tcfLogger);
-		this.liveWatchEvaluator = new LiveWatchEvaluator(this.tcfClient, (message) => this.tcfLogger.log(message));
+		this.liveWatchEvaluator = new LiveWatchEvaluator(this.tcfClient, (message) => this.tcfLogger.log(message), (core) => this.contextIdOfCore(core));
 
 		this.setDebuggerLinesStartAt1(true);
 		this.setDebuggerColumnsStartAt1(true);
@@ -1044,18 +1046,28 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return undefined;
 	}
 
-	/** The "symbolFiles" launch option as paths with an optional core filter. */
-	private static getSymbolFiles(args: any): Array<{ path: string; cores?: string[] }> {
+	/**
+	 * The "symbolFiles" launch option as paths with an optional core filter. A path may end in
+	 * "@N" or "@N,M": the TriCore cores that run the file, whose core-local memory (DSPR/PSPR
+	 * alias 0xD0000000/0xC0000000) holds its variables. The file is still mapped to the other cores.
+	 */
+	static getSymbolFiles(args: any): Array<{ path: string; cores?: string[]; localCores?: number[] }> {
 		const list: unknown[] = Array.isArray(args?.symbolFiles) ? args.symbolFiles : [];
-		const out: Array<{ path: string; cores?: string[] }> = [];
+		const out: Array<{ path: string; cores?: string[]; localCores?: number[] }> = [];
+		const split = (p: string) => {
+			const m = /^(.*\S)@(\d+(?:\s*,\s*\d+)*)$/.exec(p.trim());
+			return m
+				? { path: m[1], localCores: m[2].split(',').map(n => Number(n.trim())) }
+				: { path: p.trim(), localCores: undefined };
+		};
 		for (const f of list) {
 			if (typeof f === 'string' && f.trim() !== '') {
-				out.push({ path: f.trim() });
+				out.push(split(f));
 			} else if (f && typeof f === 'object' && typeof (f as any).path === 'string' && (f as any).path.trim() !== '') {
 				const cores = Array.isArray((f as any).cores)
 					? (f as any).cores.filter((c: unknown): c is string => typeof c === 'string' && c.trim() !== '')
 					: undefined;
-				out.push({ path: (f as any).path.trim(), cores: cores && cores.length > 0 ? cores : undefined });
+				out.push({ ...split((f as any).path), cores: cores && cores.length > 0 ? cores : undefined });
 			}
 		}
 		return out;
@@ -1208,8 +1220,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 				const coreLabel = coreInfo ? `${coreInfo.type}${coreInfo.type === 'CDSP' ? coreInfo.index : ''}` : (contextName || 'TriCore');
 				try {
+					const localCores = (fileName: string) =>
+						symbolFiles.find(f => f.path.replace(/\\/g, '/') === fileName)?.localCores;
 					await this.tcfClient.sendCommand(
-						new SetMemoryMapCommand(contextId, existing.map(fileName => ({ ['FileName']: fileName, ['ID']: contextId })))
+						new SetMemoryMapCommand(contextId, existing.map(fileName => {
+							const lc = localCores(fileName);
+							return lc ? { ['FileName']: fileName, ['ID']: contextId, ['LocalCores']: lc } : { ['FileName']: fileName, ['ID']: contextId };
+						}))
 					);
 					mappedCount++;
 					this.tcfLogger.log(`MemoryMap: ${contextId} (${coreLabel}) → ${existing.join(', ')}`);
@@ -2644,6 +2661,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	protected override async setExpressionRequestAsync(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments): Promise<void> {
 		try {
 			let scope: string | undefined;
+			// `expr@N` (Live Watch): evaluated on core N.
+			const { expression, core } = splitLiveWatchCore(args.expression);
+			if (core !== undefined) {
+				scope = await this.contextIdOfCore(core);
+				if (!scope) {
+					this.sendErrorResponse(response, 0, 'No core {core} for {expression}', { core, expression: args.expression });
+					return;
+				}
+				response.body = { value: await this.assignExpression(scope, expression, args.value) };
+				this.sendResponse(response);
+				return;
+			}
 			if (typeof args.frameId === 'number') {
 				scope = this.getStackFrameDetails(this.getLocalScopeVariableReference(args.frameId))[1];
 			} else {
@@ -2870,11 +2899,30 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.liveWatchContextId = undefined;
 	}
 
+	/** The context of TriCore core `core` (`S0.D0.C<core>`), for an expression `expr@N`. */
+	private async contextIdOfCore(core: number): Promise<string | undefined> {
+		const cached = this.coreContextIds.get(core);
+		if (cached) {
+			return cached;
+		}
+		const id = (await this.tcfClient.getThreads()).map(t => t.info.ID).find(id => new RegExp(`\\.C${core}$`).test(id));
+		if (id) {
+			this.coreContextIds.set(core, id);
+		}
+		return id;
+	}
+
 	/**
 	 * Context for Live Watch evaluation: a running core (preferably the launch core), else a suspended
 	 * one. Cached until a core suspends or resumes, so a refresh does not walk the context tree.
 	 */
 	private async pickLiveWatchContextId(): Promise<string | undefined> {
+		// The core focused in the Call Stack, as for the Watch view: it decides which copy of a
+		// variable in core-local memory is shown.
+		// Only a TriCore core: the HSM and MCS channels have other symbols.
+		if (this.focusedCoreContext && this.contextMachines.get(this.focusedCoreContext) === 44) {
+			return this.focusedCoreContext;
+		}
 		if (this.liveWatchContextId) {
 			return this.liveWatchContextId;
 		}

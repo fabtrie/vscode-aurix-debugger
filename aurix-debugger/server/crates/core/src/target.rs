@@ -321,12 +321,12 @@ impl Core {
     }
 
     /// Addresses the core accesses through its own path instead of the host address space
-    /// (HSM-private memory, MCS program RAM).
+    /// (HSM-private memory, MCS program RAM, the TriCore's local DSPR/PSPR alias).
     pub fn owns_address(&self, addr: u32) -> bool {
         match self {
             Core::CortexM(_) => crate::cortex_m::hsm_private(addr),
             Core::Mcs(c) => c.owns_address(addr),
-            Core::Tricore(_) => false,
+            Core::Tricore(_) => crate::tricore::local_address(addr),
         }
     }
 
@@ -335,6 +335,7 @@ impl Core {
         match self {
             Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.read_memory(io, addr, len),
             Core::Mcs(c) if c.owns_address(addr) => c.read_memory(io, addr, len),
+            Core::Tricore(c) => io.read(crate::tricore::global_address(c.coreid, addr), len),
             _ => io.read(addr, len),
         }
     }
@@ -352,6 +353,7 @@ impl Core {
         match self {
             Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.write_memory(io, addr, data),
             Core::Mcs(c) if c.owns_address(addr) => c.write_memory(io, addr, data),
+            Core::Tricore(c) => io.write(crate::tricore::global_address(c.coreid, addr), data),
             _ => io.write(addr, data),
         }
     }

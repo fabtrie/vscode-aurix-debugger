@@ -142,7 +142,9 @@ pub fn unwind(
         let top_frame = frames.len() == 1;
         // A caller frame's PC is a return address: the call is the instruction before it.
         let look = if top_frame { cur.pc } else { cur.pc.wrapping_sub(1) };
-        let Some(start) = func_start(look) else { break };
+        // Without symbols the top frame is taken as a function that has not saved anything
+        // (yet), returning to LR; the frames above it need their function start.
+        let Some(start) = func_start(look).or(top_frame.then_some(cur.pc)) else { break };
         let Some(sp) = cur.regs[R_SP] else { break };
         let len = (cur.pc.wrapping_sub(start)).min(MAX_PROLOGUE) + 4;
         let Some(code) = read(start, len as usize) else { break };
@@ -283,5 +285,16 @@ mod tests {
         assert_eq!(frames[2].regs[0], Some(0));
         assert_eq!(frames[3].regs[R_SP], Some(0x2000_1000));
         assert_eq!(frames[3].regs[4], Some(0x1111_1111));
+    }
+
+    #[test]
+    fn without_symbols_the_top_frame_returns_to_lr() {
+        let mut regs = [None; 32];
+        regs[R_SP] = Some(0x2000_1000);
+        regs[R_LR] = Some(0x8203);
+        let top = Frame { pc: 0x8300, pcxi: 0x2000_1000, psw: None, regs, arm: true };
+        let frames = unwind(top, 16, &|_| None, &mut |_, l| Some(vec![0; l]));
+        let pcs: Vec<u32> = frames.iter().map(|f| f.pc).collect();
+        assert_eq!(pcs, vec![0x8300, 0x8202]);
     }
 }

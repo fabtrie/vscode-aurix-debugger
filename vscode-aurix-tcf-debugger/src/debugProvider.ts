@@ -239,13 +239,15 @@ class BreakpointsManager {
 		return this.counter++;
 	}
 
-	deleteById(id: number) {
+	/** Returns whether the breakpoint was still known. */
+	deleteById(id: number): boolean {
 		const b = this.byId.get(id);
 		if (!b) {
-			return;
+			return false;
 		}
 		this.byId.delete(id);
 		this.byFile.get(b.file)?.delete(b.line);
+		return true;
 	}
 
 	updateFile(file: string, lines: number[]): BreakpointTuple[] {
@@ -294,13 +296,15 @@ class InstructionBreakpointsManager {
 		}
 	}
 
-	deleteById(id: number) {
+	/** Returns whether the breakpoint was still known. */
+	deleteById(id: number): boolean {
 		const b = this.byId.get(id);
 		if (!b) {
-			return;
+			return false;
 		}
 		this.byId.delete(id);
 		this.byAddress.delete(b.address);
+		return true;
 	}
 
 	updateAddresses(addresses: number[], allocateId: () => number, contextId?: string): InstructionBreakpointTuple[] {
@@ -3720,14 +3724,19 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (id === BREAKPOINT_INVALID) {
 				continue;
 			}
-			this.breakpointsManager.deleteById(id);
-			this.instructionBreakpointsManager.deleteById(id);
+			let known = this.breakpointsManager.deleteById(id);
+			known = this.instructionBreakpointsManager.deleteById(id) || known;
 			for (const [name, fid] of this.functionBreakpoints) {
 				if (fid === id) {
 					this.functionBreakpoints.delete(name);
+					known = true;
 				}
 			}
-			this.sendEvent(new BreakpointEvent(BreakpointEventReason.removed, { id, verified: false }));
+			// Breakpoints VS Code removed or disabled itself are already gone here; telling it
+			// they were removed would delete disabled ones from its Breakpoints view.
+			if (known) {
+				this.sendEvent(new BreakpointEvent(BreakpointEventReason.removed, { id, verified: false }));
+			}
 		}
 	}
 

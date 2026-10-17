@@ -27,6 +27,7 @@ import { findSvdForDevice, SvdCatalogEntry } from './svdCatalog';
 import { mergeSvdPeripherals } from './svdMerge';
 import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
+import { CoreRef, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
 import { SourceMappingStore, SourcePrefixMapping } from './sourceFileMap';
 
 let tcfAgentProcess: ChildProcess | undefined;
@@ -374,29 +375,12 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('aurix-debugger.osShowObjects', (kind?: string) =>
 			OsObjectsPanel.show(context.extensionUri, typeof kind === 'string' ? kind : undefined),
 		),
-		vscode.commands.registerCommand('aurix-debugger.osBreakInTask', async () => {
-			const session = vscode.debug.activeDebugSession;
-			if (session?.type !== 'aurixdbg') {
-				void vscode.window.showWarningMessage('Start an AURIX debug session first.');
+		vscode.commands.registerCommand('aurix-debugger.osBreakInTask', async (where?: LineNumberMenuArgument) => {
+			const found = breakpointsForCommand(where);
+			if (!found) {
 				return;
 			}
-			const editor = vscode.window.activeTextEditor;
-			if (!editor) {
-				void vscode.window.showWarningMessage('Open the file with the breakpoint first.');
-				return;
-			}
-			// The breakpoints on the cursor's line, which is what "this breakpoint" means.
-			const line = editor.selection.active.line;
-			const here = vscode.debug.breakpoints.filter(
-				(b): b is vscode.SourceBreakpoint =>
-					b instanceof vscode.SourceBreakpoint &&
-					b.location.uri.toString() === editor.document.uri.toString() &&
-					b.location.range.start.line === line,
-			);
-			if (here.length === 0) {
-				void vscode.window.showWarningMessage('No breakpoint on this line.');
-				return;
-			}
+			const { session, here } = found;
 
 			let tasks: string[] = [];
 			try {
@@ -419,12 +403,52 @@ export function activate(context: vscode.ExtensionContext) {
 			if (picked === undefined) {
 				return;
 			}
-			// A breakpoint's condition cannot be edited in place, so it is replaced.
-			const condition = picked === CLEAR ? undefined : `task == ${picked}`;
-			vscode.debug.removeBreakpoints(here);
-			vscode.debug.addBreakpoints(
-				here.map(b => new vscode.SourceBreakpoint(b.location, b.enabled, condition, b.hitCondition, b.logMessage)),
+			// The cores (`@N`) stay; only the task part is replaced.
+			replaceConditions(here, b => withCoreSuffix(picked === CLEAR ? '' : `task == ${picked}`, splitCoreSuffix(b.condition ?? '').cores));
+		}),
+		vscode.commands.registerCommand('aurix-debugger.breakOnCore', async (where?: LineNumberMenuArgument) => {
+			const found = breakpointsForCommand(where);
+			if (!found) {
+				return;
+			}
+			const { session, here } = found;
+
+			let cores: Array<{ core: number; id: string; name: string; suspended: boolean; hsm?: boolean }> = [];
+			try {
+				cores = ((await session.customRequest('aurix/cores')) as { cores?: typeof cores }).cores ?? [];
+			} catch (e) {
+				void vscode.window.showErrorMessage(`Cannot list the cores: ${e instanceof Error ? e.message : String(e)}`);
+				return;
+			}
+			if (cores.length === 0) {
+				void vscode.window.showWarningMessage('The target has no cores to pick from.');
+				return;
+			}
+
+			const current = new Set<CoreRef>(splitCoreSuffix(here[0].condition ?? '').cores ?? []);
+			const picked = await vscode.window.showQuickPick(
+				// Named as in the Call Stack; the description shows what the condition will say.
+				cores.map(c => {
+					// The HSM is written `@hsm`, though a typed `@6` (its number) means it too.
+					const core: CoreRef = c.hsm ? 'hsm' : c.core;
+					return {
+						label: c.name,
+						description: `@${core} · ${c.suspended ? 'suspended' : 'running'}`,
+						picked: current.has(core) || current.has(c.core),
+						core,
+					};
+				}),
+				{
+					title: 'Halt only on these cores',
+					placeHolder: 'Other cores never halt here. Pick none to halt on every core.',
+					canPickMany: true,
+				},
 			);
+			if (picked === undefined) {
+				return;
+			}
+			// The task filter stays; only the `@N` part is replaced.
+			replaceConditions(here, b => withCoreSuffix(b.condition ?? '', picked.map(p => p.core)));
 		}),
 		vscode.commands.registerCommand('aurix-debugger.osLoadFile', async () => {
 			const picked = await vscode.window.showOpenDialog({
@@ -638,6 +662,49 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 			startingAurixSessions = Math.max(0, startingAurixSessions - 1);
 		}
 	}
+}
+
+/** What VS Code passes to a command run from the editor's line number context menu. */
+type LineNumberMenuArgument = { lineNumber?: number; uri?: vscode.Uri } | undefined;
+
+/**
+ * The AURIX session and the source breakpoints a breakpoint command acts on: those on the line
+ * whose number was right-clicked, else on the cursor's line, which is what "this breakpoint"
+ * means. Tells the user and returns undefined when there are none.
+ */
+function breakpointsForCommand(where: LineNumberMenuArgument): { session: vscode.DebugSession; here: vscode.SourceBreakpoint[] } | undefined {
+	const session = vscode.debug.activeDebugSession;
+	if (session?.type !== 'aurixdbg') {
+		void vscode.window.showWarningMessage('Start an AURIX debug session first.');
+		return undefined;
+	}
+	const editor = vscode.window.activeTextEditor;
+	const uri = where?.uri ?? editor?.document.uri;
+	// `lineNumber` is 1-based.
+	const line = typeof where?.lineNumber === 'number' ? where.lineNumber - 1 : editor?.selection.active.line;
+	if (!uri || line === undefined) {
+		void vscode.window.showWarningMessage('Open the file with the breakpoint first.');
+		return undefined;
+	}
+	const here = vscode.debug.breakpoints.filter(
+		(b): b is vscode.SourceBreakpoint =>
+			b instanceof vscode.SourceBreakpoint &&
+			b.location.uri.toString() === uri.toString() &&
+			b.location.range.start.line === line,
+	);
+	if (here.length === 0) {
+		void vscode.window.showWarningMessage('No breakpoint on this line.');
+		return undefined;
+	}
+	return { session, here };
+}
+
+/** Gives breakpoints new conditions; an empty one removes the condition. */
+function replaceConditions(bps: vscode.SourceBreakpoint[], condition: (b: vscode.SourceBreakpoint) => string): void {
+	// A breakpoint's condition cannot be edited in place, so it is replaced.
+	const replaced = bps.map(b => new vscode.SourceBreakpoint(b.location, b.enabled, condition(b) || undefined, b.hitCondition, b.logMessage));
+	vscode.debug.removeBreakpoints(bps);
+	vscode.debug.addBreakpoints(replaced);
 }
 
 function resolveConfigPath(session: vscode.DebugSession, p: unknown): string | undefined {

@@ -58,9 +58,10 @@ import { SetMemoryMapCommand } from './tcf/memorymap';
 import { DisassembleDisassemblyCommand, GetCapabilitiesDisassemblyCommand } from './tcf/disassembly';
 import { GetMemoryCommand, MemoryErrorAddress, SetMemoryCommand } from './tcf/memory';
 import { MapToSourceLineNumbersCommand, TCFCodeAreaLineNumbers } from './tcf/linenumbers';
-import { GetInfoOsCommand, GetObjectsOsCommand, GetRunningOsCommand, GetProfileOsCommand, GetStacksOsCommand, LoadOsCommand, parseTaskFilter, StartProfileOsCommand, StopProfileOsCommand, TaskFilter } from './tcf/osaware';
+import { GetInfoOsCommand, GetObjectsOsCommand, GetRunningOsCommand, GetProfileOsCommand, GetStacksOsCommand, LoadOsCommand, StartProfileOsCommand, StopProfileOsCommand, TaskFilter } from './tcf/osaware';
 import { LiveWatchEvaluator, LiveWatchRequestItem, splitLiveWatchCore } from './liveWatchEvaluator';
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
+import { CoreRef, describeCores, capitalize, parseBreakpointCondition, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 
 type ElfSymbol = { name: string; address: number; size: number; file?: string };
@@ -497,7 +498,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				outer.sendEvent(new TerminatedEvent());
 			}
 		}(this.tcfLogger);
-		this.liveWatchEvaluator = new LiveWatchEvaluator(this.tcfClient, (message) => this.tcfLogger.log(message), (core) => this.contextIdOfCore(core));
+		this.liveWatchEvaluator = new LiveWatchEvaluator(this.tcfClient, (message) => this.tcfLogger.log(message), (core) => this.contextIdOfCoreRef(core));
 
 		this.setDebuggerLinesStartAt1(true);
 		this.setDebuggerColumnsStartAt1(true);
@@ -1750,6 +1751,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		response.body.supportTerminateDebuggee = true;
 		response.body.supportsInstructionBreakpoints = true;
 		response.body.supportsFunctionBreakpoints = true;
+		// Only `task == NAME` and `@core` are understood; other conditions get a warning message.
+		response.body.supportsConditionalBreakpoints = true;
 		response.body.supportsReadMemoryRequest = true;
 		response.body.supportsWriteMemoryRequest = true;
 		(response.body as any).supportsDisassembleRequest = true;
@@ -2664,12 +2667,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	protected override async setExpressionRequestAsync(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments): Promise<void> {
 		try {
 			let scope: string | undefined;
-			// `expr@N` (Live Watch): evaluated on core N.
+			// `expr@N` (Live Watch): evaluated on core N; `expr@hsm` on the HSM.
 			const { expression, core } = splitLiveWatchCore(args.expression);
 			if (core !== undefined) {
-				scope = await this.contextIdOfCore(core);
+				scope = await this.contextIdOfCoreRef(core);
 				if (!scope) {
-					this.sendErrorResponse(response, 0, 'No core {core} for {expression}', { core, expression: args.expression });
+					this.sendErrorResponse(response, 0, 'No {core} for {expression}', { core: core === 'hsm' ? 'HSM' : `core ${core}`, expression: args.expression });
 					return;
 				}
 				response.body = { value: await this.assignExpression(scope, expression, args.value) };
@@ -2913,6 +2916,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.coreContextIds.set(core, id);
 		}
 		return id;
+	}
+
+	/** The context of a breakpoint's core: `@N` as for an expression, `@hsm` the HSM's. */
+	private async contextIdOfCoreRef(core: CoreRef): Promise<string | undefined> {
+		if (core !== 'hsm') {
+			return this.contextIdOfCore(core);
+		}
+		// The HSM is the Arm core among the cores; its number differs between devices.
+		const hsm = (await this.tcfClient.getThreads()).find(
+			t => /^S\d+\.D\d+\.C\d+$/.test(t.info.ID) && AurixTCFDebugSession.contextMachine(t.info) === 40,
+		);
+		return hsm?.info.ID;
 	}
 
 	/**
@@ -3294,16 +3309,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const lines = requested.filter(l => !external.has(l));
 		const tuples = this.breakpointsManager.updateFile(file, lines);
 
+		const byLine = new Map(tuples.map(t => [t.line, t]));
+		// The condition holds a task filter (`task == NAME`, applied when the breakpoint hits) and
+		// cores (`@N`, which decide where it is planted), so it is read before the sync.
+		this.noteConditions(
+			(args.breakpoints || []).map(b => byLine.get(b.line)?.id),
+			(args.breakpoints || []).map(b => b.condition),
+		);
 		if (this.breakpointsManager.configured) {
 			await this.syncAllBreakpoints();
 		}
 
-		const byLine = new Map(tuples.map(t => [t.line, t]));
-		// A condition of the form `task == NAME` is a task filter, applied when the breakpoint hits.
-		this.noteTaskFilters(
-			(args.breakpoints || []).map(b => byLine.get(b.line)?.id),
-			(args.breakpoints || []).map(b => b.condition),
-		);
 		const bps = requested.map(line => {
 			const ext = external.get(line);
 			const t = byLine.get(line);
@@ -3311,6 +3327,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const id = ext?.id ?? t?.id;
 			if (id !== undefined) {
 				(bp as any).id = id;
+			}
+			if (ext === undefined && t) {
+				(bp as any).message = this.breakpointMessage(t.id);
 			}
 			return bp;
 		});
@@ -3347,18 +3366,19 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const owner = this.focusedCoreContext
 			?? (this.activeThreadId !== undefined ? this.threadIdToContext.get(this.activeThreadId) : undefined);
 		const tuples = this.instructionBreakpointsManager.updateAddresses(addrs, () => this.breakpointsManager.allocateId(), owner);
-		if (this.breakpointsManager.configured) {
-			await this.syncAllBreakpoints();
-		}
 
 		const byAddr = new Map<number, InstructionBreakpointTuple>();
 		for (const t of tuples) {
 			byAddr.set(t.address, t);
 		}
-		this.noteTaskFilters(
+		// `@N` in the condition overrides the core of the disassembly.
+		this.noteConditions(
 			requestAddrs.map(a => (a === undefined ? undefined : byAddr.get(a)?.id)),
 			(args.breakpoints || []).map(b => b.condition),
 		);
+		if (this.breakpointsManager.configured) {
+			await this.syncAllBreakpoints();
+		}
 
 		const bps = requestAddrs.map((addr) => {
 			if (addr === undefined) {
@@ -3370,6 +3390,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const bp = new Breakpoint(t?.verified ?? false, 0);
 			if (t) {
 				(bp as any).id = t.id;
+				(bp as any).message = this.breakpointMessage(t.id);
 			}
 			(bp as any).instructionReference = `0x${addr.toString(16)}`;
 			return bp;
@@ -3398,6 +3419,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.functionBreakpoints.set(n, this.breakpointsManager.allocateId());
 			}
 		}
+		// The cores come from the name (`main@1`, as in the Live Watch) or else the condition.
+		this.noteConditions(
+			names.map(n => (own.has(n) ? this.functionBreakpoints.get(n) : undefined)),
+			(args.breakpoints || []).map(b => b.condition),
+			names.map(n => splitCoreSuffix(n).cores),
+		);
 		if (this.breakpointsManager.configured) {
 			await this.syncAllBreakpoints();
 		}
@@ -3409,15 +3436,19 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				if (id !== undefined) {
 					(bp as any).id = id;
 				}
+				if (ext === undefined && id !== undefined) {
+					(bp as any).message = this.breakpointMessage(id);
+				}
 				return bp;
 			}),
 		};
 		this.sendResponse(response);
 	}
 
-	/** TCF properties of a function breakpoint: a symbol, an address or `file:line`. */
+	/** TCF properties of a function breakpoint: a symbol, an address or `file:line`, plus `@cores`. */
 	/* eslint-disable @typescript-eslint/naming-convention */
-	private functionBreakpointData(id: number, name: string): BreakpointData {
+	private functionBreakpointData(id: number, fullName: string): BreakpointData {
+		const name = splitCoreSuffix(fullName).text;
 		const fileLine = /^(.+):(\d+)$/.exec(name);
 		const where = fileLine
 			? { File: this.convertClientPathToDebugger(fileLine[1]), Line: Number(fileLine[2]) }
@@ -3502,6 +3533,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const k = AurixTCFDebugSession.sourceKey(where.file);
 			if (this.breakpointsManager.getAll().some(b => b.line === where.line && AurixTCFDebugSession.sourceKey(b.file) === k)) {
 				return; // the line already has a VS Code breakpoint
+			}
+		}
+		// Cores it is limited to are shown as our own would be: `name@N`, or the condition `@N`.
+		const cores = this.coresOfContextIds(props.ContextIds);
+		if (cores) {
+			if (where.kind === 'function') {
+				where.name = withCoreSuffix(where.name, cores);
+			} else {
+				(where as { condition?: string }).condition = withCoreSuffix('', cores);
 			}
 		}
 		const shown = { id: props.ID, enabled: props.Enabled, ...where } as ExternalBreakpoint;
@@ -3631,7 +3671,60 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		for (const [name, id] of this.functionBreakpoints) {
 			data.push(this.functionBreakpointData(id, name));
 		}
+		const unplantable: number[] = [];
+		for (const d of data) {
+			const id = this.breakpointTcfIdToId(d.ID);
+			if (!(await this.applyCoreFilter(id, d))) {
+				unplantable.push(id);
+			}
+		}
 		await this.tcfClient.setBreakpointsList(data);
+		for (const id of unplantable) {
+			this.breakpointsManager.setVerified(id, false);
+			this.instructionBreakpointsManager.setVerified(id, false);
+			this.sendEvent(new BreakpointEvent(BreakpointEventReason.changed, { id, verified: false, message: this.breakpointMessage(id) } as DebugProtocol.Breakpoint));
+		}
+	}
+
+	/**
+	 * Plants a breakpoint with a core filter (`@N`) on those cores only: the other cores never
+	 * halt there. Returns false when none of its cores exists; the breakpoint is then sent
+	 * disabled rather than left out, since a breakpoint missing from the list is removed and
+	 * that would delete it from VS Code.
+	 */
+	private async applyCoreFilter(id: number, data: BreakpointData): Promise<boolean> {
+		const cores = this.coreFilters.get(id);
+		if (!cores) {
+			this.coreMessages.delete(id);
+			this.unplantable.delete(id);
+			return true;
+		}
+		const contextIds: string[] = [];
+		const missing: CoreRef[] = [];
+		for (const core of cores) {
+			const ctx = await this.contextIdOfCoreRef(core).catch(() => undefined);
+			if (ctx) {
+				if (!contextIds.includes(ctx)) {
+					contextIds.push(ctx);
+				}
+			} else {
+				missing.push(core);
+			}
+		}
+		const found = cores.filter(c => !missing.includes(c));
+		this.coreMessages.set(id, [
+			found.length > 0 ? `Halts only on ${describeCores(found)}.` : '',
+			missing.length > 0 ? `${capitalize(describeCores(missing))} ${missing.length === 1 ? 'does' : 'do'} not exist on this target.` : '',
+		].filter(Boolean).join(' '));
+		if (contextIds.length === 0) {
+			data.Enabled = false;
+			delete data.ContextIds;
+			this.unplantable.add(id);
+			return false;
+		}
+		data.ContextIds = contextIds;
+		this.unplantable.delete(id);
+		return true;
 	}
 
 	/** C expression of a child variable shown under a parent expression. */
@@ -3746,9 +3839,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (id === BREAKPOINT_INVALID) {
 				continue;
 			}
-			this.breakpointsManager.setVerified(id, true);
-			this.instructionBreakpointsManager.setVerified(id, true);
-			this.sendEvent(new BreakpointEvent(BreakpointEventReason.changed, { id, verified: true }));
+			// A breakpoint sent disabled because none of its cores exists is not planted.
+			const verified = !this.unplantable.has(id);
+			this.breakpointsManager.setVerified(id, verified);
+			this.instructionBreakpointsManager.setVerified(id, verified);
+			// VS Code replaces the breakpoint's state with the event's, so the message goes along.
+			this.sendEvent(new BreakpointEvent(BreakpointEventReason.changed, { id, verified, message: this.breakpointMessage(id) } as DebugProtocol.Breakpoint));
 		}
 	}
 
@@ -3965,26 +4061,57 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.invalidateLiveWatchContext();
 	}
 
-	// --- Task-filtered breakpoints -----------------------------------------------------------
+	// --- Task- and core-filtered breakpoints -------------------------------------------------
 
 	/** Task filters by breakpoint id, from the breakpoint's condition. */
 	private taskFilters = new Map<number, TaskFilter>();
 	/** Breakpoint hits skipped because the wrong task ran, for the log and a status line. */
 	private taskFilterSkips = 0;
+	/** Cores (`@N`) by breakpoint id, from the condition or a function breakpoint's name. */
+	private coreFilters = new Map<number, CoreRef[]>();
+	/** Where a core-filtered breakpoint halts, by breakpoint id; set when it is planted. */
+	private coreMessages = new Map<number, string>();
+	/** Breakpoints none of whose cores exists, so they are not planted. */
+	private unplantable = new Set<number>();
+	/** Conditions the adapter cannot evaluate, by breakpoint id. */
+	private conditionWarnings = new Map<number, string>();
 
-	/** Records the task filters of one file's breakpoints, replacing what was there. */
-	private noteTaskFilters(ids: Array<number | undefined>, conditions: Array<string | undefined>): void {
+	/**
+	 * Records the task and core filters of a set of breakpoints, replacing what was there.
+	 * `nameCores`: cores from a function breakpoint's name, which win over the condition's.
+	 */
+	private noteConditions(ids: Array<number | undefined>, conditions: Array<string | undefined>, nameCores?: Array<CoreRef[] | undefined>): void {
 		ids.forEach((id, i) => {
 			if (id === undefined) {
 				return;
 			}
-			const f = parseTaskFilter(conditions[i]);
-			if (f) {
-				this.taskFilters.set(id, f);
+			const c = parseBreakpointCondition(conditions[i]);
+			if (c.task) {
+				this.taskFilters.set(id, c.task);
 			} else {
 				this.taskFilters.delete(id);
 			}
+			const cores = nameCores?.[i] ?? c.cores;
+			if (cores) {
+				this.coreFilters.set(id, cores);
+			} else {
+				this.coreFilters.delete(id);
+			}
+			if (c.unsupported) {
+				this.conditionWarnings.set(
+					id,
+					`"${c.unsupported}" is not evaluated: only "task == NAME" and "@core" conditions are supported, so this breakpoint halts every time.`,
+				);
+			} else {
+				this.conditionWarnings.delete(id);
+			}
 		});
+	}
+
+	/** What VS Code shows when hovering a breakpoint, if anything. */
+	private breakpointMessage(id: number): string | undefined {
+		const parts = [this.coreFilters.has(id) ? this.coreMessages.get(id) : undefined, this.conditionWarnings.get(id)].filter(Boolean);
+		return parts.length > 0 ? parts.join(' ') : undefined;
 	}
 
 	/**
@@ -4089,6 +4216,20 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return this.ortiRunning;
 	}
 
+	/** The TriCore cores a breakpoint's `ContextIds` name, if it names only such cores. */
+	private coresOfContextIds(ids: string[] | undefined): CoreRef[] | undefined {
+		if (!ids || ids.length === 0) {
+			return undefined;
+		}
+		const cores = ids.map((id): CoreRef | undefined => {
+			if (!/^S\d+\.D\d+\.C\d+$/.test(id)) {
+				return undefined;
+			}
+			return this.contextMachines.get(id) === 40 ? 'hsm' : AurixTCFDebugSession.coreOfContext(id);
+		});
+		return cores.every((c): c is CoreRef => c !== undefined) ? cores : undefined;
+	}
+
 	/** The core number a TCF context id names, e.g. `S0.D0.C1` -> 1. */
 	private static coreOfContext(id: string): number | undefined {
 		const m = /\.C(\d+)(?:$|\b)/i.exec(id);
@@ -4096,6 +4237,29 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async customRequestAsync(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): Promise<void> {
+		// The cores (`S0.D0.C<N>`, the HSM included), for picking the cores of a breakpoint (`@N`).
+		if (command === 'aurix/cores') {
+			try {
+				const infos = await this.tcfClient.getThreads();
+				const cores = infos
+					.filter(x => /^S\d+\.D\d+\.C\d+$/.test(x.info.ID))
+					.map(x => ({
+						core: AurixTCFDebugSession.coreOfContext(x.info.ID)!,
+						id: x.info.ID,
+						name: x.info.Name || x.info.ID,
+						suspended: this.suspendedContextIds.has(x.info.ID),
+						// Picked as `@hsm`, which means the HSM on every device.
+						hsm: AurixTCFDebugSession.contextMachine(x.info) === 40,
+					}))
+					.sort((a, b) => a.core - b.core);
+				response.body = { cores };
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
 		if (command === 'aurix/osInfo') {
 			try {
 				response.body = await this.tcfClient.sendCommand(new GetInfoOsCommand());

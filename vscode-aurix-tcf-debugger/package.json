@@ -277,6 +277,11 @@
 				"category": "AURIX™ Debugger"
 			},
 			{
+				"command": "aurix-debugger.breakOnCore",
+				"title": "Halt Only on Core…",
+				"category": "AURIX™ Debugger"
+			},
+			{
 				"command": "aurix-debugger.resetDebugLayout",
 				"title": "Reset Debug Layout",
 				"category": "AURIX™ Debugger"
@@ -548,6 +553,23 @@
 					"command": "aurix-debugger.osBreakInTask",
 					"when": "debugType == aurixdbg && editorTextFocus",
 					"group": "debug@1"
+				},
+				{
+					"command": "aurix-debugger.breakOnCore",
+					"when": "debugType == aurixdbg && editorTextFocus",
+					"group": "debug@2"
+				}
+			],
+			"editor/lineNumber/context": [
+				{
+					"command": "aurix-debugger.osBreakInTask",
+					"when": "debugType == aurixdbg",
+					"group": "aurix@1"
+				},
+				{
+					"command": "aurix-debugger.breakOnCore",
+					"when": "debugType == aurixdbg",
+					"group": "aurix@2"
 				}
 			]
 		},

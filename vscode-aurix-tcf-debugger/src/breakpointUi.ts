@@ -11,7 +11,7 @@
  * start of one, else as a function breakpoint named by symbol or address.
  */
 export type ExternalBreakpoint =
-	| { id: string; enabled: boolean; kind: 'source'; file: string; line: number }
+	| { id: string; enabled: boolean; kind: 'source'; file: string; line: number; condition?: string }
 	| { id: string; enabled: boolean; kind: 'function'; name: string };
 
 /** What the user did with a shown breakpoint in VS Code. */

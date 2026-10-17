@@ -53,7 +53,7 @@ export class VsCodeBreakpointUi implements BreakpointUi {
 			vscode.debug.removeBreakpoints([old]);
 		}
 		const created = bp.kind === 'source'
-			? new vscode.SourceBreakpoint(new vscode.Location(vscode.Uri.file(bp.file), new vscode.Position(Math.max(0, bp.line - 1), 0)), bp.enabled)
+			? new vscode.SourceBreakpoint(new vscode.Location(vscode.Uri.file(bp.file), new vscode.Position(Math.max(0, bp.line - 1), 0)), bp.enabled, bp.condition)
 			: new vscode.FunctionBreakpoint(bp.name, bp.enabled);
 		this.shown.set(bp.id, created);
 		vscode.debug.addBreakpoints([created]);

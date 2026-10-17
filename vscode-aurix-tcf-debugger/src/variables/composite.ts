@@ -81,8 +81,6 @@ export class CompositeVariable extends AbstractVariable {
             if (v !== undefined && nameProvider.name() !== undefined) {
                 children.push(v);
             }
-
-            console.log(`Field ${JSON.stringify(fieldContext)}`);
         }
 
         this.children = children;

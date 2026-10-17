@@ -25,6 +25,7 @@ import { OsViewProvider } from './osView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
 import { findSvdForDevice, SvdCatalogEntry } from './svdCatalog';
 import { mergeSvdPeripherals } from './svdMerge';
+import { SvdPeripheralStore } from './svdPeripheralStore';
 import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 import { CoreRef, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
@@ -64,6 +65,9 @@ const missingSourcePromptShown = new Set<string>();
 const LEARNED_SOURCE_MAPPINGS_KEY = 'aurix-debugger.learnedSourceMappings';
 const SVD_CACHE_FOLDER = 'svd-cache';
 let warnedSvdFileReplaced = false;
+/** Command the XPeripherals view gets its peripherals from, instead of parsing the SVD file. */
+const SVD_PERIPHERALS_COMMAND = 'aurix-debugger.svdPeripherals';
+let svdPeripherals: SvdPeripheralStore | undefined;
 const DISASSEMBLY_OPEN_DELAY_MS = 1200;
 const pendingDisassemblyOpenTimers = new Map<string, NodeJS.Timeout>();
 
@@ -75,6 +79,14 @@ export function activate(context: vscode.ExtensionContext) {
 	liveWatches = new LiveWatchManager(context);
 	debugLayout = new DebugLayout(context, liveWatches, (line) => agentOutput?.appendLine(line));
 	context.subscriptions.push(liveWatches);
+	svdPeripherals = new SvdPeripheralStore(getSvdCacheRoot(), (line) => agentOutput?.appendLine(line));
+	context.subscriptions.push(
+		// Called by the XPeripherals view at the session's first stop ("peripherals" in the launch configuration).
+		vscode.commands.registerCommand(SVD_PERIPHERALS_COMMAND, async (session?: vscode.DebugSession) => {
+			const svdPath = session?.configuration?.svdPath;
+			return typeof svdPath === 'string' ? svdPeripherals?.peripherals(svdPath) : undefined;
+		}),
+	);
 
 	void ensureMemoryInspectorSettings();
 	context.subscriptions.push(
@@ -949,7 +961,15 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 			const entry = await findSvdForDevice(extensionContext.extensionPath, device);
 			if (entry) {
 				try {
-					(config as any).svdPath = await sessionSvdPath(entry);
+					const svdPath = await sessionSvdPath(entry);
+					(config as any).svdPath = svdPath;
+					// Parsing the SVD file blocks the extension host for seconds (TC3xx: ~60 MB), so the
+					// view gets the peripherals converted beforehand. "svdPath" stays: it is the key of
+					// the view's cache of built peripherals.
+					if ((config as any).peripherals === undefined && svdPeripherals?.canProvide(svdPath)) {
+						(config as any).peripherals = `command:${SVD_PERIPHERALS_COMMAND}`;
+						svdPeripherals.prepare(svdPath);
+					}
 				} catch (e) {
 					agentOutput?.appendLine(`SVD for ${device} unavailable: ${e instanceof Error ? e.message : String(e)}`);
 				}

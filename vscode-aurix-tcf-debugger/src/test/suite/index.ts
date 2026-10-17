@@ -20,6 +20,8 @@ export function run(): Promise<void> {
 	mocha.addFile(path.join(testsRoot, 'breakpointCondition.test'));
 	mocha.addFile(path.join(testsRoot, 'svdCatalog.test'));
 	mocha.addFile(path.join(testsRoot, 'svdMerge.test'));
+	mocha.addFile(path.join(testsRoot, 'svdPeripherals.test'));
+	mocha.addFile(path.join(testsRoot, 'svdPeripheralsCommand.test'));
 	mocha.addFile(path.join(testsRoot, 'sourceFileMap.test'));
 	mocha.addFile(path.join(testsRoot, 'breakpoint.stopat.test'));
 	mocha.addFile(path.join(testsRoot, 'debug.stress.test'));

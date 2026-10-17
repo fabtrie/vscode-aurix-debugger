@@ -417,7 +417,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private primaryBreakpointStop:
 		| { threadId: number; ctx: string; untilMs: number; refocused: boolean; stackSuppressUntilMs: number }
 		| undefined;
-	private frameIdToMeta = new Map<number, { threadId: number; ctx: string; stack?: string }>();
+	private frameIdToMeta = new Map<number, { threadId: number; ctx: string; stack?: string; source?: { path: string; line: number } }>();
 	private threadIdToFrameIds = new Map<number, Set<number>>();
 	private liveWatchSuspendFallbackBlockedUntilMs: number = 0;
 	private postResetStackTrimUntilMs: number = 0;
@@ -688,8 +688,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
-	private rememberFrameMeta(frameId: number, threadId: number, ctx: string, stack?: string) {
-		this.frameIdToMeta.set(frameId, { threadId, ctx, stack });
+	private rememberFrameMeta(frameId: number, threadId: number, ctx: string, stack?: string, source?: { path: string; line: number }) {
+		this.frameIdToMeta.set(frameId, { threadId, ctx, stack, source });
 		let set = this.threadIdToFrameIds.get(threadId);
 		if (!set) {
 			set = new Set<number>();
@@ -2437,14 +2437,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const frames: StackFrame[] = [];
 		for (const frame of stack) {
 			const frameId = this.createNextStackFrameId(args.threadId, frame.context);
-			this.rememberFrameMeta(frameId, args.threadId, contextId, frame.context?.ID);
 			const mapped = frame.mapToSource;
+			const sourcePath = mapped?.File && mapped?.SLine ? this.resolveMappedSourcePath(mapped) : undefined;
+			this.rememberFrameMeta(frameId, args.threadId, contextId, frame.context?.ID, sourcePath ? { path: sourcePath, line: mapped!.SLine! } : undefined);
 			const ipNum = typeof frame.context?.IP === 'number' ? frame.context.IP : undefined;
 			// Align to instruction boundary (TriCore has 2/4-byte instructions).
 			const ipAligned = ipNum !== undefined ? (ipNum - (ipNum % 2)) : undefined;
 			const ipRef = ipAligned !== undefined ? `0x${ipAligned.toString(16)}` : undefined;
 			if (mapped?.File && mapped?.SLine) {
-				const sourcePath = this.resolveMappedSourcePath(mapped);
 				const src = sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined;
 				const sf = new StackFrame(frameId, frame.context.Name || ipRef || frame.context.ID, src, mapped.SLine, 1);
 				(sf as any).instructionPointerReference = ipRef;
@@ -4205,6 +4205,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			response.body = {
 				symbols: this.getElfSymbols().variables.map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, size: s.size, file: s.file })),
 			};
+			this.sendResponse(response);
+			return;
+		}
+
+		if (command === 'aurix/frameSource') {
+			response.body = this.frameIdToMeta.get(Number(args?.frameId))?.source ?? {};
 			this.sendResponse(response);
 			return;
 		}

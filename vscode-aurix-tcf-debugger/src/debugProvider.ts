@@ -3773,7 +3773,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.tcfLogger.log(`[runcontrol] suspended id=${contextId} reason=${String(info.reason ?? '')}`);
 		}
 		if (reason === StoppedEventReason.breakpoint) {
-			this.cancelPendingBreakpointStoppedTimer(contextId, 'runcontrolBreakpoint');
+			// The Breakpoints status fallback guesses the core from the first instance, but a
+			// breakpoint is planted on every core, so its guess may be another core than the one
+			// that hit it. This suspend names the right core: drop every pending fallback.
+			for (const pending of Array.from(this.pendingBreakpointStoppedTimers.keys())) {
+				this.cancelPendingBreakpointStoppedTimer(pending, 'runcontrolBreakpoint');
+			}
 		}
 		if (this.startupDiagnosticsEnabled && reason === StoppedEventReason.breakpoint) {
 			const instr = this.instructionBreakpointsManager.getAll();

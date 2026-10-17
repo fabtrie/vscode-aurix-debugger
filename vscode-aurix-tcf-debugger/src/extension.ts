@@ -1669,6 +1669,13 @@ async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promi
 async function autoRevealSourcePath(srcPath: string, line: number, session?: vscode.DebugSession, preserveFocus = false): Promise<boolean> {
 	if (!fs.existsSync(srcPath)) {
 		reportMissingSource(session ?? vscode.debug.activeDebugSession, srcPath, line);
+		if (preserveFocus) {
+			// Next to the focused Disassembly view VS Code opens no source itself: show its
+			// "file not found" editor, so it is clear that the source could not be located.
+			const viewColumn = preferredSourceViewColumn ?? vscode.ViewColumn.One;
+			void Promise.resolve(vscode.commands.executeCommand('vscode.open', vscode.Uri.file(srcPath), { viewColumn, preview: true, preserveFocus: true }))
+				.catch(() => undefined);
+		}
 		return false;
 	}
 	const norm = normalizePathForCompare(srcPath);

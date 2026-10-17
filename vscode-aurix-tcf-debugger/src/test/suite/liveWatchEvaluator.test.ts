@@ -65,9 +65,32 @@ suite('LiveWatchEvaluator', () => {
 		assert.strictEqual(liveWatchChildExpression('s', 'x'), 's.x');
 	});
 
+	test('expr@hsm names the HSM, and children keep it', () => {
+		assert.deepStrictEqual(splitLiveWatchCore('HsmState@hsm'), { expression: 'HsmState', core: 'hsm' });
+		assert.deepStrictEqual(splitLiveWatchCore('a[1] @ HSM'), { expression: 'a[1]', core: 'hsm' });
+		assert.deepStrictEqual(splitLiveWatchCore('x@hsmx'), { expression: 'x@hsmx' });
+		assert.strictEqual(liveWatchChildExpression('HsmState@hsm', 'x'), 'HsmState.x@hsm');
+	});
+
+	test('expr@hsm is evaluated in the context of the HSM', async () => {
+		const fake = fakeClient();
+		const asked: unknown[] = [];
+		const evaluator = new LiveWatchEvaluator(fake.client, () => undefined, async (core) => {
+			asked.push(core);
+			return core === 'hsm' ? 'S0.D0.C6' : undefined;
+		});
+		const [ok] = await evaluator.evaluate('S0.D0.C0', [{ expression: 'counter@hsm' }]);
+		assert.deepStrictEqual(asked, ['hsm']);
+		assert.strictEqual(ok.available, true);
+		const none = new LiveWatchEvaluator(fake.client, () => undefined, async () => undefined);
+		const [missing] = await none.evaluate('S0.D0.C0', [{ expression: 'counter@hsm' }]);
+		assert.strictEqual(missing.available, false);
+		assert.match(missing.error ?? '', /No HSM/);
+	});
+
 	test('expr@N is evaluated in the context of core N', async () => {
 		const fake = fakeClient();
-		const asked: number[] = [];
+		const asked: unknown[] = [];
 		const evaluator = new LiveWatchEvaluator(fake.client, () => undefined, async (core) => {
 			asked.push(core);
 			return core === 1 ? 'S0.D0.C1' : undefined;

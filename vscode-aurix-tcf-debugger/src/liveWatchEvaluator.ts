@@ -9,6 +9,7 @@
  * state refresh then costs one memory read (or one Expressions.evaluate) per expression.
  */
 
+import type { CoreRef } from './breakpointCondition';
 import { TCFClient, decodeEvaluatedValue } from './tcfclient';
 import { CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, EvaluateResult, GetContextExpressionsCommand } from './tcf/expressions';
 import { GetMemoryCommand } from './tcf/memory';
@@ -73,15 +74,19 @@ class BufferValueProvider implements RawValueProvider {
 }
 
 /**
- * A Live Watch expression with an optional core: `expr@N` is evaluated on TriCore core N (e.g. a
- * variable in core-local memory, which every core has its own copy of).
+ * A Live Watch expression with an optional core: `expr@N` is evaluated on core N (e.g. a
+ * variable in core-local memory, which every core has its own copy of), `expr@hsm` on the HSM,
+ * as for a breakpoint.
  */
-export function splitLiveWatchCore(expression: string): { expression: string; core?: number } {
-	const m = /^(.*\S)\s*@\s*(\d+)$/.exec(expression.trim());
-	return m ? { expression: m[1], core: Number(m[2]) } : { expression: expression.trim() };
+export function splitLiveWatchCore(expression: string): { expression: string; core?: CoreRef } {
+	const m = /^(.*\S)\s*@\s*(\d+|hsm)$/i.exec(expression.trim());
+	if (!m) {
+		return { expression: expression.trim() };
+	}
+	return { expression: m[1], core: /^hsm$/i.test(m[2]) ? 'hsm' : Number(m[2]) };
 }
 
-/** C expression of a child node below a parent expression; a core (`@N`) carries over. */
+/** C expression of a child node below a parent expression; a core (`@N`, `@hsm`) carries over. */
 export function liveWatchChildExpression(parentExpression: string, childName: string): string {
 	const { expression: parentExpr, core } = splitLiveWatchCore(parentExpression);
 	const child = childExpression(parentExpr, childName);
@@ -111,11 +116,11 @@ export class LiveWatchEvaluator {
 	private readonly creating = new Map<string, Promise<RootEntry>>();
 	private readonly helper: DefaultVariableHelper;
 
-	/** `coreContext`: the context of TriCore core N, for `expr@N`. */
+	/** `coreContext`: the context of core N or the HSM, for `expr@N` and `expr@hsm`. */
 	constructor(
 		private readonly client: TCFClient,
 		private readonly log: (message: string) => void,
-		private readonly coreContext: (core: number) => Promise<string | undefined> = async () => undefined,
+		private readonly coreContext: (core: CoreRef) => Promise<string | undefined> = async () => undefined,
 	) {
 		const self = this;
 		this.helper = new class extends DefaultVariableHelper {
@@ -163,7 +168,7 @@ export class LiveWatchEvaluator {
 		if (core !== undefined) {
 			const coreCtx = await this.coreContext(core);
 			if (!coreCtx) {
-				throw new Error(`No core ${core}`);
+				throw new Error(core === 'hsm' ? 'No HSM' : `No core ${core}`);
 			}
 			ctx = coreCtx;
 		}

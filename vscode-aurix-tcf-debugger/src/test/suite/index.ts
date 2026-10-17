@@ -17,6 +17,7 @@ export function run(): Promise<void> {
 	const testsRoot = path.resolve(__dirname);
 	mocha.addFile(path.join(testsRoot, 'liveUpdate.test'));
 	mocha.addFile(path.join(testsRoot, 'liveWatchEvaluator.test'));
+	mocha.addFile(path.join(testsRoot, 'breakpointCondition.test'));
 	mocha.addFile(path.join(testsRoot, 'svdCatalog.test'));
 	mocha.addFile(path.join(testsRoot, 'svdMerge.test'));
 	mocha.addFile(path.join(testsRoot, 'sourceFileMap.test'));

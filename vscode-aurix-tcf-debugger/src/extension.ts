@@ -521,6 +521,18 @@ export function activate(context: vscode.ExtensionContext) {
 					openDisassemblyLayoutOnce(session);
 				}
 			});
+			// While the Disassembly view is the active editor, VS Code shows every focused frame there
+			// and not in its source: reveal the source next to it, keeping the focus in the view.
+			const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+			if (activeTab && activeTab.input === undefined && activeTab.label === 'Disassembly') {
+				const frameId = (item as vscode.DebugStackFrame).frameId;
+				void Promise.resolve(session.customRequest('aurix/frameSource', { frameId }))
+					.then((src: { path?: string; line?: number }) => {
+						if (src?.path && src.line) {
+							void autoRevealSourcePath(src.path, src.line, session, true);
+						}
+					}, () => undefined);
+			}
 		})
 	);
 	context.subscriptions.push(
@@ -1654,7 +1666,7 @@ async function autoRevealSourceForStackItem(item: vscode.DebugStackFrame): Promi
 }
 
 /** Returns true when the location is shown in an editor. */
-async function autoRevealSourcePath(srcPath: string, line: number, session?: vscode.DebugSession): Promise<boolean> {
+async function autoRevealSourcePath(srcPath: string, line: number, session?: vscode.DebugSession, preserveFocus = false): Promise<boolean> {
 	if (!fs.existsSync(srcPath)) {
 		reportMissingSource(session ?? vscode.debug.activeDebugSession, srcPath, line);
 		return false;
@@ -1685,7 +1697,7 @@ async function autoRevealSourcePath(srcPath: string, line: number, session?: vsc
 			editor = await vscode.window.showTextDocument(visible.document, {
 				viewColumn: visible.viewColumn,
 				preview: isPreviewTab(visible.document.uri, visible.viewColumn),
-				preserveFocus: false
+				preserveFocus
 			});
 		} else {
 			const uri = vscode.Uri.file(srcPath);
@@ -1696,7 +1708,7 @@ async function autoRevealSourcePath(srcPath: string, line: number, session?: vsc
 			editor = await vscode.window.showTextDocument(doc, {
 				viewColumn,
 				preview: true,
-				preserveFocus: false
+				preserveFocus
 			});
 		}
 		const pos = new vscode.Position(line - 1, 0);

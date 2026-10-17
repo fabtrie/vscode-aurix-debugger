@@ -2450,13 +2450,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (mapped?.File && mapped?.SLine) {
 				const sourcePath = this.resolveMappedSourcePath(mapped);
 				const src = sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined;
-				const sf = new StackFrame(frameId, frame.context.Name || frame.context.ID, src, mapped.SLine, 1);
+				const sf = new StackFrame(frameId, frame.context.Name || ipRef || frame.context.ID, src, mapped.SLine, 1);
 				(sf as any).instructionPointerReference = ipRef;
 				frames.push(sf);
 				continue;
 			}
 
-			const sf = new StackFrame(frameId, frame.context.Name || frame.context.ID);
+			const sf = new StackFrame(frameId, frame.context.Name || ipRef || frame.context.ID);
 			(sf as any).instructionPointerReference = ipRef;
 			frames.push(sf);
 		}

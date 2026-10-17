@@ -2160,8 +2160,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 			const key = `${area.Dir ?? ''}|${area.File}`;
 			if (!sources.has(key)) {
+				// The Disassembly view renders a row only after loading its source: a missing file
+				// leaves the row with the content of the row rendered before it.
 				const sourcePath = this.resolveMappedSourcePath(area);
-				sources.set(key, sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined);
+				const exists = sourcePath !== undefined && fs.existsSync(sourcePath);
+				sources.set(key, exists ? new Source(path.basename(sourcePath), sourcePath) : undefined);
 			}
 			const location = sources.get(key);
 			if (!location) {

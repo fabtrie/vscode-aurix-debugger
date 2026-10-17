@@ -2011,13 +2011,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			let byteBudget = Math.max(1, windowInstrs * maxInstrBytes);
 
 			// Clip to executable ranges from the ELF (if available). GTM MCS code is in the MCS RAM,
-			// not in an ELF.
+			// not in an ELF. Code outside the ELF (boot ROM, another core's program) is disassembled
+			// from the target memory as it is.
 			const execRange = isa === 'MCS' ? undefined : this.findExecutableRangeForAddress(alignedBaseAddress);
-			if (this.execRanges.length > 0 && !execRange && isa !== 'MCS') {
-				response.body = { instructions: [] };
-				this.sendResponse(response);
-				return;
-			}
 			if (isa === 'MCS') {
 				// MCS instructions are 4 bytes and the program is the module RAM, 0..MCS_RAM_BYTES.
 				// VS Code also asks for the instructions before the PC, which reaches below 0 near

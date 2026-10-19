@@ -256,14 +256,16 @@ mod tests {
 
     #[test]
     fn real_elf() {
-        let p = Path::new("C:/workspace/app/build/bin/app.elf");
+        // An application ELF (AURIX_TEST_ELF) gives a non-empty image of disjoint sections.
+        let Some(p) = std::env::var_os("AURIX_TEST_ELF") else { return };
+        let p = Path::new(&p);
         if !p.exists() {
             return;
         }
         let img = Image::load(p, 0, None).unwrap();
-        let first = &img.sections[0];
-        assert_eq!(first.addr, 0x8012_0400);
-        assert!(img.sections.iter().all(|s| s.addr >= 0x8000_0000 && s.end() <= 0x8060_0000), "{:x?}", img.sections.iter().map(|s| (s.addr, s.data.len())).collect::<Vec<_>>());
-        assert!(img.size() > 1_000_000);
+        assert!(img.size() > 0);
+        let mut ranges: Vec<(u64, u64)> = img.sections.iter().map(|s| (s.addr as u64, s.end())).collect();
+        ranges.sort();
+        assert!(ranges.windows(2).all(|w| w[0].1 <= w[1].0), "{ranges:x?}");
     }
 }

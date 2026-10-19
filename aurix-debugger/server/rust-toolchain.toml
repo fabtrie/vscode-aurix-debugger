@@ -1,5 +1,4 @@
 # Jim Tcl (crates/jimtcl) is built from the upstream release with MinGW gcc, so the
-# whole server uses the GNU toolchain. Build with C:\msys64\mingw64\bin on PATH
-# (see env.ps1).
+# whole server uses the GNU toolchain. Build with C:\msys64\mingw64\bin on PATH.
 [toolchain]
 channel = "stable-x86_64-pc-windows-gnu"

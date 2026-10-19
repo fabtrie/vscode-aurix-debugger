@@ -1,8 +1,8 @@
 // Builds the aurix-dbg debug server (release) so the extension can package it.
 //
-// Jim Tcl is compiled with MinGW gcc, which needs its DLLs on PATH (see
-// aurix-debugger/server/env.ps1). The MinGW bin folder is taken from the
-// environment variable MINGW_BIN, default C:\msys64\mingw64\bin.
+// Jim Tcl is compiled with MinGW gcc, which needs its DLLs on PATH. The MinGW
+// bin folder is taken from the environment variable MINGW_BIN, default
+// C:\msys64\mingw64\bin.
 const { spawnSync } = require('child_process');
 const os = require('os');
 const path = require('path');

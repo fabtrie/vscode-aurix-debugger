@@ -684,15 +684,13 @@ mod tests {
     #[test]
     fn paths() {
         assert_eq!(normalize_path(r"C:\Workspace\app\src\a.c"), "c:/workspace/app/src/a.c");
-        assert_eq!(normalize_path("../../bsw/x/./y.c"), "bsw/x/y.c");
+        assert_eq!(normalize_path("../../src/x/./y.c"), "src/x/y.c");
         assert_eq!(normalize_path("a/b/../c.c"), "a/c.c");
         assert_eq!(join_path(r"C:\build", "x.c"), r"C:\build\x.c");
     }
 
     pub(crate) fn test_elf() -> Option<PathBuf> {
-        let p = std::env::var("AURIX_TEST_ELF")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("C:/workspace/app/build/bin/app.elf"));
+        let p = PathBuf::from(std::env::var_os("AURIX_TEST_ELF")?);
         p.exists().then_some(p)
     }
 
@@ -712,16 +710,19 @@ mod tests {
             s.file_count(),
             s.row_count()
         );
-        let f = s.function_at(0x8014_29a0).expect("function at 0x801429a0");
-        assert_eq!(f.name, "Module_Init");
-        assert_eq!((f.low, f.high), (0x8014_29a0, 0x8014_29be));
-        let li = s.line_at(0x8014_29a0).expect("line info");
-        assert!(normalize_path(&li.file).ends_with("module/src/module.c"), "{li:?}");
-        let (line, addrs) = s.resolve_line("../../bsw/AutosarAbstractionLayers/SL/Module/src/Module.c", li.line).unwrap();
+        // Any function with line info: lookups by address, file:line and name agree.
+        let f = s
+            .functions
+            .iter()
+            .find(|f| f.high > f.low && s.line_at(f.low).is_some() && s.resolve_location(&f.name) == Some(f.low))
+            .expect("a function with line info");
+        assert_eq!(s.function_at(f.low).map(|x| x.low), Some(f.low));
+        let li = s.line_at(f.low).expect("line info");
+        let (line, addrs) = s.resolve_line(&li.file, li.line).unwrap();
         assert_eq!(line, li.line);
         assert!(addrs.contains(&li.start) || addrs.iter().any(|a| f.contains(*a)), "{addrs:08x?}");
         assert!(!s.lines_in_range(li.start, li.start + 1).is_empty());
-        assert_eq!(s.globals_named("module_sm").first().map(|g| g.addr), Some(0x7001_3954));
-        assert_eq!(s.resolve_location("Module_Init"), Some(0x8014_29a0));
+        let g = s.globals.iter().find(|g| g.addr != 0).expect("a global");
+        assert!(s.globals_named(&g.name).iter().any(|x| x.addr == g.addr), "{}", g.name);
     }
 }

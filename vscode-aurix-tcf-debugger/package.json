@@ -54,7 +54,6 @@
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
 		"test": "node ./out/test/runTest.js",
-		"test:stress": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-stress.ps1",
 		"package": "npx vsce package --target win32-x64 --no-rewrite-relative-links -o aurix-debugger.vsix",
 		"release": "npx vsce publish --target win32-x64 --no-rewrite-relative-links",
 		"copy-agent": "node ./scripts/copy-agent.js"

@@ -2,12 +2,10 @@ use std::path::PathBuf;
 
 use crate::*;
 
-/// The generated ORTI file this crate is developed against: MICROSAR OS on a TC377, two cores.
-/// Absent on other machines, where the real-file tests skip.
+/// A generated ORTI file (AURIX_TEST_ORTI), e.g. MICROSAR OS on a TC377 with two cores.
+/// Without it the real-file tests skip.
 fn test_orti() -> Option<PathBuf> {
-    let p = std::env::var("AURIX_TEST_ORTI")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("C:/workspace/app/vector/Applications/Appl/GenData/Os_Trace.ORT"));
+    let p = PathBuf::from(std::env::var_os("AURIX_TEST_ORTI")?);
     p.exists().then_some(p)
 }
 

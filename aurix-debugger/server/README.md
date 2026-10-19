@@ -9,13 +9,13 @@ Compared with OpenOCD + gdb + cppdbg, this gives VS Code writable registers and 
 Requirements (Windows):
 - rustup with the `stable-x86_64-pc-windows-gnu` toolchain (pinned in `rust-toolchain.toml`);
 - MSYS2 mingw64 gcc in `C:\msys64\mingw64\bin`, which builds Jim Tcl and Capstone;
-- network access through the proxy set in `.cargo/config.toml` / `env.ps1`. The build downloads Jim Tcl
+- network access: the build downloads Jim Tcl
   (crate `jimtcl`) and OpenOCD's Tcl scripts (crate `openocd-tcl`, into `target/openocd-tcl/`) from
   GitHub; set `JIMTCL_SRC_DIR` / `OPENOCD_TCL_DIR` to local copies to build offline.
 
 ```powershell
 cd server
-. .\env.ps1          # PATH (mingw64, cargo) and proxy
+$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"   # gcc for Jim Tcl and Capstone
 cargo build          # target\debug\aurix-dbg.exe
 cargo test --workspace --exclude aurix-dbg
 ```
@@ -27,7 +27,7 @@ Stop a running `aurix-dbg.exe` before `cargo build`, because Windows locks the e
 The command-line options are the same as OpenOCD's:
 
 ```powershell
-cd C:\workspace\test\aurix-debugger
+cd aurix-debugger
 .\server\target\debug\aurix-dbg.exe -s server/target/openocd-tcl/tcl `
     -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3] [-l log.txt]
 ```
@@ -54,7 +54,7 @@ aurix-dbg.exe --remote 4444 targets "reg pc" "mdw 0x70013954 4"
 
 ## VS Code
 
-Use a launch configuration of type `aurix-tcf` with `"agentFlavor": "aurix-dbg"`. See `.vscode/launch.json`, configuration "AURIX TC37x (aurix-dbg, TCF over TAS)".
+Use a launch configuration of type `aurixdbg`; the extension's [README](../../vscode-aurix-tcf-debugger/README.md#launch-configuration) has an example.
 
 | Attribute | Meaning |
 |---|---|
@@ -451,7 +451,7 @@ The server itself holds no board or application settings. The cfg scripts come i
 |---|---|
 | OpenOCD target cfg (`target/infineon/tc3?x.cfg`, via the board cfg) | TriCore cores with `-coreid`/`-dbgbase`, PFLASH banks. |
 | [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | Generic TC3xx multi-core setup: TL1 break/step/continue, STM suspend, HSM and MCS targets, HSM start after a halting reset, `tc3xx_connect_reset_halt`, diagnostics. It takes DBGSR (`-dbgbase` + 0x1FD00) and the per-core CBS_TRCx/STMx/WDTCPUx registers (`-coreid`) from the target cfg. |
-| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | This project (TC377 TRB board, app): adapter speed, DFLASH banks, MCS modules used, notes on the application. |
+| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | A TC377 TriBoard with an application: adapter speed, DFLASH banks, MCS modules used, notes on the application. |
 
 For another board or derivative, copy `tc37x_ocds_init.cfg`, pass the target cfg's chip name to `tc3xx_ocds_setup` and adjust its settings. Options of `tc3xx_ocds.cfg` (set before `tc3xx_ocds_setup`) are listed at the top of the file: `tc3xx_hsm_target`, `tc3xx_mcs_modules`, `tc3xx_mcs_ramsize`, `tc3xx_hsm_autostart`, `tc3xx_hsm_ready_ms`, `tc3xx_gtm_suspend`, `tc3xx_step_timers`.
 
@@ -534,8 +534,9 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 
 ## Tests
 
-- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on the GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
-- **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD):
+- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
+- **Real files:** tests that need build output of a real application skip unless it is named in environment variables: `AURIX_TEST_ELF` (TriCore application ELF), `AURIX_TEST_FUNCTION` (a function in it, default `main`), `AURIX_TEST_ORTI` (its ORTI file), `AURIX_TEST_HSM_ELF`, `AURIX_TEST_APP_ELF` + `AURIX_TEST_BM_ELF` (application and bootloader), `AURIX_TEST_MCS_DIR` (MCS assembler sources with their GHS output).
+- **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD). The scripts take the ELF and a breakpoint location as arguments or from `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs a few more variables, listed in its header:
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.
   - `node tools/dap_m5.js`: source breakpoint, call stack, step over/into/out.
   - `node tools/dap_m6.js`: locals, register/global/struct writes, enum names, live watch.

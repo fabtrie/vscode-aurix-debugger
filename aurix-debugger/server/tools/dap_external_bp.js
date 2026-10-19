@@ -2,19 +2,24 @@
 // extension's real debug adapter with a recording stand-in for the view.
 //
 // Usage: node tools/dap_external_bp.js [tcf_port] [api_port] [file:line] [elf]
+// file:line and elf default to AURIX_TEST_BP_LOC and AURIX_TEST_ELF.
 // Runs against the simulator as well (aurix-dbg --adapter sim ...).
 'use strict';
 const path = require('path');
 const assert = require('assert');
 const { PassThrough } = require('stream');
 
-const ext = process.env.EXT || 'C:/workspace/test/vscode-aurix-tcf-debugger';
+const ext = process.env.EXT || path.resolve(__dirname, '../../../vscode-aurix-tcf-debugger');
 const { AurixTCFDebugSession } = require(path.join(ext, 'out', 'debugProvider.js'));
 
 const tcfPort = Number(process.argv[2] || 1534);
 const api = `http://127.0.0.1:${Number(process.argv[3] || 8080)}`;
-const loc = process.argv[4] || 'C:/workspace/app/bsw/AppData/AppTask/src/AppTask.c:743';
-const elf = process.argv[5] || 'C:/workspace/app/build/bin/app.elf';
+const loc = process.argv[4] || process.env.AURIX_TEST_BP_LOC;
+const elf = process.argv[5] || process.env.AURIX_TEST_ELF;
+if (!loc || !elf) {
+    console.error('file:line and elf are required (or set AURIX_TEST_BP_LOC and AURIX_TEST_ELF)');
+    process.exit(2);
+}
 const file = loc.slice(0, loc.lastIndexOf(':'));
 const line = Number(loc.slice(loc.lastIndexOf(':') + 1));
 const verbose = !!process.env.VERBOSE;

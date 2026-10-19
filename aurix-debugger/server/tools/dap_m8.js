@@ -1,15 +1,19 @@
 // M8 hardware check through the VS Code extension's debug adapter: disassembly
 // around the PC and the target reset (ContextReset).
 //
-// Usage: node tools/dap_m8.js [elf]
+// Usage: node tools/dap_m8.js [elf]   (default: AURIX_TEST_ELF)
 'use strict';
 const path = require('path');
 const assert = require('assert');
 const { PassThrough } = require('stream');
 
-const ext = process.env.EXT || 'C:/workspace/test/vscode-aurix-tcf-debugger';
+const ext = process.env.EXT || path.resolve(__dirname, '../../../vscode-aurix-tcf-debugger');
 const { AurixTCFDebugSession } = require(path.join(ext, 'out', 'debugProvider.js'));
-const elf = process.argv[2] || 'C:/workspace/app/build/bin/app.elf';
+const elf = process.argv[2] || process.env.AURIX_TEST_ELF;
+if (!elf) {
+    console.error('elf is required (or set AURIX_TEST_ELF)');
+    process.exit(2);
+}
 const verbose = !!process.env.VERBOSE;
 
 class DapClient {

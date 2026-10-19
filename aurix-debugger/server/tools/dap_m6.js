@@ -2,22 +2,39 @@
 // through the VS Code extension's real debug adapter.
 //
 // Usage: node tools/dap_m6.js [file:line] [elf]
+// file:line and elf default to AURIX_TEST_BP_LOC and AURIX_TEST_ELF. The variables come from
+// the environment too, all required:
+//   AURIX_TEST_STACK_LOCAL  local on the stack at file:line, in SMPU-protected RAM
+//   AURIX_TEST_REG_LOCAL    local held in a data register at file:line
+//   AURIX_TEST_REG          that register (default d8)
+//   AURIX_TEST_GLOBAL       integer global in debugger-writable RAM
+//   AURIX_TEST_ENUM         4-byte enum global
+//   AURIX_TEST_STRUCT       struct global
+//   AURIX_TEST_COUNTER      integer that changes while the target runs
 'use strict';
 const path = require('path');
 const assert = require('assert');
 const { PassThrough } = require('stream');
 
-const ext = process.env.EXT || 'C:/workspace/test/vscode-aurix-tcf-debugger';
+const ext = process.env.EXT || path.resolve(__dirname, '../../../vscode-aurix-tcf-debugger');
 const { AurixTCFDebugSession } = require(path.join(ext, 'out', 'debugProvider.js'));
 
-const loc = process.argv[2] || 'C:/workspace/app/bsw/AppData/AppTask/src/AppTask.c:743';
-const elf = process.argv[3] || 'C:/workspace/app/build/bin/app.elf';
+const loc = process.argv[2] || process.env.AURIX_TEST_BP_LOC;
+const elf = process.argv[3] || process.env.AURIX_TEST_ELF;
 const file = loc.slice(0, loc.lastIndexOf(':'));
 const line = Number(loc.slice(loc.lastIndexOf(':') + 1));
 const verbose = !!process.env.VERBOSE;
-const COUNTER = 'Counter_0.Value';
-const STRUCT = 'Monitor_st';
-const ENUM = 'module_sm';
+const COUNTER = process.env.AURIX_TEST_COUNTER;
+const STRUCT = process.env.AURIX_TEST_STRUCT;
+const ENUM = process.env.AURIX_TEST_ENUM;
+const GLOBAL = process.env.AURIX_TEST_GLOBAL;
+const STACK_LOCAL = process.env.AURIX_TEST_STACK_LOCAL;
+const REG_LOCAL = process.env.AURIX_TEST_REG_LOCAL;
+const REG = process.env.AURIX_TEST_REG || 'd8';
+if (!loc || !elf || !COUNTER || !STRUCT || !ENUM || !GLOBAL || !STACK_LOCAL || !REG_LOCAL) {
+    console.error('file:line, elf and the AURIX_TEST_* variables listed in the header are required');
+    process.exit(2);
+}
 
 class DapClient {
     constructor() {
@@ -102,21 +119,20 @@ async function main() {
     let vars = await locals();
     console.log(`       locals: ${vars.map((v) => `${v.name}=${v.value}`).join(', ')}`);
     const get = (list, n) => list.find((v) => v.name === n);
-    assert.ok(get(vars, 'State_u8') && get(vars, 'rte_read_state'), 'expected locals missing');
+    assert.ok(get(vars, STACK_LOCAL) && get(vars, REG_LOCAL), 'expected locals missing');
     assert.ok(vars.every((v) => v.value !== ''), 'a local has no value');
     ok(`Locals of frame 0: ${vars.length} variables with values`);
 
-    // Stack variable (A10 + 6): the application's SMPU does not let the debugger write CPU0's
+    // Stack variable: the application's SMPU does not let the debugger write CPU0's
     // stack (below 0x7000B400), so the write must be reported instead of silently ignored.
-    const orig = get(vars, 'State_u8').value;
-    const denied = await client.request('setVariable', { variablesReference: localsRef, name: 'State_u8', value: '0x5A' }).then(() => null, (e) => e.message);
+    const orig = get(vars, STACK_LOCAL).value;
+    const denied = await client.request('setVariable', { variablesReference: localsRef, name: STACK_LOCAL, value: '0x5A' }).then(() => null, (e) => e.message);
     assert.ok(denied && /write-protected/.test(denied), `stack write not reported: ${denied}`);
     vars = await locals();
-    assert.strictEqual(get(vars, 'State_u8').value, orig);
-    ok(`setVariable stack local State_u8 reports the SMPU protection: ${denied.replace(/^setVariable: /, '')}`);
+    assert.strictEqual(get(vars, STACK_LOCAL).value, orig);
+    ok(`setVariable stack local ${STACK_LOCAL} reports the SMPU protection: ${denied.replace(/^setVariable: /, '')}`);
 
     // Global in a debugger-writable SMPU region: write and restore.
-    const GLOBAL = 'module_delay_time';
     const g0 = (await client.request('evaluate', { expression: GLOBAL, frameId: frames[0].id, context: 'watch' })).body.result;
     const g1 = String((Number(g0) + 1) >>> 0);
     assert.strictEqual((await client.request('setExpression', { expression: GLOBAL, value: g1, frameId: frames[0].id })).body.value, g1);
@@ -124,16 +140,16 @@ async function main() {
     assert.strictEqual((await client.request('setExpression', { expression: GLOBAL, value: g0, frameId: frames[0].id })).body.value, g0);
     ok(`setExpression global ${GLOBAL}: ${g0} -> ${g1} -> ${g0}`);
 
-    // Register variable (D8)
-    const hw = get(vars, 'rte_read_state').value;
+    // Register variable
+    const hw = get(vars, REG_LOCAL).value;
     const flipped = hw === '0' ? '1' : '0';
-    assert.strictEqual((await client.request('setVariable', { variablesReference: localsRef, name: 'rte_read_state', value: flipped })).body.value, flipped);
+    assert.strictEqual((await client.request('setVariable', { variablesReference: localsRef, name: REG_LOCAL, value: flipped })).body.value, flipped);
     const regs = (await client.request('scopes', { frameId: frames[0].id })).body.scopes.find((s) => /registers/i.test(s.name));
     const groups = (await client.request('variables', { variablesReference: regs.variablesReference })).body.variables;
     const core = (await client.request('variables', { variablesReference: groups.find((g) => /core/i.test(g.name)).variablesReference })).body.variables;
-    assert.strictEqual(Number(core.find((r) => r.name === 'd8').value) & 0xff, Number(flipped), 'D8 does not hold the new value');
-    assert.strictEqual((await client.request('setVariable', { variablesReference: localsRef, name: 'rte_read_state', value: hw })).body.value, hw);
-    ok(`setVariable register local rte_read_state (D8): ${hw} -> ${flipped} -> ${hw}`);
+    assert.strictEqual(Number(core.find((r) => r.name === REG).value) & 0xff, Number(flipped), `${REG} does not hold the new value`);
+    assert.strictEqual((await client.request('setVariable', { variablesReference: localsRef, name: REG_LOCAL, value: hw })).body.value, hw);
+    ok(`setVariable register local ${REG_LOCAL} (${REG.toUpperCase()}): ${hw} -> ${flipped} -> ${hw}`);
 
     if (frames.length > 1) {
         const s1 = (await client.request('scopes', { frameId: frames[1].id })).body.scopes.find((s) => s.name === 'Locals');
@@ -143,12 +159,12 @@ async function main() {
 
     const evaluate = async (expression, context = 'watch') => (await client.request('evaluate', { expression, frameId: frames[0].id, context })).body;
     const e1 = await evaluate(ENUM);
-    assert.ok(/^module_sm_/.test(e1.result), `enum shown as ${e1.result}`);
+    assert.ok(/^[A-Za-z_]\w*$/.test(e1.result), `enum shown as ${e1.result}`);
     const e2 = await evaluate(`sizeof(${ENUM}) * 2 + (${ENUM} == ${e1.result})`);
     assert.strictEqual(e2.result, '9');
-    const e3 = await evaluate('*(uint8*)&State_u8');
+    const e3 = await evaluate(`*(uint8*)&${STACK_LOCAL}`);
     assert.strictEqual(e3.result, orig);
-    ok(`evaluate: ${ENUM} = ${e1.result}; sizeof/compare = ${e2.result}; *(uint8*)&State_u8 = ${e3.result}`);
+    ok(`evaluate: ${ENUM} = ${e1.result}; sizeof/compare = ${e2.result}; *(uint8*)&${STACK_LOCAL} = ${e3.result}`);
 
     const se = await client.request('setExpression', { expression: ENUM, value: e1.result, frameId: frames[0].id });
     assert.strictEqual(se.body.value, e1.result);

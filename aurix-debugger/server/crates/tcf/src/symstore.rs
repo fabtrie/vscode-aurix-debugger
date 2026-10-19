@@ -248,11 +248,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Application plus bootmanager: addresses map to their ELF, lines resolve in both.
+    /// Application plus bootmanager (AURIX_TEST_APP_ELF, AURIX_TEST_BM_ELF): addresses map to
+    /// their ELF, lines resolve in both.
     #[test]
     fn real_elf_set() {
-        let app = PathBuf::from("C:/workspace/app/build/bin/app_dev.elf");
-        let bm = PathBuf::from("C:/workspace/bootloader/build/bin/bootloader_dev.elf");
+        let (Some(app), Some(bm)) = (std::env::var_os("AURIX_TEST_APP_ELF"), std::env::var_os("AURIX_TEST_BM_ELF")) else {
+            eprintln!("AURIX_TEST_APP_ELF / AURIX_TEST_BM_ELF not set, skipping");
+            return;
+        };
+        let (app, bm) = (PathBuf::from(app), PathBuf::from(bm));
         if !app.exists() || !bm.exists() {
             eprintln!("test ELF files not found, skipping");
             return;

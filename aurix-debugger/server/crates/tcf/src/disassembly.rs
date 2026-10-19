@@ -234,38 +234,47 @@ mod tests {
         assert_eq!(annotate_target("call    #0x90000000", Isa::TriCore, lookup), "call    #0x90000000");
     }
 
-    /// Calls in Module_Init resolve to the names objdump shows.
+    /// The test ELF (AURIX_TEST_ELF) and the range of a function in it: AURIX_TEST_FUNCTION,
+    /// else `main`.
+    fn real_elf_function_range() -> Option<(aurix_core::image::Image, symbols::Symbols, u32, u32)> {
+        let path = std::path::PathBuf::from(std::env::var_os("AURIX_TEST_ELF")?);
+        if !path.exists() {
+            return None;
+        }
+        let img = aurix_core::image::Image::load(&path, 0, None).unwrap();
+        let syms = symbols::Symbols::load(&path).unwrap();
+        let name = std::env::var("AURIX_TEST_FUNCTION").unwrap_or_else(|_| "main".into());
+        let f = *syms.functions_named(&name).first().unwrap_or_else(|| panic!("no function {name} in the test ELF"));
+        let (lo, hi) = (f.low, f.high);
+        Some((img, syms, lo, hi))
+    }
+
+    /// Direct calls in the test function are annotated with the names of their targets.
     #[test]
     fn real_elf_call_names() {
-        let path = std::path::Path::new("C:/workspace/app/build/bin/app.elf");
-        if !path.exists() {
-            return;
-        }
-        let img = aurix_core::image::Image::load(path, 0, None).unwrap();
-        let syms = symbols::Symbols::load(path).unwrap();
-        let (lo, hi) = (0x8014_29a0u32, 0x8014_29beu32);
+        let Some((img, syms, lo, hi)) = real_elf_function_range() else { return };
         let s = img.sections.iter().find(|s| s.addr <= lo && s.end() >= hi as u64).unwrap();
         let code = &s.data[(lo - s.addr) as usize..(hi - s.addr) as usize];
         let function_at = |a: u32| syms.function_at(a).map(|f| (f.name.clone(), a - f.low));
         let calls: Vec<String> = disassemble_bytes(&capstone(Isa::TriCore).unwrap(), Isa::TriCore, code, lo)
             .into_iter()
             .map(|(_, _, t)| annotate_target(&t, Isa::TriCore, &function_at))
-            .filter(|t| t.starts_with("call"))
+            .filter(|t| t.starts_with("call") && t.contains("#0x"))
             .collect();
         eprintln!("{calls:#?}");
-        assert_eq!(calls.len(), 2, "{calls:?}");
-        assert!(calls.iter().all(|t| t.ends_with("#0x80131140 <Os_EnableInterruptSource>")), "{calls:?}");
+        assert!(!calls.is_empty(), "no direct calls in the test function");
+        for t in &calls {
+            let hex: String = t.split("#0x").nth(1).unwrap().chars().take_while(char::is_ascii_hexdigit).collect();
+            if let Some(f) = syms.function_at(u32::from_str_radix(&hex, 16).unwrap()) {
+                assert!(t.contains(&format!("<{}>", f.name)) || t.contains(&format!("<{}+", f.name)), "{t}");
+            }
+        }
     }
 
-    /// Prints a function of the test ELF for comparison with tricore-elf-objdump.
+    /// Prints the test function for comparison with tricore-elf-objdump.
     #[test]
     fn real_elf_function() {
-        let path = std::path::Path::new("C:/workspace/app/build/bin/app.elf");
-        if !path.exists() {
-            return;
-        }
-        let img = aurix_core::image::Image::load(path, 0, None).unwrap();
-        let (lo, hi) = (0x8014_29a0u32, 0x8014_29beu32);
+        let Some((img, _, lo, hi)) = real_elf_function_range() else { return };
         let s = img.sections.iter().find(|s| s.addr <= lo && s.end() >= hi as u64).unwrap();
         let code = &s.data[(lo - s.addr) as usize..(hi - s.addr) as usize];
         let lines = disassemble_bytes(&capstone(Isa::TriCore).unwrap(), Isa::TriCore, code, lo);
@@ -280,16 +289,15 @@ mod tests {
 mod hsm_tests {
     use super::*;
 
-    const HSM_ELF: &str = "C:/workspace/app/build_hsm/bin/hsm_dev.elf";
-
-    /// GHS Thumb-2 code of the HSM ELF: decodes, and the prologue decoder finds the saved
-    /// return address of the functions that call others.
+    /// GHS Thumb-2 code of the HSM ELF (AURIX_TEST_HSM_ELF): decodes, and the prologue decoder
+    /// finds the saved return address of the functions that call others.
     #[test]
     fn real_hsm_elf_thumb_code_and_prologues() {
-        let path = std::path::Path::new(HSM_ELF);
+        let Some(path) = std::env::var_os("AURIX_TEST_HSM_ELF").map(std::path::PathBuf::from) else { return };
         if !path.exists() {
             return;
         }
+        let path = path.as_path();
         let img = aurix_core::image::Image::load(path, 0, None).unwrap();
         let syms = symbols::Symbols::load(path).unwrap();
         let cs = capstone(Isa::Thumb).unwrap();

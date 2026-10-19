@@ -1,19 +1,24 @@
 // M5 hardware check: symbols, source breakpoints, call stack and source-level
 // stepping through the VS Code extension's real debug adapter.
 //
-// Usage: node tools/dap_m5.js [function] [elf]
+// Usage: node tools/dap_m5.js [file:line] [elf]
+// file:line and elf default to AURIX_TEST_BP_LOC and AURIX_TEST_ELF.
 'use strict';
 const path = require('path');
 const assert = require('assert');
 const { PassThrough } = require('stream');
 
-const ext = process.env.EXT || 'C:/workspace/test/vscode-aurix-tcf-debugger';
+const ext = process.env.EXT || path.resolve(__dirname, '../../../vscode-aurix-tcf-debugger');
 const out = (p) => require(path.join(ext, 'out', p));
 const { AurixTCFDebugSession } = out('debugProvider.js');
 
-const loc = process.argv[2] || 'C:/workspace/app/bsw/AppData/AppTask/src/AppTask.c:743';
+const loc = process.argv[2] || process.env.AURIX_TEST_BP_LOC;
 const area = { File: loc.slice(0, loc.lastIndexOf(':')), SLine: Number(loc.slice(loc.lastIndexOf(':') + 1)) };
-const elf = process.argv[3] || 'C:/workspace/app/build/bin/app.elf';
+const elf = process.argv[3] || process.env.AURIX_TEST_ELF;
+if (!loc || !elf) {
+    console.error('file:line and elf are required (or set AURIX_TEST_BP_LOC and AURIX_TEST_ELF)');
+    process.exit(2);
+}
 const verbose = !!process.env.VERBOSE;
 const hex = (n) => '0x' + (n >>> 0).toString(16).padStart(8, '0');
 

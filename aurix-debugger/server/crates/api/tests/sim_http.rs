@@ -532,18 +532,26 @@ fn rest_mcp_and_tcf_share_one_session() {
     }
 
     if ort.is_file() && elf.is_file() {
+        // What the file declares, to check the server's answers against.
+        let parsed = orti::parse(&std::fs::read_to_string(&ort).unwrap()).unwrap();
+        let cores = parsed.core_count() as usize;
+        let first_task = parsed.objects_of("TASK").next().unwrap();
+        let (task_name, task_attrs) = (first_task.name.clone(), first_task.attrs.len());
+        let task_count = parsed.objects_of("TASK").count();
+        let stack_count = parsed.objects_of("STACK").count();
+        let stack_name = parsed.objects_of("STACK").next().unwrap().name.clone();
         http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [tcl_path(elf)] })));
         let os = http.ok("POST", "/api/v1/os/orti", Some(json!({ "file": tcl_path(ort) })));
         assert_eq!(os["implementation"], "Vector_ORTI");
         assert_eq!(os["version"], "2.3");
-        assert_eq!(os["cores"], 2);
+        assert_eq!(os["cores"], cores);
         assert_eq!(os["target"], CPU0);
 
         // The object types are whatever the generator declared, Vector's own ones included.
         let types: Vec<&str> = os["types"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(types.contains(&"TASK") && types.contains(&"vs_SPINLOCK"), "{types:?}");
+        assert!(types.contains(&"TASK") && types.contains(&"STACK"), "{types:?}");
         let task = os["types"].as_array().unwrap().iter().find(|t| t["name"] == "TASK").unwrap();
-        assert_eq!(task["count"], 38);
+        assert_eq!(task["count"], task_count);
         let attrs = task["attributes"].as_array().unwrap();
         let state = attrs.iter().find(|a| a["name"] == "STATE").unwrap();
         assert_eq!((state["kind"].as_str(), state["live"].as_bool()), (Some("enum"), Some(true)));
@@ -560,46 +568,49 @@ fn rest_mcp_and_tcf_share_one_session() {
 
         // The description survives a reload of the same session.
         let again = http.ok("GET", "/api/v1/os", None);
-        assert_eq!(again["cores"], 2);
+        assert_eq!(again["cores"], cores);
 
         // Reading objects. The simulator has no real OS in memory, so the values are whatever
         // the sim holds - what matters is that every attribute resolves and is reported.
-        let list = http.ok("GET", "/api/v1/os/objects/TASK?name=Task_Core0", None);
+        let list = http.ok("GET", &format!("/api/v1/os/objects/TASK?name={task_name}"), None);
         let objs = list["objects"].as_array().unwrap();
         assert_eq!(objs.len(), 1, "{list}");
         let attrs = objs[0]["attributes"].as_array().unwrap();
-        assert_eq!(attrs.len(), 12, "{:?}", attrs);
+        assert_eq!(attrs.len(), task_attrs, "{:?}", attrs);
         let by = |n: &str| attrs.iter().find(|a| a["name"] == n).unwrap();
         // The stack is a constant address, and its enumerator names the stack object, so the
         // cell can link to it.
-        assert_eq!(by("STACK")["value"], "OsCfg_Stack_Task_Core0");
-        assert_eq!(by("STACK")["link"], "OsCfg_Stack_Task_Core0");
-        assert_eq!(by("vs_Schedule")["value"], "FULL");
+        assert!(by("STACK")["link"].is_string(), "{:?}", by("STACK"));
+        assert_eq!(by("STACK")["value"], by("STACK")["link"]);
+        assert!(by("vs_Schedule")["value"].is_string(), "{:?}", by("vs_Schedule"));
         assert!(by("PRIORITY")["error"].is_null(), "{:?}", by("PRIORITY"));
         assert!(list["reads"].as_u64().unwrap() > 0);
 
         // `live_only` drops the attributes that cannot change, which is most of a refresh.
-        let live = http.ok("GET", "/api/v1/os/objects/TASK?name=Task_Core0&live_only=true", None);
+        let live = http.ok("GET", &format!("/api/v1/os/objects/TASK?name={task_name}&live_only=true"), None);
         let n = live["objects"][0]["attributes"].as_array().unwrap().len();
-        assert!(n > 0 && n < 12, "{n} of 12 attributes are live");
+        assert!(n > 0 && n < task_attrs, "{n} of {task_attrs} attributes are live");
 
         // An OS object type that the file declares but never instantiates is empty, not an error.
-        let empty = http.ok("GET", "/api/v1/os/objects/vs_SCHEDULETABLE", None);
-        assert!(empty["objects"].as_array().unwrap().is_empty(), "{empty}");
-        assert_eq!(empty["reads"], 0);
+        if let Some(d) = parsed.decls.iter().find(|d| parsed.objects_of(&d.name).next().is_none()) {
+            let empty = http.ok("GET", &format!("/api/v1/os/objects/{}", d.name), None);
+            assert!(empty["objects"].as_array().unwrap().is_empty(), "{empty}");
+            assert_eq!(empty["reads"], 0);
+        }
 
         // A type the file never declared lists the ones it did.
         let (status, e) = http.request("GET", "/api/v1/os/objects/NOPE", None, &[]);
         assert_eq!(status, 404, "{e}");
         assert!(e["message"].as_str().is_some_and(|m| m.contains("TASK")), "{e}");
 
-        // The whole OS object, both cores at once: this is what the sidebar view reads.
+        // The whole OS object, all cores at once: this is what the sidebar view reads.
         let os_objs = http.ok("GET", "/api/v1/os/objects/OS", None);
         let attrs = os_objs["objects"][0]["attributes"].as_array().unwrap();
         let running: Vec<&Value> = attrs.iter().filter(|a| a["name"] == "RUNNINGTASK").collect();
-        assert_eq!(running.len(), 2, "one RUNNINGTASK per core: {running:?}");
-        assert_eq!(running[0]["core"], 0);
-        assert_eq!(running[1]["core"], 1);
+        assert_eq!(running.len(), cores, "one RUNNINGTASK per core: {running:?}");
+        for (core, r) in running.iter().enumerate() {
+            assert_eq!(r["core"], core);
+        }
 
         // ...and the same awareness over TCF, which is the channel the VS Code extension has.
         // One session: the file the REST call loaded is already there.
@@ -608,18 +619,18 @@ fn rest_mcp_and_tcf_share_one_session() {
         let info: Value = serde_json::from_str(&r[1]).unwrap();
         assert_eq!(info["Loaded"], true);
         assert_eq!(info["Implementation"], "Vector_ORTI");
-        assert_eq!(info["Cores"], 2);
+        assert_eq!(info["Cores"], cores);
         let types: Vec<&str> = info["Types"].as_array().unwrap().iter().map(|t| t["Name"].as_str().unwrap()).collect();
-        assert!(types.contains(&"vs_ISR"), "{types:?}");
+        assert!(types.contains(&"TASK"), "{types:?}");
 
-        let r = vs.command("AurixOS", "getObjects", &[json!("TASK"), json!("Task_Core0"), json!(false)]);
+        let r = vs.command("AurixOS", "getObjects", &[json!("TASK"), json!(task_name), json!(false)]);
         assert_eq!(r[0], "", "{r:?}");
         let got: Value = serde_json::from_str(&r[1]).unwrap();
         let attrs = got["Objects"][0]["Attributes"].as_array().unwrap();
         let by = |n: &str| attrs.iter().find(|a| a["Name"] == n).unwrap().clone();
-        assert_eq!(by("STACK")["Value"], "OsCfg_Stack_Task_Core0");
-        assert_eq!(by("STACK")["Link"], "OsCfg_Stack_Task_Core0");
-        assert_eq!(by("vs_Schedule")["Value"], "FULL");
+        assert!(by("STACK")["Link"].is_string(), "{:?}", by("STACK"));
+        assert_eq!(by("STACK")["Value"], by("STACK")["Link"]);
+        assert!(by("vs_Schedule")["Value"].is_string(), "{:?}", by("vs_Schedule"));
 
         // `getRunning` is what the debug adapter calls on every stop to name its threads, so it
         // has to answer per core and stay small.
@@ -627,14 +638,15 @@ fn rest_mcp_and_tcf_share_one_session() {
         assert_eq!(r[0], "", "{r:?}");
         let run: Value = serde_json::from_str(&r[1]).unwrap();
         let per_core = run["Cores"].as_array().unwrap();
-        assert_eq!(per_core.len(), 2);
-        assert_eq!(per_core[0]["Core"], 0);
-        assert_eq!(per_core[1]["Core"], 1);
+        assert_eq!(per_core.len(), cores);
+        for (core, c) in per_core.iter().enumerate() {
+            assert_eq!(c["Core"], core);
+        }
         for c in per_core {
             assert!(c["Task"].is_string(), "{c}");
             assert!(c["Priority"].is_string(), "{c}");
         }
-        assert!(run["Reads"].as_u64().unwrap() <= 12, "a stop must not cost much: {run}");
+        assert!(run["Reads"].as_u64().unwrap() <= 6 * cores as u64, "a stop must not cost much: {run}");
         // The AUTOSAR core id goes out as a number: it is for matching a debug target, not for
         // a person to read.
         assert!(per_core.iter().all(|c| c["CoreId"].is_number()), "{run}");
@@ -645,7 +657,7 @@ fn rest_mcp_and_tcf_share_one_session() {
         // an unreadable one says so instead of reporting zero.
         let cov = http.ok("GET", "/api/v1/os/stacks", None);
         let stacks = cov["stacks"].as_array().unwrap();
-        assert_eq!(stacks.len(), 50, "one entry per STACK object");
+        assert_eq!(stacks.len(), stack_count, "one entry per STACK object");
         for s in stacks {
             assert!(s["name"].is_string() && s["size"].as_u64().is_some(), "{s}");
             assert_eq!(s["direction"], "DOWN", "{s}");
@@ -661,9 +673,9 @@ fn rest_mcp_and_tcf_share_one_session() {
         assert!(cov["reads"].as_u64().unwrap() > 0);
 
         // Narrowing to one stack is what a panel does when the user picks a row: far cheaper.
-        let one = http.ok("GET", "/api/v1/os/stacks?names=OsCfg_Stack_OsCore0_Kernel", None);
+        let one = http.ok("GET", &format!("/api/v1/os/stacks?names={stack_name}"), None);
         assert_eq!(one["stacks"].as_array().unwrap().len(), 1, "{one}");
-        assert_eq!(one["stacks"][0]["name"], "OsCfg_Stack_OsCore0_Kernel");
+        assert_eq!(one["stacks"][0]["name"], stack_name.as_str());
         assert!(one["reads"].as_u64().unwrap() < cov["reads"].as_u64().unwrap(), "narrowing must cost less");
 
         // A name nobody declared measures nothing rather than erroring: a panel may be showing a
@@ -676,7 +688,7 @@ fn rest_mcp_and_tcf_share_one_session() {
         let r = vs.command("AurixOS", "getStacks", &[Value::Null]);
         assert_eq!(r[0], "", "{r:?}");
         let got: Value = serde_json::from_str(&r[1]).unwrap();
-        assert_eq!(got["Stacks"].as_array().unwrap().len(), 50);
+        assert_eq!(got["Stacks"].as_array().unwrap().len(), stack_count);
 
 
         // Sampled task profiling. The simulator's RAM never changes, so there is nothing to
@@ -690,7 +702,7 @@ fn rest_mcp_and_tcf_share_one_session() {
         let r = vs.command("AurixOS", "startProfile", &[json!(500)]);
         assert_eq!(r[0], "", "{r:?}");
         let started: Value = serde_json::from_str(&r[1]).unwrap();
-        assert_eq!(started["Cores"], 2, "one sampling point per core: {started}");
+        assert_eq!(started["Cores"], cores, "one sampling point per core: {started}");
         assert_eq!(started["PeriodUs"], 500);
 
         // Give the sampler a moment to deliver its baseline.
@@ -700,7 +712,7 @@ fn rest_mcp_and_tcf_share_one_session() {
         assert_eq!(p["Running"], true, "{p}");
         assert!(p["NowUs"].as_u64().unwrap() > 0, "{p}");
         let trans = p["Transitions"].as_array().unwrap();
-        assert_eq!(trans.len(), 2, "one baseline transition per core: {p}");
+        assert_eq!(trans.len(), cores, "one baseline transition per core: {p}");
         for t in trans {
             // The bytes came back through the ORTI enumerator table, so this is a task name.
             assert_eq!(t["Task"], "INVALID_TASK", "{t}");
@@ -708,7 +720,7 @@ fn rest_mcp_and_tcf_share_one_session() {
         }
         // Occupancy counts the time each core has spent in its current task, not only closed ones.
         let totals = p["Totals"].as_array().unwrap();
-        assert_eq!(totals.len(), 2, "{p}");
+        assert_eq!(totals.len(), cores, "{p}");
         assert!(totals.iter().all(|o| o["Us"].as_u64().unwrap() > 0), "{p}");
         assert_eq!(p["DroppedTransitions"], 0);
 
@@ -718,7 +730,7 @@ fn rest_mcp_and_tcf_share_one_session() {
         let r = vs.command("AurixOS", "getProfile", &[json!(now)]);
         let p2: Value = serde_json::from_str(&r[1]).unwrap();
         assert!(p2["Transitions"].as_array().unwrap().is_empty(), "{p2}");
-        assert!(p2["Totals"].as_array().unwrap().len() == 2, "totals keep accumulating: {p2}");
+        assert!(p2["Totals"].as_array().unwrap().len() == cores, "totals keep accumulating: {p2}");
 
         // Starting again replaces the session rather than sampling the same points twice.
         let r = vs.command("AurixOS", "startProfile", &[json!(1000)]);

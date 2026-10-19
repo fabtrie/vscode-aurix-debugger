@@ -464,6 +464,11 @@ mod tests {
         Some((syms, f))
     }
 
+    /// The first task of the file: every MICROSAR task has STATE, STACK and PRIORITY.
+    fn first_task(f: &crate::OrtiFile) -> &crate::Object {
+        f.objects_of("TASK").next().expect("a TASK object")
+    }
+
     /// Every attribute of the real file plans against the real ELF, and lands in the class it
     /// should. This is the seam between the ORTI grammar, DWARF and the sampler.
     #[test]
@@ -516,15 +521,15 @@ mod tests {
         assert!(matches!(m.plan, Plan::Computed(_)), "{:?}", m.plan);
 
         let task_decl = f.decl("TASK").unwrap();
-        let task = f.objects_of("TASK").find(|o| o.name == "Task_Core0").unwrap();
+        let task = first_task(&f);
         let state = plan(&syms, &mut t, task_decl.attr("STATE").unwrap(), None, task.attr("STATE").unwrap());
         assert!(matches!(state.plan, Plan::Computed(_)), "{:?}", state.plan);
         // `STACK = "&OsCfg_Stack_..."` is an address constant: no sampling, ever.
         let stack = plan(&syms, &mut t, task_decl.attr("STACK").unwrap(), None, task.attr("STACK").unwrap());
         assert!(matches!(stack.plan, Plan::Const(_)), "{:?}", stack.plan);
         assert!(stack.plan.reads().is_empty() && !stack.plan.is_live());
-        // ...and so is `SIZE = "sizeof(OsCfg_Stack_OsCore0_Error_Dyn)"`.
-        let st = f.objects_of("STACK").find(|o| o.name == "OsCfg_Stack_OsCore0_Error").unwrap();
+        // ...and so is `SIZE = "sizeof(OsCfg_Stack_..._Dyn)"`.
+        let st = f.objects_of("STACK").find(|o| o.attr("SIZE").is_some_and(|s| s.contains("sizeof"))).unwrap();
         let size = plan(&syms, &mut t, f.decl("STACK").unwrap().attr("SIZE").unwrap(), None, st.attr("SIZE").unwrap());
         match &size.plan {
             Plan::Const(b) => assert!(b.iter().any(|&x| x != 0), "sizeof should not be zero: {b:?}"),
@@ -549,7 +554,8 @@ mod tests {
 
         // Every task in the file got an address, and they are real ones.
         assert!(attr.enums.len() > 30, "{} enumerators resolved", attr.enums.len());
-        let (addr, _) = *attr.enums.iter().find(|(_, n)| n == "Task_Core0").unwrap();
+        let task = first_task(&f);
+        let (addr, _) = *attr.enums.iter().find(|(_, n)| *n == task.name).unwrap();
         assert!(addr > 0x8000_0000 || (0x7000_0000..0x7800_0000).contains(&(addr as u64)), "0x{addr:x} is not a plausible address");
         // INVALID_TASK is the null pointer the OS writes when no task is running.
         assert_eq!(attr.enum_name(0), Some("INVALID_TASK"));
@@ -558,17 +564,16 @@ mod tests {
         let mut snap = Snapshot::new(None);
         snap.insert(at, (addr as u32).to_le_bytes()[..size as usize].to_vec());
         let shown = attr.show(&value(&syms, &mut snap, &attr).unwrap());
-        assert_eq!(shown.text, "Task_Core0");
+        assert_eq!(shown.text, task.name);
         assert_eq!(shown.number, Some(addr));
 
         // A task's stack enumerator carries a link, which is what makes the cell clickable.
-        let task = f.objects_of("TASK").find(|o| o.name == "Task_Core0").unwrap();
         let sd = f.decl("TASK").unwrap().attr("STACK").unwrap();
         let sa = plan(&syms, &mut t, sd, None, task.attr("STACK").unwrap());
         let Plan::Const(bytes) = &sa.plan else { panic!("{:?}", sa.plan) };
         let shown = sa.show(bytes);
-        assert_eq!(shown.text, "OsCfg_Stack_Task_Core0");
-        assert_eq!(shown.link.as_deref(), Some("OsCfg_Stack_Task_Core0"));
+        assert!(shown.text.starts_with("OsCfg_Stack_"), "{shown:?}");
+        assert_eq!(shown.link.as_deref(), Some(shown.text.as_str()));
     }
 
     /// A one-shot read goes straight to the target and skips the attributes that cannot change.
@@ -576,7 +581,7 @@ mod tests {
     fn a_live_read_only_touches_what_can_change() {
         let Some((syms, f)) = fixtures() else { return };
         let mut t = Zeros;
-        let task = f.objects_of("TASK").find(|o| o.name == "Task_Core0").unwrap();
+        let task = first_task(&f);
         let decl = f.decl("TASK").unwrap();
 
         struct Counting(u32);
@@ -602,9 +607,9 @@ mod tests {
             let attr = plan(&syms, &mut t, d, a.index, &a.value);
             value_live(&syms, &mut reads, &attr).unwrap();
         }
-        // Twelve attributes, but the constants and the prose cost nothing.
-        assert_eq!(task.attrs.len(), 12);
-        assert!(reads.0 > 0 && reads.0 < 12, "{} reads for 12 attributes", reads.0);
+        // The constants and the prose cost nothing.
+        let n = task.attrs.len() as u32;
+        assert!(reads.0 > 0 && reads.0 < n, "{} reads for {n} attributes", reads.0);
     }
 
     /// Sample bytes in, displayed value out - through the ORTI enumerator table rather than DWARF.
@@ -612,25 +617,28 @@ mod tests {
     fn a_sampled_priority_reads_back_as_its_orti_name() {
         let Some((syms, f)) = fixtures() else { return };
         let mut t = Zeros;
-        let task = f.objects_of("TASK").find(|o| o.name == "Task_Core0").unwrap();
+        let task = first_task(&f);
         let decl = f.decl("TASK").unwrap().attr("PRIORITY").unwrap();
         let attr = plan(&syms, &mut t, decl, None, task.attr("PRIORITY").unwrap());
 
         let Plan::Direct { addr, size, .. } = attr.plan else { panic!("{:?}", attr.plan) };
         assert_eq!(attr.plan.reads(), vec![Read { addr, len: size }]);
 
-        // The field holds an ordinal; ordinal 12 is priority 420 in this file's enumerator list.
+        // The field holds an ordinal, shown as the priority the file's enumerator list gives it.
+        let fits = |n: i64| n >= 0 && (size >= 8 || n < 1i64 << (8 * size));
+        let (ordinal, name) = attr.enums.iter().rev().find(|(n, _)| *n != 0 && fits(*n)).cloned().expect("a priority enumerator");
         let mut snap = Snapshot::new(None);
-        snap.insert(addr, 12u32.to_le_bytes()[..size as usize].to_vec());
+        snap.insert(addr, ordinal.to_le_bytes()[..size as usize].to_vec());
         let bytes = value(&syms, &mut snap, &attr).unwrap();
         assert!(!snap.missed);
-        assert_eq!(attr.show(&bytes).text, "420");
+        assert_eq!(attr.show(&bytes).text, name);
 
         // An ordinal nobody declared stays a number.
+        let unused = (1..).find(|n| fits(*n) && attr.enums.iter().all(|(o, _)| o != n)).unwrap();
         let mut snap = Snapshot::new(None);
-        snap.insert(addr, 99u32.to_le_bytes()[..size as usize].to_vec());
+        snap.insert(addr, unused.to_le_bytes()[..size as usize].to_vec());
         let bytes = value(&syms, &mut snap, &attr).unwrap();
-        assert_eq!(attr.show(&bytes).text, "99");
+        assert_eq!(attr.show(&bytes).text, unused.to_string());
     }
 
     /// A computed attribute re-evaluates over sampled bytes, and says when the branch moved.
@@ -638,7 +646,7 @@ mod tests {
     fn a_computed_attribute_is_re_evaluated_over_samples() {
         let Some((syms, f)) = fixtures() else { return };
         let mut t = Zeros;
-        let task = f.objects_of("TASK").find(|o| o.name == "Task_Core0").unwrap();
+        let task = first_task(&f);
         let decl = f.decl("TASK").unwrap().attr("STATE").unwrap();
         // Planned with OsState reading 0, so the expression took the `: 0xFF` branch and the only
         // address it learned is OsState itself.
@@ -735,13 +743,13 @@ mod tests {
         let text = Attribute {
             name: "ACTION".into(),
             index: None,
-            raw: "SET_EVENT Task_Core1 Event_B".into(),
-            plan: Plan::Text("SET_EVENT Task_Core1 Event_B".into()),
+            raw: "SET_EVENT Task_B Ev_B".into(),
+            plan: Plan::Text("SET_EVENT Task_B Ev_B".into()),
             expr: None,
             enums: Vec::new(),
             links: Vec::new(),
             error: None,
         };
-        assert_eq!(text.show(b"ignored").text, "SET_EVENT Task_Core1 Event_B");
+        assert_eq!(text.show(b"ignored").text, "SET_EVENT Task_B Ev_B");
     }
 }

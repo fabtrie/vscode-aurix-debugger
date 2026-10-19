@@ -244,6 +244,6 @@ This work is based on [vscode-aurix-tcf-debugger](https://github.com/ZeZhan/vsco
 
 ## License
 
-The code in this repository is released under the MIT License - see [`LICENSE`](LICENSE).
+The code in this repository, the extension and the `aurix-dbg` debug server, is released under the MIT License - see [`LICENSE`](LICENSE).
 
-The files under `bin/` are not covered by that license: `aurix-dbg.exe`, the Infineon SVD files and the OpenOCD scripts keep their own licenses - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The Infineon SVD files and the OpenOCD scripts under `bin/`, and the third-party code built into `aurix-dbg.exe`, keep their own licenses - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

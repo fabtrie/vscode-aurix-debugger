@@ -3,7 +3,7 @@ name = "winidea-sdk"
 version = "0.1.0"
 edition = "2024"
 description = "Rust bindings for the iSYSTEM winIDEA SDK (isystem.connect)"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [dependencies]
 thiserror = "2"

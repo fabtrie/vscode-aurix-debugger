@@ -1,12 +1,14 @@
 MIT License
 
 Copyright (c) 2025 Infineon Technologies AG
+Copyright (c) 2026 Fabian Triebsch
 
-This MIT license applies only to the source code written for this project
-(the files under src/, scripts/, media/, and the project configuration files).
-It does not apply to the prebuilt tools shipped under bin/, which come from
-AURIX(TM) Configuration Studio and are redistributed under their own licenses.
-See THIRD_PARTY_NOTICES.md for details.
+This MIT license applies to the source code of this repository: the extension
+(the files under src/, scripts/, media/, and the project configuration files)
+and the aurix-dbg debug server under aurix-debugger/, from which
+bin/aurix-dbg.exe is built. It does not apply to the SVD files and OpenOCD
+scripts shipped under bin/ or to the third-party code in aurix-dbg.exe, which
+keep their own licenses. See THIRD_PARTY_NOTICES.md for details.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

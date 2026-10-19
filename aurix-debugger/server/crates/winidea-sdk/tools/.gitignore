@@ -1,5 +1,6 @@
-# 13 MB ildasm dump; regenerate with the command in ../README.md when the SDK is
-# updated. Its distilled form (pinvoke.json) IS committed, as is csexp.txt --
-# verify_exports.py needs the export list to check the generated bindings, and
-# 520 KB is a fair price for that check running without the SDK installed.
+# Generated from the iSYSTEM SDK (see "Regenerating" in ../README.md) and not
+# committed: csil.txt is the raw ildasm dump, pinvoke.json its distilled form,
+# csexp.txt the DLL's export list.
 csil.txt
+pinvoke.json
+csexp.txt

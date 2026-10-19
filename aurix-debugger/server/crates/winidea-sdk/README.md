@@ -23,16 +23,18 @@ for FFI.
 
 ### Where the DLL comes from
 
-`lib/x64/isystemConnect.dll` is **vendored into this crate** and shipped with
-the host app. It is loaded at runtime with `libloading` (nothing is linked at build
-time), so this crate still compiles anywhere — the DLL only has to exist when a
-connection is opened.
+`isystemConnect.dll` is iSYSTEM's proprietary library and is **not part of this
+repository** (`lib/x64/isystemConnect.dll` is git-ignored). Get it from the
+winIDEA C# SDK (`winIDEA.CS.SDK-9.21.417`, file
+`isystem-connect-cs/lib/x64/isystemConnect.dll`) and copy it to
+`lib/x64/isystemConnect.dll` in this crate, or point `WINIDEA_HOME` at a
+winIDEA installation. It is loaded at runtime with `libloading` (nothing is
+linked at build time), so this crate still compiles anywhere — the DLL only has
+to exist when a connection is opened.
 
-Bundling it does two things: the host no longer needs its own winIDEA
-installation, and the SDK **version is pinned to the one these bindings were
-generated from**. That second point matters — a mismatched winIDEA fails with an
-obscure *winIDEA-internal path* error rather than a missing symbol (see the
-`.ReadCompressed` note on `daq::DaqController::configure`).
+Use the SDK version these bindings were generated from: a mismatched winIDEA
+fails with an obscure *winIDEA-internal path* error rather than a missing symbol
+(see the `.ReadCompressed` note on `daq::DaqController::configure`).
 
 Resolution order is in `default_search_paths()`, most specific first:
 
@@ -99,13 +101,16 @@ cargo test -p winidea-sdk    # enum drift guard
 | File | Role |
 |---|---|
 | `enums.json` | **Required at build time** — `include_str!` into `tests/enum_values.rs` |
-| `pinvoke.json` | Input to `generate_rust.py`; the generator's record of input |
-| `csexp.txt` | Export list; input to `verify_exports.py` |
 | `*.py` | The regeneration pipeline (only run when the SDK is updated) |
+| `pinvoke.json` | Input to `generate_rust.py` — **gitignored**, regenerate on demand |
+| `csexp.txt` | Export list; input to `verify_exports.py` — **gitignored**, regenerate on demand |
 | `csil.txt` | 13 MB raw `ildasm` dump — **gitignored**, regenerate on demand |
 
 Nothing here participates in `cargo build`, so the crate compiles with no Python
 and no SDK installed. The one exception is `enums.json`, which a test embeds.
+`pinvoke.json`, `csexp.txt` and `csil.txt` are derived from the iSYSTEM SDK and
+not committed; run the first commands under *Regenerating* to recreate them
+before running the generator or `verify_exports.py`.
 
 ### Enum constants
 

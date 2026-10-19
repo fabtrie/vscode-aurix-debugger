@@ -10,8 +10,12 @@
 //   1. the environment variable AURIX_OPENOCD_DIR (a folder containing tcl/)
 //   2. ../aurix-debugger/server/target/openocd-tcl (fetched by the server build,
 //      crate openocd-tcl)
+//
+// The license texts of the third-party code in aurix-dbg.exe -> bin/THIRD_PARTY_LICENSES.txt,
+// generated from ../aurix-debugger/server by third-party-licenses.js.
 const fs = require('fs');
 const path = require('path');
+const { generate: generateLicenses } = require('./third-party-licenses');
 
 function main() {
 	const projectRoot = path.resolve(__dirname, '..');
@@ -45,6 +49,15 @@ function main() {
 		}
 	}
 	console.log(`Copied ${openocdSrc} -> ${openocdDest}`);
+
+	const licenses = path.join(projectRoot, 'bin', 'THIRD_PARTY_LICENSES.txt');
+	try {
+		const r = generateLicenses(path.dirname(serverTarget), licenses);
+		console.log(`Wrote ${licenses}: ${r.components} components, ${r.texts} license texts`);
+	} catch (e) {
+		console.error(`Third-party license texts not written: ${e.message || e}`);
+		process.exit(1);
+	}
 }
 
 main();

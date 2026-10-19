@@ -35,10 +35,11 @@ The extension uses `aurix-dbg`, a debug server that reaches the target through I
 ## Bundled files (`bin/`)
 
 - `aurix-dbg.exe` — the debug server
+- `THIRD_PARTY_LICENSES.txt` — the license texts of the third-party code in `aurix-dbg.exe`
 - `openocd/` — OpenOCD's Tcl scripts, passed to the server as a search directory
 - `svd/` — SVD files for the Peripheral view
 
-`aurix-dbg.exe` and `openocd/` are not in the repository: `npm run copy-agent` (also run when packaging) copies them from the `aurix-debugger` build.
+`aurix-dbg.exe`, `THIRD_PARTY_LICENSES.txt` and `openocd/` are not in the repository: `npm run copy-agent` (also run when packaging) copies them from the `aurix-debugger` build and generates the license file.
 
 ## Build
 

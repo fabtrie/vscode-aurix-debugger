@@ -1,0 +1,9 @@
+This crate is a Rust port of the read/write client of the TAS Client API
+(https://github.com/Infineon/tas_client_api),
+Copyright (c) Infineon Technologies AG, licensed under the Apache License,
+Version 2.0 (see LICENSE-APACHE).
+
+The port is a rewrite in Rust, limited to the read/write client and changed
+for use in aurix-dbg. It is distributed under the Apache License, Version 2.0;
+the parts written for aurix-dbg are also available under the MIT license of
+this repository.

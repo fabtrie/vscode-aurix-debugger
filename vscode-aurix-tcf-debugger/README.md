@@ -2,49 +2,54 @@
 
 > **Disclaimer:** This is a personal project, built and maintained by one developer in my own time. It is not an official Infineon product and has nothing to do with Infineon Technologies AG. It comes with no warranty and no promise of support or future updates. Use it at your own risk.
 
-The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts. `aurix-dbg.exe` is bundled with the extension; the setting `aurix-debugger.agentPath` or the launch attribute `agentPath` point to a different build.
+VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3) and the GTM MCS channels.
 
-VS Code extension for debugging Infineon AURIX&trade; devices. It supports all AURIX&trade; TC2x, TC3x, and TC4x microcontrollers, including their TriCore, PPU, and CDSP cores.
+The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts. Its source is in the [`aurix-debugger`](https://github.com/fabtrie/vscode-aurix-debugger/tree/main/aurix-debugger) folder of this repository. `aurix-dbg.exe` is bundled with the extension; the setting `aurix-debugger.agentPath` or the launch attribute `agentPath` point to a different build.
 
 ## Features
 
-- Multi-core debugging
-- Line breakpoints and instruction/address breakpoints
+- Multi-core debugging of the TriCore cores, the HSM and the GTM MCS channels
+- Line, function and instruction breakpoints, optionally only on chosen cores (`@1`, `@hsm`) or in a chosen AUTOSAR task
 - Step in/out, step over, continue/pause, restart, terminate
-- Peripheral view (read and write SVD registers)
-- Reset and halt at first breakpoint
-- Call stack and variables
-- Live watch of global variable
-- Disassembly view
-- Instruction stepping mode 
-- Memory Inspector (read and write memeory)
+- Call stack and variables, including frames without debug information
+- Live Watch of variables and registers while the target runs, in the sidebar or in editor panels
+- Peripheral view (read and write SVD registers), including the TC3xx HSM peripherals
+- Memory Inspector (read and write memory)
+- Disassembly view, instruction stepping mode, Go to Address or Symbol
+- AUTOSAR OS awareness from the ORTI file: tasks, stacks, running task per core, task profiling
 - Flashing through aurix-dbg (`enableFlashing`, Flash Target toolbar button)
+- Reset, with or without halting at the reset vector
 - Custom Tcl debugger actions and `monitor` commands in the Debug Console
-- Debug the PPU and CDSP cores
+- Source path mapping for ELF files built in another checkout
+- The debug tab layout is remembered between sessions
 
 ## Requirements
 
+- Windows (x64)
 - Visual Studio Code 1.79.0 or higher
 - Infineon `tas_server` (TAS) and a miniWiggler/DAP probe
-- OpenOCD configuration scripts for the board (e.g. the OpenOCD `tcl` directory)
+- OpenOCD configuration scripts for the board. OpenOCD's own scripts (`board/`, `target/`, ...) are bundled; the TC3xx setup [`tc3xx_ocds.cfg`](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/tc3xx_ocds.cfg) and a board file like [`tc37x_ocds_init.cfg`](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/tc37x_ocds_init.cfg) come from the `aurix-debugger` folder
 - Peripheral Inspector extension (installed automatically as a dependency)
 - Memory Inspector extension (installed automatically as a dependency)
 
-## Backend binaries (`bin/`)
+## Bundled files (`bin/`)
 
-- `aurix-dbg.exe` — the debug server. Not in the repository: `npm run copy-agent` (also run when packaging) copies it from the `aurix-debugger` build.
-- `svd/` — SVD files for the supported devices
+- `aurix-dbg.exe` — the debug server
+- `openocd/` — OpenOCD's Tcl scripts, passed to the server as a search directory
+- `svd/` — SVD files for the Peripheral view
+
+`aurix-dbg.exe` and `openocd/` are not in the repository: `npm run copy-agent` (also run when packaging) copies them from the `aurix-debugger` build.
 
 ## Build
+
+From the repository root, to build the server and package the extension with it:
 
 ```bash
 npm install
 npm run package
 ```
 
-`npm run package` compiles the TypeScript sources, copies the static assets and `aurix-dbg.exe`, and produces `aurix-debugger.vsix` in the project root.
-
-`aurix-dbg.exe` is taken from the environment variable `AURIX_DBG_EXE` if set, otherwise from `../aurix-debugger/server/target/release/` or `../aurix-debugger/server/target/debug/`.
+In this folder, `npm run package` only compiles the TypeScript sources, copies the static assets, `aurix-dbg.exe` and the OpenOCD scripts, and produces `aurix-debugger.vsix`. `aurix-dbg.exe` is taken from the environment variable `AURIX_DBG_EXE` if set, otherwise from `../aurix-debugger/server/target/release/` or `../aurix-debugger/server/target/debug/`. See the [server README](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/README.md) for building the server.
 
 ## Installation
 
@@ -70,26 +75,32 @@ Create `.vscode/launch.json`:
       "type": "aurixdbg",
       "request": "launch",
       "name": "AURIX Debug",
-      "host": "127.0.0.1",
-      "port": 1534,
       "autoStartAgent": true,
-      "searchDirs": ["${workspaceFolder}/tcl"],
-      "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
-      "symbolFiles": ["${workspaceFolder}/temp/TC375_CE/TriCore Debug (GCC)/TC375_CE.elf"],
-      "flashFiles": ["${workspaceFolder}/temp/TC375_CE/TriCore Debug (GCC)/TC375_CE.hex"],
-      "device": "TC37x",
-      "workspace": "${workspaceFolder}\\temp\\TC375_CE"
+      "searchDirs": ["${workspaceFolder}/debug"],
+      "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg", "tc37x_ocds_init.cfg"],
+      "symbolFiles": ["${workspaceFolder}/build/app.elf"],
+      "flashFiles": ["${workspaceFolder}/build/app.hex"],
+      "ortiFile": "${workspaceFolder}/build/Os_Trace.ORT",
+      "device": "TC37x"
     }
   ]
 }
 ```
 
-- `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is.
-- `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port`.
+Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the `aurix-debugger` folder and adjusted for the board.
+
+- `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is. The bundled OpenOCD scripts are always searched, after `searchDirs`.
+- `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port` (default `127.0.0.1:1534`).
 - `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
 - `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list. `verifyFlash` (default true) reads the programmed sectors back.
 - After flashing and with the Reset button, the target is reset with `resetType` (default `reset`). With `resetSuspend: true` it halts at the reset vector; otherwise it runs, and the toolbar buttons pause all cores afterwards.
-- `device` selects the SVD file bundled with the extension for the Peripheral View: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
+- `ortiFile` enables the AUTOSAR OS view and task names in the Call Stack.
+- `sourceFileMap` maps path prefixes in the debug information onto local folders, and `sourceSearchPaths` lists folders searched for sources that are not found, e.g. when a compiler cache supplied objects built in another checkout.
+- `device` selects the SVD file bundled with the extension for the Peripheral view: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
+
+### Breakpoints on chosen cores
+
+Without anything else, a breakpoint halts every core that reaches it. To halt only some cores, put them in the breakpoint's condition (`@1`, `@0,2`, `@hsm`, or with a task filter `task == ComTask @1`), or after a function breakpoint's name (`Os_Task_10ms@1`). **Halt Only on Core…** and **Halt Only in Task…** on the line number context menu set the same.
 
 ### Watch global variables
 
@@ -104,6 +115,7 @@ The Live Watch view periodically refreshes selected global variables. Use the vi
 Once configured, the active interval appears in the view header (highlighted in orange). Resume the target to run the cores and observe the selected global variables update automatically.
 
 - Entries look like the WATCH section: `name: value` in the theme's debug colors, with changed values highlighted. Structs and arrays show a short preview (`{a: 1, b: 2, …}`) and can be expanded. Pointers can be expanded to show the value they point to.
+- `expr@N` evaluates an expression on core N (`expr@hsm` on the HSM), e.g. for a variable in a core's local RAM.
 - Double-click a value (or press Enter) to change it. Double-click the name (or press F2) to edit the expression, e.g. to fix a typo. The context menu also copies the value or the expression.
 - Right-click a register or field in the **XPeripherals** view and choose **Add to Live Watch**. Registers show as hex and can be set. Fields show their bits and are read-only; change them in the XPeripherals view.
 - **Pause Updates** on an entry moves it to the **Paused** group, which is not refreshed while the target runs. **Resume Updates** moves it back.
@@ -120,6 +132,10 @@ Debugging needs room, so a Live Watch can also be opened as an editor tab: click
 - **Add to Live Watch** in the XPeripherals view asks which Live Watch to add to when panels are open.
 
 ![live-watch](media/live-watch.gif)
+
+### AUTOSAR OS
+
+With `ortiFile` set (or after the **Load ORTI File…** command), the **AUTOSAR OS** view in the Run and Debug sidebar shows per core the running task, its priority, the running ISR, the last OS service and error, and each core's thread in the Call Stack is named after its running task. **Show AUTOSAR OS Objects** opens tables of the objects the ORTI file declares (tasks, stacks with their usage, alarms, resources, ...) in an editor tab. **Show OS Profile** samples which task runs on each core while the target runs; task switches shorter than the sampling period are missed. The views refresh at the global interval set in the status bar; **Pause AUTOSAR OS Updates** stops that.
 
 ### Peripheral View
 
@@ -147,7 +163,7 @@ address or expression once the target is paused.
 
 ### Disassembly View & Instruction Stepping Mode
 
-The disassembly view opens automatically side-by-side with the source code and stays synchronized with the currently selected frame. The toolbar includes an `Enable Instruction Stepping` button, which allows stepping through the program's disassembly instructions. 
+The disassembly view opens automatically side-by-side with the source code and stays synchronized with the currently selected frame. The toolbar includes an `Enable Instruction Stepping` button, which allows stepping through the program's disassembly instructions.
 
 ![enable-instruction-stepping](media/enable-instruction-stepping.gif)
 
@@ -157,20 +173,15 @@ The disassembly view opens automatically side-by-side with the source code and s
 
 Instruction breakpoints can be set in the same way as in the source code.
 
-If the disassembly view is closed, use the Command Palette and run `Open Disassembly View` to open the view
+If the disassembly view is closed, use the Command Palette and run `Open Disassembly View` to open the view.
 
 The setting `aurix-debugger.disassembly.opcodeBytes` places the opcode bytes of each instruction `left` (between address and instruction, default), `right` (after the instruction) or `hidden`. A change applies to instructions loaded after the next stop.
 
 To show any other code location while the target is halted, click the search icon in the disassembly view's title bar (or press `Ctrl+G` in the view) and pick a function or enter an address (`0x80001234`) or `symbol+offset`. VS Code's disassembly view can only follow the selected stack frame, so the target appears as a `[Disassembly] ...` frame at the bottom of the call stack; it disappears when the target resumes.
 
-### PPU / CDSP Cores
+### Debug layout
 
-In addition to the TriCore cores, the debugger supports the cores: **PPU** and **CDSP**. Assign an ELF file to each core in the launch configuration:
-
-- `ppuElfPath` — a single ELF file for the PPU
-- `cdspElfPaths` — up to 12 ELF files (CDSP0 – CDSP11)
-
-The assigned ELF files provide the debug symbols used for source-level debugging on the corresponding core.
+When a session ends, the extension remembers where its tabs were (Disassembly, Live Watch panels, AUTOSAR OS panels, Memory Inspector) and reopens them there in the next session. The setting `aurix-debugger.rememberDebugLayout` turns this off, and **Reset Debug Layout** forgets the saved layout.
 
 ### Debugger Actions
 
@@ -235,4 +246,4 @@ This work is based on [vscode-aurix-tcf-debugger](https://github.com/ZeZhan/vsco
 
 The code in this repository is released under the MIT License - see [`LICENSE`](LICENSE).
 
-The prebuilt tools under `bin/` are not covered by that license. They come from AURIX&trade; Configuration Studio and keep their own licenses - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The files under `bin/` are not covered by that license: `aurix-dbg.exe`, the Infineon SVD files and the OpenOCD scripts keep their own licenses - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

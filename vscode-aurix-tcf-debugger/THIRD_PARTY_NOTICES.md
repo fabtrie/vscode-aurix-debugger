@@ -37,8 +37,12 @@ code, each under its own license:
 | [TAS Client API](https://github.com/Infineon/tas_client_api) | `crates/tas` is a Rust port of its read/write client | Apache-2.0 |
 | Rust crates listed in `aurix-debugger/server/Cargo.lock` | Runtime, HTTP server, DWARF, serialization, ... | Mostly MIT or Apache-2.0 (at the user's choice); also BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0 and BSL-1.0 options |
 
-The license of each crate is in its `Cargo.toml` (`cargo tree -e normal --format "{p} {l}"`
-in `aurix-debugger/server` lists them).
+The full license texts of all of them, crate by crate, are in
+`bin/THIRD_PARTY_LICENSES.txt` in the extension. That file is generated when the
+extension is packaged (`scripts/copy-agent.js`); to write it on its own, build
+the server and run `node scripts/third-party-licenses.js` in the extension
+folder. The TAS Client API's license and the notice for the port are also in
+[`aurix-debugger/server/crates/tas/`](https://github.com/fabtrie/vscode-aurix-debugger/tree/main/aurix-debugger/server/crates/tas).
 
 ## Not included
 

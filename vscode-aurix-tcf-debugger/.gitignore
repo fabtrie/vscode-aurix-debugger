@@ -12,3 +12,4 @@ test-results/
 # Copied from the aurix-debugger build by scripts/copy-agent.js
 bin/aurix-dbg.exe
 bin/openocd/
+bin/THIRD_PARTY_LICENSES.txt

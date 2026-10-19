@@ -1,17 +1,21 @@
 // End-to-end check through the VS Code extension's real debug adapter
 // (out/debugProvider.js) talking DAP in-process, against a running aurix-dbg.
 //
-// Usage: node tools/dap_smoke.js [elf]
+// Usage: node tools/dap_smoke.js [elf]   (default: AURIX_TEST_ELF)
 // Env:   EXT=<path to vscode-aurix-tcf-debugger>  HOST, PORT, VERBOSE=1
 'use strict';
 const path = require('path');
 const assert = require('assert');
 const { PassThrough } = require('stream');
 
-const ext = process.env.EXT || 'C:/workspace/test/vscode-aurix-tcf-debugger';
+const ext = process.env.EXT || path.resolve(__dirname, '../../../vscode-aurix-tcf-debugger');
 const { AurixTCFDebugSession } = require(path.join(ext, 'out', 'debugProvider.js'));
 const verbose = !!process.env.VERBOSE;
-const elf = process.argv[2] || 'C:/workspace/app/build/bin/app.elf';
+const elf = process.argv[2] || process.env.AURIX_TEST_ELF;
+if (!elf) {
+    console.error('elf is required (or set AURIX_TEST_ELF)');
+    process.exit(2);
+}
 
 class DapClient {
     constructor() {

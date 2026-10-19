@@ -1,6 +1,6 @@
 //! Pure-Rust client for Infineon's TAS (Tool Access Socket) protocol.
 //!
-//! Ported from the Apache-2.0 TAS Client API (`third_party/tas_client_api-main`),
+//! Ported from the Apache-2.0 TAS Client API (https://github.com/Infineon/tas_client_api),
 //! read/write client only. All values on the wire are little endian and
 //! word (4 byte) aligned. Three packet layers:
 //! - PL2: a leading u32 with the overall packet length in bytes (including itself)

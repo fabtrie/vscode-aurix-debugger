@@ -26,9 +26,11 @@ function getEnvNumber(name: string, fallback: number): number {
 }
 
 function getDebugConfig(): vscode.DebugConfiguration | undefined {
-	// For quick local runs you can hardcode defaults here.
-	// Env vars (if set) override the defaults.
-	const program = getEnv('AURIX_TEST_ELF') || 'c:\\Users\\ZhangZehu\\Documents\\ADS\\Testing\\tcf-agent\\temp\\TC375_CE';
+	// Needs hardware: skipped unless AURIX_TEST_ELF is set.
+	const program = getEnv('AURIX_TEST_ELF');
+	if (!program) {
+		return undefined;
+	}
 	const config: vscode.DebugConfiguration = {
 		type: 'aurixdbg',
 		request: 'launch',

@@ -7,7 +7,7 @@
 const path = require('path');
 const assert = require('assert');
 
-const ext = process.env.EXT || 'C:/workspace/test/vscode-aurix-tcf-debugger';
+const ext = process.env.EXT || path.resolve(__dirname, '../../../vscode-aurix-tcf-debugger');
 const out = (p) => require(path.join(ext, 'out', p));
 const { TCFClient } = out('tcfclient.js');
 const { SmallCommandStamper } = out('tcf.js');

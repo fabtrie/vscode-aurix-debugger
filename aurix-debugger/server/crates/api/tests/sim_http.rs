@@ -522,13 +522,9 @@ fn rest_mcp_and_tcf_share_one_session() {
     assert_eq!(status, 404, "{e}");
 
     // Attribute expressions need symbols, so that failure has to name `load_symbols`.
-    let ort = PathBuf::from(
-        std::env::var("AURIX_TEST_ORTI").unwrap_or_else(|_| "C:/workspace/app/vector/Applications/Appl/GenData/Os_Trace.ORT".into()),
-    );
-    let elf = PathBuf::from(
-        std::env::var("AURIX_TEST_ELF")
-            .unwrap_or_else(|_| "C:/workspace/app/build/bin/app.elf".into()),
-    );
+    // Optional real files; without them only the error cases above run.
+    let ort = PathBuf::from(std::env::var_os("AURIX_TEST_ORTI").unwrap_or_default());
+    let elf = PathBuf::from(std::env::var_os("AURIX_TEST_ELF").unwrap_or_default());
     if ort.is_file() {
         let (status, e) = http.request("POST", "/api/v1/os/orti", Some(json!({ "file": tcl_path(ort.clone()) })), &[]);
         assert_eq!(status, 400, "{e}");

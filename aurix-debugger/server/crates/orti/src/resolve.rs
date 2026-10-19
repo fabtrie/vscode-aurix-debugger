@@ -451,10 +451,10 @@ mod tests {
     }
 
     fn fixtures() -> Option<(Symbols, crate::OrtiFile)> {
-        let elf = std::env::var("AURIX_TEST_ELF")
-            .unwrap_or_else(|_| "C:/workspace/app/build/bin/app.elf".into());
-        let ort = std::env::var("AURIX_TEST_ORTI")
-            .unwrap_or_else(|_| "C:/workspace/app/vector/Applications/Appl/GenData/Os_Trace.ORT".into());
+        let (Ok(elf), Ok(ort)) = (std::env::var("AURIX_TEST_ELF"), std::env::var("AURIX_TEST_ORTI")) else {
+            eprintln!("AURIX_TEST_ELF / AURIX_TEST_ORTI not set, skipping");
+            return None;
+        };
         if !std::path::Path::new(&elf).exists() || !std::path::Path::new(&ort).exists() {
             eprintln!("test ELF or ORTI file not found, skipping");
             return None;

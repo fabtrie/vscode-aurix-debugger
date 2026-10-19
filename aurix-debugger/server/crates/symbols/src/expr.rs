@@ -1098,79 +1098,71 @@ mod tests {
         }
     }
 
+    /// Any enum global of the test ELF (1, 2 or 4 bytes): name lookup, enumerators, arithmetic,
+    /// address-of, casts and the conditional operator, evaluated against a fake memory.
     #[test]
     fn real_elf_expressions() {
         let Some(path) = crate::tests::test_elf() else { return };
         let s = Symbols::load(&path).unwrap();
         let mut t = Mem { pc: None, regs: HashMap::new(), mem: HashMap::new() };
-        // module_sm (enum, 4 bytes) = 5 (module_sm_idle)
-        for (i, b) in 5u32.to_le_bytes().iter().enumerate() {
-            t.mem.insert(0x7001_3954 + i as u32, *b);
+        let (name, addr, size, enums) = s
+            .globals
+            .iter()
+            .filter(|g| g.addr != 0)
+            .find_map(|g| {
+                let v = Eval::new(&s, &mut t).evaluate(&g.name).ok()?;
+                let info = s.type_info(&v.ty);
+                let enums = s.enumerators(&v.ty);
+                let fits = enums.len() >= 2 && enums.iter().take(2).all(|e| (0..0x80).contains(&e.2));
+                (v.place == Place::Memory(g.addr) && info.class == TypeClass::Enumeration && [1, 2, 4].contains(&info.size) && fits)
+                    .then(|| (g.name.clone(), g.addr, info.size as usize, enums))
+            })
+            .expect("an enum global");
+        let ((_, e0, v0), (_, e1, v1)) = (&enums[0], &enums[1]);
+        let val = *v0 as i32;
+        for (i, b) in val.to_le_bytes()[..size].iter().enumerate() {
+            t.mem.insert(addr + i as u32, *b);
         }
         let mut ev = Eval::new(&s, &mut t);
-        let v = ev.evaluate("module_sm").unwrap();
-        assert_eq!(v.place, Place::Memory(0x7001_3954));
-        let info = s.type_info(&v.ty);
-        assert_eq!((info.class, info.size, info.name.as_deref()), (TypeClass::Enumeration, 4, Some("Module_sm_en")));
-        let names: Vec<String> = s.enumerators(&v.ty).into_iter().map(|e| e.1).collect();
-        assert!(names.contains(&"module_sm_idle".to_string()), "{names:?}");
-        let r = ev.evaluate("module_sm == module_sm_idle").unwrap();
+        let v = ev.evaluate(&name).unwrap();
+        assert_eq!(v.place, Place::Memory(addr));
+        let r = ev.evaluate(&format!("{name} == {e0}")).unwrap();
         assert_eq!(ev.load(&r).unwrap(), 1i32.to_le_bytes());
-        let r = ev.evaluate("(module_sm + 3) * 2").unwrap();
-        assert_eq!(ev.load(&r).unwrap(), 16i32.to_le_bytes());
-        let r = ev.evaluate("&module_sm").unwrap();
+        let r = ev.evaluate(&format!("{name} == {e1}")).unwrap();
+        assert_eq!(ev.load(&r).unwrap(), ((v0 == v1) as i32).to_le_bytes());
+        let r = ev.evaluate(&format!("({name} + 3) * 2")).unwrap();
+        assert_eq!(ev.load(&r).unwrap(), val.wrapping_add(3).wrapping_mul(2).to_le_bytes());
+        let r = ev.evaluate(&format!("&{name}")).unwrap();
         assert_eq!(s.type_info(&r.ty).class, TypeClass::Pointer);
-        assert_eq!(ev.load(&r).unwrap(), 0x7001_3954u32.to_le_bytes());
-        let r = ev.evaluate("*(uint8*)0x70013954").unwrap();
-        assert_eq!(r.place, Place::Memory(0x7001_3954));
-        assert_eq!(ev.load(&r).unwrap(), vec![5]);
-        assert_eq!(ev.assign(&r, &[7]).unwrap(), Write::Memory(0x7001_3954, vec![7]));
+        assert_eq!(ev.load(&r).unwrap(), addr.to_le_bytes());
+        let r = ev.evaluate(&format!("*(unsigned char*){addr:#x}")).unwrap();
+        assert_eq!(r.place, Place::Memory(addr));
+        assert_eq!(ev.load(&r).unwrap(), vec![val.to_le_bytes()[0]]);
+        assert_eq!(ev.assign(&r, &[7]).unwrap(), Write::Memory(addr, vec![7]));
 
-        // Conditional operator. module_sm is 5, and 0xdead0000 is unmapped in `Mem`, so an
-        // evaluated branch that reads it fails - which is how the untaken branch is proven unread.
-        let r = ev.evaluate("module_sm == 5 ? 1 : *(uint32*)0xdead0000 + 1").unwrap();
+        // Conditional operator. 0xdead0000 is unmapped in `Mem`, so an evaluated branch that
+        // reads it fails - which is how the untaken branch is proven unread.
+        let r = ev.evaluate(&format!("{name} == {val} ? 1 : *(unsigned int*)0xdead0000 + 1")).unwrap();
         assert_eq!(ev.load(&r).unwrap(), 1i32.to_le_bytes());
-        let r = ev.evaluate("module_sm == 9 ? *(uint32*)0xdead0000 + 1 : 7").unwrap();
+        let r = ev.evaluate(&format!("{name} != {val} ? *(unsigned int*)0xdead0000 + 1 : 7")).unwrap();
         assert_eq!(ev.load(&r).unwrap(), 7i32.to_le_bytes());
-        assert!(ev.evaluate("module_sm == 5 ? *(uint32*)0xdead0000 + 1 : 7").is_err());
+        assert!(ev.evaluate(&format!("{name} == {val} ? *(unsigned int*)0xdead0000 + 1 : 7")).is_err());
         // The taken branch keeps its place, so a nested ORTI-shaped attribute stays readable.
-        let r = ev.evaluate("module_sm == 5 ? ( module_sm == 6 ? 0 : module_sm ) : 0xFF").unwrap();
-        assert_eq!(r.place, Place::Memory(0x7001_3954));
-        assert_eq!(ev.load(&r).unwrap(), 5u32.to_le_bytes());
-        // Locals of App_CyclicTask: State_u8 is at
-        // A10+6, rte_read_state in D8.
-        //
-        // The pc is resolved, not hardcoded. Code addresses move with every
-        // application rebuild, and a stale constant does not fail cleanly --
-        // it silently retargets the test at whichever function now occupies
-        // that address. (0x8021a99c, hardcoded here before, today lands in
-        // App_Init.)
-        let f = *s
-            .functions_named("App_CyclicTask")
-            .first()
-            .expect("test ELF has App_CyclicTask");
-        // The first body statement: the function's own locals are in scope,
-        // while the block-local Loop_u8 further down is not yet. The entry at
-        // f.low is the prologue, where nothing is live.
+        let r = ev.evaluate(&format!("{name} == {val} ? ( {name} != {val} ? 0 : {name} ) : 0xFF")).unwrap();
+        assert_eq!(r.place, Place::Memory(addr));
+        assert_eq!(ev.load(&r).unwrap(), val.to_le_bytes()[..size]);
+
+        // Locals: in the first statement of some function that has any, they resolve to a place.
         let pc = s
-            .lines_in_range(f.low, f.high)
-            .into_iter()
-            .map(|l| l.start)
-            .find(|&a| !s.locals_at(a).is_empty())
-            .expect("a body statement with locals in scope");
+            .functions
+            .iter()
+            .filter_map(|f| s.lines_in_range(f.low, f.high).into_iter().map(|l| l.start).find(|&a| !s.locals_at(a).is_empty()))
+            .next()
+            .expect("a function with locals");
         let locals = s.locals_at(pc);
-        let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
-        assert!(names.contains(&"State_u8") && names.contains(&"rte_read_state"), "{names:?}");
-        assert!(!names.contains(&"Loop_u8"), "block-local variable outside its block: {names:?}");
-        let mut t = Mem { pc: Some(pc), regs: HashMap::from([(26, 0x7000_1000), (8, 1)]), mem: HashMap::from([(0x7000_1006, 42)]) };
+        let mut t = Mem { pc: Some(pc), regs: (0..64).map(|r| (r, 0x7000_1000)).collect(), mem: HashMap::new() };
         let mut ev = Eval::new(&s, &mut t);
-        let v = ev.evaluate("State_u8").unwrap();
-        assert_eq!(v.place, Place::Memory(0x7000_1006));
-        assert_eq!(ev.load(&v).unwrap(), vec![42]);
-        let v = ev.evaluate("rte_read_state").unwrap();
-        assert_eq!(v.place, Place::Register(8));
-        assert_eq!(ev.load(&v).unwrap(), vec![1]);
-        assert_eq!(ev.assign(&v, &[0]).unwrap(), Write::Register(8, 0));
+        assert!(locals.iter().any(|l| ev.evaluate(&l.name).is_ok()), "no local of {pc:#x} evaluates: {:?}", locals.iter().map(|l| &l.name).collect::<Vec<_>>());
         let v = ev.evaluate("$sp + 4").unwrap();
         assert_eq!(ev.load(&v).unwrap(), 0x7000_1004u32.to_le_bytes());
     }

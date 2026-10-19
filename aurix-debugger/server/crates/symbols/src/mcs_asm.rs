@@ -546,7 +546,11 @@ mod tests {
 
     #[test]
     fn real_mcs_sources_match_the_ghs_output() {
-        let base = Path::new("C:/workspace/app/bsw/AutosarAbstractionLayers/MCAL/TriMCS");
+        // A folder with src/MCS<n>.asm, inc/ and the GHS output gen/MCS<n>_Gen.c.
+        let Some(base) = std::env::var_os("AURIX_TEST_MCS_DIR").map(std::path::PathBuf::from) else {
+            eprintln!("AURIX_TEST_MCS_DIR not set, skipping");
+            return;
+        };
         if !base.is_dir() {
             eprintln!("skipped: {} not found", base.display());
             return;
@@ -579,7 +583,7 @@ mod tests {
                 let op = isa::mcs::decode(w).unwrap_or_else(|| panic!("{n} @{:#x}: {w:#010x} not decoded", l.addr));
                 assert_eq!(isa::mcs::encode(op, &isa::mcs::operands(op, w)).unwrap(), w, "{n} @{:#x}", l.addr);
             }
-            assert!(prog.labels.iter().any(|l| l.code && l.name == "task0_init" || n == "MCS1"));
+            assert!(prog.labels.iter().any(|l| l.code), "{n}: no code labels");
         }
     }
 }

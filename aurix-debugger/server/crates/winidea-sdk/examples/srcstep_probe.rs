@@ -1,4 +1,5 @@
-//! Times winIDEA's own source-level steps: `srcstep_probe <workspace>`.
+//! Times winIDEA's own source-level steps: `srcstep_probe <workspace>`, starting at the
+//! function AURIX_TEST_FUNCTION (default `main`).
 //! Expects cpu0 halted; leaves it running at the end.
 use std::time::Instant;
 use winidea_sdk::{AddressController, ConnectionMgr, ExecutionController, WinIdea};
@@ -23,7 +24,7 @@ fn main() {
         let s = e.cpu_status().unwrap();
         if !s.is_stopped { e.stop().unwrap(); }
         let t0 = Instant::now();
-        e.run_until_function("App_CyclicTask").unwrap();
+        e.run_until_function(&std::env::var("AURIX_TEST_FUNCTION").unwrap_or_else(|_| "main".into())).unwrap();
         println!("  reached: {:?}", e.wait_until_stopped(5000));
         println!("  run until function      {:>8.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         show("start", Instant::now(), &e);

@@ -13,3 +13,4 @@ docs/
 *.vsix
 !bin/**
 bin/llvm-dwarfdump.exe
+media/*.gif

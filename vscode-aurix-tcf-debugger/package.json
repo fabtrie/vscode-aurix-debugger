@@ -54,8 +54,8 @@
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
 		"test": "node ./out/test/runTest.js",
-		"package": "npx vsce package --target win32-x64 --no-rewrite-relative-links -o aurix-debugger.vsix",
-		"release": "npx vsce publish --target win32-x64 --no-rewrite-relative-links",
+		"package": "npx vsce package --target win32-x64 --baseContentUrl https://github.com/fabtrie/vscode-aurix-debugger/blob/main/vscode-aurix-tcf-debugger --baseImagesUrl https://github.com/fabtrie/vscode-aurix-debugger/raw/main/vscode-aurix-tcf-debugger -o aurix-debugger.vsix",
+		"release": "npx vsce publish --target win32-x64 --baseContentUrl https://github.com/fabtrie/vscode-aurix-debugger/blob/main/vscode-aurix-tcf-debugger --baseImagesUrl https://github.com/fabtrie/vscode-aurix-debugger/raw/main/vscode-aurix-tcf-debugger",
 		"copy-agent": "node ./scripts/copy-agent.js"
 	},
 	"devDependencies": {

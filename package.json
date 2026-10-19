@@ -7,6 +7,7 @@
     "build:server": "node ./scripts/build-server.js",
     "build:extension": "npm --prefix vscode-aurix-tcf-debugger run compile",
     "build": "npm run build:server && npm run build:extension",
-    "package": "npm run build:server && npm --prefix vscode-aurix-tcf-debugger run package"
+    "package": "npm run build:server && npm --prefix vscode-aurix-tcf-debugger run package",
+    "release": "npm run build:server && npm --prefix vscode-aurix-tcf-debugger run release"
   }
 }

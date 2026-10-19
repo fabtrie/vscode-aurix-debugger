@@ -38,9 +38,8 @@ fails with an obscure *winIDEA-internal path* error rather than a missing symbol
 
 Resolution order is in `default_search_paths()`, most specific first:
 
-1. `AURIX_WINIDEA_SDK_PATH` — set by Electron main to the bundled copy
-   (`resources/bin/winidea` packaged, `crates/winidea-sdk/lib/x64` in dev),
-   mirroring how `AURIX_UV_PATH` works for uv.
+1. `AURIX_WINIDEA_SDK_PATH` — the directory holding the DLL, set by whoever
+   launches the server.
 2. `WINIDEA_HOME` — a user-pointed install.
 3. This crate's own `lib/x64/`, baked in via `CARGO_MANIFEST_DIR`, so
    `cargo run --example smoke` works with no arguments.

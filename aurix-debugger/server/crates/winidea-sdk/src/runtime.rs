@@ -517,23 +517,20 @@ pub(crate) unsafe fn from_cstr(p: *const c_char) -> Option<String> {
 ///
 /// Ordered most- to least-specific, so an explicit override always wins:
 ///
-/// 1. `AURIX_WINIDEA_SDK_PATH` — the directory holding the DLL. Set by the
-///    Electron main process to the bundled copy (`resources/bin/winidea` when
-///    packaged, `crates/winidea-sdk/lib/x64` in dev), exactly as
-///    `AURIX_UV_PATH` works for uv.
+/// 1. `AURIX_WINIDEA_SDK_PATH` — the directory holding the DLL, set by
+///    whoever launches the server.
 /// 2. `WINIDEA_HOME` — a user-pointed winIDEA install.
-/// 3. This crate's bundled `lib/x64/`, resolved at compile time. Makes
-///    `cargo run --example smoke` work with no arguments and no install.
+/// 3. This crate's `lib/x64/`, resolved at compile time, where a developer
+///    copies the DLL (see README.md). Makes `cargo run --example smoke` work
+///    with no arguments and no install.
 /// 4. A real winIDEA installation under Program Files.
 /// 5. Next to the running executable, for a portable deployment.
 pub fn default_search_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
 
-    // The app-provided path wins. Electron fills it from the `winidea.sdkPath`
-    // setting when set, falling back to the copy the host app ships -- so a host
-    // running a different winIDEA version can point at its own matching SDK,
-    // which is the only way to get full coverage (see the ".ReadCompressed"
-    // note on `daq::AcquisitionMode`).
+    // The explicit path wins, so a host running a different winIDEA version
+    // can point at its own matching SDK, which is the only way to get full
+    // coverage (see the ".ReadCompressed" note on `daq::AcquisitionMode`).
     if let Some(dir) = std::env::var_os("AURIX_WINIDEA_SDK_PATH") {
         v.push(PathBuf::from(dir));
     }
@@ -544,7 +541,7 @@ pub fn default_search_paths() -> Vec<PathBuf> {
         v.push(home);
     }
 
-    // The copy vendored into this crate. `CARGO_MANIFEST_DIR` is baked in at
+    // The copy in this crate's lib/x64. `CARGO_MANIFEST_DIR` is baked in at
     // compile time, so this resolves for any binary built from this workspace
     // regardless of its working directory.
     v.push(

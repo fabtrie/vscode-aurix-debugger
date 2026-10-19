@@ -50,7 +50,7 @@ npm run package
 
 ### Install from VSIX
 
-1. Build the project (see above) or download the `.vsix` from [Releases](https://github.com/ZeZhan/vscode-aurix-tcf-debugger/releases)
+1. Build the project (see above)
 2. Open the Extensions view by selecting the Extensions icon in the Activity Bar, or use the (`Ctrl+Shift+X`) keyboard shortcut.
 3. Click `...` and choose "Install from VSIX..."
 4. Select the `.vsix` file
@@ -224,6 +224,11 @@ The action is responsible for the target state it needs (e.g. halting the cores 
 ```json
 { "key": "ctrl+alt+e", "command": "aurix-debugger.runAction", "args": { "id": "erasePflash" }, "when": "debugType == aurixdbg" }
 ```
+
+
+## Acknowledgements
+
+This work is based on [vscode-aurix-tcf-debugger](https://github.com/ZeZhan/vscode-aurix-tcf-debugger) by ZeZhan. Many thanks for creating it and making it available.
 
 
 ## License

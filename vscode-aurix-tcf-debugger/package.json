@@ -1,6 +1,6 @@
 {
 	"name": "aurix-debugger",
-	"description": "AURIX™ debugger for VS Code, based on the aurix-dbg debug server (Infineon TAS, OpenOCD cfg scripts)",
+	"description": "AURIX™ debugger for VS Code",
 	"displayName": "AURIX™ Debugger",
 	"icon": "media/debugger-icon.png",
 	"publisher": "fabtrie",

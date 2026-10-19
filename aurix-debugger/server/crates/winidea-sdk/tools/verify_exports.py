@@ -7,7 +7,9 @@
 `Sdk::load` resolves all ~6k symbols eagerly, so a single bad name makes the
 whole load fail at runtime -- on a machine that has winIDEA, which is not
 necessarily the machine that built the code. This check catches that at
-development time instead, without needing the SDK installed.
+development time instead, without needing winIDEA running. csexp.txt is not
+committed; create it from the SDK's isystemConnect.dll with dumpbin (see
+../README.md, "Regenerating").
 
 It is the strongest verification available without a live winIDEA: it proves the
 symbol NAMES are right. It cannot prove the SIGNATURES are right (nothing can,

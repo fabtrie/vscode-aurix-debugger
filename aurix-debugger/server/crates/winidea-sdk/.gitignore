@@ -1,0 +1,3 @@
+# iSYSTEM's proprietary SDK library, not included in this repository.
+# ("Where the DLL comes from") for where to get it.
+/lib/x64/isystemConnect.dll

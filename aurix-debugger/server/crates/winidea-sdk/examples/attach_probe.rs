@@ -2,13 +2,12 @@
 //!
 //! `smoke.rs` proves the DLL loads and the SWIG callbacks are sound; it never
 //! asks whether there is a winIDEA to talk to. This answers exactly that, in
-//! the same order `the winidea backend` does when the workspace setting is blank
+//! the same order the `winidea` backend does when no workspace is configured
 //! (`ConnectTarget::Attach`):
 //!
 //!   1. `enumerate_instances()` — the backend's "is anything running?" check.
-//!      An empty list is precisely what surfaces as `NoRunningInstance`, and
-//!      is the most common reason the picker's "Debugger variables" root is
-//!      empty.
+//!      An empty list is precisely what surfaces as `NoRunningInstance`, the
+//!      most common reason an attach finds nothing.
 //!   2. `connect_tcp(port)` — attach to a found instance. Never starts
 //!      winIDEA, matching the backend's attach mode.
 //!   3. `DaqController::info()` — whether anything can actually be SAMPLED.

@@ -191,12 +191,17 @@ class InfoSymbolFile:
     """Path on the debug server's machine."""
     targets: list[str]
     """Targets whose symbol set holds the file."""
+    local_cores: list[int] | None = None
+    """The TriCore cores (core IDs) the file is assigned to (`load_symbols` `path@N`, or
+    `symbolFiles` in VS Code): whose core-local RAM its variables there are in. Left out when
+    it is assigned to none."""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> InfoSymbolFile:
         return cls(
             path=d.get("path"),
             targets=d.get("targets"),
+            local_cores=d.get("local_cores"),
         )
 
 
@@ -655,10 +660,10 @@ class VariableInfo:
     """C expression naming exactly this object, for `evaluate`, `write_variable`,
     `symbol_children` and the `expression` of a DAQ point. It is the plain name unless another
     global of the same name would be found first; then it is a symbol reference
-    (`${E0/GV:12}`)."""
+    (`${E0/GV:12}`). A copy in one core's core-local RAM ends in its core, `CRASH_state@2`."""
     has_children: bool
     """`symbol_children` lists members or elements: a struct or union, or an array of known
-    length."""
+    length; or, for a `per_core` group, the copies."""
     name: str
     """Name to show: the variable, the member, or the index (`[3]`)."""
     sampleable: bool
@@ -669,11 +674,20 @@ class VariableInfo:
     type_name: str
     """C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`."""
     address: int | None = None
-    """Address, when it is fixed (always for a global)."""
+    """Address, when it is fixed (always for a global, except a `per_core` group). Always the
+    system-bus address: a variable linked to the core-local alias (`0xD000_0000` DSPR,
+    `0xC000_0000` PSPR) is reported in the DSPR/PSPR of its core, e.g. `0x60000100` for
+    `0xD0000100` on core 1."""
     bit_offset: int | None = None
     """Bit field: position of its least significant bit in the storage unit at `address`."""
     bit_size: int | None = None
     """Bit field: width in bits."""
+    per_core: bool | None = None
+    """A group rather than one variable: it is in core-local RAM, which every TriCore core has
+    its own of, and its symbol file is not assigned to exactly one core (`load_symbols`
+    `path@N`, or `symbolFiles` in VS Code). Its `symbol_children` are the copies, one per core
+    (`CRASH_state@0`, `CRASH_state@1`, ...), each with its own address. A group has no
+    `address`, is not `sampleable`, and `evaluate` refuses its bare name. Left out when false."""
     unit: str | None = None
     """The compilation unit (source file) that defines a global; `list_globals` only."""
 
@@ -690,6 +704,7 @@ class VariableInfo:
             address=d.get("address"),
             bit_offset=d.get("bit_offset"),
             bit_size=d.get("bit_size"),
+            per_core=d.get("per_core"),
             unit=d.get("unit"),
         )
 
@@ -716,7 +731,8 @@ class VariableValue:
     `nan` / `inf` / `-inf` for a float that is not finite, and the bytes as hex for anything
     else or larger than 8 bytes."""
     address: int | None = None
-    """Address of the value, when it is stored on the target (not for `g_x + 1`)."""
+    """Address of the value, when it is stored on the target (not for `g_x + 1`). Always the
+    system-bus address: core-local RAM is reported in its core's DSPR/PSPR."""
     bit_offset: int | None = None
     """Bit field: position of its least significant bit in the storage unit at `address`."""
     bit_size: int | None = None
@@ -1000,10 +1016,11 @@ class GeneratedClient:
         DAQ session work without VS Code. Breakpoints that were pending are planted.
 
         There is one symbol set per core, and the last writer wins: a VS Code debug session
-        started afterwards replaces what was loaded here, and the other way round.
+        started afterwards replaces what was loaded here, and the other way round. `path@N`
+        assigns a file to the cores that run it, for its variables in core-local RAM.
 
         Args:
-            files: Files on the machine the debug server runs on. The first is the primary ELF; the others add symbols (bootmanager, FBL, ...).
+            files: Files on the machine the debug server runs on. The first is the primary ELF; the others add symbols (bootmanager, FBL, ...).  A file may end in `@N` or `@N,M` (TriCore core IDs), as in VS Code's `symbolFiles`: the cores that run it, whose core-local RAM (`0xD000_0000` / `0xC000_0000` alias) holds its variables linked there. Assigned to exactly one core, such a variable reads by its plain name; otherwise it needs its core, `CRASH_state@2`. A file without the suffix is assigned to no core, also when VS Code had assigned it.
             targets: Targets (names or indices) to load them for; default: all cores.
         """
         return SymbolsInfo.from_dict(self._call("POST", "/api/v1/symbols", None, _args({"files": files, "targets": targets})))
@@ -1018,7 +1035,9 @@ class GeneratedClient:
         page at a time.
 
         The search runs on the server and stays fast for an ELF with 10^5 globals. Each item says
-        whether a DAQ point can sample it and gives the expression to sample it by. Fails with
+        whether a DAQ point can sample it and gives the expression to sample it by. A variable in
+        core-local RAM whose file is not assigned to exactly one core is a `per_core` group: its
+        children are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ... Fails with
         `not_found` when no symbols are loaded (`load_symbols`).
 
         Args:
@@ -1034,13 +1053,14 @@ class GeneratedClient:
         stands for, each with the expression that names it.
 
         Reads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not
-        followed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`.
+        followed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`. The
+        children of a `per_core` group are its copies, one per core, each named with its `@N`.
 
         Args:
-            expression: C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or `symbol_children` returned.
+            expression: C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or `symbol_children` returned. It may end in `@N` as for `evaluate`; the children's expressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are its copies, one per core.
             limit: Return at most this many (default 100, at most 10000); a large array is paged like `list_globals`.
             offset: Skip this many children (default 0).
-            target: Symbols of this target (name or index); default: the first core that has symbols.
+            target: Symbols of this target (name or index); default: the first core that has symbols, or the core of an `@N`.
         """
         return SymbolChildren.from_dict(self._call("GET", "/api/v1/expressions/children", _args({"expression": expression, "limit": limit, "offset": offset, "target": target}), None))
 
@@ -1048,12 +1068,17 @@ class GeneratedClient:
         """Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
 
         Works while the cores run: there is no stack frame, so names are globals and statics, as in
-        a VS Code live watch. Fails with `not_found` for an unknown name or when no symbols are
-        loaded, and with `memory` when the target memory cannot be read.
+        a VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one
+        core the symbol file is assigned to; `address` is the system-bus address of that copy.
+
+        Fails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no
+        symbols are loaded; with `bad_request` for a variable in core-local RAM that needs an
+        `@N` (the message lists the choices) or an `@N` that contradicts `target`; and with
+        `memory` when the target memory cannot be read.
 
         Args:
-            expression: C expression: a global or static variable, a member or element of one (`g_motor.speed`, `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.
-            target: Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program RAM); default: the first core that has symbols.
+            expression: C expression: a global or static variable, a member or element of one (`g_motor.speed`, `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.  A trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression means, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for the HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned to exactly one core, and allowed (selecting that core's symbols) anywhere else.
+            target: Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program RAM); default: the first core that has symbols, or the core of an `@N`. It does not choose the core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.
         """
         return VariableValue.from_dict(self._call("GET", "/api/v1/expressions", _args({"expression": expression, "target": target}), None))
 
@@ -1061,12 +1086,13 @@ class GeneratedClient:
         """Write a variable by its expression and read it back.
 
         Works while the cores run, like `write_memory`; a bit field is merged into its storage
-        unit. Connected debugger clients (VS Code) are told to refresh their views.
+        unit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM
+        and the errors are as for `evaluate`.
 
         Args:
-            expression: C expression of the variable, as for `evaluate`; it must name something stored on the target.
+            expression: C expression of the variable, as for `evaluate` (including `@N`); it must name something stored on the target.
             value: The new value: a number; `true` / `false`; for an enum, an enumerator name; for an integer, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values exact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or array takes its bytes as a hex string of exactly its size.
-            target: Use this target's symbols and write memory as it sees it; default: the first core that has symbols.
+            target: Use this target's symbols and write memory as it sees it; default: the first core that has symbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.
         """
         return VariableValue.from_dict(self._call("PUT", "/api/v1/expressions", None, _args({"expression": expression, "value": value, "target": target})))
 

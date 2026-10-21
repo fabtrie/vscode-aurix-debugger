@@ -32,8 +32,10 @@ Targets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets`
 Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.";
 
 /// Revision of the API reported by `info`, raised whenever an operation or a field is added or
-/// changed. 1: `info`, `list_globals`, `symbol_children`, `evaluate`, `write_variable`.
-pub const API_VERSION: u32 = 1;
+/// changed. 1: `info`, `list_globals`, `symbol_children`, `evaluate`, `write_variable`. 2: `@N`
+/// in expressions for core-local RAM, `per_core` groups, `load_symbols` `path@N`,
+/// `local_cores` in `info`.
+pub const API_VERSION: u32 = 2;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

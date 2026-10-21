@@ -108,7 +108,8 @@ api! {
     /// DAQ session work without VS Code. Breakpoints that were pending are planted.
     ///
     /// There is one symbol set per core, and the last writer wins: a VS Code debug session
-    /// started afterwards replaces what was loaded here, and the other way round.
+    /// started afterwards replaces what was loaded here, and the other way round. `path@N`
+    /// assigns a file to the cores that run it, for its variables in core-local RAM.
     op load_symbols [symbols]: POST "/api/v1/symbols" (LoadSymbolsRequest) -> SymbolsInfo;
 
     /// The symbol files loaded per target (by this API or by a VS Code debug session).
@@ -118,7 +119,9 @@ api! {
     /// page at a time.
     ///
     /// The search runs on the server and stays fast for an ELF with 10^5 globals. Each item says
-    /// whether a DAQ point can sample it and gives the expression to sample it by. Fails with
+    /// whether a DAQ point can sample it and gives the expression to sample it by. A variable in
+    /// core-local RAM whose file is not assigned to exactly one core is a `per_core` group: its
+    /// children are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ... Fails with
     /// `not_found` when no symbols are loaded (`load_symbols`).
     op list_globals [variables]: GET "/api/v1/globals" (ListGlobalsRequest) -> GlobalList;
 
@@ -126,20 +129,27 @@ api! {
     /// stands for, each with the expression that names it.
     ///
     /// Reads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not
-    /// followed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`.
+    /// followed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`. The
+    /// children of a `per_core` group are its copies, one per core, each named with its `@N`.
     op symbol_children [variables]: GET "/api/v1/expressions/children" (SymbolChildrenRequest) -> SymbolChildren;
 
     /// Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
     ///
     /// Works while the cores run: there is no stack frame, so names are globals and statics, as in
-    /// a VS Code live watch. Fails with `not_found` for an unknown name or when no symbols are
-    /// loaded, and with `memory` when the target memory cannot be read.
+    /// a VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one
+    /// core the symbol file is assigned to; `address` is the system-bus address of that copy.
+    ///
+    /// Fails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no
+    /// symbols are loaded; with `bad_request` for a variable in core-local RAM that needs an
+    /// `@N` (the message lists the choices) or an `@N` that contradicts `target`; and with
+    /// `memory` when the target memory cannot be read.
     op evaluate [variables]: GET "/api/v1/expressions" (EvaluateRequest) -> VariableValue;
 
     /// Write a variable by its expression and read it back.
     ///
     /// Works while the cores run, like `write_memory`; a bit field is merged into its storage
-    /// unit. Connected debugger clients (VS Code) are told to refresh their views.
+    /// unit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM
+    /// and the errors are as for `evaluate`.
     op write_variable [variables]: PUT "/api/v1/expressions" (WriteVariableRequest) -> VariableValue;
 
     /// Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.

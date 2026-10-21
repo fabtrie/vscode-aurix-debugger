@@ -527,6 +527,12 @@ pub struct CommandOutput {
 pub struct LoadSymbolsRequest {
     /// Files on the machine the debug server runs on. The first is the primary ELF; the others
     /// add symbols (bootmanager, FBL, ...).
+    ///
+    /// A file may end in `@N` or `@N,M` (TriCore core IDs), as in VS Code's `symbolFiles`: the
+    /// cores that run it, whose core-local RAM (`0xD000_0000` / `0xC000_0000` alias) holds its
+    /// variables linked there. Assigned to exactly one core, such a variable reads by its plain
+    /// name; otherwise it needs its core, `CRASH_state@2`. A file without the suffix is assigned
+    /// to no core, also when VS Code had assigned it.
     pub files: Vec<String>,
     /// Targets (names or indices) to load them for; default: all cores.
     #[serde(default)]
@@ -774,6 +780,11 @@ pub struct InfoSymbolFile {
     pub path: String,
     /// Targets whose symbol set holds the file.
     pub targets: Vec<String>,
+    /// The TriCore cores (core IDs) the file is assigned to (`load_symbols` `path@N`, or
+    /// `symbolFiles` in VS Code): whose core-local RAM its variables there are in. Left out when
+    /// it is assigned to none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_cores: Vec<u32>,
 }
 
 /// The debug server, its probe connection and what is loaded.
@@ -839,14 +850,17 @@ pub struct VariableInfo {
     /// C expression naming exactly this object, for `evaluate`, `write_variable`,
     /// `symbol_children` and the `expression` of a DAQ point. It is the plain name unless another
     /// global of the same name would be found first; then it is a symbol reference
-    /// (`${E0/GV:12}`).
+    /// (`${E0/GV:12}`). A copy in one core's core-local RAM ends in its core, `CRASH_state@2`.
     pub expression: String,
     /// C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`.
     pub type_name: String,
     pub class: VariableClass,
     /// Size in bytes; for a bit field, of its storage unit.
     pub size: u32,
-    /// Address, when it is fixed (always for a global).
+    /// Address, when it is fixed (always for a global, except a `per_core` group). Always the
+    /// system-bus address: a variable linked to the core-local alias (`0xD000_0000` DSPR,
+    /// `0xC000_0000` PSPR) is reported in the DSPR/PSPR of its core, e.g. `0x60000100` for
+    /// `0xD0000100` on core 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<u32>,
     /// Bit field: position of its least significant bit in the storage unit at `address`.
@@ -856,7 +870,7 @@ pub struct VariableInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bit_size: Option<u32>,
     /// `symbol_children` lists members or elements: a struct or union, or an array of known
-    /// length.
+    /// length; or, for a `per_core` group, the copies.
     pub has_children: bool,
     /// A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at
     /// most 8 bytes.
@@ -864,6 +878,13 @@ pub struct VariableInfo {
     /// The compilation unit (source file) that defines a global; `list_globals` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// A group rather than one variable: it is in core-local RAM, which every TriCore core has
+    /// its own of, and its symbol file is not assigned to exactly one core (`load_symbols`
+    /// `path@N`, or `symbolFiles` in VS Code). Its `symbol_children` are the copies, one per core
+    /// (`CRASH_state@0`, `CRASH_state@1`, ...), each with its own address. A group has no
+    /// `address`, is not `sampleable`, and `evaluate` refuses its bare name. Left out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_core: bool,
 }
 
 /// Which globals to list.
@@ -900,7 +921,9 @@ pub struct GlobalList {
 #[serde(deny_unknown_fields)]
 pub struct SymbolChildrenRequest {
     /// C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or
-    /// `symbol_children` returned.
+    /// `symbol_children` returned. It may end in `@N` as for `evaluate`; the children's
+    /// expressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are
+    /// its copies, one per core.
     pub expression: String,
     /// Skip this many children (default 0).
     #[serde(default)]
@@ -909,7 +932,8 @@ pub struct SymbolChildrenRequest {
     /// `list_globals`.
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Symbols of this target (name or index); default: the first core that has symbols.
+    /// Symbols of this target (name or index); default: the first core that has symbols, or the
+    /// core of an `@N`.
     #[serde(default)]
     pub target: Option<String>,
 }
@@ -934,9 +958,15 @@ pub struct SymbolChildren {
 pub struct EvaluateRequest {
     /// C expression: a global or static variable, a member or element of one (`g_motor.speed`,
     /// `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.
+    ///
+    /// A trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression
+    /// means, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for
+    /// the HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned
+    /// to exactly one core, and allowed (selecting that core's symbols) anywhere else.
     pub expression: String,
     /// Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program
-    /// RAM); default: the first core that has symbols.
+    /// RAM); default: the first core that has symbols, or the core of an `@N`. It does not choose
+    /// the core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.
     #[serde(default)]
     pub target: Option<String>,
 }
@@ -955,7 +985,8 @@ pub struct VariableValue {
     pub class: VariableClass,
     /// Size in bytes; for a bit field, of its storage unit.
     pub size: u32,
-    /// Address of the value, when it is stored on the target (not for `g_x + 1`).
+    /// Address of the value, when it is stored on the target (not for `g_x + 1`). Always the
+    /// system-bus address: core-local RAM is reported in its core's DSPR/PSPR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<u32>,
     /// Bit field: position of its least significant bit in the storage unit at `address`.
@@ -982,8 +1013,8 @@ pub struct VariableValue {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteVariableRequest {
-    /// C expression of the variable, as for `evaluate`; it must name something stored on the
-    /// target.
+    /// C expression of the variable, as for `evaluate` (including `@N`); it must name something
+    /// stored on the target.
     pub expression: String,
     /// The new value: a number; `true` / `false`; for an enum, an enumerator name; for an
     /// integer, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values
@@ -992,7 +1023,7 @@ pub struct WriteVariableRequest {
     #[schemars(schema_with = "scalar_schema")]
     pub value: serde_json::Value,
     /// Use this target's symbols and write memory as it sees it; default: the first core that has
-    /// symbols.
+    /// symbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.
     #[serde(default)]
     pub target: Option<String>,
 }

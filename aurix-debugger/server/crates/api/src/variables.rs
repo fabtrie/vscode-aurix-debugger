@@ -5,7 +5,13 @@
 //! expression means the same variable here as in a VS Code live watch, through the same memory
 //! view. Values are decoded by the DAQ's [`Decoder`], so `evaluate` shows exactly what a DAQ point
 //! on the same expression streams.
+//!
+//! Core-local RAM (the `0xD000_0000` DSPR / `0xC000_0000` PSPR alias) exists once per TriCore
+//! core. A variable there means the copy of the core an `@N` names, or of the only core its ELF
+//! is assigned to ([`tcf::home_core`]); otherwise there is no single variable, so it is listed as
+//! a group of one child per core, and reading or writing it by its bare name is refused.
 
+use std::cell::OnceCell;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value as Json;
@@ -35,6 +41,7 @@ fn eval_error(e: tcf::GlobalError) -> ApiError {
         tcf::GlobalError::Memory(m) => ApiError::new(ErrorCode::Memory, m),
         tcf::GlobalError::Expression(m) if m.starts_with("Symbol not found") => ApiError::not_found(m),
         tcf::GlobalError::Expression(m) => ApiError::bad_request(m),
+        tcf::GlobalError::Core(m) => ApiError::bad_request(m),
     }
 }
 
@@ -106,6 +113,7 @@ fn shape(syms: &Symbols, ty: &TypeId, bits: Option<(u32, u32)>) -> Shape {
 fn variable(name: String, expression: String, syms: &Symbols, ty: &TypeId, size: u32, address: Option<u32>, bits: Option<(u32, u32)>) -> VariableInfo {
     let s = shape(syms, ty, bits);
     VariableInfo {
+        per_core: false,
         name,
         expression,
         type_name: s.type_name,
@@ -233,19 +241,37 @@ impl Target for NoMemory {
     }
 }
 
-fn global_info(set: &tcf::SymbolSet, p: usize, i: usize) -> VariableInfo {
-    let syms = &set.elfs[p].1;
+/// The TriCore cores by core ID, for [`tcf::home_core`]. Asked for only once a page holds a
+/// core-local global: the question waits for the core thread, which a plain search never does.
+fn tricores<'a>(api: &CoreApi, cache: &'a OnceCell<Vec<u32>>) -> &'a [u32] {
+    cache.get_or_init(|| tcf::cores(&api.handle).into_iter().filter(|c| c.tricore()).map(|c| c.coreid).collect())
+}
+
+fn global_info(api: &CoreApi, cores: &OnceCell<Vec<u32>>, set: &tcf::SymbolSet, p: usize, i: usize) -> VariableInfo {
+    let (n, syms) = &set.elfs[p];
     let g = &syms.globals[i];
     // The evaluator's own idea of the type: a label without debug information is one word.
     let ty = Eval::new(syms, &mut NoMemory).value_of(&SymbolRef::Global(i)).map(|v| v.ty).unwrap_or(TypeId::Void);
     let size = syms.type_info(&ty).size;
-    let mut v = variable(g.name.clone(), global_expression(set, p, i), syms, &ty, size, Some(g.addr), None);
+    // Core-local RAM: the global address in the one core the ELF is meant for, else a group.
+    let address = if aurix_core::tricore::local_address(g.addr) {
+        tcf::home_core(&api.session, tricores(api, cores), *n, None).ok().map(|core| aurix_core::tricore::global_address(core, g.addr))
+    } else {
+        Some(g.addr)
+    };
+    let mut v = variable(g.name.clone(), global_expression(set, p, i), syms, &ty, size, address, None);
+    if address.is_none() {
+        v.per_core = true;
+        v.has_children = true;
+        v.sampleable = false;
+    }
     v.unit = syms.units.get(g.unit).map(|u| u.name.clone()).filter(|n| !n.is_empty());
     v
 }
 
 pub fn list_globals(api: &CoreApi, req: ListGlobalsRequest) -> Result<GlobalList, ApiError> {
     let (_, set) = symbol_set(api, req.target.as_deref())?;
+    let cores = OnceCell::new();
     let index = api.globals.index(&set);
     let (offset, limit) = page(req.offset, req.limit);
     let pattern = req.query.as_deref().map(str::trim).filter(|q| !q.is_empty() && *q != "*").map(str::as_bytes);
@@ -260,7 +286,7 @@ pub fn list_globals(api: &CoreApi, req: ListGlobalsRequest) -> Result<GlobalList
         }
         // Types are looked up for this page only: that is the slow part.
         if total >= offset && items.len() < limit {
-            items.push(global_info(&set, p, i));
+            items.push(global_info(api, &cores, &set, p, i));
         }
         total += 1;
     }
@@ -291,19 +317,44 @@ fn named_members(syms: &Symbols, ty: &TypeId, base: u32, out: &mut Vec<MemberInf
     }
 }
 
+/// The children of a variable in core-local RAM that no core is determined for: one per core it
+/// may mean, each the variable `expr@N` at that core's global address.
+fn per_core_children(gv: &tcf::GlobalValue, cores: &[u32], offset: usize, limit: usize) -> Vec<VariableInfo> {
+    let syms = &gv.elf.1;
+    let v = &gv.value;
+    let (addr, size, bits) = match v.place {
+        Place::Bits { addr, storage, shift, bits } => (addr, storage, Some((shift, bits))),
+        _ => (gv.stored_at().unwrap_or(0), syms.type_info(&v.ty).size, None),
+    };
+    let expr = gv.expression();
+    let copy = |c: u32| variable(format!("core {c}"), format!("{expr}@{c}"), syms, &v.ty, size, Some(aurix_core::tricore::global_address(c, addr)), bits);
+    cores.iter().skip(offset).take(limit).map(|&c| copy(c)).collect()
+}
+
 pub fn symbol_children(api: &CoreApi, req: SymbolChildrenRequest) -> Result<SymbolChildren, ApiError> {
     let expression = req.expression.trim().to_string();
     let gv = evaluate_in(api, req.target.as_deref(), &expression)?;
     let syms = &gv.elf.1;
     let v = &gv.value;
     let info = syms.type_info(&v.ty);
+    let (offset, limit) = page(req.offset, req.limit);
+    if let Some(cores) = gv.per_core(&api.session) {
+        return Ok(SymbolChildren {
+            expression,
+            type_name: info.name.unwrap_or_else(|| "<unknown>".into()),
+            total: cores.len() as u32,
+            offset: offset as u32,
+            items: per_core_children(&gv, &cores, offset, limit),
+        });
+    }
     // Children of something stored at a fixed place have an address; of a computed value, none.
     let base = match (&v.place, &v.bytes) {
-        (Place::Memory(a), None) => Some(*a),
+        (Place::Memory(a), None) => gv.global_address(&api.session, *a).ok(),
         _ => None,
     };
-    let parent = postfix_base(syms, &expression);
-    let (offset, limit) = page(req.offset, req.limit);
+    // A child names the same core as its parent: `g_s@2` -> `g_s.a@2`.
+    let parent = postfix_base(syms, gv.expression());
+    let suffix = gv.suffix().map(|s| s.to_string()).unwrap_or_default();
     let (total, items) = match info.class {
         TypeClass::Composite => {
             let mut members = Vec::new();
@@ -314,7 +365,7 @@ pub fn symbol_children(api: &CoreApi, req: SymbolChildrenRequest) -> Result<Symb
                 .take(limit)
                 .map(|m| {
                     let name = m.name.clone().unwrap_or_default();
-                    variable(name.clone(), format!("{parent}.{name}"), syms, &m.ty, m.size, base.map(|a| a.wrapping_add(m.offset)), m.bits)
+                    variable(name.clone(), format!("{parent}.{name}{suffix}"), syms, &m.ty, m.size, base.map(|a| a.wrapping_add(m.offset)), m.bits)
                 })
                 .collect();
             (members.len(), items)
@@ -326,7 +377,7 @@ pub fn symbol_children(api: &CoreApi, req: SymbolChildrenRequest) -> Result<Symb
             let items = (offset..len.min(offset.saturating_add(limit)))
                 .map(|i| {
                     let addr = base.map(|a| a.wrapping_add(es.wrapping_mul(i as u32)));
-                    variable(format!("[{i}]"), format!("{parent}[{i}]"), syms, &elem, es, addr, None)
+                    variable(format!("[{i}]"), format!("{parent}[{i}]{suffix}"), syms, &elem, es, addr, None)
                 })
                 .collect();
             (len, items)
@@ -349,18 +400,20 @@ fn read_value(api: &CoreApi, expression: String, gv: &tcf::GlobalValue) -> Resul
     let syms = &gv.elf.1;
     let v = &gv.value;
     let size = syms.type_info(&v.ty).size;
-    let (address, bits, raw) = match (&v.place, &v.bytes) {
-        (_, Some(b)) => (None, None, b.clone()),
+    // Refuses a variable in core-local RAM that no core is named for, before reading anything.
+    let address = gv.stored_at().map(|a| gv.global_address(&api.session, a)).transpose().map_err(eval_error)?;
+    let (bits, raw) = match (&v.place, &v.bytes) {
+        (_, Some(b)) => (None, b.clone()),
         (Place::Memory(a), None) => {
             if size > MAX_TRANSFER {
                 return Err(ApiError::bad_request(format!("`{expression}` has {size} bytes, more than {MAX_TRANSFER}: use `read_memory`")));
             }
             let raw = if size == 0 { Vec::new() } else { gv.read(&api.session, *a, size as usize).map_err(|e| ApiError::new(ErrorCode::Memory, e))? };
-            (Some(*a), None, raw)
+            (None, raw)
         }
         (Place::Bits { addr, storage, shift, bits }, None) => {
             let raw = gv.read(&api.session, *addr, *storage as usize).map_err(|e| ApiError::new(ErrorCode::Memory, e))?;
-            (Some(*addr), Some((*shift, *bits)), raw)
+            (Some((*shift, *bits)), raw)
         }
         _ => return Err(ApiError::bad_request(format!("`{expression}` has no value without a stack frame"))),
     };
@@ -481,6 +534,9 @@ fn encode(syms: &Symbols, v: &symbols::expr::Value, bits: Option<(u32, u32)>, va
 pub fn write_variable(api: &CoreApi, req: WriteVariableRequest) -> Result<VariableValue, ApiError> {
     let expression = req.expression.trim().to_string();
     let gv = evaluate_in(api, req.target.as_deref(), &expression)?;
+    if let Some(a) = gv.stored_at() {
+        gv.global_address(&api.session, a).map_err(eval_error)?;
+    }
     let bits = match (&gv.value.place, &gv.value.bytes) {
         (Place::Memory(_), None) => None,
         (Place::Bits { shift, bits, .. }, None) => Some((*shift, *bits)),

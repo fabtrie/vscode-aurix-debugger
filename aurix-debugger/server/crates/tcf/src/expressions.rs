@@ -105,6 +105,28 @@ struct Scope {
     frame_index: Option<usize>,
     pc: Option<u32>,
     regs: [Option<u32>; PC_REGISTER as usize + 1],
+    /// Whose core-local memory the scope's reads of the local alias go to.
+    rule: LocalRule,
+}
+
+/// How the core whose core-local memory (`0xD000_0000` DSPR / `0xC000_0000` PSPR alias) an
+/// expression means is chosen.
+#[derive(Clone)]
+enum LocalRule {
+    /// A debugger view (TCF): the scope's core, or the one that runs the ELF (see
+    /// [`local_core`]). The scope is what the user picked, so it is a choice, not a guess.
+    Scope,
+    /// The REST/MCP/DAQ frontends, which have no scope: the core an `@N` names, else the only
+    /// core the ELF is assigned to, else none (see [`home_core`]). The TriCore cores as (core ID,
+    /// target index).
+    Home { explicit: Option<u32>, tricores: Vec<(u32, usize)> },
+}
+
+impl Scope {
+    /// A core's scope without a stack frame (globals only).
+    fn global(core: CoreInfo, rule: LocalRule) -> Scope {
+        Scope { core, frame_id: None, frame_index: None, pc: None, regs: [None; PC_REGISTER as usize + 1], rule }
+    }
 }
 
 fn frames(sh: &Shared, c: &CoreInfo) -> Res<Vec<Frame>> {
@@ -135,7 +157,7 @@ fn scope_for(sh: &Shared, ctx: &str) -> Res<Scope> {
         _ if ctx == core.id && core.suspended() && !sh.is_stepping(core.idx) => Some(0),
         _ => None,
     };
-    let mut s = Scope { core, frame_id: None, frame_index: None, pc: None, regs: [None; PC_REGISTER as usize + 1] };
+    let mut s = Scope::global(core, LocalRule::Scope);
     if let Some(i) = index {
         let fr = frames(sh, &s.core)?;
         let f = fr.get(i).ok_or_else(|| (ERR_INV_CONTEXT, format!("Invalid stack frame: {ctx}")))?;
@@ -163,14 +185,23 @@ struct TcfTarget<'a> {
     sh: &'a Shared,
     /// Target index of the scope's core.
     core: usize,
-    /// Target index for the core-local memory (see [`local_core`]).
-    local: usize,
+    /// Target index for the core-local memory (see [`LocalRule`]); `None` when no core is
+    /// determined, so such a read fails rather than picking one.
+    local: Option<usize>,
     /// ELF the expression is evaluated with.
     elf: usize,
     pc: Option<u32>,
     regs: [Option<u32>; PC_REGISTER as usize + 1],
     /// The last read that failed, so a caller can tell a memory fault from a bad name.
-    read_error: Option<String>,
+    read_error: Option<ReadFail>,
+}
+
+/// A read that failed while evaluating.
+#[derive(Clone, Debug, Default)]
+struct ReadFail {
+    message: String,
+    /// The read was of core-local memory that no core is determined for: (ELF, address).
+    per_core: Option<(usize, u32)>,
 }
 
 impl Target for TcfTarget<'_> {
@@ -181,9 +212,13 @@ impl Target for TcfTarget<'_> {
         self.regs.get(r as usize).copied().flatten()
     }
     fn read(&mut self, addr: u32, len: usize) -> Result<Vec<u8>, String> {
-        let r = read_mem(self.sh, if local_address(addr) { self.local } else { self.core }, addr, len);
+        let t = if local_address(addr) { self.local } else { Some(self.core) };
+        let r = match t {
+            Some(t) => read_mem(self.sh, t, addr, len),
+            None => Err(format!("0x{addr:08x} is core-local RAM and no core is named for it")),
+        };
         if let Err(e) = &r {
-            self.read_error = Some(e.clone());
+            self.read_error = Some(ReadFail { message: e.clone(), per_core: t.is_none().then_some((self.elf, addr)) });
         }
         r
     }
@@ -203,7 +238,15 @@ pub fn symbol_ref(elf: usize, id: &str) -> Option<SymbolRef> {
 }
 
 fn target<'a>(sh: &'a Shared, elf: usize, s: &Scope) -> TcfTarget<'a> {
-    TcfTarget { sh, core: s.core.idx, local: local_core(sh, elf, s), elf, pc: s.pc, regs: s.regs, read_error: None }
+    let local = match &s.rule {
+        LocalRule::Scope => Some(local_core(sh, elf, s)),
+        LocalRule::Home { explicit, tricores } => {
+            let ids: Vec<u32> = tricores.iter().map(|t| t.0).collect();
+            let home = home_core(sh, &ids, elf, *explicit).ok();
+            home.and_then(|c| tricores.iter().find(|t| t.0 == c)).map(|t| t.1)
+        }
+    };
+    TcfTarget { sh, core: s.core.idx, local, elf, pc: s.pc, regs: s.regs, read_error: None }
 }
 
 /// The target whose core-local memory (`0xD000_0000` DSPR / `0xC000_0000` PSPR alias) an
@@ -423,9 +466,9 @@ fn evaluate_entry(sh: &Shared, parent: &str, text: &str, symbol: &Option<String>
 
 /// Evaluates `text` in `scope` with the ELF files of `ctx`, then with the globals of the other
 /// cores' files. A failure also carries the read that failed while the first file evaluated it,
-/// if one did.
-fn evaluate_text(sh: &Shared, ctx: &str, scope: Scope, text: &str) -> Result<(Scope, Elf, Value), ((i64, String), Option<String>)> {
-    let mut first_err = None;
+/// if one did, or a later file's read of core-local memory that no core is named for.
+fn evaluate_text(sh: &Shared, ctx: &str, scope: Scope, text: &str) -> Result<(Scope, Elf, Value), ((i64, String), Option<ReadFail>)> {
+    let mut first_err: Option<(String, Option<ReadFail>)> = None;
     let own = elfs_for(sh, ctx, scope.pc, text);
     for elf in own.iter().flatten() {
         let mut t = target(sh, elf.0, &scope);
@@ -433,7 +476,12 @@ fn evaluate_text(sh: &Shared, ctx: &str, scope: Scope, text: &str) -> Result<(Sc
         match r {
             Ok(v) => return Ok((scope, elf.clone(), v)),
             Err(e) => {
-                first_err.get_or_insert((e, t.read_error));
+                // Core-local memory that no core is named for says more than "not found" in
+                // another file would.
+                let per_core = |r: &Option<ReadFail>| r.as_ref().is_some_and(|r| r.per_core.is_some());
+                if first_err.as_ref().is_none_or(|f| per_core(&t.read_error) && !per_core(&f.1)) {
+                    first_err = Some((e, t.read_error));
+                }
             }
         }
     }
@@ -442,7 +490,7 @@ fn evaluate_text(sh: &Shared, ctx: &str, scope: Scope, text: &str) -> Result<(Sc
     let own_elfs: Vec<usize> = own.iter().flatten().map(|e| e.0).collect();
     for core in cores(&sh.handle).into_iter().filter(|c| c.idx != scope.core.idx) {
         let Some(set) = sh.symbols_for(&core.id) else { continue };
-        let other = Scope { core, frame_id: None, frame_index: None, pc: None, regs: [None; PC_REGISTER as usize + 1] };
+        let other = Scope::global(core, scope.rule.clone());
         for elf in set.ordered(None).into_iter().filter(|e| !own_elfs.contains(&e.0)) {
             let mut t = target(sh, elf.0, &other);
             if let Ok(v) = Eval::new(&elf.1, &mut t).evaluate(text) {
@@ -591,7 +639,8 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
 /// Writes `bytes` at `addr` through the memory view of ELF `n` in `scope`. Returns the target
 /// whose view was used.
 fn write_checked(sh: &Shared, scope: &Scope, n: usize, addr: u32, bytes: Vec<u8>) -> Result<usize, String> {
-    let idx = if local_address(addr) { local_core(sh, n, scope) } else { scope.core.idx };
+    let idx = if local_address(addr) { target(sh, n, scope).local } else { Some(scope.core.idx) };
+    let idx = idx.ok_or_else(|| format!("0x{addr:08x} is core-local RAM and no core is named for it"))?;
     let expect = bytes.clone();
     sh.handle
         .call(move |cx| ops::write_memory_as(cx, idx, addr, &bytes).map_err(|e| e.to_string()))
@@ -617,30 +666,122 @@ fn write_checked(sh: &Shared, scope: &Scope, n: usize, addr: u32, bytes: Vec<u8>
 pub enum GlobalError {
     /// No symbols are loaded for the context.
     NoSymbols,
-    /// The context names no core, or there are no cores.
+    /// The context or an `@N` names no core, or there are no cores.
     NoTarget(String),
     /// Reading target memory failed while evaluating (e.g. following a pointer).
     Memory(String),
     /// The expression does not parse or names nothing.
     Expression(String),
+    /// The expression needs core-local RAM and names no core while several could be meant, or
+    /// it names a core other than the request's target.
+    Core(String),
+}
+
+/// The core a trailing `@N` or `@hsm` of an expression names (see [`split_core`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreSel {
+    /// The TriCore core with core ID `N`: whose core-local RAM the expression means.
+    Tricore(u32),
+    /// The HSM: its symbols and memory view.
+    Hsm,
+}
+
+impl std::fmt::Display for CoreSel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CoreSel::Tricore(n) => write!(f, "@{n}"),
+            CoreSel::Hsm => f.write_str("@hsm"),
+        }
+    }
+}
+
+/// Splits the core suffix off an expression: `CRASH_state@2`, `${E0/GV:12}@1`, `g_key@hsm`, as
+/// a VS Code live watch writes them. `@` cannot occur in a C expression, so a trailing `@N` or
+/// `@hsm` is never part of one (the `@` inside a `${...}` frame-local ID is followed by `S`).
+pub fn split_core(text: &str) -> (&str, Option<CoreSel>) {
+    let text = text.trim();
+    let Some((head, tail)) = text.rsplit_once('@') else { return (text, None) };
+    let (head, tail) = (head.trim_end(), tail.trim());
+    let sel = if tail.eq_ignore_ascii_case("hsm") {
+        CoreSel::Hsm
+    } else if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+        // Too many digits for a core ID is still a core that does not exist.
+        CoreSel::Tricore(tail.parse().unwrap_or(u32::MAX))
+    } else {
+        return (text, None);
+    };
+    if head.is_empty() {
+        return (text, None);
+    }
+    (head, Some(sel))
+}
+
+/// The TriCore core (core ID) whose core-local RAM a REST/MCP/DAQ expression of ELF `elf` means:
+/// the one an `@N` names (`explicit`), else the only core the ELF is assigned to (`symbolFiles`
+/// `path@N`, `load_symbols` `path@N`). Otherwise the cores to name one of: the ELF's if it is
+/// assigned to several, else every TriCore core of `tricores` (core IDs), not the HSM.
+///
+/// Unlike a live watch there is no scope whose core could stand in: picking one would read
+/// another core's RAM without a word, which is worse than refusing.
+pub fn home_core(sh: &Shared, tricores: &[u32], elf: usize, explicit: Option<u32>) -> Result<u32, Vec<u32>> {
+    if let Some(n) = explicit {
+        return Ok(n);
+    }
+    let mut runs = sh.symbols.lock().unwrap().run_cores(elf).to_vec();
+    match runs.as_slice() {
+        [one] if tricores.contains(one) => Ok(*one),
+        [_, _, ..] => {
+            runs.sort_unstable();
+            runs.dedup();
+            Err(runs)
+        }
+        // Not assigned, or to a core this chip does not have.
+        _ => {
+            let mut all = tricores.to_vec();
+            all.sort_unstable();
+            Err(all)
+        }
+    }
+}
+
+/// The refusal of an expression that needs core-local RAM at `addr` of ELF `elf` without a core
+/// named, listing what to write instead. `reads`: the RAM is read on the way (`*p`), rather than
+/// being where the value is.
+fn per_core_error(sh: &Shared, elf: usize, text: &str, addr: u32, candidates: &[u32], reads: bool) -> GlobalError {
+    let file = sh.elf(elf).and_then(|s| s.path.file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_else(|| "its symbol file".into());
+    let runs = sh.symbols.lock().unwrap().run_cores(elf).len() > 1;
+    let list = |v: &[String], last: &str| match v {
+        [] => String::new(),
+        [one] => one.clone(),
+        [head @ .., tail] => format!("{} {last} {tail}", head.join(", ")),
+    };
+    let cores: Vec<String> = candidates.iter().map(u32::to_string).collect();
+    let options: Vec<String> = candidates.iter().map(|c| format!("`{text}@{c}`")).collect();
+    let how = if runs { format!(" (it runs on cores {})", list(&cores, "and")) } else { String::new() };
+    let what = if reads { "reads" } else { "is in" };
+    let fix = if options.is_empty() { "; there is no TriCore core to read it through".to_string() } else { format!("; use {}", list(&options, "or")) };
+    GlobalError::Core(format!("`{text}` {what} core-local RAM (0x{addr:08X}) and {file} is not assigned to a single core{how}{fix}"))
 }
 
 /// An expression evaluated without a stack frame, as a live watch evaluates it while the core
 /// runs: globals, statics, constants and what they lead to.
 ///
-/// The REST/MCP variable operations use this rather than an evaluator of their own, so a name
-/// means the same variable there as in VS Code, read through the same memory view (core-local
-/// RAM through the core that runs the ELF).
+/// The REST/MCP variable operations and DAQ points use this rather than an evaluator of their
+/// own, so a name means the same variable there as in VS Code. Core-local RAM is the one of the
+/// core [`home_core`] picks; a value stored there for no determined core still evaluates (its
+/// type and address are known), and [`Self::per_core`] tells the caller to pick one.
 pub struct GlobalValue {
     pub elf: Elf,
     pub value: Value,
     scope: Scope,
+    /// The expression without its core suffix, and the suffix.
+    text: String,
+    sel: Option<CoreSel>,
 }
 
 /// The core a global expression of `ctx` is evaluated for: the one `ctx` names, else the first
 /// core with symbols (the set `symbols_for("")` picks), else the first examined one.
-fn global_scope(sh: &Shared, ctx: &str) -> Result<Scope, GlobalError> {
-    let all = cores(&sh.handle);
+fn global_scope(sh: &Shared, all: &[CoreInfo], ctx: &str, rule: LocalRule) -> Result<Scope, GlobalError> {
     let pos = match crate::contexts::owning_core(ctx) {
         Some(id) => all.iter().position(|c| c.id == id).ok_or_else(|| GlobalError::NoTarget(format!("unknown context {ctx}")))?,
         None => {
@@ -650,19 +791,51 @@ fn global_scope(sh: &Shared, ctx: &str) -> Result<Scope, GlobalError> {
             with_syms.first().copied().or_else(|| all.iter().position(|c| c.examined)).unwrap_or(0)
         }
     };
-    let core = all.into_iter().nth(pos).ok_or_else(|| GlobalError::NoTarget("no targets (run `init` first)".into()))?;
-    Ok(Scope { core, frame_id: None, frame_index: None, pc: None, regs: [None; PC_REGISTER as usize + 1] })
+    let core = all.get(pos).cloned().ok_or_else(|| GlobalError::NoTarget("no targets (run `init` first)".into()))?;
+    Ok(Scope::global(core, rule))
 }
 
 /// Evaluates `text` with the symbols of `ctx` (a core context, or empty for the first core that
 /// has symbols), without a stack frame.
+///
+/// A trailing `@N` (see [`split_core`]) names the TriCore core whose core-local RAM is meant and
+/// evaluates with that core's symbols, as `expr@N` does in a live watch; `@hsm` evaluates for the
+/// HSM. A `ctx` naming another core than the suffix is an error rather than a silent choice.
 pub fn evaluate_global(sh: &Shared, ctx: &str, text: &str) -> Result<GlobalValue, GlobalError> {
-    let scope = global_scope(sh, ctx)?;
+    let (expr, sel) = split_core(text);
+    let all = cores(&sh.handle);
+    let tricores: Vec<(u32, usize)> = all.iter().filter(|c| c.tricore()).map(|c| (c.coreid, c.idx)).collect();
+    let named = match sel {
+        None => None,
+        Some(CoreSel::Tricore(n)) => Some(all.iter().find(|c| c.tricore() && c.coreid == n).ok_or_else(|| {
+            let have: Vec<String> = tricores.iter().map(|t| t.0.to_string()).collect();
+            GlobalError::NoTarget(format!("`{text}`: there is no TriCore core {n} (the cores are {})", have.join(", ")))
+        })?),
+        Some(CoreSel::Hsm) => Some(all.iter().find(|c| c.arch.name == "cortex_m").ok_or_else(|| GlobalError::NoTarget(format!("`{text}`: there is no HSM")))?),
+    };
+    let ctx = match (named, crate::contexts::owning_core(ctx)) {
+        (Some(c), Some(t)) if c.id != t => {
+            let target = all.iter().find(|x| x.id == t).map_or(t.as_str(), |x| x.name.as_str());
+            return Err(GlobalError::Core(format!("`{text}` names {}, but the request's target is {target}", c.name)));
+        }
+        (Some(c), _) => c.id.clone(),
+        (None, _) => ctx.to_string(),
+    };
+    let explicit = match sel {
+        Some(CoreSel::Tricore(n)) => Some(n),
+        _ => None,
+    };
+    let ids: Vec<u32> = tricores.iter().map(|t| t.0).collect();
+    let scope = global_scope(sh, &all, &ctx, LocalRule::Home { explicit, tricores })?;
     let ctx = scope.core.id.clone();
-    match evaluate_text(sh, &ctx, scope, text) {
-        Ok((scope, elf, value)) => Ok(GlobalValue { elf, value, scope }),
+    match evaluate_text(sh, &ctx, scope, expr) {
+        Ok((scope, elf, value)) => Ok(GlobalValue { elf, value, scope, text: expr.to_string(), sel }),
         Err(((ERR_SYM_NOT_FOUND, _), _)) => Err(GlobalError::NoSymbols),
-        Err((_, Some(read))) => Err(GlobalError::Memory(read)),
+        Err((_, Some(ReadFail { per_core: Some((elf, addr)), .. }))) => {
+            let candidates = home_core(sh, &ids, elf, None).err().unwrap_or_default();
+            Err(per_core_error(sh, elf, expr, addr, &candidates, true))
+        }
+        Err((_, Some(read))) => Err(GlobalError::Memory(read.message)),
         Err(((_, e), None)) => Err(GlobalError::Expression(e)),
     }
 }
@@ -671,6 +844,63 @@ impl GlobalValue {
     /// Target index of the core the value was evaluated for.
     pub fn core(&self) -> usize {
         self.scope.core.idx
+    }
+
+    /// The core the value was evaluated for: whose symbols, and whose view of memory other than
+    /// core-local RAM (HSM-private memory, MCS program RAM).
+    pub fn scope_core(&self) -> &CoreInfo {
+        &self.scope.core
+    }
+
+    /// The expression without its core suffix.
+    pub fn expression(&self) -> &str {
+        &self.text
+    }
+
+    /// The expression's core suffix (`@2`, `@hsm`), if it has one.
+    pub fn suffix(&self) -> Option<CoreSel> {
+        self.sel
+    }
+
+    /// Where the value is stored, if at a fixed address: the object, or a bit field's storage
+    /// unit.
+    pub fn stored_at(&self) -> Option<u32> {
+        match (&self.value.place, &self.value.bytes) {
+            (Place::Memory(a), None) | (Place::Bits { addr: a, .. }, None) => Some(*a),
+            _ => None,
+        }
+    }
+
+    /// The TriCore core whose core-local RAM the value's ELF means (see [`home_core`]), or the
+    /// cores to name one of.
+    fn home(&self, sh: &Shared) -> Result<u32, Vec<u32>> {
+        match &self.scope.rule {
+            LocalRule::Home { explicit, tricores } => {
+                let ids: Vec<u32> = tricores.iter().map(|t| t.0).collect();
+                home_core(sh, &ids, self.elf.0, *explicit)
+            }
+            // Only REST values are made; a scope always has a core.
+            LocalRule::Scope => Ok(self.scope.core.coreid),
+        }
+    }
+
+    /// The cores to choose from when the value is stored in core-local RAM and no core is
+    /// determined for it (an ELF on several cores, or on none); `None` when its memory is.
+    pub fn per_core(&self, sh: &Shared) -> Option<Vec<u32>> {
+        self.stored_at().filter(|&a| local_address(a)).and_then(|_| self.home(sh).err())
+    }
+
+    /// The system-bus address of `addr` as the value means it: core-local RAM translated to the
+    /// global address of its core's DSPR/PSPR, anything else unchanged. Fails with the cores to
+    /// choose from when no core is determined.
+    pub fn global_address(&self, sh: &Shared, addr: u32) -> Result<u32, GlobalError> {
+        if !local_address(addr) {
+            return Ok(addr);
+        }
+        match self.home(sh) {
+            Ok(core) => Ok(aurix_core::tricore::global_address(core, addr)),
+            Err(candidates) => Err(per_core_error(sh, self.elf.0, &self.text, addr, &candidates, Some(addr) != self.stored_at())),
+        }
     }
 
     /// Reads `len` bytes at `addr` through the value's memory view.
@@ -685,7 +915,7 @@ impl GlobalValue {
         let write = Eval::new(&self.elf.1, &mut t).assign(&self.value, data);
         let write = match (write, t.read_error) {
             (Ok(w), _) => w,
-            (Err(_), Some(read)) => return Err(GlobalError::Memory(read)),
+            (Err(_), Some(read)) => return Err(GlobalError::Memory(read.message)),
             (Err(e), None) => return Err(GlobalError::Expression(e)),
         };
         match write {
@@ -747,5 +977,22 @@ mod tests {
             Some(SymbolRef::Object(TypeId::Die(DieRef { unit: 0, off: 0x24d }), 0x7001_3954))
         );
         assert_eq!(parse_symbol("X"), None);
+    }
+
+    #[test]
+    fn core_suffixes() {
+        assert_eq!(split_core("CRASH_state@2"), ("CRASH_state", Some(CoreSel::Tricore(2))));
+        assert_eq!(split_core(" g_s.a @ 1 "), ("g_s.a", Some(CoreSel::Tricore(1))));
+        assert_eq!(split_core("${E0/GV:12}@3"), ("${E0/GV:12}", Some(CoreSel::Tricore(3))));
+        assert_eq!(split_core("g_key@HSM"), ("g_key", Some(CoreSel::Hsm)));
+        assert_eq!(split_core("x@99999999999"), ("x", Some(CoreSel::Tricore(u32::MAX))), "a core that cannot exist");
+        // A frame local's ID has an `@` of its own, which is no core.
+        assert_eq!(split_core("${E0/LV:21.3803@S0.D0.C0.F2}"), ("${E0/LV:21.3803@S0.D0.C0.F2}", None));
+        assert_eq!(split_core("${E0/LV:21.3803@S0.D0.C0.F2}@1"), ("${E0/LV:21.3803@S0.D0.C0.F2}", Some(CoreSel::Tricore(1))));
+        for plain in ["g_x", "a@b", "@2", "x@", "x@-1"] {
+            assert_eq!(split_core(plain), (plain, None), "{plain}");
+        }
+        assert_eq!(CoreSel::Tricore(2).to_string(), "@2");
+        assert_eq!(CoreSel::Hsm.to_string(), "@hsm");
     }
 }

@@ -32,7 +32,7 @@ use aurix_core::{log_info, log_warn, ServerHandle};
 use breakpoints::BpTable;
 use channel::Writer;
 use expressions::ExprTable;
-pub use expressions::{evaluate_global, symbol_ref, GlobalError, GlobalValue};
+pub use expressions::{evaluate_global, home_core, split_core, symbol_ref, CoreSel, GlobalError, GlobalValue};
 pub use symstore::{elf_id, Elf, SymbolSet, SymbolStore};
 
 pub use breakpoints::{Bp, Instance};

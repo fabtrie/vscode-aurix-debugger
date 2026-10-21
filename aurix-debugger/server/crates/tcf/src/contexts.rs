@@ -13,6 +13,8 @@ pub const CONTAINER: &str = "S0.D0";
 pub struct CoreInfo {
     pub idx: usize,
     pub id: String,
+    /// Core ID (`-coreid`): the `N` of the context `S0.D0.C<N>` and of an expression's `@N`.
+    pub coreid: u32,
     pub name: String,
     pub examined: bool,
     /// Listed as a thread (e.g. MCS channels only once they ran).
@@ -27,6 +29,12 @@ pub struct CoreInfo {
 impl CoreInfo {
     pub fn suspended(&self) -> bool {
         self.examined && self.state == TargetState::Halted
+    }
+
+    /// A TriCore core: one with core-local DSPR/PSPR behind the `0xD000_0000` / `0xC000_0000`
+    /// alias, and the only kind an expression's `@N` names.
+    pub fn tricore(&self) -> bool {
+        self.arch.name == "tricore"
     }
 }
 
@@ -63,6 +71,7 @@ pub fn cores(h: &ServerHandle) -> Vec<CoreInfo> {
                 .map(|(i, t)| CoreInfo {
                     idx: i,
                     id: core_id(t.core.coreid()),
+                    coreid: t.core.coreid(),
                     name: t.name.clone(),
                     examined: t.core.examined(),
                     visible: t.core.visible(),

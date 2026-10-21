@@ -179,25 +179,21 @@ fn add_points(api: &Arc<CoreApi>, id: SessionId, specs: &[Spec], live: &mut Vec<
     // Resolved points waiting to be registered, with the slot in `out` that reports them.
     let mut pending: Vec<(usize, Resolved)> = Vec::new();
     for spec in specs {
-        // A point may name its own core, for HSM-private memory or MCS program RAM.
+        // A point may name its own core, for HSM-private memory or MCS program RAM; its symbols
+        // are used, else those of the first core that has any.
         let core = match &spec.target {
             Some(n) => match cores.iter().find(|c| &c.name == n || c.idx.to_string() == *n) {
-                Some(c) => Some(c.idx),
+                Some(c) => Some(c),
                 None => {
-                    let r = daq_resolve::resolve(&api.handle, None, 0, None, spec);
-                    out.push(point_json(&Resolved { error: Some(format!("unknown target '{n}'")), ..r }, None));
+                    let given = spec.expression.clone().or_else(|| spec.address.map(|a| format!("0x{a:08x}")));
+                    let name = spec.name.clone().or(given).unwrap_or_default();
+                    out.push(point_json(&Resolved::failed(spec, name, format!("unknown target '{n}'")), None));
                     continue;
                 }
             },
             None => None,
         };
-        // Symbols of the named core, else of the first core that has any.
-        let ctx = match core {
-            Some(idx) => cores.iter().find(|c| c.idx == idx).map(|c| c.id.clone()).unwrap_or_default(),
-            None => String::new(),
-        };
-        let set = api.session.symbols_for(&ctx);
-        let r = daq_resolve::resolve(&api.handle, set.as_ref(), core.unwrap_or(0), spec.target.as_deref(), spec);
+        let r = daq_resolve::resolve(&api.session, core, spec);
         if r.cfg.is_none() {
             out.push(point_json(&r, None));
             continue;

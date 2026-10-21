@@ -615,12 +615,12 @@
         "description": "An expression to evaluate.",
         "properties": {
           "expression": {
-            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.",
+            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
             "type": "string"
           },
           "target": {
             "default": null,
-            "description": "Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program\nRAM); default: the first core that has symbols.",
+            "description": "Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program\nRAM); default: the first core that has symbols, or the core of an `@N`. It does not choose\nthe core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.",
             "type": [
               "string",
               "null"
@@ -710,6 +710,15 @@
       "InfoSymbolFile": {
         "description": "A loaded symbol file and the targets it is loaded for.",
         "properties": {
+          "local_cores": {
+            "description": "The TriCore cores (core IDs) the file is assigned to (`load_symbols` `path@N`, or\n`symbolFiles` in VS Code): whose core-local RAM its variables there are in. Left out when\nit is assigned to none.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
           "path": {
             "description": "Path on the debug server's machine.",
             "type": "string"
@@ -820,7 +829,7 @@
         "description": "Symbol files to load.",
         "properties": {
           "files": {
-            "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).",
+            "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).\n\nA file may end in `@N` or `@N,M` (TriCore core IDs), as in VS Code's `symbolFiles`: the\ncores that run it, whose core-local RAM (`0xD000_0000` / `0xC000_0000` alias) holds its\nvariables linked there. Assigned to exactly one core, such a variable reads by its plain\nname; otherwise it needs its core, `CRASH_state@2`. A file without the suffix is assigned\nto no core, also when VS Code had assigned it.",
             "items": {
               "type": "string"
             },
@@ -1604,7 +1613,7 @@
         "description": "Whose children to list.",
         "properties": {
           "expression": {
-            "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned.",
+            "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned. It may end in `@N` as for `evaluate`; the children's\nexpressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are\nits copies, one per core.",
             "type": "string"
           },
           "limit": {
@@ -1629,7 +1638,7 @@
           },
           "target": {
             "default": null,
-            "description": "Symbols of this target (name or index); default: the first core that has symbols.",
+            "description": "Symbols of this target (name or index); default: the first core that has symbols, or the\ncore of an `@N`.",
             "type": [
               "string",
               "null"
@@ -1850,7 +1859,7 @@
         "description": "A variable, or a member or element of one, as the symbols describe it.",
         "properties": {
           "address": {
-            "description": "Address, when it is fixed (always for a global).",
+            "description": "Address, when it is fixed (always for a global, except a `per_core` group). Always the\nsystem-bus address: a variable linked to the core-local alias (`0xD000_0000` DSPR,\n`0xC000_0000` PSPR) is reported in the DSPR/PSPR of its core, e.g. `0x60000100` for\n`0xD0000100` on core 1.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -1880,16 +1889,20 @@
             "$ref": "#/components/schemas/VariableClass"
           },
           "expression": {
-            "description": "C expression naming exactly this object, for `evaluate`, `write_variable`,\n`symbol_children` and the `expression` of a DAQ point. It is the plain name unless another\nglobal of the same name would be found first; then it is a symbol reference\n(`${E0/GV:12}`).",
+            "description": "C expression naming exactly this object, for `evaluate`, `write_variable`,\n`symbol_children` and the `expression` of a DAQ point. It is the plain name unless another\nglobal of the same name would be found first; then it is a symbol reference\n(`${E0/GV:12}`). A copy in one core's core-local RAM ends in its core, `CRASH_state@2`.",
             "type": "string"
           },
           "has_children": {
-            "description": "`symbol_children` lists members or elements: a struct or union, or an array of known\nlength.",
+            "description": "`symbol_children` lists members or elements: a struct or union, or an array of known\nlength; or, for a `per_core` group, the copies.",
             "type": "boolean"
           },
           "name": {
             "description": "Name to show: the variable, the member, or the index (`[3]`).",
             "type": "string"
+          },
+          "per_core": {
+            "description": "A group rather than one variable: it is in core-local RAM, which every TriCore core has\nits own of, and its symbol file is not assigned to exactly one core (`load_symbols`\n`path@N`, or `symbolFiles` in VS Code). Its `symbol_children` are the copies, one per core\n(`CRASH_state@0`, `CRASH_state@1`, ...), each with its own address. A group has no\n`address`, is not `sampleable`, and `evaluate` refuses its bare name. Left out when false.",
+            "type": "boolean"
           },
           "sampleable": {
             "description": "A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at\nmost 8 bytes.",
@@ -1928,7 +1941,7 @@
         "description": "The value of an expression, read now.",
         "properties": {
           "address": {
-            "description": "Address of the value, when it is stored on the target (not for `g_x + 1`).",
+            "description": "Address of the value, when it is stored on the target (not for `g_x + 1`). Always the\nsystem-bus address: core-local RAM is reported in its core's DSPR/PSPR.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -2227,12 +2240,12 @@
         "description": "A variable to write.",
         "properties": {
           "expression": {
-            "description": "C expression of the variable, as for `evaluate`; it must name something stored on the\ntarget.",
+            "description": "C expression of the variable, as for `evaluate` (including `@N`); it must name something\nstored on the target.",
             "type": "string"
           },
           "target": {
             "default": null,
-            "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols.",
+            "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.",
             "type": [
               "string",
               "null"
@@ -2470,11 +2483,11 @@
     },
     "/api/v1/expressions": {
       "get": {
-        "description": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.\n\nWorks while the cores run: there is no stack frame, so names are globals and statics, as in\na VS Code live watch. Fails with `not_found` for an unknown name or when no symbols are\nloaded, and with `memory` when the target memory cannot be read.",
+        "description": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.\n\nWorks while the cores run: there is no stack frame, so names are globals and statics, as in\na VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one\ncore the symbol file is assigned to; `address` is the system-bus address of that copy.\n\nFails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no\nsymbols are loaded; with `bad_request` for a variable in core-local RAM that needs an\n`@N` (the message lists the choices) or an `@N` that contradicts `target`; and with\n`memory` when the target memory cannot be read.",
         "operationId": "evaluate",
         "parameters": [
           {
-            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.",
+            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
             "in": "query",
             "name": "expression",
             "required": true,
@@ -2483,7 +2496,7 @@
             }
           },
           {
-            "description": "Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program\nRAM); default: the first core that has symbols.",
+            "description": "Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program\nRAM); default: the first core that has symbols, or the core of an `@N`. It does not choose\nthe core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.",
             "in": "query",
             "name": "target",
             "required": false,
@@ -2524,7 +2537,7 @@
         ]
       },
       "put": {
-        "description": "Write a variable by its expression and read it back.\n\nWorks while the cores run, like `write_memory`; a bit field is merged into its storage\nunit. Connected debugger clients (VS Code) are told to refresh their views.",
+        "description": "Write a variable by its expression and read it back.\n\nWorks while the cores run, like `write_memory`; a bit field is merged into its storage\nunit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM\nand the errors are as for `evaluate`.",
         "operationId": "write_variable",
         "requestBody": {
           "content": {
@@ -2534,12 +2547,12 @@
                 "description": "A variable to write.",
                 "properties": {
                   "expression": {
-                    "description": "C expression of the variable, as for `evaluate`; it must name something stored on the\ntarget.",
+                    "description": "C expression of the variable, as for `evaluate` (including `@N`); it must name something\nstored on the target.",
                     "type": "string"
                   },
                   "target": {
                     "default": null,
-                    "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols.",
+                    "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.",
                     "type": [
                       "string",
                       "null"
@@ -2600,11 +2613,11 @@
     },
     "/api/v1/expressions/children": {
       "get": {
-        "description": "List the members of a struct or union, or the elements of an array, that an expression\nstands for, each with the expression that names it.\n\nReads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not\nfollowed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`.",
+        "description": "List the members of a struct or union, or the elements of an array, that an expression\nstands for, each with the expression that names it.\n\nReads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not\nfollowed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`. The\nchildren of a `per_core` group are its copies, one per core, each named with its `@N`.",
         "operationId": "symbol_children",
         "parameters": [
           {
-            "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned.",
+            "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned. It may end in `@N` as for `evaluate`; the children's\nexpressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are\nits copies, one per core.",
             "in": "query",
             "name": "expression",
             "required": true,
@@ -2643,7 +2656,7 @@
             }
           },
           {
-            "description": "Symbols of this target (name or index); default: the first core that has symbols.",
+            "description": "Symbols of this target (name or index); default: the first core that has symbols, or the\ncore of an `@N`.",
             "in": "query",
             "name": "target",
             "required": false,
@@ -2810,7 +2823,7 @@
     },
     "/api/v1/globals": {
       "get": {
-        "description": "List the global and static variables of the loaded symbols, filtered by a name pattern, one\npage at a time.\n\nThe search runs on the server and stays fast for an ELF with 10^5 globals. Each item says\nwhether a DAQ point can sample it and gives the expression to sample it by. Fails with\n`not_found` when no symbols are loaded (`load_symbols`).",
+        "description": "List the global and static variables of the loaded symbols, filtered by a name pattern, one\npage at a time.\n\nThe search runs on the server and stays fast for an ELF with 10^5 globals. Each item says\nwhether a DAQ point can sample it and gives the expression to sample it by. A variable in\ncore-local RAM whose file is not assigned to exactly one core is a `per_core` group: its\nchildren are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ... Fails with\n`not_found` when no symbols are loaded (`load_symbols`).",
         "operationId": "list_globals",
         "parameters": [
           {
@@ -3384,7 +3397,7 @@
         ]
       },
       "post": {
-        "description": "Load symbol files (ELF) for the targets, as a VS Code debug session does.\n\nMakes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a\nDAQ session work without VS Code. Breakpoints that were pending are planted.\n\nThere is one symbol set per core, and the last writer wins: a VS Code debug session\nstarted afterwards replaces what was loaded here, and the other way round.",
+        "description": "Load symbol files (ELF) for the targets, as a VS Code debug session does.\n\nMakes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a\nDAQ session work without VS Code. Breakpoints that were pending are planted.\n\nThere is one symbol set per core, and the last writer wins: a VS Code debug session\nstarted afterwards replaces what was loaded here, and the other way round. `path@N`\nassigns a file to the cores that run it, for its variables in core-local RAM.",
         "operationId": "load_symbols",
         "requestBody": {
           "content": {
@@ -3394,7 +3407,7 @@
                 "description": "Symbol files to load.",
                 "properties": {
                   "files": {
-                    "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).",
+                    "description": "Files on the machine the debug server runs on. The first is the primary ELF; the others\nadd symbols (bootmanager, FBL, ...).\n\nA file may end in `@N` or `@N,M` (TriCore core IDs), as in VS Code's `symbolFiles`: the\ncores that run it, whose core-local RAM (`0xD000_0000` / `0xC000_0000` alias) holds its\nvariables linked there. Assigned to exactly one core, such a variable reads by its plain\nname; otherwise it needs its core, `CRASH_state@2`. A file without the suffix is assigned\nto no core, also when VS Code had assigned it.",
                     "items": {
                       "type": "string"
                     },

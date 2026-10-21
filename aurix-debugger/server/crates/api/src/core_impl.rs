@@ -5,7 +5,7 @@
 //! here, never on the core thread.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,22 @@ fn busy(target: &str) -> ApiError {
 
 fn resolve(cx: &Cx, name: &str) -> Result<usize, ApiError> {
     cx.with(|c| c.target_by_name(name)).ok_or_else(|| ApiError::not_found(format!("unknown target '{name}' (see `targets`)")))
+}
+
+/// Splits a `load_symbols` file into its path and the TriCore cores of a trailing `@N` or `@N,M`,
+/// as VS Code's `symbolFiles` writes them. A file that exists as given is never split, so a path
+/// that really ends in `@2` still loads.
+fn split_run_cores(f: &str) -> (PathBuf, Vec<u32>) {
+    let whole = || (PathBuf::from(f), Vec::new());
+    let Some((path, list)) = f.trim().rsplit_once('@') else { return whole() };
+    if Path::new(f).is_file() || path.trim().is_empty() {
+        return whole();
+    }
+    let cores: Option<Vec<u32>> = list.split(',').map(|n| n.trim().parse().ok()).collect();
+    match cores {
+        Some(c) => (PathBuf::from(path.trim_end()), c),
+        None => whole(),
+    }
 }
 
 fn run_state(s: TargetState) -> RunState {
@@ -344,7 +360,14 @@ impl DebuggerApi for CoreApi {
                         match files.iter_mut().find(|(m, _)| m == n) {
                             Some((_, f)) if !f.targets.contains(&t.name) => f.targets.push(t.name.clone()),
                             Some(_) => {}
-                            None => files.push((*n, InfoSymbolFile { path: s.path.to_string_lossy().into_owned(), targets: vec![t.name.clone()] })),
+                            None => files.push((
+                                *n,
+                                InfoSymbolFile {
+                                    path: s.path.to_string_lossy().into_owned(),
+                                    targets: vec![t.name.clone()],
+                                    local_cores: store.run_cores(*n).to_vec(),
+                                },
+                            )),
                         }
                     }
                 }
@@ -615,17 +638,25 @@ impl DebuggerApi for CoreApi {
         if req.files.is_empty() {
             return Err(ApiError::bad_request("give at least one symbol file"));
         }
+        let cores = tcf::cores(&self.handle);
+        let tricores: Vec<u32> = cores.iter().filter(|c| c.tricore()).map(|c| c.coreid).collect();
         let mut paths: Vec<PathBuf> = Vec::new();
+        // The TriCore cores each file is assigned to (`path@N,M`); none clears an assignment.
+        let mut runs: Vec<(PathBuf, Vec<u32>)> = Vec::new();
         for f in &req.files {
-            let p = PathBuf::from(f);
+            let (p, run) = split_run_cores(f);
             if !p.is_file() {
-                return Err(ApiError::not_found(format!("no such file: {f}")));
+                return Err(ApiError::not_found(format!("no such file: {}", p.display())));
+            }
+            if let Some(&n) = run.iter().find(|n| !tricores.is_empty() && !tricores.contains(n)) {
+                let have: Vec<String> = tricores.iter().map(u32::to_string).collect();
+                return Err(ApiError::bad_request(format!("`{f}`: there is no TriCore core {n} (the cores are {})", have.join(", "))));
             }
             if !paths.contains(&p) {
-                paths.push(p);
+                paths.push(p.clone());
+                runs.push((p, run));
             }
         }
-        let cores = tcf::cores(&self.handle);
         let chosen: Vec<&tcf::CoreInfo> = match &req.targets {
             Some(names) => names
                 .iter()
@@ -649,6 +680,9 @@ impl DebuggerApi for CoreApi {
             for c in &chosen {
                 let ctx = tcf::owning_core(&c.id).unwrap_or_else(|| c.id.clone());
                 store.assign(&ctx, &paths).map_err(ApiError::failed)?;
+            }
+            for (p, run) in runs {
+                store.set_run_cores(&p, run);
             }
         }
         self.session.stacks.lock().unwrap().clear();

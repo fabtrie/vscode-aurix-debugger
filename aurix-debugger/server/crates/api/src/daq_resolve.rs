@@ -5,13 +5,10 @@
 //! while, and decoding runs once per delivered sample. The [`Decoder`] a point gets is **owned**
 //! and self-contained, so the sampling path never locks the symbol store.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 
 use aurix_core::daq::{PointCfg, SampleMode, Space};
-use aurix_core::{ops, ServerHandle};
-use symbols::expr::{Eval, Place, SymbolRef, Target};
+use symbols::expr::Place;
 use symbols::types::TypeClass;
 
 /// How a point's bytes become a JSON value.
@@ -179,7 +176,7 @@ pub struct Resolved {
 }
 
 impl Resolved {
-    fn failed(spec: &Spec, name: String, err: String) -> Resolved {
+    pub fn failed(spec: &Spec, name: String, err: String) -> Resolved {
         Resolved {
             name,
             expression: spec.expression.clone(),
@@ -193,38 +190,6 @@ impl Resolved {
             cfg: None,
             error: Some(err),
         }
-    }
-}
-
-/// Evaluation context for a DAQ point: globals only.
-///
-/// `pc` and `reg` deliberately return `None`. A frame local lives in a register and only exists
-/// while the target is halted, so it can never be sampled; this turns that into a clear error at
-/// subscribe time instead of a surprise later.
-struct DaqTarget<'a> {
-    handle: &'a ServerHandle,
-    core: usize,
-    /// Number of the ELF evaluating, for `${E<n>/GV:<i>}` references (`list_globals` hands them
-    /// out for a global whose plain name another one shadows).
-    elf: usize,
-}
-
-impl Target for DaqTarget<'_> {
-    fn pc(&self) -> Option<u32> {
-        None
-    }
-    fn reg(&self, _: u16) -> Option<u32> {
-        None
-    }
-    fn read(&mut self, addr: u32, len: usize) -> Result<Vec<u8>, String> {
-        // Only at resolve time, to follow an index or a pointer (`buf[i]`, `p->x`).
-        let t = self.core;
-        self.handle
-            .call(move |cx| ops::read_memory_as(cx, t, addr, len).map_err(|e| e.to_string()))
-            .unwrap_or_else(|| Err("server stopped".into()))
-    }
-    fn symbol(&mut self, id: &str) -> Option<SymbolRef> {
-        tcf::symbol_ref(self.elf, id)
     }
 }
 
@@ -249,19 +214,31 @@ pub fn decoder_for(syms: &symbols::Symbols, ty: &symbols::types::TypeId, bits: O
     (d, size, name)
 }
 
-/// Resolves one point against the symbols of `core` (if any).
-pub fn resolve(handle: &ServerHandle, set: Option<&Arc<tcf::SymbolSet>>, core: usize, target: Option<&str>, spec: &Spec) -> Resolved {
-    let space = match target {
-        Some(_) => Space::Core(core),
-        None => Space::Host,
-    };
+/// Resolves one point, with the symbols of `target` (the core the point names, if any).
+///
+/// Names are evaluated by [`tcf::evaluate_global`], as `evaluate` does: a point on an expression
+/// samples what `evaluate` reads, `@N` and the core-local rules included. A frame local lives in a
+/// register and only exists while the target is halted, so it can never be sampled; without a
+/// stack frame it does not resolve, which turns that into a clear error at subscribe time instead
+/// of a surprise later.
+///
+/// Core-local RAM is translated to its core's global DSPR/PSPR address and read over the system
+/// bus, so such a point shares the batch with all others. So is everything else a TriCore sees:
+/// its view differs from the system bus only in that alias. Only the HSM and MCS channels have
+/// memory of their own, so only their points are read through the core.
+pub fn resolve(session: &tcf::Shared, target: Option<&tcf::CoreInfo>, spec: &Spec) -> Resolved {
     let fallback = spec.name.clone();
 
-    // A raw address needs no symbols at all.
-    if let Some(addr) = spec.address {
-        let name = fallback.unwrap_or_else(|| format!("0x{addr:08x}"));
+    // A raw address needs no symbols at all; a TriCore target only decides the local alias.
+    if let Some(given) = spec.address {
+        let name = fallback.unwrap_or_else(|| format!("0x{given:08x}"));
         let Some(size) = spec.size else {
             return Resolved::failed(spec, name, "`address` needs `size`".into());
+        };
+        let (addr, space) = match target {
+            Some(c) if c.tricore() => (aurix_core::tricore::global_address(c.coreid, given), Space::Host),
+            Some(c) => (given, Space::Core(c.idx)),
+            None => (given, Space::Host),
         };
         return Resolved {
             name,
@@ -290,58 +267,68 @@ pub fn resolve(handle: &ServerHandle, set: Option<&Arc<tcf::SymbolSet>>, core: u
         return Resolved::failed(spec, fallback.unwrap_or_default(), "give either `expression` or `address` with `size`".into());
     };
     let name = fallback.unwrap_or_else(|| expr.clone());
-    let Some(set) = set else {
-        return Resolved::failed(spec, name, "no symbols loaded for this target (use `load_symbols`, or start a VS Code debug session)".into());
-    };
-
-    // Try each ELF of the set, primary first.
-    let mut last = String::from("unknown symbol");
-    for (n, syms) in &set.elfs {
-        let mut t = DaqTarget { handle, core, elf: *n };
-        let v = match Eval::new(syms, &mut t).evaluate(&expr) {
-            Ok(v) => v,
-            Err(e) => {
-                last = e;
-                continue;
-            }
-        };
-        let (addr, storage, bits) = match v.place {
-            Place::Memory(a) => (a, None, None),
-            Place::Bits { addr, storage, shift, bits } => (addr, Some(storage), Some((shift, bits))),
-            Place::Register(_) => {
-                return Resolved::failed(spec, name, format!("`{expr}` is a register value: DAQ can only sample things with a fixed address"))
-            }
-            Place::None => return Resolved::failed(spec, name, format!("`{expr}` has no address")),
-        };
-        let (mut decoder, ty_size, type_name) = decoder_for(syms, &v.ty, bits);
-        let size = spec.size.or(storage).unwrap_or(ty_size).max(1);
-        if !spec.decode || size > 8 {
-            decoder = Decoder::Hex;
-        }
-        let cmp_mask = decoder.cmp_mask(size);
-        return Resolved {
-            name,
-            expression: Some(expr),
-            target: spec.target.clone(),
-            address: Some(addr),
-            size: Some(size),
-            bits,
-            type_name,
-            requested_interval_us: spec.interval_us,
-            cfg: Some(PointCfg {
-                addr,
-                len: size,
-                space,
-                interval_us: spec.interval_us,
-                mode: spec.mode,
-                cmp_mask,
-                resend_after_us: spec.resend_after_us,
-            }),
-            decoder,
-            error: None,
-        };
+    let ctx = target.map(|c| c.id.clone()).unwrap_or_default();
+    if session.symbols_for(&ctx).is_none_or(|s| s.elfs.is_empty()) {
+        return Resolved::failed(spec, name, message(&expr, tcf::GlobalError::NoSymbols));
     }
-    Resolved::failed(spec, name, format!("`{expr}`: {last}"))
+    let gv = match tcf::evaluate_global(session, &ctx, &expr) {
+        Ok(gv) => gv,
+        Err(e) => return Resolved::failed(spec, name, message(&expr, e)),
+    };
+    let v = &gv.value;
+    let (local, storage, bits) = match v.place {
+        Place::Memory(a) if v.bytes.is_none() => (a, None, None),
+        Place::Bits { addr, storage, shift, bits } if v.bytes.is_none() => (addr, Some(storage), Some((shift, bits))),
+        Place::Register(_) => return Resolved::failed(spec, name, format!("`{expr}` is a register value: DAQ can only sample things with a fixed address")),
+        _ => return Resolved::failed(spec, name, format!("`{expr}` has no address")),
+    };
+    let core = gv.scope_core();
+    let (addr, space) = if core.tricore() {
+        match gv.global_address(session, local) {
+            Ok(a) => (a, Space::Host),
+            Err(e) => return Resolved::failed(spec, name, message(&expr, e)),
+        }
+    } else {
+        (local, Space::Core(core.idx))
+    };
+    let syms = &gv.elf.1;
+    let (mut decoder, ty_size, type_name) = decoder_for(syms, &v.ty, bits);
+    let size = spec.size.or(storage).unwrap_or(ty_size).max(1);
+    if !spec.decode || size > 8 {
+        decoder = Decoder::Hex;
+    }
+    let cmp_mask = decoder.cmp_mask(size);
+    Resolved {
+        name,
+        expression: Some(expr),
+        target: spec.target.clone(),
+        address: Some(addr),
+        size: Some(size),
+        bits,
+        type_name,
+        requested_interval_us: spec.interval_us,
+        cfg: Some(PointCfg {
+            addr,
+            len: size,
+            space,
+            interval_us: spec.interval_us,
+            mode: spec.mode,
+            cmp_mask,
+            resend_after_us: spec.resend_after_us,
+        }),
+        decoder,
+        error: None,
+    }
+}
+
+/// The `error` of a point whose expression `expr` does not resolve.
+fn message(expr: &str, e: tcf::GlobalError) -> String {
+    match e {
+        tcf::GlobalError::NoSymbols => "no symbols loaded for this target (use `load_symbols`, or start a VS Code debug session)".into(),
+        tcf::GlobalError::Expression(m) | tcf::GlobalError::Memory(m) => format!("`{expr}`: {m}"),
+        // These name the expression themselves.
+        tcf::GlobalError::NoTarget(m) | tcf::GlobalError::Core(m) => m,
+    }
 }
 
 #[cfg(test)]

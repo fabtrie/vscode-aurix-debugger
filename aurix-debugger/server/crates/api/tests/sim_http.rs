@@ -441,6 +441,262 @@ fn variables(http: &Http, vs: &mut Tcf) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A TriCore ELF of nothing but DWARF declaring `(name, address, is_pair)` variables of type
+/// `unsigned int` or `struct pair_s { unsigned int a, b; }`. Written by hand because the symbol
+/// store reads variables from DWARF only, and the MCS assembler cannot place data at
+/// `0xD000_0000`.
+fn dwarf_elf(vars: &[(&str, u32, bool)]) -> Vec<u8> {
+    // (code, tag, has children, [(attribute, form)]): compile_unit, base_type, structure_type,
+    // member, variable.
+    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 5] = [
+        (1, 0x11, true, &[(0x03, 0x08)]),
+        (2, 0x24, false, &[(0x03, 0x08), (0x3e, 0x0b), (0x0b, 0x0b)]),
+        (3, 0x13, true, &[(0x03, 0x08), (0x0b, 0x0b)]),
+        (4, 0x0d, false, &[(0x03, 0x08), (0x49, 0x13), (0x38, 0x0b)]),
+        (5, 0x34, false, &[(0x03, 0x08), (0x49, 0x13), (0x3f, 0x19), (0x02, 0x18)]),
+    ];
+    let mut abbrev = Vec::new();
+    for (code, tag, children, attrs) in abbrevs {
+        abbrev.extend([code, tag, children as u8]);
+        attrs.iter().for_each(|&(a, f)| abbrev.extend([a, f]));
+        abbrev.extend([0, 0]);
+    }
+    abbrev.push(0);
+
+    fn cstr(v: &mut Vec<u8>, s: &str) {
+        v.extend(s.as_bytes());
+        v.push(0);
+    }
+    // DWARF 4 unit header: length (patched below), version, abbreviation offset, address size.
+    let mut info = vec![0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 4, 1];
+    cstr(&mut info, "local.c");
+    let uint = info.len() as u32;
+    info.push(2);
+    cstr(&mut info, "unsigned int");
+    info.extend([0x08, 4]); // DW_ATE_unsigned, 4 bytes
+    let pair = info.len() as u32;
+    info.push(3);
+    cstr(&mut info, "pair_s");
+    info.push(8);
+    for (name, offset) in [("a", 0u8), ("b", 4)] {
+        info.push(4);
+        cstr(&mut info, name);
+        info.extend(uint.to_le_bytes());
+        info.push(offset);
+    }
+    info.push(0);
+    for &(name, addr, is_pair) in vars {
+        info.push(5);
+        cstr(&mut info, name);
+        info.extend(if is_pair { pair } else { uint }.to_le_bytes());
+        info.extend([5, 0x03]); // a 5-byte location: DW_OP_addr
+        info.extend(addr.to_le_bytes());
+    }
+    info.push(0);
+    let len = (info.len() - 4) as u32;
+    info[..4].copy_from_slice(&len.to_le_bytes());
+
+    // ELF32 little-endian, EM_TRICORE: header, section contents, section headers.
+    let shstrtab: &[u8] = b"\0.debug_abbrev\0.debug_info\0.shstrtab\0";
+    let mut elf = vec![0u8; 52];
+    let mut sections = Vec::new();
+    for (name, ty, data) in [(1u32, 1u32, &abbrev[..]), (15, 1, &info[..]), (27, 3, shstrtab)] {
+        sections.push([name, ty, 0, 0, elf.len() as u32, data.len() as u32, 0, 0, 1, 0]);
+        elf.extend(data);
+    }
+    elf.resize(elf.len().next_multiple_of(4), 0);
+    let shoff = elf.len() as u32;
+    elf.extend([0u8; 40]);
+    for sh in sections {
+        sh.iter().for_each(|w| elf.extend(w.to_le_bytes()));
+    }
+    elf[..16].copy_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let half = |elf: &mut Vec<u8>, at: usize, v: u16| elf[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    half(&mut elf, 16, 2); // ET_EXEC
+    half(&mut elf, 18, 44); // EM_TRICORE
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    elf[32..36].copy_from_slice(&shoff.to_le_bytes());
+    half(&mut elf, 40, 52);
+    half(&mut elf, 42, 32);
+    half(&mut elf, 46, 40);
+    half(&mut elf, 48, 4);
+    half(&mut elf, 50, 3);
+    elf
+}
+
+/// Variables in core-local RAM (`0xD000_0000`), which exists once per TriCore core: a name means
+/// the copy of the core `@N` names or that the file is assigned to, never a guess.
+fn core_local_variables(http: &Http, vs: &mut Tcf) {
+    let dir = std::env::temp_dir().join(format!("aurix-local-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let vars = [("CRASH_state", 0xD000_0100, false), ("g_pair", 0xD000_0200, true), ("g_shared", 0x9000_0300, false)];
+    let (elf, copy) = (dir.join("local.elf"), dir.join("copy.elf"));
+    std::fs::write(&elf, dwarf_elf(&vars)).unwrap();
+    // The same variables again, to shadow the first file's: they are named by `${E<n>/GV:<i>}`.
+    std::fs::write(&copy, dwarf_elf(&vars)).unwrap();
+    let elf = tcl_path(elf);
+    let get = |path: &str| http.ok("GET", path, None);
+    let eval = |e: &str| http.request("GET", &format!("/api/v1/expressions?expression={}", enc(e)), None, &[]);
+    let children = |e: &str| get(&format!("/api/v1/expressions/children?expression={}", enc(e)));
+    let globals = || {
+        let l = get("/api/v1/globals");
+        l["items"].as_array().unwrap().clone()
+    };
+    let named = |items: &[Value], n: &str| items.iter().find(|i| i["name"] == n).unwrap_or_else(|| panic!("no {n} in {items:?}")).clone();
+    // Each core's copy in its own DSPR, as the system bus sees it.
+    for (dspr, v) in [(0x7000_0100u32, "01000000"), (0x6000_0100, "02000000"), (0x5000_0100, "03000000")] {
+        http.ok("PUT", "/api/v1/memory", Some(json!({ "address": format!("0x{dspr:08x}"), "data": v })));
+    }
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x50000204", "data": "07000000" })));
+
+    // --- Assigned to exactly one core: plain names mean its copy ---
+    let (status, e) = http.request("POST", "/api/v1/symbols", Some(json!({ "files": [format!("{elf}@7")] })), &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "a core the chip does not have: {e}");
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [format!("{elf}@1")] })));
+    let info = get("/api/v1/info");
+    assert_eq!(info["symbol_files"][0]["local_cores"], json!([1]), "{info}");
+    let items = globals();
+    let crash = named(&items, "CRASH_state");
+    assert_eq!((crash["expression"].as_str(), crash["address"].as_u64()), (Some("CRASH_state"), Some(0x6000_0100)), "{crash}");
+    assert_eq!((crash["sampleable"].as_bool(), crash["has_children"].as_bool()), (Some(true), Some(false)), "{crash}");
+    assert!(crash.get("per_core").is_none(), "{crash}");
+    assert_eq!(named(&items, "g_pair")["address"], 0x6000_0200);
+    // Memory that is not core-local is not touched.
+    assert_eq!(named(&items, "g_shared")["address"], 0x9000_0300u32);
+    let (status, v) = eval("CRASH_state");
+    assert_eq!((status, v["value"].as_u64(), v["address"].as_u64()), (200, Some(2), Some(0x6000_0100)), "{v}");
+    // An `@N` beats the assignment.
+    let (_, v) = eval("CRASH_state@2");
+    assert_eq!((v["value"].as_u64(), v["address"].as_u64()), (Some(3), Some(0x5000_0100)), "{v}");
+    let (_, v) = eval("g_shared@1");
+    assert_eq!(v["address"], 0x9000_0300u32, "a suffix on other memory is harmless: {v}");
+    let c = children("g_pair");
+    let m: Vec<(&str, u64)> = c["items"].as_array().unwrap().iter().map(|i| (i["expression"].as_str().unwrap(), i["address"].as_u64().unwrap())).collect();
+    assert_eq!(m, [("g_pair.a", 0x6000_0200), ("g_pair.b", 0x6000_0204)], "{c}");
+    let w = http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": "CRASH_state", "value": 5 })));
+    assert_eq!(w["address"], 0x6000_0100, "{w}");
+    assert_eq!(get("/api/v1/memory?address=0x60000100&length=4")["data"], "05000000");
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x60000100", "data": "02000000" })));
+    // DAQ reads the translated address over the system bus, in the shared batch.
+    let mut ws = Ws::connect(http.0, &[]).unwrap();
+    ws.send(json!({ "op": "subscribe", "id": 1, "points": [{ "expression": "CRASH_state", "rate_hz": 100 }, { "expression": "g_pair.b@2", "rate_hz": 100 }] }));
+    let cfg = ws.recv().expect("config frame");
+    assert_eq!(cfg["points"][0]["address"], 0x6000_0100, "{cfg}");
+    assert_eq!(cfg["points"][1]["address"], 0x5000_0204, "{cfg}");
+    let s = ws.collect("samples", 1);
+    let value = |id: &Value| s[0]["points"].as_array().unwrap().iter().position(|p| p == id).map(|i| s[0]["values"][i].clone());
+    assert_eq!((value(&cfg["points"][0]["id"]), value(&cfg["points"][1]["id"])), (Some(json!(2)), Some(json!(7))), "{s:?}");
+    let out = http.ok("POST", "/api/v1/tcl", Some(json!({ "command": "daq" })));
+    let out = out["output"].as_str().unwrap();
+    for a in ["0x60000100", "0x50000204"] {
+        let line = out.lines().find(|l| l.contains(a)).unwrap_or_else(|| panic!("{a} not sampled: {out}"));
+        assert!(line.contains("via bus"), "{line}");
+    }
+    drop(ws);
+
+    // --- Assigned to several cores: a group, and a bare name is refused ---
+    let copy = tcl_path(copy);
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [format!("{elf}@0,2"), format!("{copy} @ 0, 2")] })));
+    let items = globals();
+    let crash = named(&items, "CRASH_state");
+    assert_eq!(crash["expression"], "CRASH_state");
+    assert_eq!((crash["per_core"].as_bool(), crash["has_children"].as_bool(), crash["sampleable"].as_bool()), (Some(true), Some(true), Some(false)), "{crash}");
+    assert!(crash["address"].is_null(), "{crash}");
+    assert_eq!((crash["class"].as_str(), crash["type_name"].as_str(), crash["size"].as_u64()), (Some("uint"), Some("unsigned int"), Some(4)));
+    assert_eq!(named(&items, "g_shared")["address"], 0x9000_0300u32, "not core-local, not a group");
+    assert!(named(&items, "g_shared").get("per_core").is_none());
+    let c = children("CRASH_state");
+    let cores: Vec<(&str, &str, u64, bool)> = c["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| (i["name"].as_str().unwrap(), i["expression"].as_str().unwrap(), i["address"].as_u64().unwrap(), i["sampleable"] == true))
+        .collect();
+    assert_eq!(cores, [("core 0", "CRASH_state@0", 0x7000_0100, true), ("core 2", "CRASH_state@2", 0x5000_0100, true)], "{c}");
+    assert_eq!((c["total"].as_u64(), c["type_name"].as_str()), (Some(2), Some("unsigned int")), "{c}");
+    let (status, e) = eval("CRASH_state");
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    let msg = e["message"].as_str().unwrap();
+    for want in ["0xD0000100", "local.elf", "cores 0 and 2", "`CRASH_state@0` or `CRASH_state@2`"] {
+        assert!(msg.contains(want), "{want} missing: {msg}");
+    }
+    let (status, e) = eval("CRASH_state + 1");
+    assert_eq!(status, 400, "a computed value reads the RAM too: {e}");
+    assert!(e["message"].as_str().unwrap().contains("reads core-local RAM"), "{e}");
+    assert_eq!(eval("CRASH_state@2").1["value"], 3);
+    // A struct copy's members carry its core; the group's children are the copies.
+    let c = children("g_pair");
+    assert_eq!(c["items"][1]["expression"], "g_pair@2", "{c}");
+    assert_eq!(c["items"][1]["has_children"], true, "{c}");
+    let c = children("g_pair@2");
+    let m: Vec<(&str, u64)> = c["items"].as_array().unwrap().iter().map(|i| (i["expression"].as_str().unwrap(), i["address"].as_u64().unwrap())).collect();
+    assert_eq!(m, [("g_pair.a@2", 0x5000_0200), ("g_pair.b@2", 0x5000_0204)], "{c}");
+    assert_eq!(eval("g_pair.b@2").1["value"], 7);
+    // The shadowed copy's symbol reference takes a core as well.
+    let shadowed = items.iter().filter(|i| i["name"] == "CRASH_state").nth(1).unwrap()["expression"].as_str().unwrap().to_string();
+    assert!(shadowed.starts_with("${E") && shadowed.ends_with("/GV:0}"), "{shadowed}");
+    let c = children(&shadowed);
+    assert_eq!(c["items"][0]["expression"], format!("{shadowed}@0"), "{c}");
+    let (_, v) = eval(&format!("{shadowed}@2"));
+    assert_eq!((v["value"].as_u64(), v["address"].as_u64()), (Some(3), Some(0x5000_0100)), "{v}");
+    let (status, e) = eval(&shadowed);
+    assert_eq!(status, 400, "{e}");
+    // Writes: refused bare, the copy named otherwise.
+    let (status, e) = http.request("PUT", "/api/v1/expressions", Some(json!({ "expression": "CRASH_state", "value": 9 })), &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    assert_eq!(get("/api/v1/memory?address=0x70000100&length=4")["data"], "01000000", "the refused write changed nothing");
+    vs.events.clear();
+    let w = http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": "CRASH_state@0", "value": 9 })));
+    assert_eq!((w["value"].as_u64(), w["address"].as_u64()), (Some(9), Some(0x7000_0100)), "{w}");
+    assert_eq!(get("/api/v1/memory?address=0x70000100&length=4")["data"], "09000000");
+    vs.event("Memory", "memoryChanged", "S0.D0.C0");
+    // `@N` must name a TriCore core that exists, and agree with `target`.
+    let (status, e) = eval("CRASH_state@5");
+    assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
+    assert!(e["message"].as_str().unwrap().contains("no TriCore core 5"), "{e}");
+    let (status, e) = eval("CRASH_state@6");
+    assert_eq!(status, 404, "core 6 is the HSM, not a TriCore: {e}");
+    let (status, e) = http.request("GET", &format!("/api/v1/expressions?expression={}&target=tc37x_ext.cpu0", enc("CRASH_state@2")), None, &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    assert_eq!(get(&format!("/api/v1/expressions?expression={}&target=tc37x_ext.cpu2", enc("CRASH_state@2")))["value"], 3);
+    // DAQ: the bare name is refused per point, a copy samples over the system bus.
+    let mut ws = Ws::connect(http.0, &[]).unwrap();
+    ws.send(json!({ "op": "subscribe", "id": 1, "points": [{ "expression": "CRASH_state", "rate_hz": 100 }, { "expression": "CRASH_state@2", "rate_hz": 100 }] }));
+    let cfg = ws.recv().expect("config frame");
+    let pts = cfg["points"].as_array().unwrap();
+    assert!(pts[0]["error"].as_str().is_some_and(|m| m.contains("`CRASH_state@0` or `CRASH_state@2`")), "{cfg}");
+    assert!(pts[0]["id"].is_null(), "{cfg}");
+    assert_eq!(pts[1]["address"], 0x5000_0100, "{cfg}");
+    assert_eq!(ws.collect("samples", 1)[0]["values"][0], 3);
+    drop(ws);
+    // A live watch has a scope, so it keeps reading the copy of the core it is evaluated for.
+    let r = vs.command("Expressions", "create", &[json!("S0.D0.C2"), Value::Null, json!("CRASH_state")]);
+    assert_eq!(r[0], "", "{r:?}");
+    let id = serde_json::from_str::<Value>(&r[1]).unwrap()["ID"].as_str().unwrap().to_string();
+    let r = vs.command("Expressions", "evaluate", &[json!(id)]);
+    assert_eq!(r[0], json!("AwAAAA==").to_string(), "core 2's copy: {r:?}");
+
+    // --- Assigned to no core: the copies are every TriCore core's, not the HSM's ---
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [elf] })));
+    assert!(get("/api/v1/info")["symbol_files"][0].get("local_cores").is_none(), "loading without a suffix clears it");
+    assert_eq!(named(&globals(), "CRASH_state")["per_core"], true);
+    let c = children("CRASH_state");
+    let exprs: Vec<&str> = c["items"].as_array().unwrap().iter().map(|i| i["expression"].as_str().unwrap()).collect();
+    assert_eq!(exprs, ["CRASH_state@0", "CRASH_state@1", "CRASH_state@2"], "{c}");
+    let (status, e) = eval("CRASH_state");
+    assert_eq!(status, 400, "{e}");
+    let msg = e["message"].as_str().unwrap();
+    assert!(msg.contains("`CRASH_state@0`, `CRASH_state@1` or `CRASH_state@2`") && msg.contains("not assigned to a single core"), "{msg}");
+    assert_eq!(eval("CRASH_state@1").1["value"], 2);
+    let mut ws = Ws::connect(http.0, &[]).unwrap();
+    ws.send(json!({ "op": "subscribe", "id": 1, "points": [{ "expression": "CRASH_state", "rate_hz": 100 }] }));
+    let cfg = ws.recv().expect("config frame");
+    assert!(cfg["points"][0]["error"].as_str().is_some_and(|m| m.contains("CRASH_state@1")), "{cfg}");
+    drop(ws);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Struct members and array elements, against a real application ELF (`AURIX_TEST_ELF`).
 fn variables_of_real_elf(http: &Http) {
     let Some(elf) = std::env::var_os("AURIX_TEST_ELF").map(PathBuf::from).filter(|p| p.is_file()) else {
@@ -1003,6 +1259,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     // --- Variables by name ---------------------------------------------------------------------
 
     variables(&http, &mut vs);
+    core_local_variables(&http, &mut vs);
     variables_of_real_elf(&http);
 
     // Web pages of other sites must not drive the debugger.

@@ -162,13 +162,14 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
                         crate::daq::SampleMode::OnChange => "on_change",
                     };
                     out.push(format!(
-                        "  {:3} 0x{:08x} {:4} B  asked {:6} us  scheduled {:6} us  achieved {:>6}  {mode:10} via {space}{}",
+                        "  {:3} 0x{:08x} {:4} B  asked {:6} us  scheduled {:6} us  achieved {:>6}  delivered {:>6}  {mode:10} via {space}{}",
                         p.id,
                         p.addr,
                         p.len,
                         p.interval_us(),
                         p.eff_us(),
                         p.achieved_us().map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                        p.delivered_us().map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
                         if p.muted { "  MUTED" } else { "" }
                     ));
                 }

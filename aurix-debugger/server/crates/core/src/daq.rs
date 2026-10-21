@@ -131,8 +131,15 @@ pub struct Point {
     /// rate reaches the request. See [`retune`].
     eff: Duration,
     /// Smoothed interval actually achieved, which is what the correction closes the loop on.
+    ///
+    /// Over steady intervals only - a stall is left out by design (see [`retune`]) - so it says
+    /// how well the scheduler hits its deadlines, not what a client receives. That is
+    /// [`Point::delivered_us`].
     achieved: Option<Duration>,
     last_tick: Option<Instant>,
+    /// The first tick and how many there have been since, for [`Point::delivered_us`].
+    first_tick: Option<Instant>,
+    ticks: u64,
     pub mode: SampleMode,
     pub cmp_mask: Option<Vec<u8>>,
     pub resend_after: Option<Duration>,
@@ -158,6 +165,16 @@ impl Point {
     /// Smoothed interval actually achieved, once there is one.
     pub fn achieved_us(&self) -> Option<u32> {
         self.achieved.map(|d| d.as_micros() as u32)
+    }
+
+    /// Mean interval between the samples actually taken, stalls and all: what a client gets.
+    ///
+    /// `achieved` cannot answer that, because it skips every interval it calls a stall. A
+    /// sampler that kept missing whole periods - 15.6 ms holes at 1 kHz, on a host whose timer
+    /// requests were being ignored - reported "achieved 903 us" while delivering ~190 samples/s.
+    pub fn delivered_us(&self) -> Option<u32> {
+        let (first, last) = (self.first_tick?, self.last_tick?);
+        (self.ticks > 1).then(|| (last.saturating_duration_since(first).as_micros() as u64 / (self.ticks - 1)) as u32)
     }
 
     /// Forgets the change-detection baseline, so the next read is delivered.
@@ -377,6 +394,8 @@ impl Registry {
                 // Start at the requested period and let retune() find the shorter one it needs.
                 eff: Duration::from_micros(interval_us as u64),
                 achieved: None,
+                first_tick: None,
+                ticks: 0,
                 last_tick: None,
                 mode: cfg.mode,
                 cmp_mask: cfg.cmp_mask.clone(),
@@ -530,6 +549,8 @@ fn retune(p: &mut Point, now: Instant) -> Option<Duration> {
 /// long-run rate stays steady; a stall produces a gap and never a burst of catch-up samples.
 fn advance(p: &mut Point, now: Instant) -> u64 {
     let prev = p.last_tick;
+    p.first_tick.get_or_insert(now);
+    p.ticks += 1;
     let steady = retune(p, now).is_some();
     p.next_due += p.eff;
     if p.next_due <= now {
@@ -867,6 +888,8 @@ mod tests {
             next_due: t0,
             eff: Duration::from_millis(period_ms),
             achieved: None,
+            first_tick: None,
+            ticks: 0,
             last_tick: None,
             mode: SampleMode::EveryTick,
             cmp_mask: None,
@@ -914,6 +937,28 @@ mod tests {
         let missed = advance(&mut p, t0 + Duration::from_millis(100));
         assert!(missed >= 98, "missed {missed}");
         assert!(p.next_due > t0 + Duration::from_millis(100));
+    }
+
+    /// The hardware symptom, pinned: a 1 ms point that gets three samples ~0.35 ms apart and then
+    /// a 15.6 ms hole. `achieved` leaves the holes out (they are stalls to the controller), so it
+    /// looked healthy; `delivered` is what a client actually receives.
+    #[test]
+    fn delivered_counts_the_holes_achieved_leaves_out() {
+        let t0 = Instant::now();
+        let mut p = point(1, t0);
+        assert_eq!(p.delivered_us(), None, "no interval before the second tick");
+        let mut t = t0;
+        for _ in 0..50 {
+            for _ in 0..3 {
+                advance(&mut p, t);
+                t += Duration::from_micros(350);
+            }
+            t += Duration::from_micros(15_600 - 3 * 350);
+        }
+        let delivered = p.delivered_us().unwrap();
+        assert!((5_000..5_400).contains(&delivered), "delivered every {delivered} us");
+        let achieved = p.achieved_us().unwrap();
+        assert!(achieved < 1_000, "achieved {achieved} us only sees the bursts");
     }
 
     #[test]

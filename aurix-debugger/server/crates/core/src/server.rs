@@ -139,14 +139,43 @@ static TIMER_RESOLUTION: Once = Once::new();
 /// state poll and DAQ. This belongs to the server, not to the executable: an embedder that drives
 /// `Server::run` gets the same 1 ms resolution the sampler promises. The process keeps it until
 /// it exits.
+///
+/// `timeBeginPeriod` alone is not enough on Windows 11. A process that leaves its power
+/// throttling to the system - which every process does unless it says otherwise - can have its
+/// timer requests ignored whenever the OS decides it is in the background, and a debug server
+/// started hidden by VS Code is exactly that. The request then holds while the server is busy and
+/// lapses when it goes quiet: on a TC38x, a 1 kHz point came out at ~190 samples/s, in bursts of
+/// three with a 15.6 ms hole after each, while a `sleep 1` on the console still took 1.5 ms. So the
+/// process opts out explicitly: its timer requests are always honoured, and it is never run as
+/// EcoQoS - a sampler that promises a rate is not background work.
 #[cfg(windows)]
 fn request_timer_resolution() {
     #[link(name = "winmm")]
     extern "system" {
         fn timeBeginPeriod(period: u32) -> u32;
     }
+    /// `PROCESS_POWER_THROTTLING_STATE`.
+    #[repr(C)]
+    struct PowerThrottling {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetProcessInformation(process: isize, class: i32, info: *const PowerThrottling, size: u32) -> i32;
+    }
+    const PROCESS_POWER_THROTTLING: i32 = 4;
+    const EXECUTION_SPEED: u32 = 0x1;
+    const IGNORE_TIMER_RESOLUTION: u32 = 0x4;
     TIMER_RESOLUTION.call_once(|| unsafe {
         timeBeginPeriod(1);
+        // In the control mask with a zero state: "decide this for me, and the answer is never
+        // throttle". Fails harmlessly before Windows 10 1709 (no such class) and only matters on
+        // Windows 11, so the result is not checked.
+        let state = PowerThrottling { version: 1, control_mask: EXECUTION_SPEED | IGNORE_TIMER_RESOLUTION, state_mask: 0 };
+        SetProcessInformation(GetCurrentProcess(), PROCESS_POWER_THROTTLING, &state, std::mem::size_of::<PowerThrottling>() as u32);
     });
 }
 

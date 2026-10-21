@@ -4,6 +4,14 @@
 use crate::types::*;
 
 api! {
+    /// What is serving: server version and API revision, process, probe connection, targets and
+    /// loaded symbol files.
+    ///
+    /// Always answers at once, whatever the state - no adapter, no examined target, no symbols, or
+    /// a core busy flashing: it reads what the core publishes and never queues a job on it. That
+    /// makes it the liveness probe; `core_lag_ms` says whether other operations would wait.
+    op info [server]: GET "/api/v1/info" (NoArgs) -> ServerInfo;
+
     /// List the targets (cores) with their run state.
     op targets [targets]: GET "/api/v1/targets" (NoArgs) -> TargetList;
 
@@ -105,6 +113,34 @@ api! {
 
     /// The symbol files loaded per target (by this API or by a VS Code debug session).
     op symbols [symbols]: GET "/api/v1/symbols" (NoArgs) -> SymbolsInfo;
+
+    /// List the global and static variables of the loaded symbols, filtered by a name pattern, one
+    /// page at a time.
+    ///
+    /// The search runs on the server and stays fast for an ELF with 10^5 globals. Each item says
+    /// whether a DAQ point can sample it and gives the expression to sample it by. Fails with
+    /// `not_found` when no symbols are loaded (`load_symbols`).
+    op list_globals [variables]: GET "/api/v1/globals" (ListGlobalsRequest) -> GlobalList;
+
+    /// List the members of a struct or union, or the elements of an array, that an expression
+    /// stands for, each with the expression that names it.
+    ///
+    /// Reads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not
+    /// followed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`.
+    op symbol_children [variables]: GET "/api/v1/expressions/children" (SymbolChildrenRequest) -> SymbolChildren;
+
+    /// Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
+    ///
+    /// Works while the cores run: there is no stack frame, so names are globals and statics, as in
+    /// a VS Code live watch. Fails with `not_found` for an unknown name or when no symbols are
+    /// loaded, and with `memory` when the target memory cannot be read.
+    op evaluate [variables]: GET "/api/v1/expressions" (EvaluateRequest) -> VariableValue;
+
+    /// Write a variable by its expression and read it back.
+    ///
+    /// Works while the cores run, like `write_memory`; a bit field is merged into its storage
+    /// unit. Connected debugger clients (VS Code) are told to refresh their views.
+    op write_variable [variables]: PUT "/api/v1/expressions" (WriteVariableRequest) -> VariableValue;
 
     /// Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.
     ///

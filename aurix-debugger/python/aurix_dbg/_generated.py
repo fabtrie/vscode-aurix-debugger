@@ -1,7 +1,7 @@
 # Generated from the aurix-dbg API definition (server/crates/api-spec) by `cargo build`. Do not edit.
 """Generated part of the aurix-dbg client: response types and API methods.
 
-Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
+Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
 
 The API shares its session with the other frontends: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream.
 
@@ -45,6 +45,9 @@ ResetMode = Literal["run", "halt", "init"]
 
 RunState = Literal["unknown", "running", "halted", "debug_running", "reset"]
 """Run state of a target."""
+
+VariableClass = Literal["float", "array", "struct", "union", "function", "uint", "int", "bool", "enum", "pointer", "unknown"]
+"""What a variable holds, from its type with typedefs and qualifiers stripped."""
 
 WaitFor = Literal["halted", "running"]
 """State to wait for."""
@@ -158,6 +161,62 @@ class CommandOutput:
     def from_dict(cls, d: dict[str, Any]) -> CommandOutput:
         return cls(
             output=d.get("output"),
+        )
+
+
+@dataclass
+class GlobalList:
+    """One page of the globals that match a query, sorted by name."""
+
+    items: list[VariableInfo]
+    offset: int
+    """Index of the first item among the matches."""
+    total: int
+    """Matches in all, not only on this page."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> GlobalList:
+        return cls(
+            items=_list(VariableInfo, d.get("items")),
+            offset=d.get("offset"),
+            total=d.get("total"),
+        )
+
+
+@dataclass
+class InfoSymbolFile:
+    """A loaded symbol file and the targets it is loaded for."""
+
+    path: str
+    """Path on the debug server's machine."""
+    targets: list[str]
+    """Targets whose symbol set holds the file."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> InfoSymbolFile:
+        return cls(
+            path=d.get("path"),
+            targets=d.get("targets"),
+        )
+
+
+@dataclass
+class InfoTarget:
+    """A target as `info` reports it."""
+
+    examined: bool
+    """The target has been examined (is accessible and under debug control)."""
+    name: str
+    """Target name (e.g. `tc37x.cpu0`)."""
+    reachable: bool
+    """False while the target has not been accessible for a while (e.g. not powered)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> InfoTarget:
+        return cls(
+            examined=d.get("examined"),
+            name=d.get("name"),
+            reachable=d.get("reachable"),
         )
 
 
@@ -426,6 +485,77 @@ class RegisterValue:
 
 
 @dataclass
+class ServerInfo:
+    """The debug server, its probe connection and what is loaded."""
+
+    api_version: int
+    """Revision of this API. It is raised whenever an operation or a field is added or changed,
+    so a client can check for what it needs instead of parsing `version`."""
+    connected: bool
+    """The adapter is connected to its probe."""
+    core_lag_ms: int
+    """Milliseconds since the debug core last finished a job or a run-state poll. It stays below
+    the polling period while the server is responsive and grows while one long operation
+    (flashing, a reset, a Tcl script) holds the core; the other operations wait for it."""
+    examined: bool
+    """At least one target is examined."""
+    pid: int
+    """Process ID of the server."""
+    server: str
+    """Always `aurix-dbg`."""
+    symbol_files: list[InfoSymbolFile]
+    """The loaded symbol files (by `load_symbols` or a VS Code debug session)."""
+    symbols_loading: bool
+    """Symbol files are being loaded right now; `symbol_files` lists what was loaded before."""
+    targets: list[InfoTarget]
+    version: str
+    """Version of the server."""
+    adapter: str | None = None
+    """The adapter driver in use (`tas_client`, `sim`, `winidea`), once one is configured."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ServerInfo:
+        return cls(
+            api_version=d.get("api_version"),
+            connected=d.get("connected"),
+            core_lag_ms=d.get("core_lag_ms"),
+            examined=d.get("examined"),
+            pid=d.get("pid"),
+            server=d.get("server"),
+            symbol_files=_list(InfoSymbolFile, d.get("symbol_files")),
+            symbols_loading=d.get("symbols_loading"),
+            targets=_list(InfoTarget, d.get("targets")),
+            version=d.get("version"),
+            adapter=d.get("adapter"),
+        )
+
+
+@dataclass
+class SymbolChildren:
+    """The members of a struct or union, or the elements of an array. Anything else has none."""
+
+    expression: str
+    """The parent expression."""
+    items: list[VariableInfo]
+    offset: int
+    """Index of the first item."""
+    total: int
+    """Children in all (members, or array elements), not only on this page."""
+    type_name: str
+    """The parent's type."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SymbolChildren:
+        return cls(
+            expression=d.get("expression"),
+            items=_list(VariableInfo, d.get("items")),
+            offset=d.get("offset"),
+            total=d.get("total"),
+            type_name=d.get("type_name"),
+        )
+
+
+@dataclass
 class SymbolsForTarget:
     """The symbol files of one target."""
 
@@ -517,6 +647,99 @@ class TargetList:
 
 
 @dataclass
+class VariableInfo:
+    """A variable, or a member or element of one, as the symbols describe it."""
+
+    class_: VariableClass
+    expression: str
+    """C expression naming exactly this object, for `evaluate`, `write_variable`,
+    `symbol_children` and the `expression` of a DAQ point. It is the plain name unless another
+    global of the same name would be found first; then it is a symbol reference
+    (`${E0/GV:12}`)."""
+    has_children: bool
+    """`symbol_children` lists members or elements: a struct or union, or an array of known
+    length."""
+    name: str
+    """Name to show: the variable, the member, or the index (`[3]`)."""
+    sampleable: bool
+    """A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at
+    most 8 bytes."""
+    size: int
+    """Size in bytes; for a bit field, of its storage unit."""
+    type_name: str
+    """C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`."""
+    address: int | None = None
+    """Address, when it is fixed (always for a global)."""
+    bit_offset: int | None = None
+    """Bit field: position of its least significant bit in the storage unit at `address`."""
+    bit_size: int | None = None
+    """Bit field: width in bits."""
+    unit: str | None = None
+    """The compilation unit (source file) that defines a global; `list_globals` only."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> VariableInfo:
+        return cls(
+            class_=d.get("class"),
+            expression=d.get("expression"),
+            has_children=d.get("has_children"),
+            name=d.get("name"),
+            sampleable=d.get("sampleable"),
+            size=d.get("size"),
+            type_name=d.get("type_name"),
+            address=d.get("address"),
+            bit_offset=d.get("bit_offset"),
+            bit_size=d.get("bit_size"),
+            unit=d.get("unit"),
+        )
+
+
+@dataclass
+class VariableValue:
+    """The value of an expression, read now."""
+
+    class_: VariableClass
+    expression: str
+    has_children: bool
+    """`symbol_children` lists members or elements."""
+    raw_hex: str
+    """The bytes as read, lowest address first: the whole storage unit for a bit field."""
+    sampleable: bool
+    """A DAQ point decodes it to a typed value."""
+    size: int
+    """Size in bytes; for a bit field, of its storage unit."""
+    type_name: str
+    """C type, e.g. `uint32`, `enum state_e`."""
+    value: float | bool | str
+    """Decoded as a DAQ point decodes it: a number for an integer, float or pointer, `true` /
+    `false` for a bool, the enumerator name for an enum (the number if it matches none),
+    `nan` / `inf` / `-inf` for a float that is not finite, and the bytes as hex for anything
+    else or larger than 8 bytes."""
+    address: int | None = None
+    """Address of the value, when it is stored on the target (not for `g_x + 1`)."""
+    bit_offset: int | None = None
+    """Bit field: position of its least significant bit in the storage unit at `address`."""
+    bit_size: int | None = None
+    """Bit field: width in bits."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> VariableValue:
+        return cls(
+            class_=d.get("class"),
+            expression=d.get("expression"),
+            has_children=d.get("has_children"),
+            raw_hex=d.get("raw_hex"),
+            sampleable=d.get("sampleable"),
+            size=d.get("size"),
+            type_name=d.get("type_name"),
+            value=d.get("value"),
+            address=d.get("address"),
+            bit_offset=d.get("bit_offset"),
+            bit_size=d.get("bit_size"),
+        )
+
+
+@dataclass
 class WatchpointInfo:
     """A watchpoint."""
 
@@ -556,6 +779,16 @@ class GeneratedClient:
 
     def _call(self, method: str, path: str, query: dict[str, Any] | None, body: dict[str, Any] | None) -> Any:
         raise NotImplementedError
+
+    def info(self) -> ServerInfo:
+        """What is serving: server version and API revision, process, probe connection, targets and
+        loaded symbol files.
+
+        Always answers at once, whatever the state - no adapter, no examined target, no symbols, or
+        a core busy flashing: it reads what the core publishes and never queues a job on it. That
+        makes it the liveness probe; `core_lag_ms` says whether other operations would wait.
+        """
+        return ServerInfo.from_dict(self._call("GET", "/api/v1/info", None, None))
 
     def targets(self) -> TargetList:
         """List the targets (cores) with their run state.
@@ -779,6 +1012,63 @@ class GeneratedClient:
         """The symbol files loaded per target (by this API or by a VS Code debug session).
         """
         return SymbolsInfo.from_dict(self._call("GET", "/api/v1/symbols", None, None))
+
+    def list_globals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None, target: str | None = None) -> GlobalList:
+        """List the global and static variables of the loaded symbols, filtered by a name pattern, one
+        page at a time.
+
+        The search runs on the server and stays fast for an ELF with 10^5 globals. Each item says
+        whether a DAQ point can sample it and gives the expression to sample it by. Fails with
+        `not_found` when no symbols are loaded (`load_symbols`).
+
+        Args:
+            limit: Return at most this many (default 100, at most 10000).
+            offset: Skip this many matches (default 0).
+            query: Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one character. `*speed*` finds every name containing `speed`. Default: all globals.
+            target: Symbols of this target (name or index); default: the first core that has symbols.
+        """
+        return GlobalList.from_dict(self._call("GET", "/api/v1/globals", _args({"limit": limit, "offset": offset, "query": query, "target": target}), None))
+
+    def symbol_children(self, *, expression: str, limit: int | None = None, offset: int | None = None, target: str | None = None) -> SymbolChildren:
+        """List the members of a struct or union, or the elements of an array, that an expression
+        stands for, each with the expression that names it.
+
+        Reads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not
+        followed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`.
+
+        Args:
+            expression: C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or `symbol_children` returned.
+            limit: Return at most this many (default 100, at most 10000); a large array is paged like `list_globals`.
+            offset: Skip this many children (default 0).
+            target: Symbols of this target (name or index); default: the first core that has symbols.
+        """
+        return SymbolChildren.from_dict(self._call("GET", "/api/v1/expressions/children", _args({"expression": expression, "limit": limit, "offset": offset, "target": target}), None))
+
+    def evaluate(self, *, expression: str, target: str | None = None) -> VariableValue:
+        """Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
+
+        Works while the cores run: there is no stack frame, so names are globals and statics, as in
+        a VS Code live watch. Fails with `not_found` for an unknown name or when no symbols are
+        loaded, and with `memory` when the target memory cannot be read.
+
+        Args:
+            expression: C expression: a global or static variable, a member or element of one (`g_motor.speed`, `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.
+            target: Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program RAM); default: the first core that has symbols.
+        """
+        return VariableValue.from_dict(self._call("GET", "/api/v1/expressions", _args({"expression": expression, "target": target}), None))
+
+    def write_variable(self, *, expression: str, value: float | bool | str, target: str | None = None) -> VariableValue:
+        """Write a variable by its expression and read it back.
+
+        Works while the cores run, like `write_memory`; a bit field is merged into its storage
+        unit. Connected debugger clients (VS Code) are told to refresh their views.
+
+        Args:
+            expression: C expression of the variable, as for `evaluate`; it must name something stored on the target.
+            value: The new value: a number; `true` / `false`; for an enum, an enumerator name; for an integer, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values exact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or array takes its bytes as a hex string of exactly its size.
+            target: Use this target's symbols and write memory as it sees it; default: the first core that has symbols.
+        """
+        return VariableValue.from_dict(self._call("PUT", "/api/v1/expressions", None, _args({"expression": expression, "value": value, "target": target})))
 
     def load_orti(self, *, file: str, target: str | None = None) -> OsInfo:
         """Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.

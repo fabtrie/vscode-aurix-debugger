@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use jim::{CmdResult, Interp};
@@ -23,6 +23,33 @@ pub type Job = Box<dyn for<'a, 'b> FnOnce(&'b Cx<'a>) + Send>;
 #[derive(Clone)]
 pub struct ServerHandle {
     tx: Sender<Job>,
+    status: Arc<Mutex<Published>>,
+}
+
+/// What the core looks like from outside, published by the core thread so a frontend can answer
+/// a liveness probe without a round trip: one that queues behind a flash job or a long Tcl script
+/// would make a busy server look dead.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Status {
+    /// The driver in use (`adapter name`), once one is configured.
+    pub adapter: Option<String>,
+    /// The adapter is connected to the probe (`init` ran successfully).
+    pub connected: bool,
+    pub targets: Vec<TargetStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetStatus {
+    pub name: String,
+    pub coreid: u32,
+    pub examined: bool,
+    pub reachable: bool,
+}
+
+struct Published {
+    status: Status,
+    /// When the core thread last finished a job or a poll.
+    seen: Instant,
 }
 
 impl ServerHandle {
@@ -57,6 +84,44 @@ impl ServerHandle {
     pub fn subscribe(&self) -> Receiver<Event> {
         events::subscribe()
     }
+
+    /// The last published [`Status`] and how long ago the core thread last finished a job or a
+    /// poll. That age stays below the polling period while the core thread is responsive, and
+    /// grows while one long operation (flashing, a reset, a Tcl script) holds it.
+    pub fn status(&self) -> (Status, Duration) {
+        let p = self.status.lock().unwrap();
+        (p.status.clone(), p.seen.elapsed())
+    }
+}
+
+/// Publishes the state behind [`ServerHandle::status`]. Compared before it is copied, because
+/// this runs after every job: a changed field is rare, an allocation per job would not be.
+fn publish(cx: &Cx, out: &Mutex<Published>) {
+    let mut p = out.lock().unwrap();
+    p.seen = Instant::now();
+    let same = cx.with(|c| {
+        let adapter = c.adapter.as_deref().map(|a| a.driver_name()).or(c.adapter_name.as_deref());
+        let connected = c.adapter.as_deref().is_some_and(|a| a.initialized());
+        let s = &p.status;
+        s.adapter.as_deref() == adapter
+            && s.connected == connected
+            && s.targets.len() == c.targets.len()
+            && s.targets.iter().zip(&c.targets).all(|(a, t)| {
+                a.examined == t.core.examined() && a.reachable == !t.unreachable && a.coreid == t.core.coreid() && a.name == t.name
+            })
+    });
+    if same {
+        return;
+    }
+    p.status = cx.with(|c| Status {
+        adapter: c.adapter.as_deref().map(|a| a.driver_name().to_string()).or_else(|| c.adapter_name.clone()),
+        connected: c.adapter.as_deref().is_some_and(|a| a.initialized()),
+        targets: c
+            .targets
+            .iter()
+            .map(|t| TargetStatus { name: t.name.clone(), coreid: t.core.coreid(), examined: t.core.examined(), reachable: !t.unreachable })
+            .collect(),
+    });
 }
 
 pub struct Server {
@@ -64,6 +129,7 @@ pub struct Server {
     pub sh: Shared,
     tx: Sender<Job>,
     rx: Receiver<Job>,
+    status: Arc<Mutex<Published>>,
 }
 
 static LOG_TO_EVENTS: Once = Once::new();
@@ -104,7 +170,8 @@ impl Server {
         commands::register_all(&interp, &sh);
         interp.eval_global(commands::PRELUDE).expect("prelude must evaluate");
         let (tx, rx) = channel();
-        Server { interp, sh, tx, rx }
+        let status = Arc::new(Mutex::new(Published { status: Status::default(), seen: Instant::now() }));
+        Server { interp, sh, tx, rx, status }
     }
 
     pub fn cx(&self) -> Cx<'_> {
@@ -112,7 +179,7 @@ impl Server {
     }
 
     pub fn handle(&self) -> ServerHandle {
-        ServerHandle { tx: self.tx.clone() }
+        ServerHandle { tx: self.tx.clone(), status: self.status.clone() }
     }
 
     /// Serves requests and polls targets until `shutdown`.
@@ -132,11 +199,14 @@ impl Server {
             // even spacing for about eight times the CPU, and it is not worth it: at 1 kHz the
             // sleeping loop delivered *more* samples (989/s) than the spinning one (868/s).
             let wait = deadline(next_poll, daq_due).saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(wait) {
-                Ok(job) => job(&cx),
-                Err(RecvTimeoutError::Timeout) => {}
+            let mut changed = match self.rx.recv_timeout(wait) {
+                Ok(job) => {
+                    job(&cx);
+                    true
+                }
+                Err(RecvTimeoutError::Timeout) => false,
                 Err(RecvTimeoutError::Disconnected) => break,
-            }
+            };
             // The run-state poll goes first when it is due, because it carries any DAQ point that
             // is due with it: one round trip instead of two, and the sample lands at the front of
             // the poll's batch instead of queueing behind it. That used to be the other way round
@@ -146,6 +216,11 @@ impl Server {
                 ops::poll_all(&cx);
                 let period = Duration::from_millis(cx.with(|c| c.poll_period_ms).max(1));
                 next_poll = Instant::now() + period;
+                changed = true;
+            }
+            // Not after a DAQ tick: that only moves bytes and runs up to ~1.5 kHz.
+            if changed {
+                publish(&cx, &self.status);
             }
             // Whatever the poll did not take: it only runs once a period, and it returns early
             // when polling is disabled or the device is not up, so this stays the primary path.

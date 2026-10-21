@@ -71,7 +71,8 @@ One HTTP port (`api_port`, default 8080) serves:
 
 | Path | Content |
 |---|---|
-| `/api/v1/...` | REST API: targets, run control, registers, memory, breakpoints, watchpoints, flash, Tcl. |
+| `/api/v1/...` | REST API: targets, run control, registers, memory, [variables by name](#variables-by-name), breakpoints, watchpoints, flash, Tcl. |
+| `/api/v1/info` | Liveness probe: server version, API revision, process ID, probe connection, targets, loaded symbol files. Never waits for the core. |
 | `/api/v1/os/...` | [AUTOSAR OS awareness](#autosar-os-awareness-orti): the objects an ORTI file describes, read from the running target. |
 | `/docs` | Swagger UI; `/openapi.json` is the OpenAPI 3.1 document. |
 | `/mcp` | MCP server (Streamable HTTP). Register it with `claude mcp add --transport http aurix http://127.0.0.1:8080/mcp`. |
@@ -95,7 +96,7 @@ DAQ is deliberately *not* an operation: a streaming session is of no use as an M
 - During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
 - Symbols can be loaded from the API (`load_symbols`), not only by a VS Code debug session. There is one symbol set per core and the last writer wins: a VS Code session started afterwards replaces what the API loaded, and the other way round. `symbols` reports what is loaded.
 
-**Performance.** Every operation is one short job on the core thread. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. The core loop always sleeps: it never busy-waits for a DAQ deadline, and the sampler corrects its own rate instead, so 1 kHz costs ~8 % of a core. A point that is due when the run-state poll runs is read by the poll's own batch instead of costing a second round trip. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
+**Performance.** Every operation is one short job on the core thread, except `info`, which is none: it reads a status the core thread publishes after every job and poll, so it answers while a flash job or a long Tcl script holds the core. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. The core loop always sleeps: it never busy-waits for a DAQ deadline, and the sampler corrects its own rate instead, so 1 kHz costs ~8 % of a core. A point that is due when the run-state poll runs is read by the poll's own batch instead of costing a second round trip. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
 
 **Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it. The core thread is never busy-waited, so the worst case is probe traffic and one batch of added latency, not a pinned CPU.
 
@@ -109,6 +110,36 @@ print(hex(dbg.read_register("tc37x_ext.cpu0", "pc").value))
 data = dbg.read_bytes(0x70000000, 256)   # any length, split into 64 KB calls
 for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients
 ```
+
+### Variables by name
+
+Globals can be browsed, read and written by name over REST and MCP, without a VS Code session:
+
+```text
+GET /api/v1/info                                            liveness probe
+GET /api/v1/globals?query=*speed*&offset=0&limit=100        list_globals
+GET /api/v1/expressions/children?expression=g_motor         symbol_children
+GET /api/v1/expressions?expression=g_motor.speed_rpm        evaluate
+PUT /api/v1/expressions  {"expression": "g_motor.mode", "value": "MODE_RUN"}   write_variable
+```
+
+```python
+dbg.load_symbols(files=[r"C:\build\app.elf"])
+for g in dbg.list_globals(query="*speed*").items:
+    print(g.expression, g.type_name, g.sampleable)
+print(dbg.evaluate(expression="g_motor.speed_rpm").value)
+dbg.write_variable(expression="g_motor.mode", value="MODE_RUN")
+```
+
+- **Browsing.** `list_globals` matches a case-insensitive glob (`*`, `?`) against the whole name of every global of the loaded symbols and returns one page, sorted by name; `total` counts all matches. The sorted list is built once per symbol set, so a search over 10^5 globals is one pass over the names, and only the page's types are looked up. `symbol_children` lists struct and union members (those of an anonymous member lifted to where C finds them) and array elements, paged the same way. Pointers are not followed: their target can move, so evaluate `*p` or `p->x` instead.
+- **Every item says how to use it:** `expression` to pass to the other operations and to a DAQ point, `class` (`uint`, `int`, `float`, `bool`, `enum`, `pointer`, `array`, `struct`, `union`, `function`, `unknown`), `size`, `address`, `has_children`, and `sampleable` - a DAQ point streams it as a typed value (a scalar of at most 8 bytes) rather than hex.
+- **An expression names exactly one variable.** Two `static` variables of the same name in different files, or one in the bootmanager ELF as well, are found by name in a fixed order. The ones the name does not find get a symbol reference such as `${E0/GV:12}` as their `expression`, which `evaluate`, `write_variable`, `symbol_children` and DAQ points all accept.
+- **The evaluator is the one VS Code uses** (TCF Expressions), without a stack frame: globals, statics, members, elements, casts and arithmetic, while the cores run. Core-local RAM is read through the core that runs the ELF.
+- **Values are decoded as DAQ decodes them:** `value` is a number, a bool, an enumerator name, `nan`/`inf`/`-inf`, or hex for aggregates and anything over 8 bytes, with the bytes as read in `raw_hex`. A bit field reads its storage unit and reports `bit_offset` and `bit_size`.
+- **Writes** take a number, `true`/`false`, an enumerator name, or a decimal or `0x` string (exact for 64-bit values, which a JSON number is not); a struct or array takes its bytes as hex. The value is range-checked against the type or bit field, a bit field is merged into its storage unit, and the variable is read back. Connected VS Code clients get `Memory.memoryChanged`.
+- **Errors:** `not_found` (404) without symbols or for an unknown name, `bad_request` (400) for an expression that does not parse or a value that does not fit, `memory` (422) when the target memory cannot be read.
+- **`info`** is what a client polls to see that the server is up: `api_version` is an integer raised whenever an operation or field is added or changed, `core_lag_ms` the time since the core thread last finished a job or poll (it grows while one long operation holds it), and `symbols_loading` is set while `load_symbols` parses an ELF.
+- Query parameters are URL-encoded as usual; note that `+` in an expression must be sent as `%2B`, or it arrives as a space.
 
 ### Periodic sampling (DAQ)
 
@@ -534,7 +565,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 
 ## Tests
 
-- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
+- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The variable operations run there against two MCS assembler files the test writes (their data labels are globals, one shadowing another); struct members and array elements need `AURIX_TEST_ELF`. The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
 - **Real files:** tests that need build output of a real application skip unless it is named in environment variables: `AURIX_TEST_ELF` (TriCore application ELF), `AURIX_TEST_FUNCTION` (a function in it, default `main`), `AURIX_TEST_ORTI` (its ORTI file), `AURIX_TEST_HSM_ELF`, `AURIX_TEST_APP_ELF` + `AURIX_TEST_BM_ELF` (application and bootloader), `AURIX_TEST_MCS_DIR` (MCS assembler sources with their GHS output).
 - **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD). The scripts take the ELF and a breakpoint location as arguments or from `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs a few more variables, listed in its header:
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.

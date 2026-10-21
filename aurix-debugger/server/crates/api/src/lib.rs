@@ -15,6 +15,7 @@ mod daq_ws;
 mod events;
 mod http;
 mod mcp;
+mod variables;
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ pub fn start(handle: ServerHandle, session: Arc<tcf::Shared>, bind: &str, port: 
     listener.set_nonblocking(true)?;
     let rt = tokio::runtime::Builder::new_current_thread().enable_io().enable_time().max_blocking_threads(16).build()?;
     let hub = events::Hub::start(&handle, &session);
-    let api = Arc::new(CoreApi { handle, session, hub });
+    let api = Arc::new(CoreApi { handle, session, hub, globals: Default::default(), symbol_files: Default::default() });
     thread::Builder::new().name("api-http".into()).spawn(move || {
         rt.block_on(async move {
             let served = match tokio::net::TcpListener::from_std(listener) {

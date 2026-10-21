@@ -21,7 +21,8 @@ pub use ops::{dispatch, DebuggerApi, OPS};
 /// Overall API description (OpenAPI `info.description`, MCP server instructions).
 pub const API_DOC: &str = "\
 Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, \
-memory, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
+memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible \
+Tcl console.
 
 The API shares its session with the other frontends: actions taken here are reflected in a \
 connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows \
@@ -29,6 +30,10 @@ up there and a halt from VS Code is seen in `wait_state` and the event stream.
 
 Targets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. \
 Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.";
+
+/// Revision of the API reported by `info`, raised whenever an operation or a field is added or
+/// changed. 1: `info`, `list_globals`, `symbol_children`, `evaluate`, `write_variable`.
+pub const API_VERSION: u32 = 1;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

@@ -20,9 +20,9 @@ pub enum Decoder {
     Uint { size: u8, bits: Option<(u32, u32)> },
     Int { size: u8, bits: Option<(u32, u32)> },
     Float(u8),
-    Bool,
+    Bool { bits: Option<(u32, u32)> },
     /// Enumerator names by value; short enough for a linear scan.
-    Enum { size: u8, signed: bool, names: Vec<(i64, String)> },
+    Enum { size: u8, signed: bool, bits: Option<(u32, u32)>, names: Vec<(i64, String)> },
     /// Aggregates, unknown types and anything the client asked for raw.
     Hex,
 }
@@ -34,7 +34,7 @@ impl Decoder {
             Decoder::Uint { .. } => "uint",
             Decoder::Int { .. } => "int",
             Decoder::Float(_) => "float",
-            Decoder::Bool => "bool",
+            Decoder::Bool { .. } => "bool",
             Decoder::Enum { .. } => "enum",
             Decoder::Hex => "hex",
         }
@@ -44,7 +44,10 @@ impl Decoder {
     /// neighbouring field in the same storage word would look like a change to this point.
     pub fn cmp_mask(&self, len: u32) -> Option<Vec<u8>> {
         let (shift, bits) = match self {
-            Decoder::Uint { bits: Some(b), .. } | Decoder::Int { bits: Some(b), .. } => *b,
+            Decoder::Uint { bits: Some(b), .. }
+            | Decoder::Int { bits: Some(b), .. }
+            | Decoder::Bool { bits: Some(b) }
+            | Decoder::Enum { bits: Some(b), .. } => *b,
             _ => return None,
         };
         let mask = field_mask(shift, bits);
@@ -54,14 +57,15 @@ impl Decoder {
     pub fn decode(&self, b: &[u8]) -> Value {
         match self {
             Decoder::Hex => json!(hex(b)),
-            Decoder::Bool => json!(b.iter().any(|&x| x != 0)),
+            Decoder::Bool { bits: None } => json!(b.iter().any(|&x| x != 0)),
+            Decoder::Bool { bits } => json!(extract(b, b.len().min(8) as u8, *bits) != 0),
             Decoder::Float(4) => float(f32::from_le_bytes(word(b)) as f64),
             Decoder::Float(_) => float(f64::from_le_bytes(dword(b))),
             Decoder::Uint { size, bits } => json!(extract(b, *size, *bits)),
             Decoder::Int { size, bits } => json!(sign_extend(extract(b, *size, *bits), width(*size, *bits))),
-            Decoder::Enum { size, signed, names } => {
-                let raw = extract(b, *size, None);
-                let v = if *signed { sign_extend(raw, width(*size, None)) } else { raw as i64 };
+            Decoder::Enum { size, signed, bits, names } => {
+                let raw = extract(b, *size, *bits);
+                let v = if *signed { sign_extend(raw, width(*size, *bits)) } else { raw as i64 };
                 match names.iter().find(|(n, _)| *n == v) {
                     Some((_, name)) => json!(name),
                     // Not an enumerator: a bit set, or a value the target should not hold.
@@ -200,6 +204,9 @@ impl Resolved {
 struct DaqTarget<'a> {
     handle: &'a ServerHandle,
     core: usize,
+    /// Number of the ELF evaluating, for `${E<n>/GV:<i>}` references (`list_globals` hands them
+    /// out for a global whose plain name another one shadows).
+    elf: usize,
 }
 
 impl Target for DaqTarget<'_> {
@@ -216,26 +223,26 @@ impl Target for DaqTarget<'_> {
             .call(move |cx| ops::read_memory_as(cx, t, addr, len).map_err(|e| e.to_string()))
             .unwrap_or_else(|| Err("server stopped".into()))
     }
-    fn symbol(&mut self, _: &str) -> Option<SymbolRef> {
-        None
+    fn symbol(&mut self, id: &str) -> Option<SymbolRef> {
+        tcf::symbol_ref(self.elf, id)
     }
 }
 
 /// Picks the decoder for a resolved value, from its DWARF type.
-fn decoder_for(syms: &symbols::Symbols, ty: &symbols::types::TypeId, bits: Option<(u32, u32)>) -> (Decoder, u32, Option<String>) {
+pub fn decoder_for(syms: &symbols::Symbols, ty: &symbols::types::TypeId, bits: Option<(u32, u32)>) -> (Decoder, u32, Option<String>) {
     let info = syms.type_info(ty);
     let size = info.size.max(1);
     let name = info.name.clone();
     let s = size.min(8) as u8;
     let d = match info.class {
         // TypeClass has no Boolean: the name is the only way to tell a C99 _Bool apart.
-        TypeClass::Cardinal if size == 1 && matches!(name.as_deref(), Some("_Bool") | Some("bool")) => Decoder::Bool,
+        TypeClass::Cardinal if size == 1 && matches!(name.as_deref(), Some("_Bool") | Some("bool")) => Decoder::Bool { bits },
         TypeClass::Cardinal | TypeClass::Pointer if size <= 8 => Decoder::Uint { size: s, bits },
         TypeClass::Integer if size <= 8 => Decoder::Int { size: s, bits },
         TypeClass::Real if size == 4 || size == 8 => Decoder::Float(s),
         TypeClass::Enumeration if size <= 8 => {
             let signed = syms.type_info(&info.resolved).base.map(|b| syms.type_info(&b).class) == Some(TypeClass::Integer);
-            Decoder::Enum { size: s, signed, names: syms.enumerators(ty).into_iter().map(|(_, n, v)| (v, n)).collect() }
+            Decoder::Enum { size: s, signed, bits, names: syms.enumerators(ty).into_iter().map(|(_, n, v)| (v, n)).collect() }
         }
         _ => Decoder::Hex,
     };
@@ -289,8 +296,8 @@ pub fn resolve(handle: &ServerHandle, set: Option<&Arc<tcf::SymbolSet>>, core: u
 
     // Try each ELF of the set, primary first.
     let mut last = String::from("unknown symbol");
-    for (_, syms) in &set.elfs {
-        let mut t = DaqTarget { handle, core };
+    for (n, syms) in &set.elfs {
+        let mut t = DaqTarget { handle, core, elf: *n };
         let v = match Eval::new(syms, &mut t).evaluate(&expr) {
             Ok(v) => v,
             Err(e) => {
@@ -383,12 +390,23 @@ mod tests {
 
     #[test]
     fn bools_and_enums_read_as_names() {
-        assert_eq!(Decoder::Bool.decode(&[0]), json!(false));
-        assert_eq!(Decoder::Bool.decode(&[1]), json!(true));
-        let e = Decoder::Enum { size: 4, signed: false, names: vec![(0, "IDLE".into()), (2, "RUN".into())] };
+        assert_eq!(Decoder::Bool { bits: None }.decode(&[0]), json!(false));
+        assert_eq!(Decoder::Bool { bits: None }.decode(&[1]), json!(true));
+        let e = Decoder::Enum { size: 4, signed: false, bits: None, names: vec![(0, "IDLE".into()), (2, "RUN".into())] };
         assert_eq!(e.decode(&[2, 0, 0, 0]), json!("RUN"));
         // A value that matches no enumerator stays a number rather than becoming a lie.
         assert_eq!(e.decode(&[7, 0, 0, 0]), json!(7i64));
+    }
+
+    #[test]
+    fn enum_and_bool_bit_fields_read_only_their_own_bits() {
+        // Bits 4..5 hold RUN (2); the neighbouring bits are set and must not leak in.
+        let e = Decoder::Enum { size: 4, signed: false, bits: Some((4, 2)), names: vec![(0, "IDLE".into()), (2, "RUN".into())] };
+        assert_eq!(e.decode(&[0xef, 0xff, 0x00, 0x00]), json!("RUN"));
+        assert_eq!(e.cmp_mask(4), Some(vec![0x30, 0x00, 0x00, 0x00]));
+        let b = Decoder::Bool { bits: Some((9, 1)) };
+        assert_eq!(b.decode(&[0xff, 0xfd, 0x00, 0x00]), json!(false));
+        assert_eq!(b.decode(&[0x00, 0x02, 0x00, 0x00]), json!(true));
     }
 
     #[test]

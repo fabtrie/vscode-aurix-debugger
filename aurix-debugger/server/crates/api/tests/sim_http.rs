@@ -276,6 +276,240 @@ fn core_breakpoints(h: &ServerHandle) -> Vec<u32> {
     h.call(|cx| cx.with(|c| c.targets[0].breakpoints.iter().map(|b| b.addr).collect())).unwrap()
 }
 
+/// Percent-encodes a query parameter value (expressions carry `+`, `[`, `$`, `{` and spaces).
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+/// `info` and the variable operations before anything is loaded.
+fn variables_without_symbols(http: &Http, h: &ServerHandle) {
+    const CPU0: &str = "tc37x_ext.cpu0";
+    let info = http.ok("GET", "/api/v1/info", None);
+    assert_eq!(info["server"], "aurix-dbg");
+    assert_eq!(info["api_version"], api_spec::API_VERSION);
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    // The server runs in this test process.
+    assert_eq!(info["pid"], std::process::id());
+    assert_eq!((info["adapter"].as_str(), info["connected"].as_bool(), info["examined"].as_bool()), (Some("sim"), Some(true), Some(true)), "{info}");
+    let t0 = info["targets"].as_array().unwrap().iter().find(|t| t["name"] == CPU0).unwrap_or_else(|| panic!("{info}"));
+    assert_eq!((t0["examined"].as_bool(), t0["reachable"].as_bool()), (Some(true), Some(true)));
+    assert!(info["symbol_files"].as_array().unwrap().is_empty(), "{info}");
+    assert_eq!(info["symbols_loading"], false);
+
+    // A liveness probe must answer while the core thread is held by something long (flashing, a
+    // reset, a Tcl script), and say so: it reads what the core published, not a job queued behind.
+    // Held well under a second: after a longer stall the 1 kHz DAQ check below ran at the 15.6 ms
+    // Windows timer tick on this machine.
+    let busy = {
+        let h = h.clone();
+        thread::spawn(move || h.call(|_| thread::sleep(Duration::from_millis(600))))
+    };
+    thread::sleep(Duration::from_millis(200));
+    let t = Instant::now();
+    let info = http.ok("GET", "/api/v1/info", None);
+    assert!(t.elapsed() < Duration::from_millis(150), "info waited for the core thread: {:?}", t.elapsed());
+    assert!(info["core_lag_ms"].as_u64().unwrap() >= 150, "{info}");
+    busy.join().unwrap();
+    let info = http.ok("GET", "/api/v1/info", None);
+    assert!(info["core_lag_ms"].as_u64().unwrap() < 150, "{info}");
+
+    // Without symbols every variable operation is a 404 that names the missing call.
+    for (method, path, body) in [
+        ("GET", "/api/v1/globals".to_string(), None),
+        ("GET", "/api/v1/expressions?expression=g_x".to_string(), None),
+        ("GET", "/api/v1/expressions/children?expression=g_x".to_string(), None),
+        ("PUT", "/api/v1/expressions".to_string(), Some(json!({ "expression": "g_x", "value": 1 }))),
+    ] {
+        let (status, e) = http.request(method, &path, body, &[]);
+        assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{method} {path}: {e}");
+        assert!(e["message"].as_str().unwrap().contains("load_symbols"), "{e}");
+    }
+}
+
+/// Variables by name against two symbol files written here: MCS assembler sources, which the
+/// symbol store loads without debug information, so their data labels are 32-bit globals. That
+/// is enough for names, addresses, values, writes and shadowing; struct and array children need
+/// a real ELF (`AURIX_TEST_ELF`).
+fn variables(http: &Http, vs: &mut Tcf) {
+    let dir = std::env::temp_dir().join(format!("aurix-vars-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (app, boot) = (dir.join("app.asm"), dir.join("boot.asm"));
+    std::fs::write(&app, ".org 0x100\ng_counter: .var 0\ng_flags: .var 0\ng_Motor_speed: .var 0\n").unwrap();
+    // A second file that defines `g_counter` again: the application's is the one a name finds.
+    std::fs::write(&boot, ".org 0x200\ng_counter: .var 0\ng_boot: .var 0\n").unwrap();
+    let info = http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [tcl_path(app.clone()), tcl_path(boot.clone())] })));
+    assert_eq!(info["targets"][0]["globals"], 5, "{info}");
+
+    // `info` lists the files and the targets they are loaded for.
+    let info = http.ok("GET", "/api/v1/info", None);
+    let files = info["symbol_files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{info}");
+    assert!(files[0]["path"].as_str().unwrap().ends_with("app.asm"), "{info}");
+    assert!(files[0]["targets"].as_array().unwrap().iter().any(|t| t == "tc37x_ext.cpu0"), "{info}");
+
+    // Sorted by name, case-insensitively; each says how to name and sample it.
+    let all = http.ok("GET", "/api/v1/globals", None);
+    assert_eq!(all["total"], 5, "{all}");
+    let items = all["items"].as_array().unwrap();
+    let names: Vec<&str> = items.iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["g_boot", "g_counter", "g_counter", "g_flags", "g_Motor_speed"]);
+    let counter = &items[1];
+    assert_eq!(counter["expression"], "g_counter");
+    assert_eq!(counter["address"], 0x100);
+    assert_eq!((counter["class"].as_str(), counter["size"].as_u64(), counter["type_name"].as_str()), (Some("uint"), Some(4), Some("unsigned int")));
+    assert_eq!((counter["sampleable"].as_bool(), counter["has_children"].as_bool()), (Some(true), Some(false)));
+    // The shadowed one gets an expression that still names exactly it.
+    let shadowed = items[2]["expression"].as_str().unwrap().to_string();
+    assert!(shadowed.starts_with("${E") && shadowed.ends_with("/GV:0}"), "{shadowed}");
+    assert_eq!(items[2]["address"], 0x200);
+
+    // Glob search, case-insensitive, and paging.
+    let q = http.ok("GET", &format!("/api/v1/globals?query={}", enc("*MOTOR*")), None);
+    assert_eq!((q["total"].as_u64(), q["items"][0]["name"].as_str()), (Some(1), Some("g_Motor_speed")), "{q}");
+    assert_eq!(http.ok("GET", &format!("/api/v1/globals?query={}", enc("g_?lags")), None)["total"], 1);
+    assert_eq!(http.ok("GET", "/api/v1/globals?query=motor", None)["total"], 0, "a pattern matches the whole name");
+    let p = http.ok("GET", "/api/v1/globals?offset=3&limit=1", None);
+    assert_eq!((p["total"].as_u64(), p["offset"].as_u64(), p["items"].as_array().unwrap().len()), (Some(5), Some(3), 1), "{p}");
+    assert_eq!(p["items"][0]["name"], "g_flags");
+
+    // Evaluate: values decoded as DAQ decodes them, with the raw bytes beside.
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x100", "data": "2a000000" })));
+    let v = http.ok("GET", "/api/v1/expressions?expression=g_counter", None);
+    assert_eq!((v["value"].as_u64(), v["raw_hex"].as_str(), v["address"].as_u64()), (Some(42), Some("2a000000"), Some(0x100)), "{v}");
+    assert_eq!((v["class"].as_str(), v["sampleable"].as_bool()), (Some("uint"), Some(true)));
+    let v = http.ok("GET", &format!("/api/v1/expressions?expression={}", enc("g_counter + 1")), None);
+    assert_eq!(v["value"], 43, "{v}");
+    assert!(v["address"].is_null(), "a computed value has no address: {v}");
+    let v = http.ok("GET", &format!("/api/v1/expressions?expression={}", enc(&shadowed)), None);
+    assert_eq!(v["address"], 0x200, "{v}");
+    let (status, e) = http.request("GET", "/api/v1/expressions?expression=no_such_global", None, &[]);
+    assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
+    let (status, e) = http.request("GET", &format!("/api/v1/expressions?expression={}", enc("g_counter +")), None, &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    let (status, e) = http.request("GET", "/api/v1/expressions?expression=g_counter&target=nope", None, &[]);
+    assert_eq!(status, 404, "{e}");
+    assert_eq!(http.ok("GET", "/api/v1/expressions?expression=g_counter&target=tc37x_ext.cpu0", None)["value"], 42);
+
+    // Write: numbers, exact 64-bit hex strings, and range checks. VS Code is told to refresh.
+    vs.events.clear();
+    let w = http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": "g_flags", "value": "0xdeadbeef" })));
+    assert_eq!((w["value"].as_u64(), w["raw_hex"].as_str()), (Some(0xdead_beef), Some("efbeadde")), "{w}");
+    assert_eq!(http.ok("GET", "/api/v1/memory?address=0x104&length=4", None)["data"], "efbeadde");
+    vs.event("Memory", "memoryChanged", "S0.D0");
+    assert_eq!(http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": "g_counter", "value": 7 })))["value"], 7);
+    for bad in [json!(-1), json!(4_294_967_296u64), json!("seven"), json!(1.5), json!({ "a": 1 })] {
+        let (status, e) = http.request("PUT", "/api/v1/expressions", Some(json!({ "expression": "g_counter", "value": bad })), &[]);
+        assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{bad}: {e}");
+    }
+    let (status, e) = http.request("PUT", "/api/v1/expressions", Some(json!({ "expression": "g_counter + 1", "value": 1 })), &[]);
+    assert_eq!(status, 400, "a computed value cannot be written: {e}");
+    assert_eq!(http.ok("GET", "/api/v1/expressions?expression=g_counter", None)["value"], 7, "the failed writes changed nothing");
+
+    // A scalar has no children.
+    let c = http.ok("GET", "/api/v1/expressions/children?expression=g_counter", None);
+    assert_eq!((c["total"].as_u64(), c["type_name"].as_str()), (Some(0), Some("unsigned int")), "{c}");
+    assert!(c["items"].as_array().unwrap().is_empty());
+
+    // MCP: the same operations are tools.
+    let v = [("MCP-Protocol-Version", "2025-06-18")];
+    let (_, tools) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/list" })), &v);
+    let tools = tools["result"]["tools"].as_array().unwrap().clone();
+    let tool = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap_or_else(|| panic!("no tool {n}")).clone();
+    assert_eq!(tool("evaluate")["annotations"]["readOnlyHint"], true);
+    assert_eq!(tool("write_variable")["annotations"]["readOnlyHint"], false);
+    assert_eq!(tool("info")["inputSchema"]["type"], "object");
+    let call = |id: u32, name: &str, args: Value| {
+        let (_, r) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": args } })), &v);
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        r["result"]["structuredContent"].clone()
+    };
+    assert_eq!(call(11, "evaluate", json!({ "expression": "g_counter" }))["value"], 7);
+    assert_eq!(call(12, "list_globals", json!({ "query": "g_c*" }))["total"], 2);
+    assert_eq!(call(13, "write_variable", json!({ "expression": "g_boot", "value": 5 }))["value"], 5);
+    assert_eq!(call(14, "info", json!({}))["server"], "aurix-dbg");
+
+    // A DAQ point on the expression `list_globals` handed out samples the same variable.
+    let mut ws = Ws::connect(http.0, &[]).unwrap();
+    ws.send(json!({ "op": "subscribe", "id": 1, "points": [{ "expression": shadowed, "rate_hz": 10 }, { "expression": "g_counter", "rate_hz": 10 }] }));
+    let cfg = ws.recv().expect("config frame");
+    assert_eq!(cfg["points"][0]["address"], 0x200, "{cfg}");
+    assert_eq!(cfg["points"][1]["address"], 0x100, "{cfg}");
+    drop(ws);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Struct members and array elements, against a real application ELF (`AURIX_TEST_ELF`).
+fn variables_of_real_elf(http: &Http) {
+    let Some(elf) = std::env::var_os("AURIX_TEST_ELF").map(PathBuf::from).filter(|p| p.is_file()) else {
+        eprintln!("AURIX_TEST_ELF not set, skipping the struct and array children");
+        return;
+    };
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [tcl_path(elf)] })));
+    let t = Instant::now();
+    let all = http.ok("GET", "/api/v1/globals?limit=10000", None);
+    eprintln!("list_globals: {} globals, first page in {:?}", all["total"], t.elapsed());
+    let t = Instant::now();
+    let q = http.ok("GET", &format!("/api/v1/globals?query={}", enc("*a*")), None);
+    eprintln!("list_globals *a*: {} matches in {:?}", q["total"], t.elapsed());
+    assert!(t.elapsed() < Duration::from_secs(2), "a search must stay interactive");
+    let items = all["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    // Sorted by name, ignoring case.
+    let names: Vec<String> = items.iter().map(|i| i["name"].as_str().unwrap().to_ascii_lowercase()).collect();
+    assert!(names.windows(2).all(|w| w[0] <= w[1]), "not sorted");
+    // Every expression handed out evaluates to the variable it describes.
+    let readable = |v: &Value| v["size"].as_u64().is_some_and(|n| n <= 65536);
+    for g in items.iter().filter(|g| readable(g)).take(200) {
+        let v = http.ok("GET", &format!("/api/v1/expressions?expression={}", enc(g["expression"].as_str().unwrap())), None);
+        assert_eq!(v["address"], g["address"], "{g} -> {v}");
+        assert_eq!(v["type_name"], g["type_name"], "{g} -> {v}");
+    }
+
+    // A struct: its members, each naming itself and lying inside the parent.
+    let s = items.iter().find(|i| i["class"] == "struct" && i["has_children"] == true).expect("a struct global");
+    let c = http.ok("GET", &format!("/api/v1/expressions/children?expression={}", enc(s["expression"].as_str().unwrap())), None);
+    let members = c["items"].as_array().unwrap();
+    assert!(!members.is_empty() && c["total"].as_u64() >= Some(members.len() as u64), "{c}");
+    let (base, size) = (s["address"].as_u64().unwrap(), s["size"].as_u64().unwrap());
+    for m in members {
+        let a = m["address"].as_u64().unwrap();
+        assert!(a >= base && a < base + size.max(1), "{m} outside {s}");
+        assert!(m["expression"].as_str().unwrap().contains(&format!(".{}", m["name"].as_str().unwrap())), "{m}");
+        if !readable(m) {
+            continue;
+        }
+        let v = http.ok("GET", &format!("/api/v1/expressions?expression={}", enc(m["expression"].as_str().unwrap())), None);
+        assert_eq!(v["address"], m["address"], "{m} -> {v}");
+    }
+
+    // An array: elements paged by offset and limit, one element size apart.
+    if let Some(arr) = items.iter().find(|i| i["class"] == "array" && i["has_children"] == true && i["size"].as_u64() > Some(8)) {
+        let e = enc(arr["expression"].as_str().unwrap());
+        let all = http.ok("GET", &format!("/api/v1/expressions/children?expression={e}&limit=10000"), None);
+        let n = all["total"].as_u64().unwrap();
+        if n >= 3 {
+            let c = http.ok("GET", &format!("/api/v1/expressions/children?expression={e}&offset=1&limit=2"), None);
+            let el = c["items"].as_array().unwrap();
+            assert_eq!((el.len(), c["total"].as_u64()), (2, Some(n)), "{c}");
+            assert_eq!(el[0]["name"], "[1]");
+            let step = el[0]["size"].as_u64().unwrap();
+            assert_eq!(el[1]["address"].as_u64().unwrap() - el[0]["address"].as_u64().unwrap(), step, "{c}");
+            assert_eq!(el[0]["address"].as_u64().unwrap(), arr["address"].as_u64().unwrap() + step, "{c}");
+        }
+    }
+
+    // Writing an integer in RAM (not a constant in flash) reads back what was written.
+    let in_ram = |v: &Value| v["address"].as_u64().is_some_and(|a| matches!(a >> 28, 0x5 | 0x6 | 0x7 | 0x9 | 0xB));
+    let scalar = items.iter().find(|g| g["sampleable"] == true && matches!(g["class"].as_str(), Some("uint" | "int")) && in_ram(g));
+    if let Some(g) = scalar {
+        let w = http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": g["expression"], "value": 1 })));
+        assert_eq!(w["value"], 1, "{w}");
+    }
+}
+
 #[test]
 fn rest_mcp_and_tcf_share_one_session() {
     let h = server();
@@ -411,6 +645,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     assert_eq!(status, 404, "{e}");
     assert!(e["message"].as_str().unwrap().contains("no such file"), "{e}");
     assert_eq!(http.ok("GET", "/api/v1/symbols", None)["targets"].as_array().unwrap().len(), 0);
+    variables_without_symbols(&http, &h);
 
     // --- DAQ over the WebSocket ---------------------------------------------------------------
 
@@ -764,6 +999,11 @@ fn rest_mcp_and_tcf_share_one_session() {
         let r = vs.command("AurixOS", "load", &[json!("no/such.ORT"), Value::Null]);
         assert!(r[0].contains("no such file"), "{r:?}");
     }
+
+    // --- Variables by name ---------------------------------------------------------------------
+
+    variables(&http, &mut vs);
+    variables_of_real_elf(&http);
 
     // Web pages of other sites must not drive the debugger.
     let (status, _) = http.request("POST", &format!("/api/v1/targets/{CPU0}/halt"), None, &[("Origin", "http://evil.example")]);

@@ -32,10 +32,11 @@ use aurix_core::{log_info, log_warn, ServerHandle};
 use breakpoints::BpTable;
 use channel::Writer;
 use expressions::ExprTable;
-pub use symstore::{SymbolSet, SymbolStore};
+pub use expressions::{evaluate_global, symbol_ref, GlobalError, GlobalValue};
+pub use symstore::{elf_id, Elf, SymbolSet, SymbolStore};
 
 pub use breakpoints::{Bp, Instance};
-pub use contexts::{cores, owning_core, CoreInfo, CONTAINER};
+pub use contexts::{core_id, cores, owning_core, CoreInfo, CONTAINER};
 
 /// Owner of the breakpoints set through the REST/MCP API (TCF channel IDs start at 1). They
 /// stay armed when a TCF client disconnects.

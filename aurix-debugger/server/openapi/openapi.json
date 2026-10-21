@@ -610,6 +610,28 @@
           }
         ]
       },
+      "EvaluateRequest": {
+        "additionalProperties": false,
+        "description": "An expression to evaluate.",
+        "properties": {
+          "expression": {
+            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.",
+            "type": "string"
+          },
+          "target": {
+            "default": null,
+            "description": "Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program\nRAM); default: the first core that has symbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "expression"
+        ],
+        "type": "object"
+      },
       "FlashVerifyRequest": {
         "additionalProperties": false,
         "description": "Flash verification arguments.",
@@ -654,6 +676,122 @@
         "required": [
           "files"
         ],
+        "type": "object"
+      },
+      "GlobalList": {
+        "description": "One page of the globals that match a query, sorted by name.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/VariableInfo"
+            },
+            "type": "array"
+          },
+          "offset": {
+            "description": "Index of the first item among the matches.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "description": "Matches in all, not only on this page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "offset",
+          "items"
+        ],
+        "type": "object"
+      },
+      "InfoSymbolFile": {
+        "description": "A loaded symbol file and the targets it is loaded for.",
+        "properties": {
+          "path": {
+            "description": "Path on the debug server's machine.",
+            "type": "string"
+          },
+          "targets": {
+            "description": "Targets whose symbol set holds the file.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "targets"
+        ],
+        "type": "object"
+      },
+      "InfoTarget": {
+        "description": "A target as `info` reports it.",
+        "properties": {
+          "examined": {
+            "description": "The target has been examined (is accessible and under debug control).",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Target name (e.g. `tc37x.cpu0`).",
+            "type": "string"
+          },
+          "reachable": {
+            "description": "False while the target has not been accessible for a while (e.g. not powered).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "examined",
+          "reachable"
+        ],
+        "type": "object"
+      },
+      "ListGlobalsRequest": {
+        "additionalProperties": false,
+        "description": "Which globals to list.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "Return at most this many (default 100, at most 10000).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Skip this many matches (default 0).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "default": null,
+            "description": "Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one\ncharacter. `*speed*` finds every name containing `speed`. Default: all globals.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "default": null,
+            "description": "Symbols of this target (name or index); default: the first core that has symbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "LoadOrtiRequest": {
@@ -1346,6 +1484,163 @@
           }
         ]
       },
+      "ServerInfo": {
+        "description": "The debug server, its probe connection and what is loaded.",
+        "properties": {
+          "adapter": {
+            "description": "The adapter driver in use (`tas_client`, `sim`, `winidea`), once one is configured.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "api_version": {
+            "description": "Revision of this API. It is raised whenever an operation or a field is added or changed,\nso a client can check for what it needs instead of parsing `version`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "connected": {
+            "description": "The adapter is connected to its probe.",
+            "type": "boolean"
+          },
+          "core_lag_ms": {
+            "description": "Milliseconds since the debug core last finished a job or a run-state poll. It stays below\nthe polling period while the server is responsive and grows while one long operation\n(flashing, a reset, a Tcl script) holds the core; the other operations wait for it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "examined": {
+            "description": "At least one target is examined.",
+            "type": "boolean"
+          },
+          "pid": {
+            "description": "Process ID of the server.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "server": {
+            "description": "Always `aurix-dbg`.",
+            "type": "string"
+          },
+          "symbol_files": {
+            "description": "The loaded symbol files (by `load_symbols` or a VS Code debug session).",
+            "items": {
+              "$ref": "#/components/schemas/InfoSymbolFile"
+            },
+            "type": "array"
+          },
+          "symbols_loading": {
+            "description": "Symbol files are being loaded right now; `symbol_files` lists what was loaded before.",
+            "type": "boolean"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/InfoTarget"
+            },
+            "type": "array"
+          },
+          "version": {
+            "description": "Version of the server.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "version",
+          "api_version",
+          "pid",
+          "connected",
+          "examined",
+          "targets",
+          "symbol_files",
+          "symbols_loading",
+          "core_lag_ms"
+        ],
+        "type": "object"
+      },
+      "SymbolChildren": {
+        "description": "The members of a struct or union, or the elements of an array. Anything else has none.",
+        "properties": {
+          "expression": {
+            "description": "The parent expression.",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/VariableInfo"
+            },
+            "type": "array"
+          },
+          "offset": {
+            "description": "Index of the first item.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "description": "Children in all (members, or array elements), not only on this page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type_name": {
+            "description": "The parent's type.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expression",
+          "type_name",
+          "total",
+          "offset",
+          "items"
+        ],
+        "type": "object"
+      },
+      "SymbolChildrenRequest": {
+        "additionalProperties": false,
+        "description": "Whose children to list.",
+        "properties": {
+          "expression": {
+            "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned.",
+            "type": "string"
+          },
+          "limit": {
+            "default": null,
+            "description": "Return at most this many (default 100, at most 10000); a large array is paged like\n`list_globals`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Skip this many children (default 0).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "default": null,
+            "description": "Symbols of this target (name or index); default: the first core that has symbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "expression"
+        ],
+        "type": "object"
+      },
       "SymbolsForTarget": {
         "description": "The symbol files of one target.",
         "properties": {
@@ -1503,6 +1798,215 @@
         },
         "required": [
           "command"
+        ],
+        "type": "object"
+      },
+      "VariableClass": {
+        "description": "What a variable holds, from its type with typedefs and qualifiers stripped.",
+        "oneOf": [
+          {
+            "enum": [
+              "float",
+              "array",
+              "struct",
+              "union",
+              "function"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "uint",
+            "description": "Unsigned integer.",
+            "type": "string"
+          },
+          {
+            "const": "int",
+            "description": "Signed integer.",
+            "type": "string"
+          },
+          {
+            "const": "bool",
+            "description": "`_Bool` / `bool`.",
+            "type": "string"
+          },
+          {
+            "const": "enum",
+            "description": "Enumeration; its value is the enumerator name.",
+            "type": "string"
+          },
+          {
+            "const": "pointer",
+            "description": "Pointer; its value is the address it holds.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "No usable type information (`void`, a label without debug information of its type).",
+            "type": "string"
+          }
+        ]
+      },
+      "VariableInfo": {
+        "description": "A variable, or a member or element of one, as the symbols describe it.",
+        "properties": {
+          "address": {
+            "description": "Address, when it is fixed (always for a global).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bit_offset": {
+            "description": "Bit field: position of its least significant bit in the storage unit at `address`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bit_size": {
+            "description": "Bit field: width in bits.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "class": {
+            "$ref": "#/components/schemas/VariableClass"
+          },
+          "expression": {
+            "description": "C expression naming exactly this object, for `evaluate`, `write_variable`,\n`symbol_children` and the `expression` of a DAQ point. It is the plain name unless another\nglobal of the same name would be found first; then it is a symbol reference\n(`${E0/GV:12}`).",
+            "type": "string"
+          },
+          "has_children": {
+            "description": "`symbol_children` lists members or elements: a struct or union, or an array of known\nlength.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name to show: the variable, the member, or the index (`[3]`).",
+            "type": "string"
+          },
+          "sampleable": {
+            "description": "A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at\nmost 8 bytes.",
+            "type": "boolean"
+          },
+          "size": {
+            "description": "Size in bytes; for a bit field, of its storage unit.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type_name": {
+            "description": "C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "The compilation unit (source file) that defines a global; `list_globals` only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "expression",
+          "type_name",
+          "class",
+          "size",
+          "has_children",
+          "sampleable"
+        ],
+        "type": "object"
+      },
+      "VariableValue": {
+        "description": "The value of an expression, read now.",
+        "properties": {
+          "address": {
+            "description": "Address of the value, when it is stored on the target (not for `g_x + 1`).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bit_offset": {
+            "description": "Bit field: position of its least significant bit in the storage unit at `address`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bit_size": {
+            "description": "Bit field: width in bits.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "class": {
+            "$ref": "#/components/schemas/VariableClass"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "has_children": {
+            "description": "`symbol_children` lists members or elements.",
+            "type": "boolean"
+          },
+          "raw_hex": {
+            "description": "The bytes as read, lowest address first: the whole storage unit for a bit field.",
+            "pattern": "^([0-9a-fA-F]{2})*$",
+            "type": "string"
+          },
+          "sampleable": {
+            "description": "A DAQ point decodes it to a typed value.",
+            "type": "boolean"
+          },
+          "size": {
+            "description": "Size in bytes; for a bit field, of its storage unit.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type_name": {
+            "description": "C type, e.g. `uint32`, `enum state_e`.",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Decoded as a DAQ point decodes it: a number for an integer, float or pointer, `true` /\n`false` for a bool, the enumerator name for an enum (the number if it matches none),\n`nan` / `inf` / `-inf` for a float that is not finite, and the bytes as hex for anything\nelse or larger than 8 bytes."
+          }
+        },
+        "required": [
+          "expression",
+          "type_name",
+          "class",
+          "size",
+          "value",
+          "raw_hex",
+          "has_children",
+          "sampleable"
         ],
         "type": "object"
       },
@@ -1717,11 +2221,48 @@
           "value"
         ],
         "type": "object"
+      },
+      "WriteVariableRequest": {
+        "additionalProperties": false,
+        "description": "A variable to write.",
+        "properties": {
+          "expression": {
+            "description": "C expression of the variable, as for `evaluate`; it must name something stored on the\ntarget.",
+            "type": "string"
+          },
+          "target": {
+            "default": null,
+            "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "The new value: a number; `true` / `false`; for an enum, an enumerator name; for an\ninteger, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values\nexact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or\narray takes its bytes as a hex string of exactly its size."
+          }
+        },
+        "required": [
+          "expression",
+          "value"
+        ],
+        "type": "object"
       }
     }
   },
   "info": {
-    "description": "Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nThe API shares its session with the other frontends: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream.\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
+    "description": "Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nThe API shares its session with the other frontends: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream.\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
     "title": "aurix-dbg API",
     "version": "0.1.0"
   },
@@ -1927,6 +2468,222 @@
         ]
       }
     },
+    "/api/v1/expressions": {
+      "get": {
+        "description": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.\n\nWorks while the cores run: there is no stack frame, so names are globals and statics, as in\na VS Code live watch. Fails with `not_found` for an unknown name or when no symbols are\nloaded, and with `memory` when the target memory cannot be read.",
+        "operationId": "evaluate",
+        "parameters": [
+          {
+            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.",
+            "in": "query",
+            "name": "expression",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program\nRAM); default: the first core that has symbols.",
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VariableValue"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.",
+        "tags": [
+          "variables"
+        ]
+      },
+      "put": {
+        "description": "Write a variable by its expression and read it back.\n\nWorks while the cores run, like `write_memory`; a bit field is merged into its storage\nunit. Connected debugger clients (VS Code) are told to refresh their views.",
+        "operationId": "write_variable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "A variable to write.",
+                "properties": {
+                  "expression": {
+                    "description": "C expression of the variable, as for `evaluate`; it must name something stored on the\ntarget.",
+                    "type": "string"
+                  },
+                  "target": {
+                    "default": null,
+                    "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "value": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "description": "The new value: a number; `true` / `false`; for an enum, an enumerator name; for an\ninteger, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values\nexact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or\narray takes its bytes as a hex string of exactly its size."
+                  }
+                },
+                "required": [
+                  "expression",
+                  "value"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VariableValue"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Write a variable by its expression and read it back.",
+        "tags": [
+          "variables"
+        ]
+      }
+    },
+    "/api/v1/expressions/children": {
+      "get": {
+        "description": "List the members of a struct or union, or the elements of an array, that an expression\nstands for, each with the expression that names it.\n\nReads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not\nfollowed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`.",
+        "operationId": "symbol_children",
+        "parameters": [
+          {
+            "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned.",
+            "in": "query",
+            "name": "expression",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return at most this many (default 100, at most 10000); a large array is paged like\n`list_globals`.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Skip this many children (default 0).",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Symbols of this target (name or index); default: the first core that has symbols.",
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolChildren"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the members of a struct or union, or the elements of an array, that an expression stands for, each with the expression that names it.",
+        "tags": [
+          "variables"
+        ]
+      }
+    },
     "/api/v1/flash/verify": {
       "post": {
         "description": "Compare flash contents with an image file (`verify_image`).",
@@ -2048,6 +2805,128 @@
         "summary": "Program image files into flash (`flash write_images`).",
         "tags": [
           "flash"
+        ]
+      }
+    },
+    "/api/v1/globals": {
+      "get": {
+        "description": "List the global and static variables of the loaded symbols, filtered by a name pattern, one\npage at a time.\n\nThe search runs on the server and stays fast for an ELF with 10^5 globals. Each item says\nwhether a DAQ point can sample it and gives the expression to sample it by. Fails with\n`not_found` when no symbols are loaded (`load_symbols`).",
+        "operationId": "list_globals",
+        "parameters": [
+          {
+            "description": "Return at most this many (default 100, at most 10000).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Skip this many matches (default 0).",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one\ncharacter. `*speed*` finds every name containing `speed`. Default: all globals.",
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Symbols of this target (name or index); default: the first core that has symbols.",
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the global and static variables of the loaded symbols, filtered by a name pattern, one page at a time.",
+        "tags": [
+          "variables"
+        ]
+      }
+    },
+    "/api/v1/info": {
+      "get": {
+        "description": "What is serving: server version and API revision, process, probe connection, targets and\nloaded symbol files.\n\nAlways answers at once, whatever the state - no adapter, no examined target, no symbols, or\na core busy flashing: it reads what the core publishes and never queues a job on it. That\nmakes it the liveness probe; `core_lag_ms` says whether other operations would wait.",
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "What is serving: server version and API revision, process, probe connection, targets and loaded symbol files.",
+        "tags": [
+          "server"
         ]
       }
     },

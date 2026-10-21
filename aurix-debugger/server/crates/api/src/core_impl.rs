@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
 use api_spec::types::*;
-use api_spec::{ApiError, DebuggerApi, ErrorCode, MAX_TRANSFER};
+use api_spec::{ApiError, DebuggerApi, ErrorCode, API_VERSION, MAX_TRANSFER};
 use aurix_core::arch::RegGroup;
 use aurix_core::events::emit;
 use aurix_core::target::{DebugReason, TargetState};
@@ -20,12 +20,17 @@ use aurix_core::{ops, Cx, Event, ServerHandle};
 
 use crate::events::Hub;
 use crate::orti_state::CoreTarget;
+use crate::variables;
 use orti::Awareness;
 
 pub struct CoreApi {
     pub handle: ServerHandle,
     pub session: Arc<tcf::Shared>,
     pub hub: Arc<Hub>,
+    /// Sorted global lists for `list_globals`.
+    pub globals: variables::GlobalsCache,
+    /// The symbol files `info` last saw, for while a load holds the symbol store.
+    pub symbol_files: Mutex<Vec<InfoSymbolFile>>,
 }
 
 fn api_err(e: aurix_core::Error) -> ApiError {
@@ -327,6 +332,45 @@ fn os_info(aw: &Awareness, target: Option<String>) -> OsInfo {
 }
 
 impl DebuggerApi for CoreApi {
+    fn info(&self, _: NoArgs) -> Result<ServerInfo, ApiError> {
+        // The liveness probe: nothing here may wait for the core thread.
+        let (status, lag) = self.handle.status();
+        let (symbol_files, symbols_loading) = match self.session.symbols.try_lock() {
+            Ok(store) => {
+                let mut files: Vec<(usize, InfoSymbolFile)> = Vec::new();
+                for t in &status.targets {
+                    let Some(set) = store.set(&tcf::core_id(t.coreid)) else { continue };
+                    for (n, s) in &set.elfs {
+                        match files.iter_mut().find(|(m, _)| m == n) {
+                            Some((_, f)) if !f.targets.contains(&t.name) => f.targets.push(t.name.clone()),
+                            Some(_) => {}
+                            None => files.push((*n, InfoSymbolFile { path: s.path.to_string_lossy().into_owned(), targets: vec![t.name.clone()] })),
+                        }
+                    }
+                }
+                files.sort_by_key(|(n, _)| *n);
+                let files: Vec<InfoSymbolFile> = files.into_iter().map(|(_, f)| f).collect();
+                *self.symbol_files.lock().unwrap() = files.clone();
+                (files, false)
+            }
+            // `load_symbols` holds the store while it parses an ELF, which takes seconds.
+            Err(_) => (self.symbol_files.lock().unwrap().clone(), true),
+        };
+        Ok(ServerInfo {
+            server: "aurix-dbg".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            api_version: API_VERSION,
+            pid: std::process::id(),
+            adapter: status.adapter,
+            connected: status.connected,
+            examined: status.targets.iter().any(|t| t.examined),
+            targets: status.targets.into_iter().map(|t| InfoTarget { name: t.name, examined: t.examined, reachable: t.reachable }).collect(),
+            symbol_files,
+            symbols_loading,
+            core_lag_ms: lag.as_millis() as u64,
+        })
+    }
+
     fn targets(&self, _: NoArgs) -> Result<TargetList, ApiError> {
         self.call(|cx| Ok(TargetList { targets: (0..cx.with(|c| c.targets.len())).map(|t| info(cx, t)).collect() }))
     }
@@ -616,6 +660,22 @@ impl DebuggerApi for CoreApi {
 
     fn symbols(&self, _: NoArgs) -> Result<SymbolsInfo, ApiError> {
         Ok(self.symbols_info())
+    }
+
+    fn list_globals(&self, req: ListGlobalsRequest) -> Result<GlobalList, ApiError> {
+        variables::list_globals(self, req)
+    }
+
+    fn symbol_children(&self, req: SymbolChildrenRequest) -> Result<SymbolChildren, ApiError> {
+        variables::symbol_children(self, req)
+    }
+
+    fn evaluate(&self, req: EvaluateRequest) -> Result<VariableValue, ApiError> {
+        variables::evaluate(self, req)
+    }
+
+    fn write_variable(&self, req: WriteVariableRequest) -> Result<VariableValue, ApiError> {
+        variables::write_variable(self, req)
     }
 
     fn load_orti(&self, req: LoadOrtiRequest) -> Result<OsInfo, ApiError> {

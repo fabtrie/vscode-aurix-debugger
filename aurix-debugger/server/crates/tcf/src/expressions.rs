@@ -169,6 +169,8 @@ struct TcfTarget<'a> {
     elf: usize,
     pc: Option<u32>,
     regs: [Option<u32>; PC_REGISTER as usize + 1],
+    /// The last read that failed, so a caller can tell a memory fault from a bad name.
+    read_error: Option<String>,
 }
 
 impl Target for TcfTarget<'_> {
@@ -179,20 +181,29 @@ impl Target for TcfTarget<'_> {
         self.regs.get(r as usize).copied().flatten()
     }
     fn read(&mut self, addr: u32, len: usize) -> Result<Vec<u8>, String> {
-        read_mem(self.sh, if local_address(addr) { self.local } else { self.core }, addr, len)
+        let r = read_mem(self.sh, if local_address(addr) { self.local } else { self.core }, addr, len);
+        if let Err(e) = &r {
+            self.read_error = Some(e.clone());
+        }
+        r
     }
     fn symbol(&mut self, id: &str) -> Option<SymbolRef> {
-        // Symbols of another ELF do not exist in this one.
-        match split_elf_id(id) {
-            Some((n, rest)) if n == self.elf => parse_symbol(rest),
-            Some(_) => None,
-            None => parse_symbol(id),
-        }
+        symbol_ref(self.elf, id)
+    }
+}
+
+/// A `${ID}` symbol reference of an expression evaluated with ELF `elf`. Symbols of another ELF
+/// do not exist in this one, so an `E<n>/` ID only resolves in its own.
+pub fn symbol_ref(elf: usize, id: &str) -> Option<SymbolRef> {
+    match split_elf_id(id) {
+        Some((n, rest)) if n == elf => parse_symbol(rest),
+        Some(_) => None,
+        None => parse_symbol(id),
     }
 }
 
 fn target<'a>(sh: &'a Shared, elf: usize, s: &Scope) -> TcfTarget<'a> {
-    TcfTarget { sh, core: s.core.idx, local: local_core(sh, elf, s), elf, pc: s.pc, regs: s.regs }
+    TcfTarget { sh, core: s.core.idx, local: local_core(sh, elf, s), elf, pc: s.pc, regs: s.regs, read_error: None }
 }
 
 /// The target whose core-local memory (`0xD000_0000` DSPR / `0xC000_0000` PSPR alias) an
@@ -407,14 +418,22 @@ fn evaluate_entry(sh: &Shared, parent: &str, text: &str, symbol: &Option<String>
         let v = Eval::new(&elf.1, &mut t).value_of(&s).map_err(|e| (ERR_INV_EXPRESSION, e))?;
         return Ok((scope, elf, v));
     }
+    evaluate_text(sh, parent, scope, text).map_err(|(e, _)| e)
+}
+
+/// Evaluates `text` in `scope` with the ELF files of `ctx`, then with the globals of the other
+/// cores' files. A failure also carries the read that failed while the first file evaluated it,
+/// if one did.
+fn evaluate_text(sh: &Shared, ctx: &str, scope: Scope, text: &str) -> Result<(Scope, Elf, Value), ((i64, String), Option<String>)> {
     let mut first_err = None;
-    let own = elfs_for(sh, parent, scope.pc, text);
+    let own = elfs_for(sh, ctx, scope.pc, text);
     for elf in own.iter().flatten() {
         let mut t = target(sh, elf.0, &scope);
-        match Eval::new(&elf.1, &mut t).evaluate(text) {
+        let r = Eval::new(&elf.1, &mut t).evaluate(text);
+        match r {
             Ok(v) => return Ok((scope, elf.clone(), v)),
             Err(e) => {
-                first_err.get_or_insert(e);
+                first_err.get_or_insert((e, t.read_error));
             }
         }
     }
@@ -431,9 +450,12 @@ fn evaluate_entry(sh: &Shared, parent: &str, text: &str, symbol: &Option<String>
             }
         }
     }
-    match own {
-        Err(e) if first_err.is_none() => Err(e),
-        _ => fail(ERR_INV_EXPRESSION, first_err.unwrap_or_default()),
+    match (own, first_err) {
+        (Err(e), None) => Err((e, None)),
+        (_, first) => {
+            let (e, read) = first.unwrap_or_default();
+            Err(((ERR_INV_EXPRESSION, e), read))
+        }
     }
 }
 
@@ -544,24 +566,7 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
     let idx = scope.core.idx;
     match write {
         Write::Memory(addr, bytes) => {
-            let idx = if local_address(addr) { local_core(sh, n, &scope) } else { idx };
-            let expect = bytes.clone();
-            sh.handle
-                .call(move |cx| ops::write_memory_as(cx, idx, addr, &bytes).map_err(|e| e.to_string()))
-                .unwrap_or_else(|| Err("server stopped".into()))
-                .map_err(|e| (ERR_OTHER, e))?;
-            // The debug interface reports no error for writes the chip drops (e.g. memory
-            // write-protected for the debugger by the application's SMPU regions): verify RAM
-            // writes while halted. Peripheral registers and running cores may legitimately differ.
-            if scope.core.suspended() && addr < PERIPHERAL_BASE {
-                let back = read_mem(sh, idx, addr, expect.len()).map_err(|e| (ERR_OTHER, e))?;
-                if back != expect {
-                    return fail(
-                        ERR_OTHER,
-                        format!("The target ignored the write to 0x{addr:08x}: the memory is write-protected for the debugger (e.g. by the application's SMPU configuration)"),
-                    );
-                }
-            }
+            write_checked(sh, &scope, n, addr, bytes).map_err(|e| (ERR_OTHER, e))?;
         }
         Write::Register(r, value) => {
             if scope.frame_index != Some(0) {
@@ -581,6 +586,118 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
     }
     sh.invalidate_stack(idx);
     Ok(())
+}
+
+/// Writes `bytes` at `addr` through the memory view of ELF `n` in `scope`. Returns the target
+/// whose view was used.
+fn write_checked(sh: &Shared, scope: &Scope, n: usize, addr: u32, bytes: Vec<u8>) -> Result<usize, String> {
+    let idx = if local_address(addr) { local_core(sh, n, scope) } else { scope.core.idx };
+    let expect = bytes.clone();
+    sh.handle
+        .call(move |cx| ops::write_memory_as(cx, idx, addr, &bytes).map_err(|e| e.to_string()))
+        .unwrap_or_else(|| Err("server stopped".into()))?;
+    // The debug interface reports no error for writes the chip drops (e.g. memory
+    // write-protected for the debugger by the application's SMPU regions): verify RAM
+    // writes while halted. Peripheral registers and running cores may legitimately differ.
+    if scope.core.suspended() && addr < PERIPHERAL_BASE {
+        let back = read_mem(sh, idx, addr, expect.len())?;
+        if back != expect {
+            return Err(format!(
+                "The target ignored the write to 0x{addr:08x}: the memory is write-protected for the debugger (e.g. by the application's SMPU configuration)"
+            ));
+        }
+    }
+    Ok(idx)
+}
+
+// --- Global expressions for the REST/MCP frontend --------------------------------------------
+
+/// Why [`evaluate_global`] failed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GlobalError {
+    /// No symbols are loaded for the context.
+    NoSymbols,
+    /// The context names no core, or there are no cores.
+    NoTarget(String),
+    /// Reading target memory failed while evaluating (e.g. following a pointer).
+    Memory(String),
+    /// The expression does not parse or names nothing.
+    Expression(String),
+}
+
+/// An expression evaluated without a stack frame, as a live watch evaluates it while the core
+/// runs: globals, statics, constants and what they lead to.
+///
+/// The REST/MCP variable operations use this rather than an evaluator of their own, so a name
+/// means the same variable there as in VS Code, read through the same memory view (core-local
+/// RAM through the core that runs the ELF).
+pub struct GlobalValue {
+    pub elf: Elf,
+    pub value: Value,
+    scope: Scope,
+}
+
+/// The core a global expression of `ctx` is evaluated for: the one `ctx` names, else the first
+/// core with symbols (the set `symbols_for("")` picks), else the first examined one.
+fn global_scope(sh: &Shared, ctx: &str) -> Result<Scope, GlobalError> {
+    let all = cores(&sh.handle);
+    let pos = match crate::contexts::owning_core(ctx) {
+        Some(id) => all.iter().position(|c| c.id == id).ok_or_else(|| GlobalError::NoTarget(format!("unknown context {ctx}")))?,
+        None => {
+            let store = sh.symbols.lock().unwrap();
+            let mut with_syms: Vec<usize> = (0..all.len()).filter(|&i| store.set(&all[i].id).is_some()).collect();
+            with_syms.sort_by_key(|&i| all[i].id.rsplit_once(".C").and_then(|(_, n)| n.parse::<u32>().ok()));
+            with_syms.first().copied().or_else(|| all.iter().position(|c| c.examined)).unwrap_or(0)
+        }
+    };
+    let core = all.into_iter().nth(pos).ok_or_else(|| GlobalError::NoTarget("no targets (run `init` first)".into()))?;
+    Ok(Scope { core, frame_id: None, frame_index: None, pc: None, regs: [None; PC_REGISTER as usize + 1] })
+}
+
+/// Evaluates `text` with the symbols of `ctx` (a core context, or empty for the first core that
+/// has symbols), without a stack frame.
+pub fn evaluate_global(sh: &Shared, ctx: &str, text: &str) -> Result<GlobalValue, GlobalError> {
+    let scope = global_scope(sh, ctx)?;
+    let ctx = scope.core.id.clone();
+    match evaluate_text(sh, &ctx, scope, text) {
+        Ok((scope, elf, value)) => Ok(GlobalValue { elf, value, scope }),
+        Err(((ERR_SYM_NOT_FOUND, _), _)) => Err(GlobalError::NoSymbols),
+        Err((_, Some(read))) => Err(GlobalError::Memory(read)),
+        Err(((_, e), None)) => Err(GlobalError::Expression(e)),
+    }
+}
+
+impl GlobalValue {
+    /// Target index of the core the value was evaluated for.
+    pub fn core(&self) -> usize {
+        self.scope.core.idx
+    }
+
+    /// Reads `len` bytes at `addr` through the value's memory view.
+    pub fn read(&self, sh: &Shared, addr: u32, len: usize) -> Result<Vec<u8>, String> {
+        target(sh, self.elf.0, &self.scope).read(addr, len)
+    }
+
+    /// Stores `data` (the size of the value's type) into the variable, merging a bit field into
+    /// its storage unit. Returns the target whose memory view was written and the range.
+    pub fn assign(&self, sh: &Shared, data: &[u8]) -> Result<(usize, u32, u32), GlobalError> {
+        let mut t = target(sh, self.elf.0, &self.scope);
+        let write = Eval::new(&self.elf.1, &mut t).assign(&self.value, data);
+        let write = match (write, t.read_error) {
+            (Ok(w), _) => w,
+            (Err(_), Some(read)) => return Err(GlobalError::Memory(read)),
+            (Err(e), None) => return Err(GlobalError::Expression(e)),
+        };
+        match write {
+            Write::Memory(addr, bytes) => {
+                let len = bytes.len() as u32;
+                let idx = write_checked(sh, &self.scope, self.elf.0, addr, bytes).map_err(GlobalError::Memory)?;
+                Ok((idx, addr, len))
+            }
+            // Without a stack frame nothing lives in a register.
+            Write::Register(..) => Err(GlobalError::Expression("a register variable needs a stack frame".into())),
+        }
+    }
 }
 
 /// Handles Expressions.* and the variable part of Symbols.*; returns the reply fields.

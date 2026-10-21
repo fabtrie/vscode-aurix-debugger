@@ -753,3 +753,246 @@ pub struct OsStackList {
     /// Bus accesses this call made. Measuring is the expensive part of OS awareness.
     pub reads: u32,
 }
+
+// --- Server ----------------------------------------------------------------------------------
+
+/// A target as `info` reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InfoTarget {
+    /// Target name (e.g. `tc37x.cpu0`).
+    pub name: String,
+    /// The target has been examined (is accessible and under debug control).
+    pub examined: bool,
+    /// False while the target has not been accessible for a while (e.g. not powered).
+    pub reachable: bool,
+}
+
+/// A loaded symbol file and the targets it is loaded for.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InfoSymbolFile {
+    /// Path on the debug server's machine.
+    pub path: String,
+    /// Targets whose symbol set holds the file.
+    pub targets: Vec<String>,
+}
+
+/// The debug server, its probe connection and what is loaded.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ServerInfo {
+    /// Always `aurix-dbg`.
+    pub server: String,
+    /// Version of the server.
+    pub version: String,
+    /// Revision of this API. It is raised whenever an operation or a field is added or changed,
+    /// so a client can check for what it needs instead of parsing `version`.
+    pub api_version: u32,
+    /// Process ID of the server.
+    pub pid: u32,
+    /// The adapter driver in use (`tas_client`, `sim`, `winidea`), once one is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// The adapter is connected to its probe.
+    pub connected: bool,
+    /// At least one target is examined.
+    pub examined: bool,
+    pub targets: Vec<InfoTarget>,
+    /// The loaded symbol files (by `load_symbols` or a VS Code debug session).
+    pub symbol_files: Vec<InfoSymbolFile>,
+    /// Symbol files are being loaded right now; `symbol_files` lists what was loaded before.
+    pub symbols_loading: bool,
+    /// Milliseconds since the debug core last finished a job or a run-state poll. It stays below
+    /// the polling period while the server is responsive and grows while one long operation
+    /// (flashing, a reset, a Tcl script) holds the core; the other operations wait for it.
+    pub core_lag_ms: u64,
+}
+
+// --- Variables -------------------------------------------------------------------------------
+
+/// What a variable holds, from its type with typedefs and qualifiers stripped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VariableClass {
+    /// Unsigned integer.
+    Uint,
+    /// Signed integer.
+    Int,
+    Float,
+    /// `_Bool` / `bool`.
+    Bool,
+    /// Enumeration; its value is the enumerator name.
+    Enum,
+    /// Pointer; its value is the address it holds.
+    Pointer,
+    Array,
+    Struct,
+    Union,
+    Function,
+    /// No usable type information (`void`, a label without debug information of its type).
+    Unknown,
+}
+
+/// A variable, or a member or element of one, as the symbols describe it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct VariableInfo {
+    /// Name to show: the variable, the member, or the index (`[3]`).
+    pub name: String,
+    /// C expression naming exactly this object, for `evaluate`, `write_variable`,
+    /// `symbol_children` and the `expression` of a DAQ point. It is the plain name unless another
+    /// global of the same name would be found first; then it is a symbol reference
+    /// (`${E0/GV:12}`).
+    pub expression: String,
+    /// C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`.
+    pub type_name: String,
+    pub class: VariableClass,
+    /// Size in bytes; for a bit field, of its storage unit.
+    pub size: u32,
+    /// Address, when it is fixed (always for a global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<u32>,
+    /// Bit field: position of its least significant bit in the storage unit at `address`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_offset: Option<u32>,
+    /// Bit field: width in bits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_size: Option<u32>,
+    /// `symbol_children` lists members or elements: a struct or union, or an array of known
+    /// length.
+    pub has_children: bool,
+    /// A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at
+    /// most 8 bytes.
+    pub sampleable: bool,
+    /// The compilation unit (source file) that defines a global; `list_globals` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Which globals to list.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListGlobalsRequest {
+    /// Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one
+    /// character. `*speed*` finds every name containing `speed`. Default: all globals.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Skip this many matches (default 0).
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Return at most this many (default 100, at most 10000).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Symbols of this target (name or index); default: the first core that has symbols.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// One page of the globals that match a query, sorted by name.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GlobalList {
+    /// Matches in all, not only on this page.
+    pub total: u32,
+    /// Index of the first item among the matches.
+    pub offset: u32,
+    pub items: Vec<VariableInfo>,
+}
+
+/// Whose children to list.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolChildrenRequest {
+    /// C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or
+    /// `symbol_children` returned.
+    pub expression: String,
+    /// Skip this many children (default 0).
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Return at most this many (default 100, at most 10000); a large array is paged like
+    /// `list_globals`.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Symbols of this target (name or index); default: the first core that has symbols.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// The members of a struct or union, or the elements of an array. Anything else has none.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolChildren {
+    /// The parent expression.
+    pub expression: String,
+    /// The parent's type.
+    pub type_name: String,
+    /// Children in all (members, or array elements), not only on this page.
+    pub total: u32,
+    /// Index of the first item.
+    pub offset: u32,
+    pub items: Vec<VariableInfo>,
+}
+
+/// An expression to evaluate.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluateRequest {
+    /// C expression: a global or static variable, a member or element of one (`g_motor.speed`,
+    /// `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.
+    pub expression: String,
+    /// Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program
+    /// RAM); default: the first core that has symbols.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// A value: a number, a bool, or a string (an enumerator name, a number, or hex bytes).
+fn scalar_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "number" }, { "type": "boolean" }, { "type": "string" }] })
+}
+
+/// The value of an expression, read now.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct VariableValue {
+    pub expression: String,
+    /// C type, e.g. `uint32`, `enum state_e`.
+    pub type_name: String,
+    pub class: VariableClass,
+    /// Size in bytes; for a bit field, of its storage unit.
+    pub size: u32,
+    /// Address of the value, when it is stored on the target (not for `g_x + 1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<u32>,
+    /// Bit field: position of its least significant bit in the storage unit at `address`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_offset: Option<u32>,
+    /// Bit field: width in bits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_size: Option<u32>,
+    /// Decoded as a DAQ point decodes it: a number for an integer, float or pointer, `true` /
+    /// `false` for a bool, the enumerator name for an enum (the number if it matches none),
+    /// `nan` / `inf` / `-inf` for a float that is not finite, and the bytes as hex for anything
+    /// else or larger than 8 bytes.
+    #[schemars(schema_with = "scalar_schema")]
+    pub value: serde_json::Value,
+    /// The bytes as read, lowest address first: the whole storage unit for a bit field.
+    pub raw_hex: Hex,
+    /// `symbol_children` lists members or elements.
+    pub has_children: bool,
+    /// A DAQ point decodes it to a typed value.
+    pub sampleable: bool,
+}
+
+/// A variable to write.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WriteVariableRequest {
+    /// C expression of the variable, as for `evaluate`; it must name something stored on the
+    /// target.
+    pub expression: String,
+    /// The new value: a number; `true` / `false`; for an enum, an enumerator name; for an
+    /// integer, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values
+    /// exact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or
+    /// array takes its bytes as a hex string of exactly its size.
+    #[schemars(schema_with = "scalar_schema")]
+    pub value: serde_json::Value,
+    /// Use this target's symbols and write memory as it sees it; default: the first core that has
+    /// symbols.
+    #[serde(default)]
+    pub target: Option<String>,
+}

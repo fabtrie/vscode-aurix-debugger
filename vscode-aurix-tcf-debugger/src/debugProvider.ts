@@ -151,6 +151,9 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 const DEFAULT_TCF_HOST = 'localhost';
 const DEFAULT_TCF_PORT = 1534;
 const DEFAULT_BREAKPOINTS_PREFIX = 'aurix-';
+// After the focused core resumed: long enough for the other cores' resume events of a resume of
+// all cores (or of a reset) to arrive first.
+const REFOCUS_DELAY_MS = 300;
 const BREAKPOINT_INVALID = -1;
 const MEMORY_READ_FALLBACK_MIN_BYTES = 8;
 const MEMORY_READ_FALLBACK_MAX_BYTES = 512;
@@ -374,6 +377,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private disassemblyCapabilities = new Map<string, string[]>();
 	// Core context of the frame focused last (scopes request): disassembly decodes with its ISA.
 	private focusedCoreContext: string | undefined;
+	// Moves the focus to a halted core after the focused one resumed (refocusOnHaltedCore).
+	private refocusTimer: NodeJS.Timeout | undefined;
 	/** Context IDs of the TriCore cores by core number (`expr@N`). */
 	private readonly coreContextIds = new Map<number, string>();
 	/** A core paused on its own (MCS channel) whose coming suspend event should take the focus. */
@@ -4077,6 +4082,44 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.tcfLogger.log(`[runcontrol] resumed id=${contextId} threadId=${threadId}`);
 		}
 		this.invalidateLiveWatchContext();
+		if (this.focusedCoreContext === contextId) {
+			clearTimeout(this.refocusTimer);
+			this.refocusTimer = setTimeout(() => {
+				this.refocusTimer = undefined;
+				void this.refocusOnHaltedCore();
+			}, REFOCUS_DELAY_MS);
+		}
+	}
+
+	/**
+	 * VS Code shows Pause while the focused thread runs, even with other cores halted - e.g. after
+	 * a halting reset, when the HSM stops at its reset breakpoint, takes the focus and is released
+	 * again. So when the focused core has resumed and others stay halted, a halted core (the launch
+	 * core if it is one) takes the focus and the toolbar shows Continue. Cores the application has
+	 * not started yet (boot halt) do not count: they would keep the focus while everything runs.
+	 */
+	private async refocusOnHaltedCore(): Promise<void> {
+		// A step reports its own stop; the focus may have moved on meanwhile.
+		if (this.pendingStepThreads.size > 0 || !this.focusedCoreContext || this.suspendedContextIds.has(this.focusedCoreContext)) {
+			return;
+		}
+		try {
+			this.tcfClient.invalidateThreadsCache();
+			const infos = await this.tcfClient.getThreads();
+			const halted = infos
+				.filter(t => Boolean(t.state?.suspended) && (t.state?.data as Record<string, unknown> | null)?.['StateName'] !== 'boot-halt')
+				.map(t => t.info.ID as string);
+			if (halted.length === 0 || halted.includes(this.focusedCoreContext ?? '')) {
+				return;
+			}
+			const ctx = halted.find(c => this.isLaunchCoreContext(c)) ?? halted[0];
+			this.focusLog(`refocus on halted ${ctx}: the focused core ${String(this.focusedCoreContext)} runs`);
+			this.suspendedContextIds.add(ctx);
+			this.sendStoppedEvent(StoppedEventReason.pause, this.getOrAssignThreadId(ctx), { preserveFocus: false });
+			void this.emitSourceLocation(ctx);
+		} catch (e) {
+			this.tcfLogger.log(`refocus on a halted core failed: ${AurixTCFDebugSession.formatError(e)}`);
+		}
 	}
 
 	// --- Task- and core-filtered breakpoints -------------------------------------------------

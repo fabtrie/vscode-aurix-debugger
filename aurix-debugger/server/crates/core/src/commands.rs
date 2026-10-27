@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::events::{emit, Event};
 use crate::flash::{self, FlashBank};
 use crate::gtm_mcs::DEFAULT_RAM_SIZE;
-use crate::image::Image;
+use crate::image::{Image, ImageFile};
 use crate::ops;
 use crate::target::{BpKind, Core, TargetEntry, TargetState, WatchAccess};
 use crate::util::{parse_bool, parse_u32, parse_u64};
@@ -261,12 +261,11 @@ fn require_controller_flash(cx: &Cx, what: &str) -> Result<(), String> {
 ///
 /// `Ok(false)` means this adapter drives the flash controller itself, and the
 /// caller goes on to the DMU path.
-fn flash_by_download(cx: &Cx, files: &[&str]) -> Result<bool, String> {
-    let owned: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
+fn flash_by_download(cx: &Cx, files: &[ImageFile]) -> Result<bool, String> {
     cx.with(|c| {
         let Some(ad) = c.adapter.as_deref_mut() else { return Ok(false) };
         let Some(dl) = ad.flash_download() else { return Ok(false) };
-        dl.download(&owned).map(|()| true).map_err(e2s)
+        dl.download(files).map(|()| true).map_err(e2s)
     })
 }
 
@@ -821,21 +820,23 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             }
             // A probe that programs from its own download list takes the file as
             // it is; the DMU path below only applies when we drive the controller.
-            if !args.is_empty() && flash_by_download(cx, &args[..1])? {
-                return Ok(format!("downloaded {}", args[0]));
+            let file = image_file(&args, "flash write_image [erase] [incremental] [unlock] <file> [offset [type]]")?;
+            if flash_by_download(cx, std::slice::from_ref(&file))? {
+                return Ok(format!("downloaded {}", file.path));
             }
-            let img = load_image(&args, "flash write_image [erase] [incremental] [unlock] <file> [offset [type]]")?;
+            let img = file.load()?;
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
-            Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped, args[0]))
+            Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped, file.path))
         }
         Some("write_images") => {
             // Merges the files first (later files win), so a file cannot erase what an earlier
             // one programmed into a shared sector, and incremental writes see the final content.
-            const USAGE: &str = "usage: flash write_images [erase] [incremental] [unlock] [verify] <file> ...";
+            const USAGE: &str =
+                "usage: flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-type <type>] <file> ...";
             require_init(cx, "flash")?;
-            let mut files: Vec<&str> = a[2..].to_vec();
+            let mut args: Vec<&str> = a[2..].to_vec();
             let (mut erase, mut incremental, mut unlock, mut verify) = (false, false, false, false);
-            while let Some(flag) = files.first().copied() {
+            while let Some(flag) = args.first().copied() {
                 match flag {
                     "erase" => erase = true,
                     "incremental" => incremental = true,
@@ -843,21 +844,33 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
                     "verify" => verify = true,
                     _ => break,
                 }
-                files.remove(0);
+                args.remove(0);
             }
-            if files.is_empty() {
+            // -offset and -type apply to the file that follows them.
+            let mut files = Vec::new();
+            let (mut offset, mut kind) = (None, None);
+            let mut it = args.into_iter();
+            while let Some(arg) = it.next() {
+                match arg {
+                    "-offset" => offset = Some(num32(it.next().ok_or(USAGE)?)?),
+                    "-type" => kind = Some(it.next().ok_or(USAGE)?.to_string()),
+                    path => files.push(ImageFile { path: path.to_string(), offset: offset.take().unwrap_or(0), kind: kind.take() }),
+                }
+            }
+            if files.is_empty() || offset.is_some() || kind.is_some() {
                 return Err(USAGE.into());
             }
+            let names = || files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join(", ");
             // As in write_image: hand the whole list over, already merged by
             // winIDEA's own loader rather than by us.
             if flash_by_download(cx, &files)? {
-                return Ok(format!("downloaded {}", files.join(", ")));
+                return Ok(format!("downloaded {}", names()));
             }
             let mut img = Image::default();
             for file in &files {
-                let (merged, changed) = img.overlay(&load_image(&[file], USAGE)?);
+                let (merged, changed) = img.overlay(&file.load()?);
                 if changed > 0 {
-                    crate::log_warn!("flash write_images: {file} replaces {changed} bytes of earlier files");
+                    crate::log_warn!("flash write_images: {} replaces {changed} bytes of earlier files", file.path);
                 }
                 img = merged;
             }
@@ -884,10 +897,14 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
 }
 
 /// `<file> [offset [type]]`
-fn load_image(args: &[&str], usage_text: &str) -> Result<Image, String> {
-    let file = args.first().ok_or_else(|| format!("usage: {usage_text}"))?;
+fn image_file(args: &[&str], usage_text: &str) -> Result<ImageFile, String> {
+    let path = args.first().ok_or_else(|| format!("usage: {usage_text}"))?;
     let offset = args.get(1).map(|o| num32(o)).transpose()?.unwrap_or(0);
-    Image::load(Path::new(file), offset, args.get(2).copied())
+    Ok(ImageFile { path: path.to_string(), offset, kind: args.get(2).map(|t| t.to_string()) })
+}
+
+fn load_image(args: &[&str], usage_text: &str) -> Result<Image, String> {
+    image_file(args, usage_text)?.load()
 }
 
 fn cmd_verify_image(cx: &Cx, a: &[&str]) -> CmdResult {
@@ -918,7 +935,8 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
         if !cx.with(|c| c.initialized) {
             ops::init(cx).map_err(|e| format!("** OpenOCD init failed **: {e}"))?;
         }
-        let img = Image::load(Path::new(file), offset.unwrap_or(0), None)?;
+        let file = ImageFile { offset: offset.unwrap_or(0), ..ImageFile::new(file) };
+        let img = file.load()?;
         ops::reset(cx, "init").map_err(|e| format!("** Unable to reset target **: {e}"))?;
         let mut needs_flash = true;
         if preverify {
@@ -932,7 +950,7 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
             out.push("** Programming Started **".into());
             // A probe that programs from its own download list gets the file;
             // otherwise we drive the flash controller ourselves.
-            if flash_by_download(cx, &[file])? {
+            if flash_by_download(cx, std::slice::from_ref(&file))? {
                 out.push("** Programming Finished **: downloaded".into());
             } else {
                 let stats = flash::write_image(cx, &img, true)

@@ -340,5 +340,5 @@ pub fn check(r: &OpResult, addr: u64, write: bool) -> Result<()> {
 /// verification the same way.
 pub trait FlashDownload {
     /// Programs `files` (code only -- symbols stay with our own DWARF reader).
-    fn download(&mut self, files: &[String]) -> Result<()>;
+    fn download(&mut self, files: &[crate::image::ImageFile]) -> Result<()>;
 }

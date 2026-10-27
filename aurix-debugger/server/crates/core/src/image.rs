@@ -22,6 +22,25 @@ pub struct Image {
     pub sections: Vec<Section>,
 }
 
+/// An image file to program: `offset` is added to its addresses (the base address of a binary
+/// file), `kind` is its type (detected when `None`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageFile {
+    pub path: String,
+    pub offset: u32,
+    pub kind: Option<String>,
+}
+
+impl ImageFile {
+    pub fn new(path: &str) -> ImageFile {
+        ImageFile { path: path.to_string(), offset: 0, kind: None }
+    }
+
+    pub fn load(&self) -> Result<Image, String> {
+        Image::load(Path::new(&self.path), self.offset, self.kind.as_deref())
+    }
+}
+
 fn u16le(b: &[u8], o: usize) -> Result<u16, String> {
     b.get(o..o + 2).map(|x| u16::from_le_bytes([x[0], x[1]])).ok_or_else(|| "truncated ELF file".to_string())
 }
@@ -33,7 +52,7 @@ fn u32le(b: &[u8], o: usize) -> Result<u32, String> {
 /// Pairs of hex digits as bytes.
 fn hex_bytes(s: &[u8]) -> Option<Vec<u8>> {
     let nibble = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     s.chunks(2).map(|c| Some(nibble(c[0])? << 4 | nibble(c[1])?)).collect()

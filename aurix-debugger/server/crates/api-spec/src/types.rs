@@ -478,13 +478,63 @@ pub struct WatchpointList {
 
 // --- Flash, Tcl ------------------------------------------------------------------------------
 
+/// Image file type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageType {
+    Elf,
+    /// Intel HEX.
+    Ihex,
+    /// Motorola S-records.
+    Srec,
+    /// Raw binary.
+    Bin,
+}
+
+impl ImageType {
+    /// The type name of the `flash write_images` command.
+    pub fn tcl_name(self) -> &'static str {
+        match self {
+            ImageType::Elf => "elf",
+            ImageType::Ihex => "ihex",
+            ImageType::Srec => "s19",
+            ImageType::Bin => "bin",
+        }
+    }
+}
+
+/// An image file to program: a path, or a path with an offset and its type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum FlashFile {
+    Path(String),
+    Placed(PlacedFlashFile),
+}
+
+/// An image file with an offset and its type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+pub struct PlacedFlashFile {
+    /// Path on the debug server's machine.
+    pub path: String,
+    /// Added to all addresses of the file: the load address of a binary file, which is
+    /// placed at 0 otherwise.
+    #[serde(default)]
+    pub offset: Option<Addr>,
+    /// File type; detected from the content and extension by default.
+    #[serde(default, rename = "type")]
+    pub kind: Option<ImageType>,
+}
+
 /// Flash programming arguments.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlashWriteRequest {
-    /// Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win
-    /// where they overlap.
-    pub files: Vec<String>,
+    /// Image files (ELF, Intel HEX, S-records, binary) on the debug server's machine; later
+    /// files win where they overlap. An entry is a path, or an object with `path`, `offset` and
+    /// `type` (`elf`, `ihex`, `srec`, `bin`).
+    pub files: Vec<FlashFile>,
     /// Erase programmed sectors first (needed unless they are erased).
     #[serde(default)]
     pub erase: bool,

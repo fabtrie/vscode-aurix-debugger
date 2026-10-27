@@ -632,6 +632,62 @@
         ],
         "type": "object"
       },
+      "FlashFile": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An image file with an offset and its type.",
+            "properties": {
+              "offset": {
+                "anyOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "maximum": 4294967295,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      {
+                        "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Added to all addresses of the file: the load address of a binary file, which is\nplaced at 0 otherwise."
+              },
+              "path": {
+                "description": "Path on the debug server's machine.",
+                "type": "string"
+              },
+              "type": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ImageType"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "File type; detected from the content and extension by default."
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "An image file to program: a path, or a path with an offset and its type."
+      },
       "FlashVerifyRequest": {
         "additionalProperties": false,
         "description": "Flash verification arguments.",
@@ -656,9 +712,9 @@
             "type": "boolean"
           },
           "files": {
-            "description": "Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win\nwhere they overlap.",
+            "description": "Image files (ELF, Intel HEX, S-records, binary) on the debug server's machine; later\nfiles win where they overlap. An entry is a path, or an object with `path`, `offset` and\n`type` (`elf`, `ihex`, `srec`, `bin`).",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/FlashFile"
             },
             "type": "array"
           },
@@ -706,6 +762,32 @@
           "items"
         ],
         "type": "object"
+      },
+      "ImageType": {
+        "description": "Image file type.",
+        "oneOf": [
+          {
+            "enum": [
+              "elf"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "ihex",
+            "description": "Intel HEX.",
+            "type": "string"
+          },
+          {
+            "const": "srec",
+            "description": "Motorola S-records.",
+            "type": "string"
+          },
+          {
+            "const": "bin",
+            "description": "Raw binary.",
+            "type": "string"
+          }
+        ]
       },
       "InfoSymbolFile": {
         "description": "A loaded symbol file and the targets it is loaded for.",
@@ -2767,9 +2849,9 @@
                     "type": "boolean"
                   },
                   "files": {
-                    "description": "Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win\nwhere they overlap.",
+                    "description": "Image files (ELF, Intel HEX, S-records, binary) on the debug server's machine; later\nfiles win where they overlap. An entry is a path, or an object with `path`, `offset` and\n`type` (`elf`, `ihex`, `srec`, `bin`).",
                     "items": {
-                      "type": "string"
+                      "$ref": "#/components/schemas/FlashFile"
                     },
                     "type": "array"
                   },

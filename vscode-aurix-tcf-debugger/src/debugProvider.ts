@@ -65,6 +65,7 @@ import { CoreRef, describeCores, capitalize, parseBreakpointCondition, splitCore
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 
 type ElfSymbol = { name: string; address: number; size: number; file?: string };
+type FlashFile = { path: string; offset?: number | string; type?: string };
 
 /**
  * Splits a .symtab name into the source-level name and, for file-local symbols, the defining file.
@@ -138,7 +139,9 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	refocusOnWrongContext?: boolean;
 	instructionStepping?: boolean;
 
-	flashFiles?: string[];
+	// Images to flash: a path, or a path with an offset (the load address of a binary file) and
+	// its type.
+	flashFiles?: Array<string | FlashFile>;
 	enableFlashing?: boolean;
 	verifyFlash?: boolean;
 	// Debugger Actions toolbar button; handled in the extension (debuggerActions.ts).
@@ -1670,10 +1673,19 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	/** Images to flash: the "flashFiles" launch option. */
-	private static getFlashFiles(args: any): string[] {
-		return Array.isArray(args?.flashFiles)
-			? args.flashFiles.filter((f: unknown): f is string => typeof f === 'string' && f.trim() !== '')
-			: [];
+	private static getFlashFiles(args: any): FlashFile[] {
+		if (!Array.isArray(args?.flashFiles)) {
+			return [];
+		}
+		return args.flashFiles
+			.map((f: any): FlashFile | undefined => typeof f === 'string' ? { path: f } : typeof f?.path === 'string' ? f : undefined)
+			.filter((f: FlashFile | undefined): f is FlashFile => f !== undefined && f.path.trim() !== '');
+	}
+
+	/** A flash file for the console: its path, with the offset when it has one. */
+	private static describeFlashFile(f: FlashFile): string {
+		const offset = typeof f.offset === 'number' ? `0x${f.offset.toString(16)}` : f.offset;
+		return offset === undefined ? f.path : `${f.path} at ${offset}`;
 	}
 
 	/**
@@ -1681,10 +1693,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * and written in one go, so files sharing a 16 KB sector do not erase each other's data.
 	 * - "incremental": sectors that already hold the image are not erased and rewritten.
 	 * - "verify" (launch option "verifyFlash", default true): reads the programmed sectors back afterwards.
+	 * - "-offset" and "-type" apply to the file that follows them.
 	 */
-	private static flashCommand(files: string[], args: any): string {
+	private static flashCommand(files: FlashFile[], args: any): string {
 		const verify = args?.verifyFlash === false ? '' : ' verify';
-		return `flash write_images erase incremental${verify} ${files.map(f => `{${f.replace(/\\/g, '/')}}`).join(' ')}`;
+		const words = files.map(f => [
+			...(f.offset !== undefined ? [`-offset {${f.offset}}`] : []),
+			...(f.type ? [`-type {${f.type}}`] : []),
+			`{${f.path.replace(/\\/g, '/')}}`,
+		].join(' '));
+		return `flash write_images erase incremental${verify} ${words.join(' ')}`;
 	}
 
 	/** Runs the Tcl commands, printing each with its output. */
@@ -1719,8 +1737,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * The final reset honors resetType and resetSuspend like the Reset button. It does not pause
 	 * the cores afterwards: the session is not initialized yet, stopOnEntry does that.
 	 */
-	private async flashWithAurixDbg(files: string[], args: any): Promise<void> {
-		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
+	private async flashWithAurixDbg(files: FlashFile[], args: any): Promise<void> {
+		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.map(AurixTCFDebugSession.describeFlashFile).join(', ')}\n`, 'console'));
 		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, args)]);
 		await this.resetTarget({ pauseAll: false });
 	}
@@ -1729,8 +1747,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * Flashes the images during a debug session (Flash Target toolbar button). The caller resets
 	 * the target afterwards like the Reset button does.
 	 */
-	private async flashInSession(files: string[]): Promise<void> {
-		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.join(', ')}\n`, 'console'));
+	private async flashInSession(files: FlashFile[]): Promise<void> {
+		this.sendEvent(new OutputEvent(`aurix-dbg: flashing ${files.map(AurixTCFDebugSession.describeFlashFile).join(', ')}\n`, 'console'));
 		this.beginResetTransition();
 		await this.runFlashSteps(['reset init', AurixTCFDebugSession.flashCommand(files, this.launchArgs)]);
 		this.elfSymbols = undefined;

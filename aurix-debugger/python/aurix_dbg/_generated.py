@@ -37,6 +37,9 @@ BreakpointOwner = Literal["api", "client"]
 ErrorCode = Literal["bad_request", "not_found", "not_halted", "not_examined", "busy", "timeout", "memory", "adapter", "device_locked", "device_access", "resource", "failed"]
 """Error kind."""
 
+ImageType = Literal["elf", "ihex", "srec", "bin"]
+"""Image file type."""
+
 RegisterGroup = Literal["core", "debug"]
 """Register group."""
 
@@ -986,7 +989,7 @@ class GeneratedClient:
         """
         return WatchpointList.from_dict(self._call("DELETE", "/api/v1/watchpoints", _args({"address": address, "target": target}), None))
 
-    def flash_write(self, *, files: list[str], erase: bool | None = None, incremental: bool | None = None, verify: bool | None = None) -> CommandOutput:
+    def flash_write(self, *, files: list[str | dict[str, Any]], erase: bool | None = None, incremental: bool | None = None, verify: bool | None = None) -> CommandOutput:
         """Program image files into flash (`flash write_images`).
 
         Needs a preceding halting reset (`reset` with mode `halt`): the flash is protected
@@ -994,7 +997,7 @@ class GeneratedClient:
         erased. Blocks the debug server while it runs.
 
         Args:
-            files: Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win where they overlap.
+            files: Image files (ELF, Intel HEX, S-records, binary) on the debug server's machine; later files win where they overlap. An entry is a path, or an object with `path`, `offset` and `type` (`elf`, `ihex`, `srec`, `bin`).
             erase: Erase programmed sectors first (needed unless they are erased).
             incremental: Skip sectors that already hold the image data.
             verify: Read back and compare after programming.

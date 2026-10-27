@@ -280,6 +280,26 @@ fn memory_commands() {
 }
 
 #[test]
+fn write_images_places_each_file_by_its_own_options() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    let bin = std::env::temp_dir().join(format!("aurix-write-images-{}.bin", std::process::id()));
+    std::fs::write(&bin, [1, 2, 3, 4]).unwrap();
+    let bin = jim::quote(&tcl_path(bin));
+    let err = |cmd: &str| s.interp.eval(&format!("catch {{{cmd}}} err; set err")).unwrap();
+    // The image data lies outside every flash bank, which names where the file was placed.
+    assert!(err(&format!("flash write_images {bin}")).contains("image data at 0x00000000"));
+    assert!(err(&format!("flash write_images erase -offset 0x90000000 {bin} {bin}")).contains("image data at 0x00000000"));
+    assert!(err(&format!("flash write_images {bin} -offset 0x90000000 -type bin {bin}")).contains("image data at 0x00000000"));
+    let e = err(&format!("flash write_images -offset 0x90000000 {bin}"));
+    assert!(e.contains("image data at 0x90000000"), "{e}");
+    assert!(err(&format!("flash write_images -type s19 {bin}")).contains("S-record line 1"));
+    assert!(err(&format!("flash write_images {bin} -offset 0x90000000")).starts_with("usage"));
+    assert!(err("flash write_images -type").starts_with("usage"));
+    std::fs::remove_file(std::env::temp_dir().join(format!("aurix-write-images-{}.bin", std::process::id()))).unwrap();
+}
+
+#[test]
 fn reset_halt_runs_reset_sequence() {
     let s = server();
     s.interp.eval("init").unwrap();

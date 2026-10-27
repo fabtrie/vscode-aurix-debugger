@@ -706,10 +706,45 @@
 								}
 							},
 							"flashFiles": {
-								"description": "Images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX, S-records or binary). Images other than ELF carry no symbols: list the ELF in symbolFiles as well. The files are merged into one image first; where they overlap, later files win. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
+								"description": "Images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX, S-records or binary). Images other than ELF carry no symbols: list the ELF in symbolFiles as well. The files are merged into one image first; where they overlap, later files win. Use the post-build HEX if the build patches CRCs or fills gaps after linking. A binary file needs an entry with \"offset\": its load address.",
 								"type": "array",
 								"items": {
-									"type": "string"
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "object",
+											"required": [
+												"path"
+											],
+											"additionalProperties": false,
+											"properties": {
+												"path": {
+													"type": "string",
+													"description": "Path to the image file"
+												},
+												"offset": {
+													"type": [
+														"string",
+														"integer"
+													],
+													"pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+													"description": "Added to all addresses of the file, e.g. \"0x80300000\": the load address of a binary file, which is placed at 0 otherwise"
+												},
+												"type": {
+													"type": "string",
+													"enum": [
+														"elf",
+														"ihex",
+														"srec",
+														"bin"
+													],
+													"description": "File type; detected from the content and extension by default (.hex Intel HEX, .srec/.s19/.s28/.s37/.mot S-records, otherwise binary)"
+												}
+											}
+										}
+									]
 								}
 							},
 							"enableFlashing": {

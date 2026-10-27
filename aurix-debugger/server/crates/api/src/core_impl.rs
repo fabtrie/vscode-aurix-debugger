@@ -620,8 +620,20 @@ impl DebuggerApi for CoreApi {
             }
         }
         for f in &req.files {
+            let path = match f {
+                FlashFile::Path(path) => path,
+                FlashFile::Placed(p) => {
+                    if let Some(offset) = p.offset {
+                        cmd += &format!(" -offset {:#x}", offset.0);
+                    }
+                    if let Some(kind) = p.kind {
+                        cmd += &format!(" -type {}", kind.tcl_name());
+                    }
+                    &p.path
+                }
+            };
             cmd += " ";
-            cmd += &jim::quote(f);
+            cmd += &jim::quote(path);
         }
         self.tcl_command(&cmd)
     }

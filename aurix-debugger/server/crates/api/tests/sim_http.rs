@@ -812,6 +812,20 @@ fn rest_mcp_and_tcf_share_one_session() {
     let (status, e) = http.request("GET", "/api/v1/memory?address=0x70000000&length=70000", None, &[]);
     assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")));
 
+    // Flash files with an offset: the image lies outside every flash bank, which names where
+    // it was placed.
+    let bin = std::env::temp_dir().join(format!("aurix-api-flash-{}.bin", std::process::id()));
+    std::fs::write(&bin, [1, 2, 3, 4]).unwrap();
+    let path = tcl_path(bin.clone());
+    let files = json!([path, { "path": path, "offset": "0x90000000", "type": "bin" }]);
+    let (_, e) = http.request("POST", "/api/v1/flash/write", Some(json!({ "files": files })), &[]);
+    assert!(e["message"].as_str().is_some_and(|m| m.contains("image data at 0x00000000")), "{e}");
+    let (_, e) = http.request("POST", "/api/v1/flash/write", Some(json!({ "files": [{ "path": path, "offset": "0x90000000" }] })), &[]);
+    assert!(e["message"].as_str().is_some_and(|m| m.contains("image data at 0x90000000")), "{e}");
+    let (status, e) = http.request("POST", "/api/v1/flash/write", Some(json!({ "files": [{ "path": path, "type": "zip" }] })), &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    std::fs::remove_file(&bin).unwrap();
+
     // A breakpoint from the API shows up in VS Code; VS Code on the same address shares the
     // core breakpoint, so removing the API's keeps VS Code's armed.
     const BP: u32 = 0x8000_2000;

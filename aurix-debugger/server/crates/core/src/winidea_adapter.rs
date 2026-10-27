@@ -32,6 +32,7 @@ use tas::{Batch, OpResult};
 
 use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, FlashDownload};
 use crate::error::{other, Error, Result};
+use crate::image::ImageFile;
 use crate::target::{DebugReason, RunControl, RunMode, TargetState, Transition};
 use crate::tricore::Tricore;
 
@@ -438,12 +439,14 @@ impl FlashDownload for WinIdeaAdapter {
     /// differ, and every frontend reads ours, so this asserts afterwards that
     /// winIDEA still has none.
     ///
-    /// S-records go over as Intel HEX: winIDEA's loader rejects every line
-    /// that does not start with `S`, and flash container tools write comment
-    /// lines between the data blocks.
-    fn download(&mut self, files: &[String]) -> Result<()> {
+    /// Only ELF and Intel HEX files without an offset or a given type go over
+    /// as they are; the others are converted to Intel HEX by our own loader.
+    /// winIDEA's S-record loader rejects every line that does not start with
+    /// `S`, and flash container tools write comment lines between the data
+    /// blocks.
+    fn download(&mut self, files: &[ImageFile]) -> Result<()> {
         let session = self.session.as_ref().ok_or_else(|| Error::Usage(NOT_CONNECTED.into()))?;
-        let converted = TempHexFiles::convert_srecs(files)?;
+        let converted = TempHexFiles::convert(files)?;
         let entries: Vec<String> = converted
             .paths
             .iter()
@@ -477,26 +480,29 @@ impl FlashDownload for WinIdeaAdapter {
     }
 }
 
-/// The download list with S-record files replaced by Intel HEX copies, which
-/// are removed again on drop.
+/// The download list with the files winIDEA would not load as we do replaced
+/// by Intel HEX copies, which are removed again on drop.
 struct TempHexFiles {
     paths: Vec<String>,
     temps: Vec<std::path::PathBuf>,
 }
 
 impl TempHexFiles {
-    fn convert_srecs(files: &[String]) -> Result<TempHexFiles> {
+    fn convert(files: &[ImageFile]) -> Result<TempHexFiles> {
         use crate::image::Image;
         use std::path::Path;
         let mut out = TempHexFiles { paths: Vec::new(), temps: Vec::new() };
         for (i, f) in files.iter().enumerate() {
-            let path = Path::new(f);
-            let bytes = std::fs::read(path).map_err(|e| other(format!("couldn't open image file {f}: {e}")))?;
-            if Image::detect(path, &bytes) != "s19" {
-                out.paths.push(f.clone());
-                continue;
+            let path = Path::new(&f.path);
+            if f.offset == 0 && f.kind.is_none() {
+                let bytes =
+                    std::fs::read(path).map_err(|e| other(format!("couldn't open image file {}: {e}", f.path)))?;
+                if matches!(Image::detect(path, &bytes), "elf" | "ihex") {
+                    out.paths.push(f.path.clone());
+                    continue;
+                }
             }
-            let img = Image::load(path, 0, Some("s19")).map_err(other)?;
+            let img = f.load().map_err(other)?;
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
             let hex = std::env::temp_dir().join(format!("aurix-dbg-{}-{i}-{stem}.hex", std::process::id()));
             std::fs::write(&hex, img.to_ihex()).map_err(|e| other(format!("couldn't write {}: {e}", hex.display())))?;
@@ -1084,23 +1090,32 @@ mod download_tests {
     }
 
     #[test]
-    fn srecs_go_over_as_intel_hex() {
+    fn srecs_and_placed_files_go_over_as_intel_hex() {
         let dir = std::env::temp_dir();
         let srec = dir.join(format!("aurix-dl-test-{}.srec", std::process::id()));
         std::fs::write(&srec, ";comment\r\nS3078000000004056F\r\nS70500000000FA\r\n").unwrap();
         let elf = srec.with_extension("elf");
         std::fs::write(&elf, b"\x7fELF").unwrap();
-        let files = [srec.to_string_lossy().into_owned(), elf.to_string_lossy().into_owned()];
+        let bin = srec.with_extension("bin");
+        std::fs::write(&bin, [7, 8, 9]).unwrap();
+        let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let files = [
+            ImageFile::new(&path(&srec)),
+            ImageFile::new(&path(&elf)),
+            ImageFile { offset: 0x8030_0000, ..ImageFile::new(&path(&bin)) },
+        ];
 
-        let converted = TempHexFiles::convert_srecs(&files).unwrap();
-        let hex = converted.temps[0].clone();
-        assert_eq!(converted.paths, [hex.to_string_lossy().into_owned(), files[1].clone()]);
-        let img = crate::image::Image::from_ihex(&std::fs::read_to_string(&hex).unwrap()).unwrap();
-        assert_eq!(img.sections[0].data, [4, 5]);
+        let converted = TempHexFiles::convert(&files).unwrap();
+        let hex = converted.temps.clone();
+        assert_eq!(converted.paths, [path(&hex[0]), path(&elf), path(&hex[1])]);
+        let read = |p| crate::image::Image::from_ihex(&std::fs::read_to_string(p).unwrap()).unwrap().sections;
+        assert_eq!(read(&hex[0])[0].data, [4, 5]);
+        assert_eq!(read(&hex[1]), [crate::image::Section { addr: 0x8030_0000, data: vec![7, 8, 9] }]);
         drop(converted);
-        assert!(!hex.exists());
-        std::fs::remove_file(&srec).unwrap();
-        std::fs::remove_file(&elf).unwrap();
+        assert!(hex.iter().all(|h| !h.exists()));
+        for f in [srec, elf, bin] {
+            std::fs::remove_file(f).unwrap();
+        }
     }
 }
 

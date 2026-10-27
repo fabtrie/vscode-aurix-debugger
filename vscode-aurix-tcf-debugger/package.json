@@ -706,7 +706,7 @@
 								}
 							},
 							"flashFiles": {
-								"description": "Images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX or binary). The files are merged into one image first; where they overlap, later files win. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
+								"description": "Images to program when enableFlashing is true or with the Flash Target toolbar button (ELF, Intel HEX, S-records or binary). Images other than ELF carry no symbols: list the ELF in symbolFiles as well. The files are merged into one image first; where they overlap, later files win. Use the post-build HEX if the build patches CRCs or fills gaps after linking.",
 								"type": "array",
 								"items": {
 									"type": "string"

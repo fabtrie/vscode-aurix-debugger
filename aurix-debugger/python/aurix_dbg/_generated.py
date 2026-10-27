@@ -994,7 +994,7 @@ class GeneratedClient:
         erased. Blocks the debug server while it runs.
 
         Args:
-            files: Image files (ELF, Intel HEX) on the debug server's machine; later files win where they overlap.
+            files: Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win where they overlap.
             erase: Erase programmed sectors first (needed unless they are erased).
             incremental: Skip sectors that already hold the image data.
             verify: Read back and compare after programming.

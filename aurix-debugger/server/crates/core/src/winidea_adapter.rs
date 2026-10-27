@@ -437,9 +437,15 @@ impl FlashDownload for WinIdeaAdapter {
     /// Two symbol tables for one target would disagree the moment the files
     /// differ, and every frontend reads ours, so this asserts afterwards that
     /// winIDEA still has none.
+    ///
+    /// S-records go over as Intel HEX: winIDEA's loader rejects every line
+    /// that does not start with `S`, and flash container tools write comment
+    /// lines between the data blocks.
     fn download(&mut self, files: &[String]) -> Result<()> {
         let session = self.session.as_ref().ok_or_else(|| Error::Usage(NOT_CONNECTED.into()))?;
-        let entries: Vec<String> = files
+        let converted = TempHexFiles::convert_srecs(files)?;
+        let entries: Vec<String> = converted
+            .paths
             .iter()
             .map(|f| {
                 format!(
@@ -468,6 +474,44 @@ impl FlashDownload for WinIdeaAdapter {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// The download list with S-record files replaced by Intel HEX copies, which
+/// are removed again on drop.
+struct TempHexFiles {
+    paths: Vec<String>,
+    temps: Vec<std::path::PathBuf>,
+}
+
+impl TempHexFiles {
+    fn convert_srecs(files: &[String]) -> Result<TempHexFiles> {
+        use crate::image::Image;
+        use std::path::Path;
+        let mut out = TempHexFiles { paths: Vec::new(), temps: Vec::new() };
+        for (i, f) in files.iter().enumerate() {
+            let path = Path::new(f);
+            let bytes = std::fs::read(path).map_err(|e| other(format!("couldn't open image file {f}: {e}")))?;
+            if Image::detect(path, &bytes) != "s19" {
+                out.paths.push(f.clone());
+                continue;
+            }
+            let img = Image::load(path, 0, Some("s19")).map_err(other)?;
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+            let hex = std::env::temp_dir().join(format!("aurix-dbg-{}-{i}-{stem}.hex", std::process::id()));
+            std::fs::write(&hex, img.to_ihex()).map_err(|e| other(format!("couldn't write {}: {e}", hex.display())))?;
+            out.paths.push(hex.to_string_lossy().into_owned());
+            out.temps.push(hex);
+        }
+        Ok(out)
+    }
+}
+
+impl Drop for TempHexFiles {
+    fn drop(&mut self) {
+        for t in &self.temps {
+            let _ = std::fs::remove_file(t);
+        }
     }
 }
 
@@ -1037,6 +1081,26 @@ mod download_tests {
         assert_eq!(json_escape("C:/ws/app.elf"), "C:/ws/app.elf");
         // A quote in a path would otherwise end the JSON string early.
         assert_eq!(json_escape(r#"C:\a"b"#), r#"C:/a\"b"#);
+    }
+
+    #[test]
+    fn srecs_go_over_as_intel_hex() {
+        let dir = std::env::temp_dir();
+        let srec = dir.join(format!("aurix-dl-test-{}.srec", std::process::id()));
+        std::fs::write(&srec, ";comment\r\nS3078000000004056F\r\nS70500000000FA\r\n").unwrap();
+        let elf = srec.with_extension("elf");
+        std::fs::write(&elf, b"\x7fELF").unwrap();
+        let files = [srec.to_string_lossy().into_owned(), elf.to_string_lossy().into_owned()];
+
+        let converted = TempHexFiles::convert_srecs(&files).unwrap();
+        let hex = converted.temps[0].clone();
+        assert_eq!(converted.paths, [hex.to_string_lossy().into_owned(), files[1].clone()]);
+        let img = crate::image::Image::from_ihex(&std::fs::read_to_string(&hex).unwrap()).unwrap();
+        assert_eq!(img.sections[0].data, [4, 5]);
+        drop(converted);
+        assert!(!hex.exists());
+        std::fs::remove_file(&srec).unwrap();
+        std::fs::remove_file(&elf).unwrap();
     }
 }
 

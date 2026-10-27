@@ -656,7 +656,7 @@
             "type": "boolean"
           },
           "files": {
-            "description": "Image files (ELF, Intel HEX) on the debug server's machine; later files win where they\noverlap.",
+            "description": "Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win\nwhere they overlap.",
             "items": {
               "type": "string"
             },
@@ -2767,7 +2767,7 @@
                     "type": "boolean"
                   },
                   "files": {
-                    "description": "Image files (ELF, Intel HEX) on the debug server's machine; later files win where they\noverlap.",
+                    "description": "Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win\nwhere they overlap.",
                     "items": {
                       "type": "string"
                     },

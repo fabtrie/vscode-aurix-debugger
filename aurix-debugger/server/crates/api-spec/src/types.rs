@@ -482,8 +482,8 @@ pub struct WatchpointList {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlashWriteRequest {
-    /// Image files (ELF, Intel HEX) on the debug server's machine; later files win where they
-    /// overlap.
+    /// Image files (ELF, Intel HEX, S-records) on the debug server's machine; later files win
+    /// where they overlap.
     pub files: Vec<String>,
     /// Erase programmed sectors first (needed unless they are erased).
     #[serde(default)]

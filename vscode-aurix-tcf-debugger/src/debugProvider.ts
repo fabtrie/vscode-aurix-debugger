@@ -2043,7 +2043,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			// Clip to executable ranges from the ELF (if available). GTM MCS code is in the MCS RAM,
 			// not in an ELF. Code outside the ELF (boot ROM, another core's program) is disassembled
 			// from the target memory as it is.
-			const execRange = isa === 'MCS' ? undefined : this.findExecutableRangeForAddress(alignedBaseAddress);
+			const execRange = isa === 'MCS' ? undefined : this.findExecutableRangeForAddress(alignedBaseAddress, isa === 'TRICORE');
 			if (isa === 'MCS') {
 				// MCS instructions are 4 bytes and the program is the module RAM, 0..MCS_RAM_BYTES.
 				// VS Code also asks for the instructions before the PC, which reaches below 0 near
@@ -2103,6 +2103,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 			const toInstruction = (l: any, fallbackAddr: number): DebugProtocol.DisassembledInstruction => {
 				const addr = typeof l?.Address === 'number' ? l.Address : fallbackAddr;
+				// Memory the server could not read, e.g. the unmapped addresses below the reset
+				// vector 0xA0000000 that VS Code asks for as the instructions before the PC.
+				if (l?.Unreadable === true) {
+					return { address: `0x${addr.toString(16)}`, instruction: '??', presentationHint: 'invalid' };
+				}
 				const parts = Array.isArray(l?.Instruction) ? l.Instruction : [];
 				const text = parts.map((p: any) => (p?.Text ? String(p.Text) : '')).join('');
 				return {
@@ -2133,7 +2138,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 			instructions = instructions.slice(startIndex, startIndex + instructionCount);
 
-			response.body = { instructions: await this.withDisassemblySource(ctx, instructions) };
+			response.body = { instructions: await this.withDisassemblySource(ctx, instructions, isa === 'TRICORE') };
 			this.sendResponse(response);
 		} catch (e) {
 			this.sendErrorResponse(response, 0, 'Disassemble error {message}', { message: AurixTCFDebugSession.formatError(e) });
@@ -2165,18 +2170,29 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 */
 	private async withDisassemblySource(
 		ctx: string,
-		instructions: Array<{ address: string; instruction: string; instructionBytes?: string }>
+		instructions: DebugProtocol.DisassembledInstruction[],
+		tricore: boolean
 	): Promise<DebugProtocol.DisassembledInstruction[]> {
-		const addrs = instructions.map(i => Number.parseInt(i.address.substring(2), 16));
-		if (addrs.length === 0) {
+		// The line table has the cached addresses: a non-cached TriCore address is looked up there.
+		const addrs = instructions.map(i => {
+			const addr = Number.parseInt(i.address.substring(2), 16);
+			return tricore ? AurixTCFDebugSession.cachedAlias(addr) : addr;
+		});
+		// Unreadable lines have no source; a window can reach from unmapped memory into the code.
+		const lookup = addrs.filter((_, idx) => instructions[idx].presentationHint !== 'invalid');
+		if (lookup.length === 0) {
 			return instructions;
 		}
 		let areas: TCFCodeAreaLineNumbers[] = [];
 		try {
-			// One query for the whole window: the agent returns every line entry overlapping it.
-			areas = (await this.tcfClient.sendCommand(
-				new MapToSourceLineNumbersCommand(ctx, Math.min(...addrs), Math.max(...addrs) + 4)
-			)) || [];
+			// One query for the window: the agent returns every line entry overlapping it. Per
+			// segment, as the aliasing may put the two ends of a window far apart.
+			for (const segment of new Set(lookup.map(a => a >>> 28))) {
+				const inSegment = lookup.filter(a => a >>> 28 === segment);
+				areas.push(...((await this.tcfClient.sendCommand(
+					new MapToSourceLineNumbersCommand(ctx, Math.min(...inSegment), Math.max(...inSegment) + 4)
+				)) || []));
+			}
 		} catch (e) {
 			this.tcfLogger.error(`Disassembly source lookup failed: ${String(e)}`);
 			return instructions;
@@ -2184,6 +2200,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const sources = new Map<string, Source | undefined>();
 		return instructions.map((ins, idx) => {
 			const addr = addrs[idx];
+			if (ins.presentationHint === 'invalid') {
+				return ins;
+			}
 			const area = areas.find(a => a.File && a.SLine && a.SAddr !== undefined && a.EAddr !== undefined && addr >= a.SAddr && addr < a.EAddr);
 			if (!area) {
 				return ins;
@@ -3032,7 +3051,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		// TriCore instructions start on even addresses.
 		address -= address % 2;
-		if (this.execRanges.length > 0 && !this.findExecutableRangeForAddress(address)) {
+		if (this.execRanges.length > 0 && !this.findExecutableRangeForAddress(address, this.contextMachines.get(ctx) === 44)) {
 			throw new Error(`0x${address.toString(16)} is not in an executable section of the program`);
 		}
 		label ??= await this.symbolLabelForAddress(ctx, address);
@@ -3053,16 +3072,26 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
-	private findExecutableRangeForAddress(addr: number): { start: number; end: number } | undefined {
-		if (this.execRanges.length === 0) {
-			return undefined;
+	/** TriCore: the cached address of a non-cached one (segment 0xA is 0x8, 0xB is 0x9), else the address. */
+	private static cachedAlias(addr: number): number {
+		const segment = addr >>> 28;
+		return segment === 0xa || segment === 0xb ? addr - 0x20000000 : addr;
+	}
+
+	/**
+	 * The executable ELF range containing `addr`. With `tricore`, an address in the non-cached
+	 * segments (e.g. the reset vector 0xA0000000) is found in the cached range of the ELF, which
+	 * is returned moved to the address's segment.
+	 */
+	private findExecutableRangeForAddress(addr: number, tricore = false): { start: number; end: number } | undefined {
+		const find = (a: number) => this.execRanges.find(r => a >= r.start && a < r.end);
+		const range = find(addr);
+		const cached = tricore ? AurixTCFDebugSession.cachedAlias(addr) : addr;
+		if (range || cached === addr) {
+			return range;
 		}
-		for (const r of this.execRanges) {
-			if (addr >= r.start && addr < r.end) {
-				return r;
-			}
-		}
-		return undefined;
+		const alias = find(cached);
+		return alias && { start: alias.start + (addr - cached), end: alias.end + (addr - cached) };
 	}
 
 	private getElfSymbols(): { functions: ElfSymbol[]; variables: ElfSymbol[] } {

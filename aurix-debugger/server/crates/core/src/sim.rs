@@ -189,6 +189,10 @@ pub struct SimAdapter {
     srst: bool,
 }
 
+/// Unmapped as on the chip, so that reads into it fail: the top of segment 9, right below the
+/// non-cached PFLASH (reset vector 0xA0000000).
+pub const SIM_UNMAPPED: std::ops::Range<u32> = 0x9FF0_0000..0xA000_0000;
+
 /// Delay of a reset of the simulated SBC reset loop after a halting reset.
 pub const SBC_LOOP_DELAY: Duration = Duration::from_millis(200);
 
@@ -440,21 +444,29 @@ impl Adapter for SimAdapter {
             match op {
                 BatchOp::Read { addr, len, addr_map } => {
                     let mut data = vec![0u8; len];
+                    // A read into unmapped memory fails there; TAS reports the bytes read before.
+                    let end = addr + len as u64;
+                    let ok = if addr_map == 0 && addr < SIM_UNMAPPED.end as u64 && end > SIM_UNMAPPED.start as u64 {
+                        (SIM_UNMAPPED.start as u64).saturating_sub(addr) as usize
+                    } else {
+                        len
+                    };
                     if addr_map == 0 {
                         self.reads.push((addr as u32, len));
                         // One register read per word, so side effects happen once.
                         let mut k = 0;
-                        while k < len {
+                        while k < ok {
                             let a = addr as u32 + k as u32;
                             let base = a & !3;
                             let w = self.read32(base).to_le_bytes();
                             let start = (a - base) as usize;
-                            let n = (4 - start).min(len - k);
+                            let n = (4 - start).min(ok - k);
                             data[k..k + n].copy_from_slice(&w[start..start + n]);
                             k += n;
                         }
                     }
-                    out.push(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: len, data });
+                    let err = if ok < len { PL0_ERR_DATA } else { PL0_ERR_NO_ERROR };
+                    out.push(OpResult { err, bytes_ok: ok, data });
                 }
                 BatchOp::Write { addr, data, addr_map } => {
                     if addr_map == 0 {

@@ -812,6 +812,19 @@ fn rest_mcp_and_tcf_share_one_session() {
     let (status, e) = http.request("GET", "/api/v1/memory?address=0x70000000&length=70000", None, &[]);
     assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")));
 
+    // Disassembly reaching from unmapped memory (the top of segment 9) to the reset vector: the
+    // readable part is decoded, the rest marked unreadable.
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0xa0000000", "data": "0090" })));
+    let r = vs.command("Disassembly", "disassemble", &[json!(c0), json!(0x9fff_ffc0u32), json!(0x80), json!({})]);
+    assert_eq!(r[0], "", "{r:?}");
+    let lines: Vec<Value> = serde_json::from_str(&r[1]).unwrap();
+    let unreadable: Vec<u64> = lines.iter().filter(|l| l["Unreadable"] == true).map(|l| l["Address"].as_u64().unwrap()).collect();
+    assert_eq!(unreadable, (0x9fff_ffc0..0xa000_0000).step_by(4).collect::<Vec<u64>>(), "{lines:?}");
+    let pc = lines.iter().find(|l| l["Address"] == 0xa000_0000u32).unwrap();
+    assert_eq!(pc["Instruction"][0]["Text"], "ret", "{pc}");
+    let r = vs.command("Disassembly", "disassemble", &[json!(c0), json!(0x9fff_ff00u32), json!(0x80), json!({})]);
+    assert!(r[0].contains("0x9fffff00"), "nothing readable: {r:?}");
+
     // Flash files with an offset: the image lies outside every flash bank, which names where
     // it was placed.
     let bin = std::env::temp_dir().join(format!("aurix-api-flash-{}.bin", std::process::id()));

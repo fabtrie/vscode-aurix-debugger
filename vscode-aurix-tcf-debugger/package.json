@@ -297,6 +297,21 @@
 				"category": "AURIX™ Debugger"
 			},
 			{
+				"command": "aurix-debugger.editorBreakOnChange",
+				"title": "Break on Value Change",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.editorBreakOnRead",
+				"title": "Break on Value Read",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.editorBreakOnAccess",
+				"title": "Break on Value Access",
+				"category": "AURIX™ Debugger"
+			},
+			{
 				"command": "aurix-debugger.resetDebugLayout",
 				"title": "Reset Debug Layout",
 				"category": "AURIX™ Debugger"
@@ -445,6 +460,18 @@
 				{
 					"command": "aurix-debugger.liveWatchBreakOnAccess",
 					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.editorBreakOnChange",
+					"when": "debugType == aurixdbg && editorIsOpen"
+				},
+				{
+					"command": "aurix-debugger.editorBreakOnRead",
+					"when": "debugType == aurixdbg && editorIsOpen"
+				},
+				{
+					"command": "aurix-debugger.editorBreakOnAccess",
+					"when": "debugType == aurixdbg && editorIsOpen"
 				},
 				{
 					"command": "aurix-debugger.liveWatchEditExpression",
@@ -600,6 +627,21 @@
 					"command": "aurix-debugger.breakOnCore",
 					"when": "debugType == aurixdbg && editorTextFocus",
 					"group": "debug@2"
+				},
+				{
+					"command": "aurix-debugger.editorBreakOnChange",
+					"when": "debugType == aurixdbg && editorTextFocus",
+					"group": "debug@3"
+				},
+				{
+					"command": "aurix-debugger.editorBreakOnRead",
+					"when": "debugType == aurixdbg && editorTextFocus",
+					"group": "debug@4"
+				},
+				{
+					"command": "aurix-debugger.editorBreakOnAccess",
+					"when": "debugType == aurixdbg && editorTextFocus",
+					"group": "debug@5"
 				}
 			],
 			"editor/lineNumber/context": [

@@ -118,6 +118,7 @@ Right-click a variable in the Variables or Watch view and choose **Break on Valu
 - **Core-local RAM** (`0xD000_0000`) means the copy of the core whose variable you picked (`CRASH_state@2`).
 - Each core has 8 hardware events, shared with breakpoints. A data breakpoint wider than one byte takes two, and catches every access that starts inside the variable. An access that starts below it and reaches into it is not caught, e.g. a 64-bit copy of the struct around it. When the hardware events run out, the breakpoint is shown unverified with the reason.
 - In the **Live Watch**, the same three entries are on the context menu of every row. The expression means what it means there, so `x@1` is core 1's copy. These work while the target runs. VS Code offers extensions no way to add data breakpoints to its view, so they show up as function breakpoints named `expression [access]`, e.g. `g_count [write]`. You can disable or remove them there, and they end with the debug session.
+- In the **editor**, right-click a variable, or select an expression such as `g_motor.speed` or `buf[3]` first, and pick one of the three entries. They are also in the Command Palette. While a core is halted, the name is looked up in the frame selected in the Call Stack: a local is watched at its address on that core, and shown by that address, e.g. `0x7003fe20 [write]`. While the target runs, the name means what it means in the Live Watch. They show up and end like the Live Watch's.
 - Watchpoints set through the debug server's API show up the same way.
 
 ### Watch global variables

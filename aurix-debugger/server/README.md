@@ -599,7 +599,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
   - `node tools/dap_m8.js`: disassembly and reset.
   - `node tools/tcf_smoke.js`: raw TCF services.
   - `node tools/dap_external_bp.js [tcf_port] [api_port]`: API breakpoints in VS Code's Breakpoints view (also runs against the simulator).
-  - `node tools/dap_watch.js [tcf_port] [api_port] [expression] [elf]`: data breakpoints on a watch expression, with a condition, from the Live Watch, and API watchpoints in the Breakpoints view (also runs against the simulator; `HIT=1` also waits for a hit on a running target that writes the variable).
+  - `node tools/dap_watch.js [tcf_port] [api_port] [expression] [elf]`: data breakpoints on a watch expression, with a condition, from the Live Watch and the editor, and API watchpoints in the Breakpoints view (also runs against the simulator; `HIT=1` also waits for a hit on a running target that writes the variable).
   - DAQ: `pip install -e python`, then sample a changing global by name and check the rate and jitter from the `t_us` deltas. Verified on a TC377 board with an application running: every increment of a 5 ms counter caught over 5 s at 1 kHz requested, `float32` and enum globals decoded, and a 1 kHz session left a concurrent REST `read_memory` unchanged (median 21.0 ms either way).
 
 ## Not yet implemented

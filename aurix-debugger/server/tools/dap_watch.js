@@ -45,7 +45,10 @@ class DapClient {
                 const p = this.pending.get(msg.request_seq);
                 if (p) {
                     this.pending.delete(msg.request_seq);
-                    msg.success ? p.resolve(msg) : p.reject(new Error(`${msg.command}: ${msg.message}`));
+                    // As VS Code shows it: the error's format with its variables filled in.
+                    const err = msg.body && msg.body.error;
+                    const text = err ? err.format.replace(/\{(\w+)\}/g, (m, k) => (err.variables && k in err.variables ? err.variables[k] : m)) : msg.message;
+                    msg.success ? p.resolve(msg) : p.reject(new Error(`${msg.command}: ${text}`));
                 }
             }
         }
@@ -172,7 +175,7 @@ async function main() {
 
     // From the Live Watch (its context menu): shown in the view like other clients' watchpoints,
     // and kept when VS Code next sends its own breakpoints (Breakpoints.set replaces the lot).
-    const lw = (await client.request('aurix/liveWatchDataBreakpoint', { expression: expr, access: 'read' })).body;
+    const lw = (await client.request('aurix/addDataBreakpoint', { expression: expr, access: 'read' })).body;
     assert.strictEqual(lw.name, `${expr} [read]`);
     const lwShown = await until('Live Watch breakpoint shown', () => ui.shown.get(lw.id));
     assert.strictEqual(lwShown.name, lw.name);
@@ -180,13 +183,30 @@ async function main() {
     const lwServer = (await watches()).find((x) => x.id === lw.id);
     assert.ok(lwServer && lwServer.owner === 'client' && lwServer.access === 'read', JSON.stringify(await watches()));
     ok(`Live Watch ${lw.id} shown as "${lw.name}", kept by a later sync`);
-    const again = (await client.request('aurix/liveWatchDataBreakpoint', { expression: expr, access: 'read' })).body;
+    const again = (await client.request('aurix/addDataBreakpoint', { expression: expr, access: 'read' })).body;
     assert.strictEqual(again.id, lw.id);
-    await assert.rejects(client.request('aurix/liveWatchDataBreakpoint', { expression: 'no_such_variable_xyz' }), /Cannot watch/);
+    await assert.rejects(client.request('aurix/addDataBreakpoint', { expression: 'no_such_variable_xyz' }), /Cannot watch/);
     ok('the same one again is not doubled; an unknown name is refused');
     ui.user({ id: lw.id, removed: true });
     await until('Live Watch breakpoint removed', async () => !(await watches()).some((x) => x.id === lw.id));
     ok('removed in VS Code -> removed on the server');
+
+    // From the editor (its context menu) while a core is halted: evaluated in the selected frame;
+    // a global stays a name the server resolves on every core.
+    const thread = (await client.request('threads', {})).body.threads[0].id;
+    client.events = [];
+    await client.request('pause', { threadId: thread });
+    await until('paused', () => client.events.find((e) => e.event === 'stopped'));
+    const frame = (await client.request('stackTrace', { threadId: thread })).body.stackFrames[0];
+    const ed = (await client.request('aurix/addDataBreakpoint', { expression: expr, access: 'write', inFrame: true, frameId: frame.id })).body;
+    assert.strictEqual(ed.name, `${expr} [write]`);
+    await until('editor breakpoint shown', () => ui.shown.get(ed.id));
+    const edServer = (await watches()).find((x) => x.id === ed.id);
+    assert.ok(edServer && edServer.expression === expr && edServer.instances.length > 0, JSON.stringify(edServer));
+    await assert.rejects(client.request('aurix/addDataBreakpoint', { expression: '1 + 2', inFrame: true, frameId: frame.id }), /not stored in memory/);
+    ok(`editor (frame ${frame.name}): ${ed.name} on ${edServer.instances.length} cores; 1 + 2 refused`);
+    ui.user({ id: ed.id, removed: true });
+    await until('editor breakpoint removed', async () => !(await watches()).some((x) => x.id === ed.id));
 
     await client.request('disconnect', {});
     console.log(`\nwatchpoint test passed (${passed} checks)`);

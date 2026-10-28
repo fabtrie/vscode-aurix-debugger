@@ -314,6 +314,9 @@ export function activate(context: vscode.ExtensionContext) {
 				await liveWatches.reveal(target);
 			}
 		}),
+		vscode.commands.registerCommand('aurix-debugger.editorBreakOnChange', () => editorDataBreakpoint('write')),
+		vscode.commands.registerCommand('aurix-debugger.editorBreakOnRead', () => editorDataBreakpoint('read')),
+		vscode.commands.registerCommand('aurix-debugger.editorBreakOnAccess', () => editorDataBreakpoint('readWrite')),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchBreakOnChange', async (item?: LiveWatchCommandArgument) => {
 			await liveWatches?.resolve(item).addDataBreakpoint(item, 'write');
 		}),
@@ -718,6 +721,40 @@ function breakpointsForCommand(where: LineNumberMenuArgument): { session: vscode
 		return undefined;
 	}
 	return { session, here };
+}
+
+/**
+ * A data breakpoint on the editor's selection, or on the identifier under the cursor. Evaluated in
+ * the focused stack frame when a core is halted, so a local is watched where it lives; otherwise
+ * as the Live Watch evaluates it.
+ */
+async function editorDataBreakpoint(access: 'write' | 'read' | 'readWrite'): Promise<void> {
+	const session = vscode.debug.activeDebugSession;
+	if (session?.type !== 'aurixdbg') {
+		void vscode.window.showWarningMessage('Start an AURIX debug session first.');
+		return;
+	}
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		return;
+	}
+	const doc = editor.document;
+	const sel = editor.selection;
+	const word = sel.isEmpty ? doc.getWordRangeAtPosition(sel.active, /[A-Za-z_]\w*/) : undefined;
+	const expression = (sel.isEmpty ? (word ? doc.getText(word) : '') : doc.getText(sel)).trim();
+	if (expression === '' || expression.includes('\n')) {
+		void vscode.window.showWarningMessage('Select an expression, or put the cursor on a variable.');
+		return;
+	}
+	// The frame selected in the Call Stack (VS Code 1.90 and later).
+	const item = (vscode.debug as { activeStackItem?: { session?: vscode.DebugSession; frameId?: number } }).activeStackItem;
+	const frameId = item?.session === session && typeof item.frameId === 'number' ? item.frameId : undefined;
+	try {
+		const r = await session.customRequest('aurix/addDataBreakpoint', { expression, access, inFrame: true, frameId }) as { name?: string } | undefined;
+		vscode.window.setStatusBarMessage(`Data breakpoint ${r?.name ?? expression}`, 4000);
+	} catch (e) {
+		void vscode.window.showErrorMessage(e instanceof Error ? e.message : String(e));
+	}
 }
 
 /** Gives breakpoints new conditions; an empty one removes the condition. */

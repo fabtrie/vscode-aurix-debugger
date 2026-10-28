@@ -319,7 +319,7 @@ export class LiveWatchInstance implements vscode.Disposable {
 			return;
 		}
 		try {
-			const r = await session.customRequest('aurix/liveWatchDataBreakpoint', { expression: target.expression, access }) as { name?: string } | undefined;
+			const r = await session.customRequest('aurix/addDataBreakpoint', { expression: target.expression, access }) as { name?: string } | undefined;
 			vscode.window.setStatusBarMessage(`Data breakpoint ${r?.name ?? target.expression}`, 4000);
 		} catch (e) {
 			void vscode.window.showErrorMessage(e instanceof Error ? e.message : String(e));

@@ -5000,15 +5000,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		// A data breakpoint on a Live Watch row: `{ expression, access }` (`write`, `read`, `readWrite`).
-		if (command === 'aurix/liveWatchDataBreakpoint') {
+		// A data breakpoint from a Live Watch row or the editor: `{ expression, access, inFrame?, frameId? }`,
+		// access `write`, `read` or `readWrite`.
+		if (command === 'aurix/addDataBreakpoint') {
 			const expression = typeof args?.expression === 'string' ? args.expression.trim() : '';
 			if (!expression) {
 				this.sendErrorResponse(response, 0, 'No expression given');
 				return;
 			}
 			try {
-				response.body = await this.addLiveWatchDataBreakpoint(expression, args?.access ?? 'write');
+				const frameId = typeof args?.frameId === 'number' ? args.frameId : undefined;
+				response.body = await this.addViewDataBreakpoint(expression, args?.access ?? 'write', args?.inFrame === true, frameId);
 				this.sendResponse(response);
 			} catch (e) {
 				this.sendErrorResponse(response, 0, 'Cannot watch {expression}: {message}', { expression, message: AurixTCFDebugSession.formatError(e) });
@@ -5021,33 +5023,56 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	/**
-	 * Data breakpoints set from the Live Watch, by TCF ID. An extension cannot add data breakpoints
-	 * to VS Code's view, so their IDs are not ours: they are shown like other clients' breakpoints,
-	 * as function breakpoints named `expression [access]`, which can be disabled and removed there.
-	 * They belong to this session, and go with it.
+	 * Data breakpoints set from the Live Watch or the editor, by TCF ID. An extension cannot add
+	 * data breakpoints to VS Code's view, so their IDs are not ours: they are shown like other
+	 * clients' breakpoints, as function breakpoints named `expression [access]` (a local by its
+	 * address), which can be disabled and removed there. They belong to this session, and go with it.
 	 */
 	private liveWatchBreakpoints = new Map<string, BreakpointData>();
 	private liveWatchBreakpointCount = 0;
 
-	/** Sets a data breakpoint on a Live Watch expression, resolved by the server as the Live Watch evaluates it. */
-	private async addLiveWatchDataBreakpoint(expression: string, access: DebugProtocol.DataBreakpointAccessType): Promise<{ id: string; name: string }> {
+	/**
+	 * Sets a data breakpoint on `expression`. Without `inFrame` it is meant as the Live Watch
+	 * evaluates it (globals, `x@1`), resolved by the server. With `inFrame` (the editor) it is
+	 * evaluated in frame `frameId`, else in the focused core's top frame when that core is halted,
+	 * so a local is watched at its address there (see `dataBreakpointTarget`).
+	 */
+	private async addViewDataBreakpoint(
+		expression: string, access: DebugProtocol.DataBreakpointAccessType, inFrame: boolean, frameId: number | undefined,
+	): Promise<{ id: string; name: string }> {
 		const mode = access === 'read' ? ACCESS_READ : access === 'readWrite' ? ACCESS_READ | ACCESS_WRITE : ACCESS_WRITE;
-		const name = `${expression} [${access === 'read' ? 'read' : access === 'readWrite' ? 'read/write' : 'write'}]`;
-		const known = Array.from(this.liveWatchBreakpoints.values()).find(p => p.Location === expression && p.AccessMode === mode);
+		const accessName = access === 'read' ? 'read' : access === 'readWrite' ? 'read/write' : 'write';
+		/* eslint-disable @typescript-eslint/naming-convention */
+		let where: Pick<BreakpointData, 'Location' | 'Address' | 'Size' | 'ContextIds'>;
+		const frame = frameId !== undefined ? this.tryResolveFrame(frameId) : {};
+		const halted = this.focusedCoreContext && this.suspendedContextIds.has(this.focusedCoreContext) ? this.focusedCoreContext : undefined;
+		const scope = inFrame ? frame.stack ?? frame.ctx ?? halted : undefined;
+		if (scope) {
+			const t = await this.dataBreakpointTarget(scope, expression);
+			if (!t) {
+				throw new Error('not stored in memory');
+			}
+			where = t.expression !== undefined
+				? { Location: t.expression, ContextIds: t.context ? [t.context] : undefined }
+				: { Address: `0x${(t.address ?? 0).toString(16)}`, Size: t.size, ContextIds: t.context ? [t.context] : undefined };
+		} else {
+			// `x@hsm` is the HSM's variable, watched by the HSM; any other expression on the TriCore cores.
+			const hsm = splitLiveWatchCore(expression).core === 'hsm' ? await this.contextIdOfCoreRef('hsm') : undefined;
+			where = { Location: expression, ContextIds: hsm ? [hsm] : undefined };
+		}
+		const name = `${where.Location ?? where.Address} [${accessName}]`;
+		const known = Array.from(this.liveWatchBreakpoints.values()).find(p =>
+			p.Location === where.Location && p.Address === where.Address && p.AccessMode === mode);
 		if (known) {
 			return { id: known.ID, name };
 		}
-		// `x@hsm` is the HSM's variable, watched by the HSM; any other expression on the TriCore cores.
-		const hsm = splitLiveWatchCore(expression).core === 'hsm' ? await this.contextIdOfCoreRef('hsm') : undefined;
 		this.liveWatchBreakpointCount += 1;
-		/* eslint-disable @typescript-eslint/naming-convention */
 		const props: BreakpointData = {
-			ID: `livewatch-${process.pid}-${Date.now().toString(36)}-${this.liveWatchBreakpointCount}`,
+			ID: `viewwatch-${process.pid}-${Date.now().toString(36)}-${this.liveWatchBreakpointCount}`,
 			Enabled: true,
 			BreakpointType: BreakpointType.Hardware,
 			AccessMode: mode,
-			Location: expression,
-			ContextIds: hsm ? [hsm] : undefined,
+			...where,
 		};
 		/* eslint-enable */
 		this.liveWatchBreakpoints.set(props.ID, props);

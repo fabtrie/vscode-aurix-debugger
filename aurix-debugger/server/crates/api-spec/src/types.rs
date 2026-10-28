@@ -350,6 +350,10 @@ pub struct AddBreakpointRequest {
     /// Targets (names or indices) to break on; default: all examined targets.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
+    /// C expression evaluated on the halted core (in its top stack frame): a hit only halts
+    /// when it is not zero, e.g. `count > 100`. Otherwise the core is resumed at once.
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 /// A breakpoint.
@@ -368,6 +372,8 @@ pub enum BreakpointOwner {
     Api,
     /// A debugger client (VS Code): removed when it disconnects.
     Client,
+    /// The Tcl console (`wp`): only on the core, not shown in VS Code.
+    Console,
 }
 
 /// Where a breakpoint is planted on one target.
@@ -406,6 +412,8 @@ pub struct BreakpointInfo {
     /// Source line (the actual line with code, for a file/line breakpoint).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
     /// Where it is planted.
     pub instances: Vec<BreakpointInstance>,
     /// Number of hits reported to debugger clients.
@@ -433,41 +441,88 @@ pub enum WatchAccess {
     Access,
 }
 
-/// Watchpoint arguments.
+/// Watchpoint arguments: an `address` or an `expression`.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddWatchpointRequest {
-    /// Target name or index.
-    pub target: String,
+    /// Target name or index; default: every TriCore core.
+    #[serde(default)]
+    pub target: Option<String>,
     /// Data address.
-    pub address: Addr,
-    /// Watched bytes (default 4).
+    #[serde(default)]
+    pub address: Option<Addr>,
+    /// C expression of the watched object instead of an address, as `evaluate` takes it
+    /// (`g_motor.speed`, `g_buf[3]`, `CRASH_state@2`). Its address and size come from the
+    /// symbols, and are looked up again when other symbols are loaded. A variable in core-local
+    /// RAM is watched at its local address on its own core and at its global address on the
+    /// other cores.
+    #[serde(default)]
+    pub expression: Option<String>,
+    /// Watched bytes; default: the size of the expression's type, or 4 for an address.
     #[serde(default)]
     pub length: Option<u32>,
     /// Triggering access (default `write`).
     #[serde(default)]
     pub access: Option<WatchAccess>,
+    /// C expression evaluated on the halted core (in its top stack frame): a hit only halts
+    /// when it is not zero, e.g. `g_motor.speed > 100`. Otherwise the core is resumed at once,
+    /// which still costs a halt on every access.
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
-/// A watchpoint by target and address.
+/// A watchpoint by `id`, or by `target` and `address`.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WatchpointRef {
-    /// Target name or index.
-    pub target: String,
-    /// Data address.
-    pub address: Addr,
+    /// Watchpoint ID.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Target name or index (with `address`).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Data address (with `target`): removes the watchpoint planted there, on all its targets.
+    #[serde(default)]
+    pub address: Option<Addr>,
 }
 
-/// A watchpoint.
+/// Where a watchpoint is planted on one target.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct WatchpointInfo {
-    pub id: u32,
+pub struct WatchpointInstance {
     /// Target name.
     pub target: String,
+    /// Address as this target accesses it (core-local RAM: the local address on its own core).
     pub address: u32,
     pub length: u32,
+    /// Why it could not be planted (e.g. no free hardware event).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A watchpoint (data breakpoint).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WatchpointInfo {
+    /// Watchpoint ID.
+    pub id: String,
+    pub owner: BreakpointOwner,
+    pub enabled: bool,
+    /// Requested data address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<u32>,
+    /// Requested expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
     pub access: WatchAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// Where it is planted.
+    pub instances: Vec<WatchpointInstance>,
+    /// Number of hits reported to debugger clients (not counting those whose condition was
+    /// false).
+    pub hits: u32,
+    /// Why it is not planted (e.g. symbols not loaded yet: it is planted once they are).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The watchpoints of all targets.

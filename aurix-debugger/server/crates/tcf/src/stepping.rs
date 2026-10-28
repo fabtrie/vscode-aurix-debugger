@@ -26,7 +26,7 @@ use aurix_core::unwind::csa_address;
 use aurix_core::unwind_arm::is_thumb32;
 use aurix_core::{log_warn, ops, ServerHandle};
 
-use crate::contexts::{find_core, read_pc};
+use crate::contexts::{cores, find_core, read_pc};
 use crate::forwarder;
 use crate::symstore::SymbolSet;
 use crate::wire;
@@ -90,7 +90,7 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
             }
         };
         let pc = read_pc(&h, idx);
-        forwarder::halted(&shared, idx, reason, pc);
+        forwarder::halted(&shared, idx, reason, pc, false);
         forwarder::sync_others(&shared, idx);
     });
 }
@@ -196,7 +196,7 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
             return stop;
         }
         let caller_pcxi = csa_word0(h, r.frame);
-        return run_to(h, idx, Kind::TriCore, r.ra, caller_pcxi, rm, cancel, deadline);
+        return run_to(shared, idx, Kind::TriCore, r.ra, caller_pcxi, rm, cancel, deadline);
     }
 
     let (Some(f), Some(li)) = (syms.function_at(r.pc), syms.line_at(r.pc)) else {
@@ -242,7 +242,7 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
             if mode == 4 && syms.line_at(r.pc).is_some() {
                 return Ok(Stop::Done);
             }
-            match run_to(h, idx, Kind::TriCore, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
+            match run_to(shared, idx, Kind::TriCore, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
                 Stop::Done => {
                     // The return address often starts the next line (a call is
                     // commonly the last instruction of a statement).
@@ -273,7 +273,7 @@ fn run(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -
 
         // Left the function without a CSA change (JL/JI fast call).
         if r.frame == frame_pcxi && in_func(prev.pc) && in_func(r.ra) && (mode == 3 || syms.line_at(r.pc).is_none()) {
-            match run_to(h, idx, Kind::TriCore, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
+            match run_to(shared, idx, Kind::TriCore, r.ra, Some(frame_pcxi), rm, cancel, deadline)? {
                 Stop::Done => {
                     r = regs(h)?;
                     if new_line(&r) {
@@ -316,7 +316,7 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
             step_instruction(h, idx, rm)?;
             return Ok(Stop::Done);
         };
-        return run_to(h, idx, Kind::Arm, caller.pc, caller.sp(), rm, cancel, deadline);
+        return run_to(shared, idx, Kind::Arm, caller.pc, caller.sp(), rm, cancel, deadline);
     }
 
     let mut r = read_regs(h, idx, Kind::Arm)?;
@@ -346,7 +346,7 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
             if mode == 4 && syms.line_at(r.pc).is_some() {
                 return Ok(Stop::Done);
             }
-            match run_to(h, idx, Kind::Arm, next, Some(prev.frame), rm, cancel, deadline)? {
+            match run_to(shared, idx, Kind::Arm, next, Some(prev.frame), rm, cancel, deadline)? {
                 Stop::Done => {
                     r = read_regs(h, idx, Kind::Arm)?;
                     if new_line(&r) {
@@ -390,7 +390,7 @@ fn run_mcs(shared: &Shared, idx: usize, mode: u64, cancel: &AtomicBool) -> Resul
     if mode == 5 {
         let frames = crate::stack::unwind_core(shared, idx)?;
         if let Some(caller) = frames.get(1) {
-            return run_to(h, idx, Kind::Mcs, caller.pc, None, rm, cancel, deadline);
+            return run_to(shared, idx, Kind::Mcs, caller.pc, None, rm, cancel, deadline);
         }
     }
     if step_instruction(h, idx, rm).is_ok() {
@@ -417,7 +417,8 @@ fn run_mcs(shared: &Shared, idx: usize, mode: u64, cancel: &AtomicBool) -> Resul
 /// Runs until `addr` is reached in the expected frame (recursion guard: PCXI on TriCore, SP
 /// on Cortex-M).
 #[allow(clippy::too_many_arguments)]
-fn run_to(h: &ServerHandle, idx: usize, kind: Kind, addr: u32, expect_frame: Option<u32>, rm: RunMode, cancel: &AtomicBool, deadline: Instant) -> Result<Stop, String> {
+fn run_to(shared: &Shared, idx: usize, kind: Kind, addr: u32, expect_frame: Option<u32>, rm: RunMode, cancel: &AtomicBool, deadline: Instant) -> Result<Stop, String> {
+    let h = &shared.handle;
     let temp = match call(h, move |cx| ops::add_breakpoint(cx, idx, addr, 4, BpKind::Hard).map_err(|e| e.to_string())) {
         Ok(_) => true,
         Err(e) if e.contains("Duplicate") => false,
@@ -450,6 +451,13 @@ fn run_to(h: &ServerHandle, idx: usize, kind: Kind, addr: u32, expect_frame: Opt
                     return Ok(Stop::Done);
                 }
                 continue; // recursive call hit the return address
+            }
+            // A breakpoint in the code run over whose condition is false: run on.
+            let reason = h.call(move |cx| ops::state(cx, idx).1).unwrap_or(DebugReason::DbgRq);
+            let ids = forwarder::hit_breakpoints(shared, idx, reason, Some(r.pc));
+            let ctx = cores(h).into_iter().find(|c| c.idx == idx).map(|c| c.id);
+            if !ids.is_empty() && ctx.is_some_and(|ctx| !forwarder::stop_wanted(shared, &ctx, &ids)) {
+                continue;
             }
             return Ok(Stop::Elsewhere);
         }

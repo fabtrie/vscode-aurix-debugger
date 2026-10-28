@@ -91,7 +91,9 @@ DAQ is deliberately *not* an operation: a streaming session is of no use as an M
 **Shared session.** REST, MCP and VS Code (TCF) share one session:
 - Run control goes through the same core operations and events. A halt from the API shows up in VS Code, and a resume in VS Code shows up in `wait_state` and on the event stream.
 - Breakpoints live in one table. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
-- VS Code shows API breakpoints in its Breakpoints view. A breakpoint at the start of a source line is shown as a source breakpoint; any other is shown as a function breakpoint named by symbol or address, e.g. `0x8021a9de`. Removing, disabling or enabling it in VS Code changes it on the server, and removing it through the API removes it from the view. When the debug session ends, the extension takes them out of the view again, so they are not saved with the workspace. VS Code's own function breakpoints accept a symbol, an address or `file:line`.
+- Watchpoints (data breakpoints) live in the same table: VS Code's data breakpoints and the API's watchpoints share hardware the same way. `list_watchpoints` also shows the Tcl console's (`wp`), with owner `console`; those are only on the core.
+- VS Code shows API breakpoints in its Breakpoints view. A breakpoint at the start of a source line is shown as a source breakpoint; any other is shown as a function breakpoint named by symbol or address, e.g. `0x8021a9de`. An API watchpoint is shown as a function breakpoint named by what it watches, e.g. `g_count [write]`, since an extension cannot add data breakpoints to the view. Removing, disabling or enabling it in VS Code changes it on the server, and removing it through the API removes it from the view. When the debug session ends, the extension takes them out of the view again, so they are not saved with the workspace. VS Code's own function breakpoints accept a symbol, an address or `file:line`.
+- A breakpoint or watchpoint with a `condition` (a C expression) is evaluated by the server on the halted core, in its top stack frame. When the condition is zero, the core is resumed before any client is told about the halt, so VS Code does not flicker. The API's event stream still shows the halt and the resume. Conditions are also checked during a source-level step over a function. Every hit is still a real halt, which costs a few milliseconds.
 - Memory and register writes from the API send `Memory.memoryChanged` / `Registers.registerChanged`. The extension then refreshes its variable, watch and register views.
 - During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
 - Symbols can be loaded from the API (`load_symbols`), not only by a VS Code debug session. There is one symbol set per core and the last writer wins: a VS Code session started afterwards replaces what the API loaded, and the other way round. `symbols` reports what is loaded.
@@ -146,6 +148,18 @@ dbg.write_variable(expression="g_motor.mode", value="MODE_RUN")
 - **Errors:** `not_found` (404) without symbols, for an unknown name or an `@N` that names no TriCore core, `bad_request` (400) for an expression that does not parse, a value that does not fit, or core-local RAM that needs an `@N`, `memory` (422) when the target memory cannot be read.
 - **`info`** is what a client polls to see that the server is up: `api_version` is an integer raised whenever an operation or field is added or changed, `core_lag_ms` the time since the core thread last finished a job or poll (it grows while one long operation holds it), and `symbols_loading` is set while `load_symbols` parses an ELF.
 - Query parameters are URL-encoded as usual; note that `+` in an expression must be sent as `%2B`, or it arrives as a space.
+
+### Watchpoints
+
+`add_watchpoint` takes an `address` (with `length`, default 4) or an `expression`, a `target` (default: every TriCore core) and an `access` (`write`, `read`, `access`). VS Code's data breakpoints are the same breakpoints, set through TCF with `AccessMode` and `Size`. An expression is resolved on each core from that core's symbols, to the object's address and the size of its type (a bit field: its storage unit). It is resolved again when other symbols are loaded, so a rebuilt ELF moves the watchpoint with the variable.
+
+The TriCore data triggers decide what is caught. These rules were measured on a TC38x:
+- **Start address only.** A trigger compares the address an access starts at. A watchpoint wider than one byte is therefore a range over two of the core's 8 hardware events (shared with breakpoints): it catches every access that starts inside the object, a byte store to its middle included. An access that starts below the object and reaches into it is not caught, e.g. a 64-bit copy of the struct that contains it.
+- **After the access.** The core halts with reason `watchpoint` once the store is done, with the PC at the next instruction.
+- **Core-local RAM.** The local alias (`0xD000_0000`) and the global address of the same DSPR never match each other: the trigger sees the address as the core issues it. So a variable in core-local RAM is watched at its local address on its own core and at its global address on the others; `CRASH_state@2` picks core 2's copy. A variable of an ELF that runs on several cores means each core's own copy.
+- The HSM watches with its DWT, by address range. MCS channels have no watchpoints.
+
+A `condition` works as for breakpoints (see [Shared session](#rest-mcp-and-python-api)).
 
 ### Periodic sampling (DAQ)
 
@@ -541,7 +555,7 @@ Unknown commands fail with `not supported by aurix-dbg`.
 
 ## TCF services
 
-Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS ([OS awareness](#autosar-os-awareness-orti)), and Tcl (the debug console `monitor` command).
+Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line; data breakpoints with `AccessMode` and `Size` on an address or expression; `Condition`), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS ([OS awareness](#autosar-os-awareness-orti)), and Tcl (the debug console `monitor` command).
 
 `AurixOS` carries the ORTI objects on the connection the debug adapter already has, so the extension needs no second port and the awareness dies with the session:
 
@@ -576,7 +590,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 
 ## Tests
 
-- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The variable operations run there against two MCS assembler files the test writes (their data labels are globals, one shadowing another); struct members and array elements need `AURIX_TEST_ELF`. The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
+- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The variable operations run there against two MCS assembler files the test writes (their data labels are globals, one shadowing another); struct members and array elements need `AURIX_TEST_ELF`. Watchpoints run there too: on expressions and core-local RAM, shared between the API and a TCF client, hit by a store the simulator makes (`SimAdapter::store`, which compares start addresses as the chip does), with conditions and running out of hardware events. The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
 - **Real files:** tests that need build output of a real application skip unless it is named in environment variables: `AURIX_TEST_ELF` (TriCore application ELF), `AURIX_TEST_FUNCTION` (a function in it, default `main`), `AURIX_TEST_ORTI` (its ORTI file), `AURIX_TEST_HSM_ELF`, `AURIX_TEST_APP_ELF` + `AURIX_TEST_BM_ELF` (application and bootloader), `AURIX_TEST_MCS_DIR` (MCS assembler sources with their GHS output), `AURIX_TEST_SREC` (an S-record image).
 - **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD). The scripts take the ELF and a breakpoint location as arguments or from `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs a few more variables, listed in its header:
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.
@@ -585,6 +599,7 @@ The driver runs the DMU command sequences over the debug interface, without a RA
   - `node tools/dap_m8.js`: disassembly and reset.
   - `node tools/tcf_smoke.js`: raw TCF services.
   - `node tools/dap_external_bp.js [tcf_port] [api_port]`: API breakpoints in VS Code's Breakpoints view (also runs against the simulator).
+  - `node tools/dap_watch.js [tcf_port] [api_port] [expression] [elf]`: data breakpoints on a watch expression, with a condition, from the Live Watch, and API watchpoints in the Breakpoints view (also runs against the simulator; `HIT=1` also waits for a hit on a running target that writes the variable).
   - DAQ: `pip install -e python`, then sample a changing global by name and check the rate and jitter from the `t_us` deltas. Verified on a TC377 board with an application running: every increment of a 5 ms counter caught over 5 s at 1 kHz requested, `float32` and enum globals decoded, and a 1 kHz session left a concurrent REST `read_memory` unchanged (median 21.0 ms either way).
 
 ## Not yet implemented

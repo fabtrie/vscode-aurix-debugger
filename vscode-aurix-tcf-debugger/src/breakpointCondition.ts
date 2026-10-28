@@ -44,14 +44,16 @@ export function withCoreSuffix(text: string, cores: CoreRef[] | undefined): stri
 export interface BreakpointCondition {
 	task?: TaskFilter;
 	cores?: CoreRef[];
-	/** The part of the condition that is neither a task filter nor a core, if any. */
-	unsupported?: string;
+	/**
+	 * The part of the condition that is neither a task filter nor a core: a C expression the
+	 * debug server evaluates on the halted core, which is resumed again when it is zero.
+	 */
+	expression?: string;
 }
 
 /**
- * Parses a breakpoint condition: an optional task filter (see `parseTaskFilter`) followed by an
- * optional core suffix. The adapter cannot evaluate other expressions; they are returned as
- * `unsupported`, so the breakpoint can say so instead of quietly halting every time.
+ * Parses a breakpoint condition: a task filter (see `parseTaskFilter`) or a C expression (`x > 3`),
+ * followed by an optional core suffix.
  */
 export function parseBreakpointCondition(condition: string | undefined): BreakpointCondition {
 	const { text, cores } = splitCoreSuffix(condition ?? '');
@@ -59,7 +61,7 @@ export function parseBreakpointCondition(condition: string | undefined): Breakpo
 		return { cores };
 	}
 	const task = parseTaskFilter(text);
-	return task ? { task, cores } : { cores, unsupported: text };
+	return task ? { task, cores } : { cores, expression: text };
 }
 
 /** How the Breakpoints view names cores, e.g. `core 1`, `cores 0, 2` or `core 0 and the HSM`. */

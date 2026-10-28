@@ -314,6 +314,15 @@ export function activate(context: vscode.ExtensionContext) {
 				await liveWatches.reveal(target);
 			}
 		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchBreakOnChange', async (item?: LiveWatchCommandArgument) => {
+			await liveWatches?.resolve(item).addDataBreakpoint(item, 'write');
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchBreakOnRead', async (item?: LiveWatchCommandArgument) => {
+			await liveWatches?.resolve(item).addDataBreakpoint(item, 'read');
+		}),
+		vscode.commands.registerCommand('aurix-debugger.liveWatchBreakOnAccess', async (item?: LiveWatchCommandArgument) => {
+			await liveWatches?.resolve(item).addDataBreakpoint(item, 'readWrite');
+		}),
 		vscode.commands.registerCommand('aurix-debugger.liveWatchEditExpression', async (item?: LiveWatchCommandArgument) => {
 			await liveWatches?.resolve(item).editExpression(item);
 		}),

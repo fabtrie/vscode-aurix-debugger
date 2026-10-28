@@ -34,6 +34,8 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 import { LifetimeDebugSession } from './lifetimeDebugSession';
 import { TCFClient } from './tcfclient';
 import {
+	ACCESS_READ,
+	ACCESS_WRITE,
 	AddBreakpointsCommand,
 	BreakpointData,
 	BreakpointType,
@@ -50,7 +52,7 @@ import {
 } from './tcf-all';
 import { GetChildrenRegistersCommand, GetContextRegistersCommand, GetRegistersCommand, SetRegistersCommand } from './tcf/registers';
 import { TCL_SERVICE, TclEvalCommand } from './tcf/tcl';
-import { AssignExpressionsCommand, CreateExpressionsCommand, GetContextExpressionsCommand } from './tcf/expressions';
+import { AssignExpressionsCommand, CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, GetContextExpressionsCommand } from './tcf/expressions';
 import { FindByAddrSymbolsCommand, FindByNameSymbolsCommand, GetChildrenSymbolsCommand, GetContextSymbolsCommand } from './tcf/symbols';
 import { encodeVariableValue } from './variables/encode';
 import { GetChildrenStackTraceCommand } from './tcf/stacktrace';
@@ -159,6 +161,25 @@ const MEMORY_READ_FALLBACK_MIN_BYTES = 8;
 const MEMORY_READ_FALLBACK_MAX_BYTES = 512;
 const MEMORY_READ_FALLBACK_CHUNK_BYTES = 4;
 
+/**
+ * What a data breakpoint watches, as its DAP `dataId` carries it (JSON): an expression the server
+ * resolves on each core (and again after a rebuild), or a fixed address for what has no name
+ * outside a stack frame (a local variable, or what a local pointer points to).
+ */
+interface DataBreakpointTarget {
+	expression?: string;
+	address?: number;
+	size: number;
+	/** The only core to watch on; none: every TriCore core. */
+	context?: string;
+}
+
+/** Core-local scratchpad RAM (`0xD000_0000` DSPR, `0xC000_0000` PSPR): each TriCore core's own. */
+function isCoreLocalAddress(addr: number): boolean {
+	const a = addr >>> 0;
+	return (a >= 0xD000_0000 && a < 0xD010_0000) || (a >= 0xC000_0000 && a < 0xC010_0000);
+}
+
 enum BreakpointEventReason {
 	removed = 'removed',
 	changed = 'changed',
@@ -166,6 +187,7 @@ enum BreakpointEventReason {
 
 enum StoppedEventReason {
 	breakpoint = 'breakpoint',
+	dataBreakpoint = 'data breakpoint',
 	pause = 'pause',
 	entry = 'entry',
 	step = 'step',
@@ -600,7 +622,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private sendStoppedEvent(
 		reason: string,
 		threadId: number,
-		opts?: { allThreadsStopped?: boolean; preserveFocus?: boolean }
+		opts?: { allThreadsStopped?: boolean; preserveFocus?: boolean; hitBreakpointIds?: number[] }
 	) {
 		const ctx = this.threadIdToContext.get(threadId);
 		this.focusLog(
@@ -623,6 +645,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 		if (opts?.preserveFocus !== undefined) {
 			(ev.body as DebugProtocol.StoppedEvent['body']).preserveFocusHint = opts.preserveFocus;
+		}
+		if (opts?.hitBreakpointIds && opts.hitBreakpointIds.length > 0) {
+			(ev.body as DebugProtocol.StoppedEvent['body']).hitBreakpointIds = opts.hitBreakpointIds;
 		}
 		this.sendEvent(ev);
 	}
@@ -1774,8 +1799,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		response.body.supportTerminateDebuggee = true;
 		response.body.supportsInstructionBreakpoints = true;
 		response.body.supportsFunctionBreakpoints = true;
-		// Only `task == NAME` and `@core` are understood; other conditions get a warning message.
+		// `task == NAME` and `@core` are applied here; any other condition is a C expression the
+		// server evaluates when the breakpoint hits.
 		response.body.supportsConditionalBreakpoints = true;
+		response.body.supportsDataBreakpoints = true;
+		// "Add Data Breakpoint at Address" (DAP 1.66, VS Code 1.90).
+		(response.body as any).supportsDataBreakpointBytes = true;
 		response.body.supportsReadMemoryRequest = true;
 		response.body.supportsWriteMemoryRequest = true;
 		(response.body as any).supportsDisassembleRequest = true;
@@ -2676,18 +2705,28 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 	}
 
+	/**
+	 * The variables of a reference with their expressions (see `annotateVariable`): a structure's
+	 * children, or a frame's locals. None for the register and global scopes.
+	 */
+	private async variablesOf(ref: number): Promise<any[]> {
+		if (this.isSubVariableReference(ref)) {
+			return this.getSubVariable(ref);
+		}
+		if (this.isRegisterScopeVariableReference(ref) || this.isGlobalScopeVariableReference(ref)) {
+			return [];
+		}
+		const [ctx, stack] = this.getStackFrameDetails(ref);
+		const vars = await this.tcfClient.getStackVariables(ctx, stack);
+		for (const v of vars) {
+			AurixTCFDebugSession.annotateVariable(v, v.name?.(), stack);
+		}
+		return vars;
+	}
+
 	protected override async setVariableRequestAsync(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments): Promise<void> {
 		try {
-			let vars: any[] = [];
-			if (this.isSubVariableReference(args.variablesReference)) {
-				vars = this.getSubVariable(args.variablesReference);
-			} else if (!this.isRegisterScopeVariableReference(args.variablesReference) && !this.isGlobalScopeVariableReference(args.variablesReference)) {
-				const [ctx, stack] = this.getStackFrameDetails(args.variablesReference);
-				vars = await this.tcfClient.getStackVariables(ctx, stack);
-				for (const v of vars) {
-					AurixTCFDebugSession.annotateVariable(v, v.name?.(), stack);
-				}
-			}
+			const vars = await this.variablesOf(args.variablesReference);
 			const variable = vars.find(v => (v?.name?.() ?? '') === args.name);
 			if (variable && typeof variable.setValue === 'function') {
 				const value = await variable.setValue(args.value);
@@ -3509,6 +3548,229 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 	/* eslint-enable */
 
+	// --- Data breakpoints (watchpoints) -------------------------------------------------------
+
+	/** Data breakpoints as VS Code set them, by access type and `dataId`. */
+	private dataBreakpoints = new Map<string, { id: number; target: DataBreakpointTarget; access: DebugProtocol.DataBreakpointAccessType }>();
+	/** Whether the server planted a data breakpoint, by breakpoint id. */
+	private dataVerified = new Map<number, boolean>();
+
+	protected override async dataBreakpointInfoRequestAsync(response: DebugProtocol.DataBreakpointInfoResponse, args: DebugProtocol.DataBreakpointInfoArguments): Promise<void> {
+		const reply = (dataId: string | null, description: string, canPersist = false) => {
+			response.body = { dataId, description, accessTypes: ['write', 'read', 'readWrite'], canPersist };
+			this.sendResponse(response);
+		};
+		try {
+			// "Add Data Breakpoint at Address": the name is the address.
+			const a = args as DebugProtocol.DataBreakpointInfoArguments & { asAddress?: boolean; bytes?: number };
+			if (a.asAddress) {
+				const addr = this.parseMemoryReference(a.name);
+				if (addr === undefined) {
+					return reply(null, `'${a.name}' is not an address`);
+				}
+				const size = a.bytes && a.bytes > 0 ? a.bytes : 4;
+				return reply(JSON.stringify({ address: addr, size }), `${size} bytes at 0x${addr.toString(16)}`, true);
+			}
+			const found = await this.dataBreakpointSource(args);
+			if (!found) {
+				return reply(null, `'${args.name}' cannot be watched`);
+			}
+			const target = await this.dataBreakpointTarget(found.scope, found.expression);
+			if (!target) {
+				return reply(null, `'${found.expression}' is not stored in memory`);
+			}
+			const where = target.address !== undefined ? ` at 0x${target.address.toString(16)} (a fixed address)` : '';
+			return reply(JSON.stringify(target), `${target.expression ?? found.expression} (${target.size} bytes)${where}`, target.expression !== undefined);
+		} catch (e) {
+			return reply(null, `'${args.name}' cannot be watched: ${AurixTCFDebugSession.formatError(e)}`);
+		}
+	}
+
+	/** The expression a data breakpoint request means, and the context to evaluate it in. */
+	private async dataBreakpointSource(args: DebugProtocol.DataBreakpointInfoArguments): Promise<{ expression: string; scope: string } | undefined> {
+		const ref = args.variablesReference;
+		if (ref) {
+			if (this.isRegisterScopeVariableReference(ref)) {
+				return undefined;
+			}
+			const v = (await this.variablesOf(ref)).find(x => (x?.name?.() ?? '') === args.name);
+			if (v?.__aurixExpr && v?.__aurixScope) {
+				return { expression: v.__aurixExpr, scope: v.__aurixScope };
+			}
+			// The Globals scope lists configured expressions, which are global by definition.
+			if (this.isGlobalScopeVariableReference(ref)) {
+				const [ctx] = this.getStackFrameDetails(ref);
+				return { expression: args.name, scope: ctx };
+			}
+			return undefined;
+		}
+		// A watch expression: `expr@N` means core N, as in the Live Watch.
+		const { expression, core } = splitLiveWatchCore(args.name);
+		if (core !== undefined) {
+			const scope = await this.contextIdOfCoreRef(core);
+			return scope ? { expression: args.name, scope } : undefined;
+		}
+		const frame = args.frameId !== undefined ? this.tryResolveFrame(args.frameId) : {};
+		const scope = frame.stack ?? frame.ctx ?? this.focusedCoreContext ?? (await this.pickContextIdForCore(this.launchCore));
+		return scope ? { expression, scope } : undefined;
+	}
+
+	/**
+	 * What to watch for `expression` evaluated in `scope`: the expression itself when it names
+	 * no local variable, so the server resolves it on every core; core-local RAM as the copy of
+	 * the scope's core (`expr@N`). Anything a local leads to is watched at its fixed address, on
+	 * the scope's core only. `undefined` when the value is not in memory.
+	 */
+	private async dataBreakpointTarget(scope: string, expression: string): Promise<DataBreakpointTarget | undefined> {
+		const here = await this.evaluateLocation(scope, expression);
+		if (here.address === undefined || !here.size) {
+			return undefined;
+		}
+		const core = scope.replace(/\.F\d+$/, '');
+		if (await this.usesLocals(scope, expression)) {
+			return { address: here.address, size: here.size, context: core };
+		}
+		const hsm = await this.contextIdOfCoreRef('hsm').catch(() => undefined);
+		if (core === hsm) {
+			return { expression, size: here.size, context: core };
+		}
+		const { core: named } = splitLiveWatchCore(expression);
+		const coreNum = AurixTCFDebugSession.coreOfContext(core);
+		if (named === undefined && coreNum !== undefined && isCoreLocalAddress(here.address)) {
+			return { expression: `${expression}@${coreNum}`, size: here.size };
+		}
+		return { expression, size: here.size };
+	}
+
+	/** Address (when stored in memory) and size of `expression` in `scope`. */
+	private async evaluateLocation(scope: string, expression: string): Promise<{ address?: number; size?: number; symbol?: string }> {
+		const id = await this.tcfClient.sendCommand(new CreateExpressionsCommand(scope, null, splitLiveWatchCore(expression).expression));
+		try {
+			const ctx = await this.tcfClient.sendCommand(new GetContextExpressionsCommand(id));
+			const ev = await this.tcfClient.sendCommand(new EvaluateExpressionsCommand(id)).catch(e => (e as { result?: { properties?: unknown } })?.result);
+			// eslint-disable-next-line @typescript-eslint/naming-convention
+			const props = (ev?.properties ?? undefined) as { Address?: number; Symbol?: string } | undefined;
+			return { address: props?.Address, size: ctx?.Size, symbol: props?.Symbol };
+		} finally {
+			await this.tcfClient.sendCommand(new DisposeExpressionsCommand(id)).catch(() => undefined);
+		}
+	}
+
+	/** Whether any variable `expression` names is a local of the frame `scope`. */
+	private async usesLocals(scope: string, expression: string): Promise<boolean> {
+		if (/\bLV:/.test(expression)) {
+			return true;
+		}
+		const names = new Set<string>();
+		// Identifiers, except member names after `.` or `->`.
+		for (const m of splitLiveWatchCore(expression).expression.matchAll(/(\.|->)?\s*([A-Za-z_]\w*)/g)) {
+			if (!m[1]) {
+				names.add(m[2]);
+			}
+		}
+		for (const name of names) {
+			const r = await this.evaluateLocation(scope, name).catch(() => undefined);
+			if (r?.symbol && /\bLV:/.test(r.symbol)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	protected override async setDataBreakpointsRequestAsync(response: DebugProtocol.SetDataBreakpointsResponse, args: DebugProtocol.SetDataBreakpointsArguments): Promise<void> {
+		const wanted = args.breakpoints ?? [];
+		const keys = wanted.map(b => `${b.accessType ?? 'write'}|${b.dataId}`);
+		for (const [k, d] of Array.from(this.dataBreakpoints)) {
+			if (!keys.includes(k)) {
+				this.dataBreakpoints.delete(k);
+				this.dataVerified.delete(d.id);
+				this.statusMessages.delete(d.id);
+			}
+		}
+		wanted.forEach((b, i) => {
+			if (this.dataBreakpoints.has(keys[i])) {
+				return;
+			}
+			const target = AurixTCFDebugSession.parseDataId(b.dataId);
+			if (target) {
+				this.dataBreakpoints.set(keys[i], { id: this.breakpointsManager.allocateId(), target, access: b.accessType ?? 'write' });
+			}
+		});
+		this.noteConditions(keys.map(k => this.dataBreakpoints.get(k)?.id), wanted.map(b => b.condition));
+		if (this.breakpointsManager.configured) {
+			await this.syncAllBreakpoints();
+		}
+		const bps: DebugProtocol.Breakpoint[] = [];
+		for (const k of keys) {
+			const d = this.dataBreakpoints.get(k);
+			if (!d) {
+				bps.push({ verified: false, message: 'Not a data breakpoint of this debugger' });
+				continue;
+			}
+			if (this.breakpointsManager.configured) {
+				await this.refreshDataBreakpointStatus(d.id);
+			}
+			bps.push({ id: d.id, verified: this.dataVerified.get(d.id) ?? false, message: this.breakpointMessage(d.id) });
+		}
+		response.body = { breakpoints: bps };
+		this.sendResponse(response);
+	}
+
+	private static parseDataId(dataId: string): DataBreakpointTarget | undefined {
+		try {
+			const t = JSON.parse(dataId) as DataBreakpointTarget;
+			const ok = typeof t.size === 'number' && t.size > 0 && (typeof t.expression === 'string' || typeof t.address === 'number');
+			return ok ? t : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** TCF properties of a data breakpoint. */
+	/* eslint-disable @typescript-eslint/naming-convention */
+	private dataBreakpointData(d: { id: number; target: DataBreakpointTarget; access: DebugProtocol.DataBreakpointAccessType }): BreakpointData {
+		const t = d.target;
+		const access = d.access === 'read' ? ACCESS_READ : d.access === 'readWrite' ? ACCESS_READ | ACCESS_WRITE : ACCESS_WRITE;
+		return {
+			ID: this.breakpointIdToTcfId(d.id),
+			Enabled: true,
+			BreakpointType: BreakpointType.Hardware,
+			AccessMode: access,
+			Size: t.size,
+			...(t.expression !== undefined ? { Location: t.expression } : { Address: `0x${(t.address ?? 0).toString(16)}` }),
+			ContextIds: t.context ? [t.context] : undefined,
+		};
+	}
+	/* eslint-enable */
+
+	private isDataBreakpointId(id: number): boolean {
+		return Array.from(this.dataBreakpoints.values()).some(d => d.id === id);
+	}
+
+	/** Reads whether the server planted data breakpoint `id`, and why not. */
+	private async refreshDataBreakpointStatus(id: number): Promise<void> {
+		const st = await this.tcfClient.sendCommand(new GetStatusBreakpointsCommand(this.breakpointIdToTcfId(id))).catch(() => undefined);
+		const inst = st?.Instances ?? [];
+		const planted = inst.some(i => !i.Error);
+		this.dataVerified.set(id, planted && !this.unplantable.has(id));
+		const why = planted ? undefined : st?.Error ?? inst.find(i => i.Error)?.Error;
+		if (why) {
+			this.statusMessages.set(id, why);
+		} else {
+			this.statusMessages.delete(id);
+		}
+	}
+
+	/** DAP ids of the breakpoints a suspend event names (`BPs`): ours and other clients'. */
+	private hitBreakpointIds(data: unknown): number[] {
+		// eslint-disable-next-line @typescript-eslint/naming-convention
+		const bps = Array.isArray((data as { BPs?: unknown })?.BPs) ? ((data as { BPs: unknown[] }).BPs as unknown[]) : [];
+		return bps
+			.map(x => String(x))
+			.map(tcfId => (this.isOwnBreakpoint(tcfId) ? this.breakpointTcfIdToId(tcfId) : this.externalBreakpoints.get(tcfId)?.id ?? BREAKPOINT_INVALID))
+			.filter(id => id !== BREAKPOINT_INVALID);
+	}
+
 	private isOwnBreakpoint(tcfId: string): boolean {
 		return tcfId.startsWith(this.breakpointPrefix);
 	}
@@ -3606,6 +3868,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * start of one, else as a function breakpoint named by symbol, address or file:line.
 	 */
 	private async externalBreakpointLocation(props: BreakpointData): Promise<{ kind: 'source'; file: string; line: number } | { kind: 'function'; name: string }> {
+		// A watchpoint (the extension API cannot add data breakpoints to the view): named by what
+		// it watches and how, e.g. `g_count [write]`.
+		const mode = props.AccessMode ?? 0;
+		if ((mode & 0x04) === 0 && (mode & (ACCESS_READ | ACCESS_WRITE | 0x08)) !== 0) {
+			const access = (mode & ACCESS_READ) === 0 ? 'write' : (mode & (ACCESS_WRITE | 0x08)) === 0 ? 'read' : 'read/write';
+			const location = typeof props.Location === 'string' ? props.Location.trim() : '';
+			const addr = props.Address !== undefined ? this.parseMemoryReference(String(props.Address)) : this.parseMemoryReference(location);
+			const what = addr !== undefined ? `0x${addr.toString(16)}` : location || props.ID;
+			return { kind: 'function', name: `${what} [${access}]` };
+		}
 		const status = await this.tcfClient.sendCommand(new GetStatusBreakpointsCommand(props.ID)).catch(() => undefined);
 		const inst = (status?.Instances ?? []).find(i => !i.Error && i.Address !== undefined && i.LocationContext);
 		const planted = inst ? Number(inst.Address) : undefined;
@@ -3640,6 +3912,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		try {
 			if (c.removed) {
 				this.externalBreakpoints.delete(c.id);
+				this.liveWatchBreakpoints.delete(c.id);
 				await this.tcfClient.sendCommand(new RemoveBreakpointsCommand([c.id]));
 			} else {
 				// The server keeps the breakpoint with the client that set it.
@@ -3722,6 +3995,20 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 		for (const [name, id] of this.functionBreakpoints) {
 			data.push(this.functionBreakpointData(id, name));
+		}
+		for (const d of this.dataBreakpoints.values()) {
+			data.push(this.dataBreakpointData(d));
+		}
+		// `Breakpoints.set` replaces all of this client's breakpoints: the Live Watch's are in the
+		// list too, as last changed in the view.
+		for (const [id, props] of this.liveWatchBreakpoints) {
+			data.push(this.externalBreakpoints.get(id)?.props ?? props);
+		}
+		for (const d of data) {
+			const condition = this.exprConditions.get(this.breakpointTcfIdToId(d.ID));
+			if (condition) {
+				d.Condition = condition;
+			}
 		}
 		const unplantable: number[] = [];
 		for (const d of data) {
@@ -3850,7 +4137,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const threadId = this.getOrAssignThreadId(contextId);
 			this.onThreadSuspended(threadId);
 			this.notePrimaryBreakpointStop(threadId, contextId);
-			this.sendStoppedEvent(StoppedEventReason.breakpoint, threadId, { allThreadsStopped: this.stopsAllCores(contextId) });
+			const data = this.isDataBreakpointId(id);
+			this.sendStoppedEvent(data ? StoppedEventReason.dataBreakpoint : StoppedEventReason.breakpoint, threadId, {
+				allThreadsStopped: this.stopsAllCores(contextId),
+				hitBreakpointIds: data ? [id] : undefined,
+			});
 			void this.emitSourceLocation(contextId);
 		}, this.breakpointStopDelayMs);
 		this.pendingBreakpointStoppedTimers.set(contextId, timer);
@@ -3859,6 +4150,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private onBreakpointRemoved(tcfIds: string[]) {
 		for (const tcfId of tcfIds) {
 			if (!this.isOwnBreakpoint(tcfId)) {
+				this.liveWatchBreakpoints.delete(tcfId);
 				this.externalPending.delete(tcfId);
 				if (this.externalBreakpoints.delete(tcfId)) {
 					this.breakpointUi?.hide([tcfId]);
@@ -3877,6 +4169,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 					known = true;
 				}
 			}
+			for (const [key, d] of Array.from(this.dataBreakpoints)) {
+				if (d.id === id) {
+					this.dataBreakpoints.delete(key);
+					known = true;
+				}
+			}
 			// Breakpoints VS Code removed or disabled itself are already gone here; telling it
 			// they were removed would delete disabled ones from its Breakpoints view.
 			if (known) {
@@ -3889,6 +4187,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		for (const tcfId of tcfIds) {
 			const id = this.breakpointTcfIdToId(tcfId);
 			if (id === BREAKPOINT_INVALID) {
+				continue;
+			}
+			// A data breakpoint can fail on the server (no free hardware event, a name that is
+			// not there): its state comes from its status.
+			if (this.isDataBreakpointId(id)) {
+				void this.refreshDataBreakpointStatus(id).then(() => {
+					const bp = { id, verified: this.dataVerified.get(id) ?? false, message: this.breakpointMessage(id) };
+					this.sendEvent(new BreakpointEvent(BreakpointEventReason.changed, bp as DebugProtocol.Breakpoint));
+				});
 				continue;
 			}
 			// A breakpoint sent disabled because none of its cores exists is not planted.
@@ -3919,16 +4226,20 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const reasonText = (info.reason || '').toLowerCase();
 		this.focusLog(`contextSuspended ctx=${contextId} threadId=${threadId} reason=${String(info.reason ?? '')} pc=0x${Number(info.pc ?? 0).toString(16)}`);
 		const pendingStep = this.pendingStepThreads.delete(threadId);
-		let reason = reasonText.includes('breakpoint') ? StoppedEventReason.breakpoint : StoppedEventReason.pause;
-		if (reason !== StoppedEventReason.breakpoint) {
+		// A watchpoint halts after the access, with the PC at the next instruction.
+		let reason = reasonText.includes('watchpoint')
+			? StoppedEventReason.dataBreakpoint
+			: reasonText.includes('breakpoint') ? StoppedEventReason.breakpoint : StoppedEventReason.pause;
+		if (reason === StoppedEventReason.pause) {
 			if (pendingStep || reasonText.includes('step')) {
 				reason = StoppedEventReason.step;
 			}
 		}
+		const breakpointStop = reason === StoppedEventReason.breakpoint || reason === StoppedEventReason.dataBreakpoint;
 		if (this.startupDiagnosticsEnabled) {
 			this.tcfLogger.log(`[runcontrol] suspended id=${contextId} reason=${String(info.reason ?? '')}`);
 		}
-		if (reason === StoppedEventReason.breakpoint) {
+		if (breakpointStop) {
 			// The Breakpoints status fallback guesses the core from the first instance, but a
 			// breakpoint is planted on every core, so its guess may be another core than the one
 			// that hit it. This suspend names the right core: drop every pending fallback.
@@ -3981,7 +4292,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.tcfLogger.log(`[breakpoints] stop pc=0x${pc.toString(16)} instrMatch=${matchText} nearest=${nearestText}`);
 			}
 		}
-		if (reason === StoppedEventReason.breakpoint) {
+		if (breakpointStop) {
 			// A task-filtered breakpoint that the wrong task hit is resumed without ever being
 			// reported, so VS Code never flickers a stop the user did not ask for.
 			if (!(await this.breakpointStopWanted(contextId, info.data))) {
@@ -3997,7 +4308,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.cancelPendingPauseStoppedTimers('runcontrolBreakpoint');
 			this.suppressPauseStoppedUntilMs = Date.now() + Math.max(150, this.stopStormPauseDelayMs * 4);
 			this.notePrimaryBreakpointStop(threadId, contextId);
-			this.sendStoppedEvent(reason, threadId, { allThreadsStopped: this.stopsAllCores(contextId) });
+			// VS Code highlights the data breakpoint that hit; it cannot tell from the PC.
+			const hit = reason === StoppedEventReason.dataBreakpoint ? this.hitBreakpointIds(info.data) : undefined;
+			this.sendStoppedEvent(reason, threadId, { allThreadsStopped: this.stopsAllCores(contextId), hitBreakpointIds: hit });
 			void this.emitSourceLocation(contextId);
 			return;
 		}
@@ -4163,12 +4476,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private coreMessages = new Map<number, string>();
 	/** Breakpoints none of whose cores exists, so they are not planted. */
 	private unplantable = new Set<number>();
-	/** Conditions the adapter cannot evaluate, by breakpoint id. */
-	private conditionWarnings = new Map<number, string>();
+	/** Condition expressions by breakpoint id: sent as the TCF `Condition`, evaluated by the server. */
+	private exprConditions = new Map<number, string>();
+	/** Why a data breakpoint is not planted (the server's status), by breakpoint id. */
+	private statusMessages = new Map<number, string>();
 
 	/**
-	 * Records the task and core filters of a set of breakpoints, replacing what was there.
-	 * `nameCores`: cores from a function breakpoint's name, which win over the condition's.
+	 * Records the task and core filters and the condition expressions of a set of breakpoints,
+	 * replacing what was there. `nameCores`: cores from a function breakpoint's name, which win
+	 * over the condition's.
 	 */
 	private noteConditions(ids: Array<number | undefined>, conditions: Array<string | undefined>, nameCores?: Array<CoreRef[] | undefined>): void {
 		ids.forEach((id, i) => {
@@ -4187,20 +4503,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			} else {
 				this.coreFilters.delete(id);
 			}
-			if (c.unsupported) {
-				this.conditionWarnings.set(
-					id,
-					`"${c.unsupported}" is not evaluated: only "task == NAME" and "@core" conditions are supported, so this breakpoint halts every time.`,
-				);
+			if (c.expression) {
+				this.exprConditions.set(id, c.expression);
 			} else {
-				this.conditionWarnings.delete(id);
+				this.exprConditions.delete(id);
 			}
 		});
 	}
 
 	/** What VS Code shows when hovering a breakpoint, if anything. */
 	private breakpointMessage(id: number): string | undefined {
-		const parts = [this.coreFilters.has(id) ? this.coreMessages.get(id) : undefined, this.conditionWarnings.get(id)].filter(Boolean);
+		const parts = [this.statusMessages.get(id), this.coreFilters.has(id) ? this.coreMessages.get(id) : undefined].filter(Boolean);
 		return parts.length > 0 ? parts.join(' ') : undefined;
 	}
 
@@ -4687,7 +5000,65 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
+		// A data breakpoint on a Live Watch row: `{ expression, access }` (`write`, `read`, `readWrite`).
+		if (command === 'aurix/liveWatchDataBreakpoint') {
+			const expression = typeof args?.expression === 'string' ? args.expression.trim() : '';
+			if (!expression) {
+				this.sendErrorResponse(response, 0, 'No expression given');
+				return;
+			}
+			try {
+				response.body = await this.addLiveWatchDataBreakpoint(expression, args?.access ?? 'write');
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, 'Cannot watch {expression}: {message}', { expression, message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
 		// Fall back to default behavior for unknown custom requests.
 		await super.customRequestAsync(command, response, args, request);
+	}
+
+	/**
+	 * Data breakpoints set from the Live Watch, by TCF ID. An extension cannot add data breakpoints
+	 * to VS Code's view, so their IDs are not ours: they are shown like other clients' breakpoints,
+	 * as function breakpoints named `expression [access]`, which can be disabled and removed there.
+	 * They belong to this session, and go with it.
+	 */
+	private liveWatchBreakpoints = new Map<string, BreakpointData>();
+	private liveWatchBreakpointCount = 0;
+
+	/** Sets a data breakpoint on a Live Watch expression, resolved by the server as the Live Watch evaluates it. */
+	private async addLiveWatchDataBreakpoint(expression: string, access: DebugProtocol.DataBreakpointAccessType): Promise<{ id: string; name: string }> {
+		const mode = access === 'read' ? ACCESS_READ : access === 'readWrite' ? ACCESS_READ | ACCESS_WRITE : ACCESS_WRITE;
+		const name = `${expression} [${access === 'read' ? 'read' : access === 'readWrite' ? 'read/write' : 'write'}]`;
+		const known = Array.from(this.liveWatchBreakpoints.values()).find(p => p.Location === expression && p.AccessMode === mode);
+		if (known) {
+			return { id: known.ID, name };
+		}
+		// `x@hsm` is the HSM's variable, watched by the HSM; any other expression on the TriCore cores.
+		const hsm = splitLiveWatchCore(expression).core === 'hsm' ? await this.contextIdOfCoreRef('hsm') : undefined;
+		this.liveWatchBreakpointCount += 1;
+		/* eslint-disable @typescript-eslint/naming-convention */
+		const props: BreakpointData = {
+			ID: `livewatch-${process.pid}-${Date.now().toString(36)}-${this.liveWatchBreakpointCount}`,
+			Enabled: true,
+			BreakpointType: BreakpointType.Hardware,
+			AccessMode: mode,
+			Location: expression,
+			ContextIds: hsm ? [hsm] : undefined,
+		};
+		/* eslint-enable */
+		this.liveWatchBreakpoints.set(props.ID, props);
+		await this.tcfClient.sendCommand(new AddBreakpointsCommand(props));
+		const st = await this.tcfClient.sendCommand(new GetStatusBreakpointsCommand(props.ID)).catch(() => undefined);
+		const inst = st?.Instances ?? [];
+		if (!inst.some(i => !i.Error)) {
+			this.liveWatchBreakpoints.delete(props.ID);
+			await this.tcfClient.sendCommand(new RemoveBreakpointsCommand([props.ID])).catch(() => undefined);
+			throw new Error(st?.Error ?? inst.find(i => i.Error)?.Error ?? 'not planted');
+		}
+		return { id: props.ID, name };
 	}
 }

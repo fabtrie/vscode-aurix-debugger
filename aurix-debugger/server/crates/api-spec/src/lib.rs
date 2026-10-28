@@ -34,8 +34,9 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// Revision of the API reported by `info`, raised whenever an operation or a field is added or
 /// changed. 1: `info`, `list_globals`, `symbol_children`, `evaluate`, `write_variable`. 2: `@N`
 /// in expressions for core-local RAM, `per_core` groups, `load_symbols` `path@N`,
-/// `local_cores` in `info`. 3: `flash_write` files with `offset` and `type`.
-pub const API_VERSION: u32 = 3;
+/// `local_cores` in `info`. 3: `flash_write` files with `offset` and `type`. 4: watchpoints in
+/// the shared session (string IDs, `owner`, `instances`), on an `expression`, with a `condition`.
+pub const API_VERSION: u32 = 4;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

@@ -490,7 +490,7 @@ pub struct Breakpoint {
     pub slot: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WatchAccess {
     Read,
     Write,

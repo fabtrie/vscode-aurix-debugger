@@ -27,6 +27,14 @@
             "default": null,
             "description": "Code address."
           },
+          "condition": {
+            "default": null,
+            "description": "C expression evaluated on the halted core (in its top stack frame): a hit only halts\nwhen it is not zero, e.g. `count > 100`. Otherwise the core is resumed at once.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "file": {
             "default": null,
             "description": "Source file (with `line`); needs the symbols loaded by a VS Code debug session.",
@@ -69,7 +77,7 @@
       },
       "AddWatchpointRequest": {
         "additionalProperties": false,
-        "description": "Watchpoint arguments.",
+        "description": "Watchpoint arguments: an `address` or an `expression`.",
         "properties": {
           "access": {
             "anyOf": [
@@ -86,20 +94,44 @@
           "address": {
             "anyOf": [
               {
-                "maximum": 4294967295,
-                "minimum": 0,
-                "type": "integer"
+                "anyOf": [
+                  {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                    "type": "string"
+                  }
+                ]
               },
               {
-                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
-                "type": "string"
+                "type": "null"
               }
             ],
+            "default": null,
             "description": "Data address."
+          },
+          "condition": {
+            "default": null,
+            "description": "C expression evaluated on the halted core (in its top stack frame): a hit only halts\nwhen it is not zero, e.g. `g_motor.speed > 100`. Otherwise the core is resumed at once,\nwhich still costs a halt on every access.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expression": {
+            "default": null,
+            "description": "C expression of the watched object instead of an address, as `evaluate` takes it\n(`g_motor.speed`, `g_buf[3]`, `CRASH_state@2`). Its address and size come from the\nsymbols, and are looked up again when other symbols are loaded. A variable in core-local\nRAM is watched at its local address on its own core and at its global address on the\nother cores.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "length": {
             "default": null,
-            "description": "Watched bytes (default 4).",
+            "description": "Watched bytes; default: the size of the expression's type, or 4 for an address.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -108,14 +140,14 @@
             ]
           },
           "target": {
-            "description": "Target name or index.",
-            "type": "string"
+            "default": null,
+            "description": "Target name or index; default: every TriCore core.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
-        "required": [
-          "target",
-          "address"
-        ],
         "type": "object"
       },
       "ApiError": {
@@ -383,6 +415,12 @@
               "null"
             ]
           },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -514,6 +552,11 @@
           {
             "const": "client",
             "description": "A debugger client (VS Code): removed when it disconnects.",
+            "type": "string"
+          },
+          {
+            "const": "console",
+            "description": "The Tcl console (`wp`): only on the core, not shown in VS Code.",
             "type": "string"
           }
         ]
@@ -2167,20 +2210,89 @@
         ]
       },
       "WatchpointInfo": {
-        "description": "A watchpoint.",
+        "description": "A watchpoint (data breakpoint).",
         "properties": {
           "access": {
             "$ref": "#/components/schemas/WatchAccess"
           },
           "address": {
+            "description": "Requested data address.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "error": {
+            "description": "Why it is not planted (e.g. symbols not loaded yet: it is planted once they are).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expression": {
+            "description": "Requested expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hits": {
+            "description": "Number of hits reported to debugger clients (not counting those whose condition was\nfalse).",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
           "id": {
+            "description": "Watchpoint ID.",
+            "type": "string"
+          },
+          "instances": {
+            "description": "Where it is planted.",
+            "items": {
+              "$ref": "#/components/schemas/WatchpointInstance"
+            },
+            "type": "array"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/BreakpointOwner"
+          }
+        },
+        "required": [
+          "id",
+          "owner",
+          "enabled",
+          "access",
+          "instances",
+          "hits"
+        ],
+        "type": "object"
+      },
+      "WatchpointInstance": {
+        "description": "Where a watchpoint is planted on one target.",
+        "properties": {
+          "address": {
+            "description": "Address as this target accesses it (core-local RAM: the local address on its own core).",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "error": {
+            "description": "Why it could not be planted (e.g. no free hardware event).",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "length": {
             "format": "uint32",
@@ -2193,11 +2305,9 @@
           }
         },
         "required": [
-          "id",
           "target",
           "address",
-          "length",
-          "access"
+          "length"
         ],
         "type": "object"
       },
@@ -2218,31 +2328,47 @@
       },
       "WatchpointRef": {
         "additionalProperties": false,
-        "description": "A watchpoint by target and address.",
+        "description": "A watchpoint by `id`, or by `target` and `address`.",
         "properties": {
           "address": {
             "anyOf": [
               {
-                "maximum": 4294967295,
-                "minimum": 0,
-                "type": "integer"
+                "anyOf": [
+                  {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                    "type": "string"
+                  }
+                ]
               },
               {
-                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
-                "type": "string"
+                "type": "null"
               }
             ],
-            "description": "Data address."
+            "default": null,
+            "description": "Data address (with `target`): removes the watchpoint planted there, on all its targets."
+          },
+          "id": {
+            "default": null,
+            "description": "Watchpoint ID.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "target": {
-            "description": "Target name or index.",
-            "type": "string"
+            "default": null,
+            "description": "Target name or index (with `address`).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
-        "required": [
-          "target",
-          "address"
-        ],
         "type": "object"
       },
       "WriteMemoryRequest": {
@@ -2425,6 +2551,14 @@
                     ],
                     "default": null,
                     "description": "Code address."
+                  },
+                  "condition": {
+                    "default": null,
+                    "description": "C expression evaluated on the halted core (in its top stack frame): a hit only halts\nwhen it is not zero, e.g. `count > 100`. Otherwise the core is resumed at once.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "file": {
                     "default": null,
@@ -4107,35 +4241,60 @@
     },
     "/api/v1/watchpoints": {
       "delete": {
-        "description": "Remove a watchpoint. Returns the remaining watchpoints.",
+        "description": "Remove a watchpoint (also one set in VS Code or the Tcl console). Returns the remaining\nwatchpoints.",
         "operationId": "remove_watchpoint",
         "parameters": [
           {
-            "description": "Data address.",
+            "description": "Data address (with `target`): removes the watchpoint planted there, on all its targets.",
             "in": "query",
             "name": "address",
-            "required": true,
+            "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "maximum": 4294967295,
-                  "minimum": 0,
-                  "type": "integer"
+                  "anyOf": [
+                    {
+                      "maximum": 4294967295,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                      "type": "string"
+                    }
+                  ]
                 },
                 {
-                  "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
-                  "type": "string"
+                  "type": "null"
                 }
+              ],
+              "default": null
+            }
+          },
+          {
+            "description": "Watchpoint ID.",
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
               ]
             }
           },
           {
-            "description": "Target name or index.",
+            "description": "Target name or index (with `address`).",
             "in": "query",
             "name": "target",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": "string"
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -4161,13 +4320,13 @@
             "description": "Error"
           }
         },
-        "summary": "Remove a watchpoint.",
+        "summary": "Remove a watchpoint (also one set in VS Code or the Tcl console).",
         "tags": [
           "watchpoints"
         ]
       },
       "get": {
-        "description": "List the watchpoints (data breakpoints) of all targets.",
+        "description": "List the watchpoints (data breakpoints) of all clients: the API's, VS Code's and those of\nthe Tcl console.",
         "operationId": "list_watchpoints",
         "responses": {
           "200": {
@@ -4191,20 +4350,20 @@
             "description": "Error"
           }
         },
-        "summary": "List the watchpoints (data breakpoints) of all targets.",
+        "summary": "List the watchpoints (data breakpoints) of all clients: the API's, VS Code's and those of the Tcl console.",
         "tags": [
           "watchpoints"
         ]
       },
       "post": {
-        "description": "Set a watchpoint: the target halts when it accesses the address.",
+        "description": "Set a watchpoint on an address or a variable (`expression`): the target halts after an\naccess to it, with reason `watchpoint` and the PC at the instruction after the access.\n\nA watchpoint wider than one byte takes two of the 8 hardware events of a core (shared with\nbreakpoints) and catches every access that starts inside it; an access that starts below\nit and reaches into it is not caught. It shows up in VS Code's Breakpoints view.",
         "operationId": "add_watchpoint",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "Watchpoint arguments.",
+                "description": "Watchpoint arguments: an `address` or an `expression`.",
                 "properties": {
                   "access": {
                     "anyOf": [
@@ -4221,20 +4380,44 @@
                   "address": {
                     "anyOf": [
                       {
-                        "maximum": 4294967295,
-                        "minimum": 0,
-                        "type": "integer"
+                        "anyOf": [
+                          {
+                            "maximum": 4294967295,
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                            "type": "string"
+                          }
+                        ]
                       },
                       {
-                        "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
-                        "type": "string"
+                        "type": "null"
                       }
                     ],
+                    "default": null,
                     "description": "Data address."
+                  },
+                  "condition": {
+                    "default": null,
+                    "description": "C expression evaluated on the halted core (in its top stack frame): a hit only halts\nwhen it is not zero, e.g. `g_motor.speed > 100`. Otherwise the core is resumed at once,\nwhich still costs a halt on every access.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "expression": {
+                    "default": null,
+                    "description": "C expression of the watched object instead of an address, as `evaluate` takes it\n(`g_motor.speed`, `g_buf[3]`, `CRASH_state@2`). Its address and size come from the\nsymbols, and are looked up again when other symbols are loaded. A variable in core-local\nRAM is watched at its local address on its own core and at its global address on the\nother cores.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "length": {
                     "default": null,
-                    "description": "Watched bytes (default 4).",
+                    "description": "Watched bytes; default: the size of the expression's type, or 4 for an address.",
                     "format": "uint32",
                     "minimum": 0,
                     "type": [
@@ -4243,19 +4426,19 @@
                     ]
                   },
                   "target": {
-                    "description": "Target name or index.",
-                    "type": "string"
+                    "default": null,
+                    "description": "Target name or index; default: every TriCore core.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
-                "required": [
-                  "target",
-                  "address"
-                ],
                 "type": "object"
               }
             }
           },
-          "required": true
+          "required": false
         },
         "responses": {
           "200": {
@@ -4279,7 +4462,7 @@
             "description": "Error"
           }
         },
-        "summary": "Set a watchpoint: the target halts when it accesses the address.",
+        "summary": "Set a watchpoint on an address or a variable (`expression`): the target halts after an access to it, with reason `watchpoint` and the PC at the instruction after the access.",
         "tags": [
           "watchpoints"
         ]

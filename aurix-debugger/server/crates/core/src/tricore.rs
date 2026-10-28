@@ -202,7 +202,8 @@ impl Tricore {
         }
     }
 
-    /// Index of the armed trigger that caused the current halt, if any.
+    /// Index of the armed trigger that caused the current halt, if any. For a range, the slot of
+    /// its lower bound, which is the slot `add_breakpoint` / `add_watchpoint` returned.
     pub fn hit_trigger(&self) -> Option<usize> {
         match self.reason {
             DebugReason::Breakpoint | DebugReason::Watchpoint => self.evtsrc_trigger(),
@@ -212,7 +213,9 @@ impl Tricore {
 
     fn evtsrc_trigger(&self) -> Option<usize> {
         match (self.dbgsr >> 8) & 0x1F {
-            n @ 16..=23 => Some((n - EVTSRC_TRIGGER0) as usize).filter(|&i| self.triggers[i].enable),
+            n @ 16..=23 => Some((n - EVTSRC_TRIGGER0) as usize)
+                .filter(|&i| self.triggers[i].enable)
+                .map(|i| if i % 2 == 1 && self.triggers[i - 1].enable && self.triggers[i - 1].range { i - 1 } else { i }),
             _ => None,
         }
     }
@@ -541,11 +544,21 @@ impl Tricore {
         Ok(slot as u8)
     }
 
+    /// Data watchpoint on `addr..addr + len`.
+    ///
+    /// A trigger compares the start address of an access only: a single address misses a byte
+    /// store into the middle of a word. Anything wider than a byte is therefore a range over two
+    /// triggers, which catches every access that starts inside it (the upper bound is exclusive).
+    /// An access that starts below `addr` and reaches into it is still missed.
     pub fn add_watchpoint(&mut self, io: &mut Io, addr: u32, len: u32, access: u32) -> Result<u8> {
-        let range = len > 4;
-        let slot = self
-            .find_slot(range)
-            .ok_or_else(|| Error::Resource("No hardware event available for watchpoint".into()))?;
+        let range = len > 1;
+        let slot = self.find_slot(range).ok_or_else(|| {
+            Error::Resource(if range {
+                "No pair of hardware events available for watchpoint (a watchpoint wider than one byte takes two)".into()
+            } else {
+                "No hardware event available for watchpoint".into()
+            })
+        })?;
         self.triggers[slot] = Trigger { enable: true, bbm: false, pc: false, range, access, addr };
         if range {
             self.triggers[slot + 1] = Trigger { enable: true, access, addr: addr.wrapping_add(len), ..Default::default() };
@@ -801,6 +814,20 @@ mod tests {
         let _ = c.poll_apply(&[halted_tr0, 0]);
         assert_eq!(c.reason, DebugReason::Breakpoint);
         assert_eq!(c.hit_trigger(), Some(0));
+    }
+
+    #[test]
+    fn a_hit_of_a_range_is_reported_at_its_lower_slot() {
+        let mut c = Tricore::new();
+        c.triggers[2] = Trigger { enable: true, range: true, access: 1, addr: 0x7000_0000, ..Default::default() };
+        c.triggers[3] = Trigger { enable: true, access: 1, addr: 0x7000_0004, ..Default::default() };
+        for n in [2, 3] {
+            let _ = c.poll_apply(&[DBGSR_DE, 0]);
+            c.reason = DebugReason::NotHalted;
+            let _ = c.poll_apply(&[DBGSR_DE | DBGSR_HALTED | ((EVTSRC_TRIGGER0 + n) << 8), 0]);
+            assert_eq!(c.reason, DebugReason::Watchpoint);
+            assert_eq!(c.hit_trigger(), Some(2), "EVTSRC TR{n}");
+        }
     }
 
     #[test]

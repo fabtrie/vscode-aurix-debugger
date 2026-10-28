@@ -142,16 +142,53 @@ fn watch_access(a: aurix_core::target::WatchAccess) -> WatchAccess {
     }
 }
 
-fn watchpoints(cx: &Cx) -> WatchpointList {
-    let watchpoints = cx.with(|c| {
-        c.targets
-            .iter()
-            .flat_map(|e| {
-                e.watchpoints.iter().map(|w| WatchpointInfo { id: w.id, target: e.name.clone(), address: w.addr, length: w.len, access: watch_access(w.access) })
-            })
-            .collect()
-    });
-    WatchpointList { watchpoints }
+fn core_access(a: WatchAccess) -> aurix_core::target::WatchAccess {
+    match a {
+        WatchAccess::Read => aurix_core::target::WatchAccess::Read,
+        WatchAccess::Write => aurix_core::target::WatchAccess::Write,
+        WatchAccess::Access => aurix_core::target::WatchAccess::Access,
+    }
+}
+
+/// ID of a watchpoint set on the core directly (Tcl `wp`), by its core ID.
+const CONSOLE_WATCHPOINT: &str = "console-";
+
+fn owner(bp: &tcf::Bp) -> BreakpointOwner {
+    if bp.owner == tcf::API_OWNER {
+        BreakpointOwner::Api
+    } else {
+        BreakpointOwner::Client
+    }
+}
+
+fn watchpoint_info(id: &str, bp: &tcf::Bp, access: aurix_core::target::WatchAccess, names: &HashMap<usize, String>) -> WatchpointInfo {
+    let p = &bp.props;
+    let location = p.get("Location");
+    let instances = bp
+        .instances
+        .iter()
+        .map(|i| WatchpointInstance {
+            target: names.get(&i.target).cloned().unwrap_or_else(|| i.target.to_string()),
+            address: i.addr,
+            length: match i.kind {
+                tcf::Kind::Data { len, .. } => len,
+                tcf::Kind::Code => 0,
+            },
+            error: i.error.clone(),
+        })
+        .collect();
+    WatchpointInfo {
+        id: id.to_string(),
+        owner: owner(bp),
+        enabled: bp.enabled(),
+        address: p.get("Address").and_then(addr_prop).or_else(|| location.and_then(addr_prop)),
+        expression: location.filter(|l| addr_prop(l).is_none()).and_then(Value::as_str).map(str::to_string),
+        access: watch_access(access),
+        condition: bp.condition().map(str::to_string),
+        instances,
+        hits: bp.hits,
+        error: bp.error.clone(),
+    }
 }
 
 fn addr_prop(v: &Value) -> Option<u32> {
@@ -177,12 +214,13 @@ fn breakpoint_info(id: &str, bp: &tcf::Bp, names: &HashMap<usize, String>, sessi
         .collect();
     BreakpointInfo {
         id: id.to_string(),
-        owner: if bp.owner == tcf::API_OWNER { BreakpointOwner::Api } else { BreakpointOwner::Client },
+        owner: owner(bp),
         enabled: bp.enabled(),
         address,
         symbol,
         file: p.get("File").and_then(Value::as_str).map(str::to_string),
         line: bp.line.or_else(|| p.get("Line").and_then(Value::as_u64).map(|l| l as u32)),
+        condition: bp.condition().map(str::to_string),
         instances,
         hits: bp.hits,
         error: bp.error.clone(),
@@ -237,7 +275,47 @@ impl CoreApi {
 
     fn breakpoint_list(&self) -> Result<BreakpointList, ApiError> {
         let names = self.names()?;
-        Ok(BreakpointList { breakpoints: self.session.breakpoints().iter().map(|(id, bp)| breakpoint_info(id, bp, &names, &self.session)).collect() })
+        let breakpoints = self.session.breakpoints().iter().filter(|(_, bp)| bp.data().is_none()).map(|(id, bp)| breakpoint_info(id, bp, &names, &self.session)).collect();
+        Ok(BreakpointList { breakpoints })
+    }
+
+    /// The session's data breakpoints, then the watchpoints set on the core directly.
+    fn watchpoint_list(&self) -> Result<WatchpointList, ApiError> {
+        let names = self.names()?;
+        let mut watchpoints: Vec<WatchpointInfo> =
+            self.session.breakpoints().iter().filter_map(|(id, bp)| bp.data().map(|a| watchpoint_info(id, bp, a, &names))).collect();
+        let session = self.session.session_watchpoints();
+        let console = self.call(move |cx| {
+            Ok(cx.with(|c| {
+                let mut out = Vec::new();
+                for (t, e) in c.targets.iter().enumerate() {
+                    out.extend(e.watchpoints.iter().filter(|w| !session.contains(&(t, w.id))).map(|w| (e.name.clone(), w.clone())));
+                }
+                out
+            }))
+        })?;
+        watchpoints.extend(console.into_iter().map(|(target, w)| WatchpointInfo {
+            id: format!("{CONSOLE_WATCHPOINT}{}", w.id),
+            owner: BreakpointOwner::Console,
+            enabled: true,
+            address: Some(w.addr),
+            expression: None,
+            access: watch_access(w.access),
+            condition: None,
+            instances: vec![WatchpointInstance { target, address: w.addr, length: w.len, error: None }],
+            hits: 0,
+            error: None,
+        }));
+        Ok(WatchpointList { watchpoints })
+    }
+
+    /// TCF context IDs of targets given by name or index.
+    fn context_ids(&self, targets: &[String]) -> Result<Vec<String>, ApiError> {
+        let cores = tcf::cores(&self.handle);
+        targets
+            .iter()
+            .map(|n| cores.iter().find(|c| &c.name == n || c.idx.to_string() == *n).map(|c| c.id.clone()).ok_or_else(|| ApiError::not_found(format!("unknown target '{n}'"))))
+            .collect()
     }
 
     /// The target and primary ELF an ORTI file is resolved against.
@@ -554,14 +632,10 @@ impl DebuggerApi for CoreApi {
             _ => return Err(ApiError::bad_request("give exactly one of `address`, `symbol` or `file` with `line`")),
         }
         if let Some(targets) = &req.targets {
-            let cores = tcf::cores(&self.handle);
-            let ids = targets
-                .iter()
-                .map(|n| {
-                    cores.iter().find(|c| &c.name == n || c.idx.to_string() == *n).map(|c| c.id.clone()).ok_or_else(|| ApiError::not_found(format!("unknown target '{n}'")))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            props.insert("ContextIds".into(), json!(ids));
+            props.insert("ContextIds".into(), json!(self.context_ids(targets)?));
+        }
+        if let Some(c) = req.condition.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            props.insert("Condition".into(), json!(c));
         }
         self.session.apply_breakpoints(vec![props], false, tcf::API_OWNER).map_err(ApiError::bad_request)?;
         let (bp, _) = self.session.breakpoint(&id).ok_or_else(|| ApiError::failed("breakpoint vanished"))?;
@@ -582,30 +656,86 @@ impl DebuggerApi for CoreApi {
     }
 
     fn list_watchpoints(&self, _: NoArgs) -> Result<WatchpointList, ApiError> {
-        self.call(|cx| Ok(watchpoints(cx)))
+        self.watchpoint_list()
     }
 
     fn add_watchpoint(&self, req: AddWatchpointRequest) -> Result<WatchpointInfo, ApiError> {
-        let access = req.access.unwrap_or(WatchAccess::Write);
-        let len = req.length.unwrap_or(4);
-        self.call(move |cx| {
-            let t = resolve(cx, &req.target)?;
-            let a = match access {
-                WatchAccess::Read => aurix_core::target::WatchAccess::Read,
-                WatchAccess::Write => aurix_core::target::WatchAccess::Write,
-                WatchAccess::Access => aurix_core::target::WatchAccess::Access,
-            };
-            let id = ops::add_watchpoint(cx, t, req.address.0, len, a).map_err(api_err)?;
-            Ok(WatchpointInfo { id, target: ops::target_name(cx, t), address: req.address.0, length: len, access })
-        })
+        let access = core_access(req.access.unwrap_or(WatchAccess::Write));
+        let id = self.session.next_api_breakpoint_id();
+        let mut props: Map<String, Value> = Map::new();
+        props.insert("ID".into(), json!(id));
+        props.insert("Enabled".into(), json!(true));
+        props.insert("BreakpointType".into(), json!("Hardware"));
+        props.insert("AccessMode".into(), json!(tcf::access_bits(access)));
+        match (&req.address, req.expression.as_deref().map(str::trim)) {
+            (Some(a), None) => {
+                props.insert("Address".into(), json!(a.0));
+            }
+            (None, Some(e)) if !e.is_empty() => {
+                props.insert("Location".into(), json!(e));
+            }
+            _ => return Err(ApiError::bad_request("give exactly one of `address` or `expression`")),
+        }
+        match req.length {
+            Some(0) => return Err(ApiError::bad_request("`length` must be at least 1")),
+            Some(n) => {
+                props.insert("Size".into(), json!(n));
+            }
+            None => {}
+        }
+        if let Some(t) = &req.target {
+            props.insert("ContextIds".into(), json!(self.context_ids(std::slice::from_ref(t))?));
+        }
+        if let Some(c) = req.condition.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            props.insert("Condition".into(), json!(c));
+        }
+        self.session.apply_breakpoints(vec![props], false, tcf::API_OWNER).map_err(ApiError::bad_request)?;
+        let (bp, _) = self.session.breakpoint(&id).ok_or_else(|| ApiError::failed("watchpoint vanished"))?;
+        // Planted nowhere (an expression that names nothing, no free hardware event): report it
+        // rather than leave a watchpoint that never halts.
+        if !bp.planted() {
+            self.session.remove_breakpoints(vec![id]);
+            let why = bp.error.clone().or_else(|| bp.instances.iter().find_map(|i| i.error.clone())).unwrap_or_else(|| "not planted".into());
+            let code = if why.contains("hardware event") { ErrorCode::Resource } else { ErrorCode::BadRequest };
+            return Err(ApiError::new(code, why));
+        }
+        Ok(watchpoint_info(&id, &bp, access, &self.names()?))
     }
 
     fn remove_watchpoint(&self, req: WatchpointRef) -> Result<WatchpointList, ApiError> {
-        self.call(move |cx| {
-            let t = resolve(cx, &req.target)?;
-            ops::remove_watchpoint(cx, t, req.address.0).map_err(api_err)?;
-            Ok(watchpoints(cx))
-        })
+        match (&req.id, &req.target, &req.address) {
+            (Some(id), None, None) => {
+                if let Some(n) = id.strip_prefix(CONSOLE_WATCHPOINT).and_then(|n| n.parse::<u32>().ok()) {
+                    self.call(move |cx| {
+                        let t = cx.with(|c| c.targets.iter().position(|e| e.watchpoints.iter().any(|w| w.id == n)));
+                        let t = t.ok_or_else(|| ApiError::not_found(format!("unknown watchpoint '{CONSOLE_WATCHPOINT}{n}'")))?;
+                        ops::remove_watchpoint_id(cx, t, n).map_err(api_err)
+                    })?;
+                } else if self.session.breakpoint(id).is_some_and(|(b, _)| b.data().is_some()) {
+                    self.session.remove_breakpoints(vec![id.clone()]);
+                } else {
+                    return Err(ApiError::not_found(format!("unknown watchpoint '{id}'")));
+                }
+            }
+            (None, Some(target), Some(addr)) => {
+                let t = self.target(target)?;
+                let a = addr.0;
+                let ids: Vec<String> = self
+                    .session
+                    .breakpoints()
+                    .into_iter()
+                    .filter(|(_, b)| b.data().is_some() && b.instances.iter().any(|i| i.error.is_none() && i.target == t && i.addr == a))
+                    .map(|(id, _)| id)
+                    .collect();
+                if ids.is_empty() {
+                    self.call(move |cx| ops::remove_watchpoint(cx, t, a).map_err(api_err))?;
+                } else {
+                    self.session.remove_breakpoints(ids);
+                }
+            }
+            _ => return Err(ApiError::bad_request("give `id`, or `target` with `address`")),
+        }
+        self.watchpoint_list()
     }
 
     fn flash_write(&self, req: FlashWriteRequest) -> Result<CommandOutput, ApiError> {

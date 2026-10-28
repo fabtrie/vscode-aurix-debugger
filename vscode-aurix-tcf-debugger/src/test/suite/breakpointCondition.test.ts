@@ -18,9 +18,10 @@ suite('Breakpoint conditions', () => {
 		assert.deepStrictEqual(parseBreakpointCondition('  '), { cores: undefined });
 	});
 
-	test('reports what it cannot evaluate, keeping the cores', () => {
-		assert.deepStrictEqual(parseBreakpointCondition('x > 3'), { cores: undefined, unsupported: 'x > 3' });
-		assert.deepStrictEqual(parseBreakpointCondition('x > 3 @0'), { cores: [0], unsupported: 'x > 3' });
+	test('passes any other condition on as an expression, keeping the cores', () => {
+		assert.deepStrictEqual(parseBreakpointCondition('x > 3'), { cores: undefined, expression: 'x > 3' });
+		assert.deepStrictEqual(parseBreakpointCondition('x > 3 @0'), { cores: [0], expression: 'x > 3' });
+		assert.deepStrictEqual(parseBreakpointCondition('g_s.mode == 2 && g_n != 0'), { cores: undefined, expression: 'g_s.mode == 2 && g_n != 0' });
 	});
 
 	test('replaces the core suffix and keeps the rest', () => {

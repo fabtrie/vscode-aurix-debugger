@@ -930,6 +930,55 @@ impl GlobalValue {
     }
 }
 
+fn global_error_text(e: GlobalError) -> String {
+    match e {
+        GlobalError::NoSymbols => "symbols not loaded".into(),
+        GlobalError::NoTarget(m) | GlobalError::Memory(m) | GlobalError::Expression(m) | GlobalError::Core(m) => m,
+    }
+}
+
+/// Where `core` accesses the object `text` names, for a watchpoint: its address and the size of
+/// its type (a bit field's storage unit).
+///
+/// A trigger compares the address as the core issues it, and the local alias of core-local RAM
+/// never matches its global address. So core-local RAM is watched at the address it is linked at
+/// on its own core, as that core's code accesses it, and at its global address on the others. A
+/// variable of an ELF on several cores means each core's own copy.
+pub fn watch_range(sh: &Shared, core: &CoreInfo, text: &str) -> Result<(u32, u32), String> {
+    // An `@N` picks the core whose copy is meant, whichever core the watchpoint is planted on.
+    let ctx = if split_core(text).1.is_some() { "" } else { core.id.as_str() };
+    let gv = evaluate_global(sh, ctx, text).map_err(global_error_text)?;
+    let (addr, size) = match (&gv.value.place, &gv.value.bytes) {
+        (Place::Memory(a), None) => (*a, gv.elf.1.type_info(&gv.value.ty).size),
+        (Place::Bits { addr, storage, .. }, None) => (*addr, *storage),
+        _ => return Err(format!("`{}` is not stored in memory", gv.expression())),
+    };
+    if size == 0 {
+        return Err(format!("`{}` has no size", gv.expression()));
+    }
+    if !local_address(addr) {
+        return Ok((addr, size));
+    }
+    if !core.tricore() {
+        return Err(format!("`{}` is in TriCore core-local RAM (0x{addr:08X})", gv.expression()));
+    }
+    match gv.global_address(sh, addr) {
+        Ok(global) if aurix_core::tricore::global_address(core.coreid, addr) == global => Ok((addr, size)),
+        Ok(global) => Ok((global, size)),
+        Err(_) => Ok((addr, size)),
+    }
+}
+
+/// Whether the breakpoint condition `text` holds on the suspended core `ctx`: evaluated in its
+/// top stack frame, true when the value is not zero.
+pub fn condition_holds(sh: &Shared, ctx: &str, text: &str) -> Result<bool, String> {
+    let scope = scope_for(sh, ctx).map_err(|e| e.1)?;
+    let (scope, (n, syms), v) = evaluate_text(sh, ctx, scope, text).map_err(|((_, e), _)| e)?;
+    let mut t = target(sh, n, &scope);
+    let bytes = Eval::new(&syms, &mut t).load(&v)?;
+    Ok(bytes.iter().any(|&b| b != 0))
+}
+
 /// Handles Expressions.* and the variable part of Symbols.*; returns the reply fields.
 pub fn dispatch(sh: &Shared, service: &str, command: &str, args: &[String]) -> Res<Vec<String>> {
     match (service, command) {

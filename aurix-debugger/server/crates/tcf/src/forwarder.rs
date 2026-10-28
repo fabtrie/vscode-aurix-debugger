@@ -7,9 +7,11 @@ use std::thread;
 use serde_json::{json, Value};
 
 use aurix_core::target::DebugReason;
-use aurix_core::Event;
+use aurix_core::{log_warn, ops, Event};
 
+use crate::breakpoints::Kind;
 use crate::contexts::{context_json, cores, read_pc, reason_text, CoreInfo, CONTAINER};
+use crate::expressions::condition_holds;
 use crate::wire;
 use crate::Shared;
 
@@ -42,7 +44,7 @@ pub fn start(shared: Arc<Shared>) {
                     // Any core may have run (TL1-gated steps run all cores).
                     shared.stacks.lock().unwrap().clear();
                     if !shared.any_stepping() {
-                        halted(&shared, target, reason, pc);
+                        halted(&shared, target, reason, pc, true);
                     }
                 }
                 Event::Resumed { target, .. } => {
@@ -100,22 +102,64 @@ fn core_by_index(shared: &Shared, idx: usize) -> Option<CoreInfo> {
 }
 
 /// Reports a halt: breakpoint status (hit counts) first, then contextSuspended.
-pub fn halted(shared: &Shared, target: usize, reason: DebugReason, pc: Option<u32>) {
+///
+/// With `filter`, a halt at breakpoints whose conditions are all false is not reported: the core
+/// is resumed instead. A source-level step checks the conditions itself while it runs.
+pub fn halted(shared: &Shared, target: usize, reason: DebugReason, pc: Option<u32>, filter: bool) {
     let Some(c) = core_by_index(shared, target).filter(|c| c.visible) else { return };
-    let mut bp_ids = Vec::new();
-    if reason == DebugReason::Breakpoint {
-        if let Some(pc) = pc {
-            let mut table = shared.bps.lock().unwrap();
-            bp_ids = table.record_hit(target, pc);
-            // Status (HitCount) first: the client then treats the following
-            // contextSuspended as the one breakpoint stop.
-            for id in &bp_ids {
-                let st = table.status(id);
-                shared.broadcast(&wire::event("Breakpoints", "status", &[json!(id).to_string(), st.to_string()]));
-            }
+    let bp_ids = hit_breakpoints(shared, target, reason, pc);
+    if filter && !bp_ids.is_empty() && !stop_wanted(shared, &c.id, &bp_ids) {
+        match shared.handle.call(move |cx| ops::resume(cx, target, None).map_err(|e| e.to_string())) {
+            Some(Ok(())) => return,
+            Some(Err(e)) => log_warn!("[{}] cannot resume after a breakpoint whose condition is false: {e}", c.name),
+            None => return,
+        }
+    }
+    {
+        let mut table = shared.bps.lock().unwrap();
+        table.count_hits(&bp_ids);
+        // Status (HitCount) first: the client then treats the following
+        // contextSuspended as the one breakpoint stop.
+        for id in &bp_ids {
+            let st = table.status(id);
+            shared.broadcast(&wire::event("Breakpoints", "status", &[json!(id).to_string(), st.to_string()]));
         }
     }
     suspended_event(shared, &c, pc, reason_text(reason), &bp_ids, reason);
+}
+
+/// The breakpoints a halt of `target` with `reason` at `pc` is for.
+pub fn hit_breakpoints(shared: &Shared, target: usize, reason: DebugReason, pc: Option<u32>) -> Vec<String> {
+    let wp = match reason {
+        DebugReason::Breakpoint if pc.is_some() => None,
+        DebugReason::Watchpoint => shared
+            .handle
+            .call(move |cx| ops::hit_watchpoint(cx, target))
+            .flatten()
+            .map(|w| (w.addr, Kind::Data { len: w.len, access: w.access })),
+        _ => return Vec::new(),
+    };
+    shared.bps.lock().unwrap().hits(target, reason, pc, wp)
+}
+
+/// Whether a halt of core `ctx` at the breakpoints `ids` is one to report: one of them has no
+/// condition, or its condition holds. A condition that cannot be evaluated counts as holding,
+/// so the stop is not dropped without a trace.
+pub fn stop_wanted(shared: &Shared, ctx: &str, ids: &[String]) -> bool {
+    let conditions: Vec<(String, Option<String>)> = {
+        let t = shared.bps.lock().unwrap();
+        ids.iter().filter_map(|id| t.bps.get(id).map(|b| (id.clone(), b.condition().map(str::to_string)))).collect()
+    };
+    if conditions.is_empty() {
+        return true;
+    }
+    conditions.iter().any(|(id, cond)| match cond {
+        None => true,
+        Some(text) => condition_holds(shared, ctx, text).unwrap_or_else(|e| {
+            log_warn!("breakpoint {id}: cannot evaluate the condition `{text}` ({e}); halting");
+            true
+        }),
+    })
 }
 
 /// Reports the current state of the cores other than `except`, whose events

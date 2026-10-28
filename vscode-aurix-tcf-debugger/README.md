@@ -9,7 +9,8 @@ The extension uses `aurix-dbg`, a debug server that reaches the target through I
 ## Features
 
 - Multi-core debugging of the TriCore cores, the HSM and the GTM MCS channels
-- Line, function and instruction breakpoints, optionally only on chosen cores (`@1`, `@hsm`) or in a chosen AUTOSAR task
+- Line, function and instruction breakpoints, optionally only on chosen cores (`@1`, `@hsm`), in a chosen AUTOSAR task or under a condition (`count > 100`)
+- Data breakpoints (watchpoints) on variables, watch expressions and addresses: break on write, read or both
 - Step in/out, step over, continue/pause, restart, terminate
 - Call stack and variables, including frames without debug information
 - Live Watch of variables and registers while the target runs, in the sidebar or in editor panels
@@ -103,6 +104,21 @@ Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the 
 ### Breakpoints on chosen cores
 
 Without anything else, a breakpoint halts every core that reaches it. To halt only some cores, put them in the breakpoint's condition (`@1`, `@0,2`, `@hsm`, or with a task filter `task == ComTask @1`), or after a function breakpoint's name (`Os_Task_10ms@1`). **Halt Only on Core…** and **Halt Only in Task…** on the line number context menu set the same.
+
+### Conditions
+
+Any other condition is a C expression, e.g. `g_motor.speed > 100 @1`. The debug server evaluates it on the halted core in its top stack frame (locals included). When it is zero, the core runs on before VS Code hears about the halt. The core still halts on every hit, so a breakpoint on a hot path slows the target down. Hit counts are not supported.
+
+### Data breakpoints
+
+Right-click a variable in the Variables or Watch view and choose **Break on Value Change** (or **Break on Value Read** / **Break on Value Access**), or add one at an address from the Breakpoints view (VS Code 1.90 and later). The core halts after the access, at the next instruction. A condition works as above, e.g. `g_mode == 3`.
+
+- **Globals** are watched by name on every TriCore core, so writes from any core are caught. They are resolved again when the ELF is rebuilt, and VS Code keeps them between sessions. Limit them with `@N` in the condition.
+- **Locals, and what a local pointer points to,** are watched at their fixed address on that core only, for the rest of the session.
+- **Core-local RAM** (`0xD000_0000`) means the copy of the core whose variable you picked (`CRASH_state@2`).
+- Each core has 8 hardware events, shared with breakpoints. A data breakpoint wider than one byte takes two, and catches every access that starts inside the variable. An access that starts below it and reaches into it is not caught, e.g. a 64-bit copy of the struct around it. When the hardware events run out, the breakpoint is shown unverified with the reason.
+- In the **Live Watch**, the same three entries are on the context menu of every row. The expression means what it means there, so `x@1` is core 1's copy. These work while the target runs. VS Code offers extensions no way to add data breakpoints to its view, so they show up as function breakpoints named `expression [access]`, e.g. `g_count [write]`. You can disable or remove them there, and they end with the debug session.
+- Watchpoints set through the debug server's API show up the same way.
 
 ### Watch global variables
 

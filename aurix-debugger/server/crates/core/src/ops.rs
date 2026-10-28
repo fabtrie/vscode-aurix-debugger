@@ -762,15 +762,28 @@ pub fn add_watchpoint(cx: &Cx, t: usize, addr: u32, len: u32, access: WatchAcces
 }
 
 pub fn remove_watchpoint(cx: &Cx, t: usize, addr: u32) -> Result<()> {
+    let id = cx.with(|c| c.targets[t].watchpoints.iter().find(|w| w.addr == addr).map(|w| w.id));
+    let id = id.ok_or_else(|| usage(format!("no watchpoint at address 0x{addr:08x} found")))?;
+    remove_watchpoint_id(cx, t, id)
+}
+
+/// Removes the watchpoint `id` (from [`add_watchpoint`]); unlike [`remove_watchpoint`] it is
+/// not ambiguous when several watch the same address.
+pub fn remove_watchpoint_id(cx: &Cx, t: usize, id: u32) -> Result<()> {
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
-        let pos = e
-            .watchpoints
-            .iter()
-            .position(|w| w.addr == addr)
-            .ok_or_else(|| usage(format!("no watchpoint at address 0x{addr:08x} found")))?;
+        let pos = e.watchpoints.iter().position(|w| w.id == id).ok_or_else(|| usage(format!("no watchpoint {id}")))?;
         let wp = e.watchpoints.remove(pos);
         e.core.remove_trigger(&mut io, wp.slot)
+    })
+}
+
+/// The watchpoint whose trigger halted target `t`, when the core can tell which one did.
+pub fn hit_watchpoint(cx: &Cx, t: usize) -> Option<Watchpoint> {
+    cx.with(|c| {
+        let e = &c.targets[t];
+        let slot = e.core.hit_trigger()?;
+        e.watchpoints.iter().find(|w| w.slot as usize == slot).cloned()
     })
 }
 

@@ -83,13 +83,20 @@ api! {
     /// Remove a breakpoint (also one set in VS Code). Returns the remaining breakpoints.
     op remove_breakpoint [breakpoints]: DELETE "/api/v1/breakpoints/{id}" (BreakpointRef) -> BreakpointList;
 
-    /// List the watchpoints (data breakpoints) of all targets.
+    /// List the watchpoints (data breakpoints) of all clients: the API's, VS Code's and those of
+    /// the Tcl console.
     op list_watchpoints [watchpoints]: GET "/api/v1/watchpoints" (NoArgs) -> WatchpointList;
 
-    /// Set a watchpoint: the target halts when it accesses the address.
+    /// Set a watchpoint on an address or a variable (`expression`): the target halts after an
+    /// access to it, with reason `watchpoint` and the PC at the instruction after the access.
+    ///
+    /// A watchpoint wider than one byte takes two of the 8 hardware events of a core (shared with
+    /// breakpoints) and catches every access that starts inside it; an access that starts below
+    /// it and reaches into it is not caught. It shows up in VS Code's Breakpoints view.
     op add_watchpoint [watchpoints]: POST "/api/v1/watchpoints" (AddWatchpointRequest) -> WatchpointInfo;
 
-    /// Remove a watchpoint. Returns the remaining watchpoints.
+    /// Remove a watchpoint (also one set in VS Code or the Tcl console). Returns the remaining
+    /// watchpoints.
     op remove_watchpoint [watchpoints]: DELETE "/api/v1/watchpoints" (WatchpointRef) -> WatchpointList;
 
     /// Program image files into flash (`flash write_images`).

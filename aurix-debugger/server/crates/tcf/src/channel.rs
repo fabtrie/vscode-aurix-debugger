@@ -253,8 +253,8 @@ impl Channel {
             ("Breakpoints", "getCapabilities") => Ok(vec![
                 String::new(),
                 json!({ "ID": CONTAINER, "Location": true, "FileLine": true, "ContextIds": true,
-                        "BreakpointType": true, "IgnoreCount": false, "Condition": false,
-                        "Temporary": false, "AccessMode": false }).to_string(),
+                        "BreakpointType": true, "IgnoreCount": false, "Condition": true,
+                        "Temporary": false, "AccessMode": true }).to_string(),
             ]),
 
             ("StackTrace", "getChildren") => self.st_children(a, None),

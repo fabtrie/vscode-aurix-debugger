@@ -304,6 +304,28 @@ export class LiveWatchInstance implements vscode.Disposable {
 		}
 	}
 
+	/**
+	 * Sets a data breakpoint on the row's expression, meant as the Live Watch means it (`x@1` is
+	 * core 1's copy). It shows up in the Breakpoints view as `expression [access]`.
+	 */
+	async addDataBreakpoint(arg: LiveWatchCommandArgument, access: 'write' | 'read' | 'readWrite'): Promise<void> {
+		const target = this.targetOf(arg);
+		if (!target?.expression) {
+			return;
+		}
+		const session = vscode.debug.activeDebugSession;
+		if (!session || session.type !== 'aurixdbg') {
+			void vscode.window.showWarningMessage('Data breakpoints can only be set during an AURIX debug session.');
+			return;
+		}
+		try {
+			const r = await session.customRequest('aurix/liveWatchDataBreakpoint', { expression: target.expression, access }) as { name?: string } | undefined;
+			vscode.window.setStatusBarMessage(`Data breakpoint ${r?.name ?? target.expression}`, 4000);
+		} catch (e) {
+			void vscode.window.showErrorMessage(e instanceof Error ? e.message : String(e));
+		}
+	}
+
 	async clearExpressions(): Promise<void> {
 		this.expressions.clear();
 		this.results.clear();

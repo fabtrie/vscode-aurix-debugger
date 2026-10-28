@@ -201,6 +201,21 @@
 				"category": "AURIX™ Debugger"
 			},
 			{
+				"command": "aurix-debugger.liveWatchBreakOnChange",
+				"title": "Break on Value Change",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchBreakOnRead",
+				"title": "Break on Value Read",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.liveWatchBreakOnAccess",
+				"title": "Break on Value Access",
+				"category": "AURIX™ Debugger"
+			},
+			{
 				"command": "aurix-debugger.liveWatchAddPeripheral",
 				"title": "Add to Live Watch",
 				"category": "AURIX™ Debugger",
@@ -420,6 +435,18 @@
 					"when": "false"
 				},
 				{
+					"command": "aurix-debugger.liveWatchBreakOnChange",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchBreakOnRead",
+					"when": "false"
+				},
+				{
+					"command": "aurix-debugger.liveWatchBreakOnAccess",
+					"when": "false"
+				},
+				{
 					"command": "aurix-debugger.liveWatchEditExpression",
 					"when": "false"
 				},
@@ -524,6 +551,21 @@
 					"command": "aurix-debugger.liveWatchCopyExpression",
 					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/",
 					"group": "2_copy@2"
+				},
+				{
+					"command": "aurix-debugger.liveWatchBreakOnChange",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/ && debugType == aurixdbg",
+					"group": "3_breakpoints@1"
+				},
+				{
+					"command": "aurix-debugger.liveWatchBreakOnRead",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/ && debugType == aurixdbg",
+					"group": "3_breakpoints@2"
+				},
+				{
+					"command": "aurix-debugger.liveWatchBreakOnAccess",
+					"when": "webviewId =~ /^aurixLiveWatch(Panel)?$/ && webviewSection =~ /^liveWatch\\.(root|child)/ && debugType == aurixdbg",
+					"group": "3_breakpoints@3"
 				},
 				{
 					"command": "aurix-debugger.liveWatchPauseExpression",

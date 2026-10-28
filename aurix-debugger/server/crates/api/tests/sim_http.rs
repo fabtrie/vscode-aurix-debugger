@@ -697,6 +697,153 @@ fn core_local_variables(http: &Http, vs: &mut Tcf) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A store of core `t` to `addr` in the simulator: halts it at an armed store trigger.
+fn sim_store(h: &ServerHandle, t: usize, addr: u32) -> bool {
+    h.call(move |cx| cx.with(|c| c.adapter.as_mut().unwrap().as_any_mut().downcast_mut::<aurix_core::sim::SimAdapter>().unwrap().store(t, addr)))
+        .unwrap()
+}
+
+/// Core watchpoints of target `t`, as (address, length).
+fn core_watchpoints(h: &ServerHandle, t: usize) -> Vec<(u32, u32)> {
+    h.call(move |cx| cx.with(|c| c.targets[t].watchpoints.iter().map(|w| (w.addr, w.len)).collect())).unwrap()
+}
+
+/// Waits for the SSE event `kind` of `target`.
+fn sse_event(sse: &Receiver<Value>, kind: &str, target: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let ev = sse.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap_or_else(|_| panic!("no {kind} event of {target}"));
+        if ev["type"] == kind && ev["target"] == target {
+            return ev;
+        }
+    }
+}
+
+/// Watchpoints on expressions, shared by the API and VS Code, with conditions.
+fn watchpoints(http: &Http, vs: &mut Tcf, h: &ServerHandle, sse: &Receiver<Value>) {
+    const CPU0: &str = "tc37x_ext.cpu0";
+    let c0 = tcf::cores(h).into_iter().find(|c| c.idx == 0).unwrap().id;
+    let dir = std::env::temp_dir().join(format!("aurix-watch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let elf = dir.join("watch.elf");
+    std::fs::write(&elf, dwarf_elf(&[("g_count", 0x7000_0400, false), ("g_pair", 0x9000_0500, true), ("CRASH_state", 0xD000_0100, false)])).unwrap();
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [format!("{}@1", tcl_path(elf))] })));
+    let watches = || http.ok("GET", "/api/v1/watchpoints", None)["watchpoints"].as_array().unwrap().clone();
+    let by_id = |id: &str| watches().into_iter().find(|w| w["id"] == id).unwrap_or_else(|| panic!("no watchpoint {id}"));
+    for t in 0..3 {
+        assert!(core_watchpoints(h, t).is_empty(), "core {t} starts without watchpoints");
+    }
+
+    // An expression on every TriCore core: its address and size come from the symbols.
+    let w = http.ok("POST", "/api/v1/watchpoints", Some(json!({ "expression": "g_count" })));
+    let count_id = w["id"].as_str().unwrap().to_string();
+    assert_eq!((w["owner"].as_str(), w["expression"].as_str(), w["access"].as_str()), (Some("api"), Some("g_count"), Some("write")), "{w}");
+    let inst = w["instances"].as_array().unwrap();
+    assert_eq!(inst.len(), 3, "{w}");
+    assert!(inst.iter().all(|i| i["address"] == 0x7000_0400u32 && i["length"] == 4 && i["error"].is_null()), "{w}");
+    assert_eq!(core_watchpoints(h, 0), vec![(0x7000_0400, 4)]);
+    let added = vs.event("Breakpoints", "contextAdded", &count_id);
+    assert!(added[3].contains("\"AccessMode\":2"), "VS Code sees a data breakpoint: {added:?}");
+    let bps = http.ok("GET", "/api/v1/breakpoints", None);
+    assert!(bps["breakpoints"].as_array().unwrap().iter().all(|b| b["id"] != count_id.as_str()), "a watchpoint is no breakpoint: {bps}");
+
+    // A byte store into the middle of the word halts (a range, not a single address), reported
+    // as a watchpoint stop at this watchpoint.
+    vs.events.clear();
+    http.ok("POST", &format!("/api/v1/targets/{CPU0}/halt"), None);
+    vs.event("RunControl", "contextSuspended", &c0);
+    http.ok("POST", &format!("/api/v1/targets/{CPU0}/resume"), Some(json!({})));
+    vs.event("RunControl", "contextResumed", &c0);
+    assert!(sim_store(h, 0, 0x7000_0402));
+    let st = vs.event("RunControl", "contextSuspended", &c0);
+    assert_eq!(st[5], json!("Watchpoint").to_string(), "{st:?}");
+    assert!(st[6].contains(&count_id), "{st:?}");
+    assert_eq!(by_id(&count_id)["hits"], 1);
+    assert!(!sim_store(h, 0, 0x7000_0404), "halted cores do not store");
+
+    // A condition: hits while it is false resume the core without a report.
+    let w = http.ok(
+        "POST",
+        "/api/v1/watchpoints",
+        Some(json!({ "expression": "g_pair.b", "target": CPU0, "condition": "g_pair.a == 5" })),
+    );
+    let pair_id = w["id"].as_str().unwrap().to_string();
+    assert_eq!((w["instances"][0]["address"].as_u64(), w["instances"][0]["length"].as_u64()), (Some(0x9000_0504), Some(4)), "{w}");
+    assert_eq!(w["condition"], "g_pair.a == 5");
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x90000500", "data": "00000000" })));
+    http.ok("POST", &format!("/api/v1/targets/{CPU0}/resume"), Some(json!({})));
+    vs.event("RunControl", "contextResumed", &c0);
+    vs.events.clear();
+    while sse.try_recv().is_ok() {}
+    assert!(sim_store(h, 0, 0x9000_0504));
+    sse_event(sse, "halted", CPU0);
+    sse_event(sse, "resumed", CPU0);
+    vs.command("RunControl", "getState", &[json!(c0)]);
+    assert!(!vs.events.iter().any(|m| m[2] == "contextSuspended"), "a false condition is not reported: {:?}", vs.events);
+    assert_eq!(by_id(&pair_id)["hits"], 0);
+    // True: reported, at this watchpoint only (g_count is armed on the core as well).
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x90000500", "data": "05000000" })));
+    assert!(sim_store(h, 0, 0x9000_0504));
+    let st = vs.event("RunControl", "contextSuspended", &c0);
+    assert!(st[6].contains(&pair_id) && !st[6].contains(&count_id), "{st:?}");
+    assert_eq!(by_id(&pair_id)["hits"], 1);
+
+    // Core-local RAM of core 1 (the file's core): its local address there, the global one on the
+    // other cores, since the local alias never matches the global address.
+    let w = http.ok("POST", "/api/v1/watchpoints", Some(json!({ "expression": "CRASH_state" })));
+    let at: Vec<(String, u64)> = w["instances"].as_array().unwrap().iter().map(|i| (i["target"].as_str().unwrap().to_string(), i["address"].as_u64().unwrap())).collect();
+    assert_eq!(
+        at,
+        [("tc37x_ext.cpu0".to_string(), 0x6000_0100), ("tc37x_ext.cpu1".to_string(), 0xD000_0100), ("tc37x_ext.cpu2".to_string(), 0x6000_0100)],
+        "{w}"
+    );
+
+    // VS Code on the same object shares the core watchpoint; it stays when the API's goes.
+    let r = vs.command("Breakpoints", "add", &[json!({ "ID": "vs-w1", "Enabled": true, "Location": "g_count", "AccessMode": 2, "ContextIds": [c0] })]);
+    assert_eq!(r[0], "", "{r:?}");
+    let n0 = core_watchpoints(h, 0).len();
+    http.ok("DELETE", "/api/v1/watchpoints", Some(json!({ "id": count_id })));
+    assert_eq!(core_watchpoints(h, 0).len(), n0, "VS Code's keeps the core watchpoint");
+    assert_eq!(by_id("vs-w1")["owner"], "client");
+    vs.command("Breakpoints", "remove", &[json!(["vs-w1"])]);
+    assert!(!core_watchpoints(h, 0).contains(&(0x7000_0400, 4)));
+
+    // The Tcl console's watchpoints are listed too, and can be removed by ID.
+    http.ok("POST", "/api/v1/tcl", Some(json!({ "command": "wp 0x70000600 1 w" })));
+    let console = watches().into_iter().find(|w| w["owner"] == "console").expect("console watchpoint");
+    assert_eq!(console["instances"][0]["address"], 0x7000_0600u32);
+    http.ok("DELETE", "/api/v1/watchpoints", Some(json!({ "id": console["id"] })));
+    assert!(!watches().iter().any(|w| w["owner"] == "console"));
+
+    // Errors: nothing to watch, a name that is not there, no free pair of hardware events
+    // (cpu0: g_pair.b and CRASH_state take four of eight, and two ranges more fill it).
+    let (status, e) = http.request("POST", "/api/v1/watchpoints", Some(json!({ "target": CPU0 })), &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    let (status, e) = http.request("POST", "/api/v1/watchpoints", Some(json!({ "expression": "no_such_var" })), &[]);
+    assert_eq!(status, 400, "{e}");
+    assert!(watches().iter().all(|w| w["expression"] != "no_such_var"), "a failed watchpoint is not kept");
+    for a in [0x7000_0700u32, 0x7000_0710] {
+        http.ok("POST", "/api/v1/watchpoints", Some(json!({ "address": a, "length": 8, "target": CPU0 })));
+    }
+    let (status, e) = http.request("POST", "/api/v1/watchpoints", Some(json!({ "address": "0x70000720", "length": 2, "target": CPU0 })), &[]);
+    assert_eq!(e["code"], "resource", "{status} {e}");
+    assert!(e["message"].as_str().unwrap().contains("two"), "{e}");
+    let (_, e) = http.request("POST", "/api/v1/watchpoints", Some(json!({ "address": "0x70000720", "length": 1, "target": CPU0 })), &[]);
+    assert_eq!(e["code"], "resource", "all eight are in use: {e}");
+
+    // By target and address; then the rest.
+    http.ok("DELETE", "/api/v1/watchpoints", Some(json!({ "target": CPU0, "address": "0x70000700" })));
+    for w in watches() {
+        http.ok("DELETE", "/api/v1/watchpoints", Some(json!({ "id": w["id"] })));
+    }
+    assert!(watches().is_empty());
+    for t in 0..3 {
+        assert!(core_watchpoints(h, t).is_empty(), "core {t}: {:?}", core_watchpoints(h, t));
+    }
+    http.ok("POST", &format!("/api/v1/targets/{CPU0}/halt"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Struct members and array elements, against a real application ELF (`AURIX_TEST_ELF`).
 fn variables_of_real_elf(http: &Http) {
     let Some(elf) = std::env::var_os("AURIX_TEST_ELF").map(PathBuf::from).filter(|p| p.is_file()) else {
@@ -1287,6 +1434,7 @@ fn rest_mcp_and_tcf_share_one_session() {
 
     variables(&http, &mut vs);
     core_local_variables(&http, &mut vs);
+    watchpoints(&http, &mut vs, &h, &sse);
     variables_of_real_elf(&http);
 
     // Web pages of other sites must not drive the debugger.

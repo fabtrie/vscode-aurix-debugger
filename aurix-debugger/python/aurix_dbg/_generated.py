@@ -31,7 +31,7 @@ def _args(d):
     return {k: v for k, v in d.items() if v is not None}
 
 
-BreakpointOwner = Literal["api", "client"]
+BreakpointOwner = Literal["api", "client", "console"]
 """Who set a breakpoint."""
 
 ErrorCode = Literal["bad_request", "not_found", "not_halted", "not_examined", "busy", "timeout", "memory", "adapter", "device_locked", "device_access", "resource", "failed"]
@@ -90,6 +90,7 @@ class BreakpointInfo:
     owner: BreakpointOwner
     address: int | None = None
     """Requested code address."""
+    condition: str | None = None
     error: str | None = None
     """Why it is not planted (e.g. symbols not loaded yet: it is planted once they are)."""
     file: str | None = None
@@ -108,6 +109,7 @@ class BreakpointInfo:
             instances=_list(BreakpointInstance, d.get("instances")),
             owner=d.get("owner"),
             address=d.get("address"),
+            condition=d.get("condition"),
             error=d.get("error"),
             file=d.get("file"),
             line=d.get("line"),
@@ -760,23 +762,61 @@ class VariableValue:
 
 @dataclass
 class WatchpointInfo:
-    """A watchpoint."""
+    """A watchpoint (data breakpoint)."""
 
     access: WatchAccess
-    address: int
-    id: int
-    length: int
-    target: str
-    """Target name."""
+    enabled: bool
+    hits: int
+    """Number of hits reported to debugger clients (not counting those whose condition was
+    false)."""
+    id: str
+    """Watchpoint ID."""
+    instances: list[WatchpointInstance]
+    """Where it is planted."""
+    owner: BreakpointOwner
+    address: int | None = None
+    """Requested data address."""
+    condition: str | None = None
+    error: str | None = None
+    """Why it is not planted (e.g. symbols not loaded yet: it is planted once they are)."""
+    expression: str | None = None
+    """Requested expression."""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> WatchpointInfo:
         return cls(
             access=d.get("access"),
-            address=d.get("address"),
+            enabled=d.get("enabled"),
+            hits=d.get("hits"),
             id=d.get("id"),
+            instances=_list(WatchpointInstance, d.get("instances")),
+            owner=d.get("owner"),
+            address=d.get("address"),
+            condition=d.get("condition"),
+            error=d.get("error"),
+            expression=d.get("expression"),
+        )
+
+
+@dataclass
+class WatchpointInstance:
+    """Where a watchpoint is planted on one target."""
+
+    address: int
+    """Address as this target accesses it (core-local RAM: the local address on its own core)."""
+    length: int
+    target: str
+    """Target name."""
+    error: str | None = None
+    """Why it could not be planted (e.g. no free hardware event)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> WatchpointInstance:
+        return cls(
+            address=d.get("address"),
             length=d.get("length"),
             target=d.get("target"),
+            error=d.get("error"),
         )
 
 
@@ -940,7 +980,7 @@ class GeneratedClient:
         """
         return BreakpointList.from_dict(self._call("GET", "/api/v1/breakpoints", None, None))
 
-    def add_breakpoint(self, *, address: int | str | None = None, file: str | None = None, line: int | None = None, symbol: str | None = None, targets: list[str] | None = None) -> BreakpointInfo:
+    def add_breakpoint(self, *, address: int | str | None = None, condition: str | None = None, file: str | None = None, line: int | None = None, symbol: str | None = None, targets: list[str] | None = None) -> BreakpointInfo:
         """Set a hardware breakpoint at an address, function or source line.
 
         The breakpoint is shared with the connected debugger clients: VS Code reports its hits.
@@ -949,12 +989,13 @@ class GeneratedClient:
 
         Args:
             address: Code address.
+            condition: C expression evaluated on the halted core (in its top stack frame): a hit only halts when it is not zero, e.g. `count > 100`. Otherwise the core is resumed at once.
             file: Source file (with `line`); needs the symbols loaded by a VS Code debug session.
             line: Source line in `file`.
             symbol: Function name; needs the symbols loaded by a VS Code debug session.
             targets: Targets (names or indices) to break on; default: all examined targets.
         """
-        return BreakpointInfo.from_dict(self._call("POST", "/api/v1/breakpoints", None, _args({"address": address, "file": file, "line": line, "symbol": symbol, "targets": targets})))
+        return BreakpointInfo.from_dict(self._call("POST", "/api/v1/breakpoints", None, _args({"address": address, "condition": condition, "file": file, "line": line, "symbol": symbol, "targets": targets})))
 
     def remove_breakpoint(self, id: str) -> BreakpointList:
         """Remove a breakpoint (also one set in VS Code). Returns the remaining breakpoints.
@@ -965,29 +1006,39 @@ class GeneratedClient:
         return BreakpointList.from_dict(self._call("DELETE", f"/api/v1/breakpoints/{quote(str(id), safe='')}", None, None))
 
     def list_watchpoints(self) -> WatchpointList:
-        """List the watchpoints (data breakpoints) of all targets.
+        """List the watchpoints (data breakpoints) of all clients: the API's, VS Code's and those of
+        the Tcl console.
         """
         return WatchpointList.from_dict(self._call("GET", "/api/v1/watchpoints", None, None))
 
-    def add_watchpoint(self, *, address: int | str, target: str, access: WatchAccess | None = None, length: int | None = None) -> WatchpointInfo:
-        """Set a watchpoint: the target halts when it accesses the address.
+    def add_watchpoint(self, *, access: WatchAccess | None = None, address: int | str | None = None, condition: str | None = None, expression: str | None = None, length: int | None = None, target: str | None = None) -> WatchpointInfo:
+        """Set a watchpoint on an address or a variable (`expression`): the target halts after an
+        access to it, with reason `watchpoint` and the PC at the instruction after the access.
+
+        A watchpoint wider than one byte takes two of the 8 hardware events of a core (shared with
+        breakpoints) and catches every access that starts inside it; an access that starts below
+        it and reaches into it is not caught. It shows up in VS Code's Breakpoints view.
 
         Args:
-            address: Data address.
-            target: Target name or index.
             access: Triggering access (default `write`).
-            length: Watched bytes (default 4).
+            address: Data address.
+            condition: C expression evaluated on the halted core (in its top stack frame): a hit only halts when it is not zero, e.g. `g_motor.speed > 100`. Otherwise the core is resumed at once, which still costs a halt on every access.
+            expression: C expression of the watched object instead of an address, as `evaluate` takes it (`g_motor.speed`, `g_buf[3]`, `CRASH_state@2`). Its address and size come from the symbols, and are looked up again when other symbols are loaded. A variable in core-local RAM is watched at its local address on its own core and at its global address on the other cores.
+            length: Watched bytes; default: the size of the expression's type, or 4 for an address.
+            target: Target name or index; default: every TriCore core.
         """
-        return WatchpointInfo.from_dict(self._call("POST", "/api/v1/watchpoints", None, _args({"address": address, "target": target, "access": access, "length": length})))
+        return WatchpointInfo.from_dict(self._call("POST", "/api/v1/watchpoints", None, _args({"access": access, "address": address, "condition": condition, "expression": expression, "length": length, "target": target})))
 
-    def remove_watchpoint(self, *, address: int | str, target: str) -> WatchpointList:
-        """Remove a watchpoint. Returns the remaining watchpoints.
+    def remove_watchpoint(self, *, address: int | str | None = None, id: str | None = None, target: str | None = None) -> WatchpointList:
+        """Remove a watchpoint (also one set in VS Code or the Tcl console). Returns the remaining
+        watchpoints.
 
         Args:
-            address: Data address.
-            target: Target name or index.
+            address: Data address (with `target`): removes the watchpoint planted there, on all its targets.
+            id: Watchpoint ID.
+            target: Target name or index (with `address`).
         """
-        return WatchpointList.from_dict(self._call("DELETE", "/api/v1/watchpoints", _args({"address": address, "target": target}), None))
+        return WatchpointList.from_dict(self._call("DELETE", "/api/v1/watchpoints", _args({"address": address, "id": id, "target": target}), None))
 
     def flash_write(self, *, files: list[str | dict[str, Any]], erase: bool | None = None, incremental: bool | None = None, verify: bool | None = None) -> CommandOutput:
         """Program image files into flash (`flash write_images`).

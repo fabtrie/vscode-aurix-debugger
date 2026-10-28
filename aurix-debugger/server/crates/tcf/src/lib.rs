@@ -29,13 +29,13 @@ use serde_json::{Map, Value};
 use aurix_core::unwind::Frame;
 use aurix_core::{log_info, log_warn, ServerHandle};
 
-use breakpoints::BpTable;
+use breakpoints::{BpTable, Resolver};
 use channel::Writer;
 use expressions::ExprTable;
 pub use expressions::{evaluate_global, home_core, split_core, symbol_ref, CoreSel, GlobalError, GlobalValue};
 pub use symstore::{elf_id, Elf, SymbolSet, SymbolStore};
 
-pub use breakpoints::{Bp, Instance};
+pub use breakpoints::{access_bits, Bp, Instance, Kind};
 pub use contexts::{core_id, cores, owning_core, CoreInfo, CONTAINER};
 
 /// Owner of the breakpoints set through the REST/MCP API (TCF channel IDs start at 1). They
@@ -140,6 +140,8 @@ impl Shared {
         let mut statuses = Vec::new();
         let removed: Vec<String>;
         let syms = |ctx: &str| self.symbols_for(ctx);
+        let data = |c: &CoreInfo, text: &str| expressions::watch_range(self, c, text);
+        let r = Resolver { syms: &syms, data: &data };
         {
             let mut t = self.bps.lock().unwrap();
             let new_ids: Vec<String> = list.iter().filter_map(|p| p.get("ID").and_then(Value::as_str).map(str::to_string)).collect();
@@ -163,7 +165,7 @@ impl Shared {
                 }
                 // A change (e.g. enable) keeps the breakpoint with the client that created it.
                 let own = props.get("ID").and_then(Value::as_str).and_then(|id| t.bps.get(id)).map_or(owner, |b| b.owner);
-                let (id, existed) = t.insert(&self.handle, props, own, &syms)?;
+                let (id, existed) = t.insert(&self.handle, props, own, &r)?;
                 let bp = &t.bps[&id];
                 if bp.planted() || !bp.enabled() {
                     if existed {
@@ -209,8 +211,9 @@ impl Shared {
         let mut statuses = Vec::new();
         {
             let syms = |ctx: &str| self.symbols_for(ctx);
+            let data = |c: &CoreInfo, text: &str| expressions::watch_range(self, c, text);
             let mut t = self.bps.lock().unwrap();
-            for id in t.reresolve(&self.handle, &syms) {
+            for id in t.reresolve(&self.handle, &Resolver { syms: &syms, data: &data }) {
                 if t.bps[&id].planted() {
                     added.push(t.bps[&id].props.clone());
                 }
@@ -223,6 +226,12 @@ impl Shared {
     /// All breakpoints by ID.
     pub fn breakpoints(&self) -> Vec<(String, Bp)> {
         self.bps.lock().unwrap().bps.iter().map(|(id, b)| (id.clone(), b.clone())).collect()
+    }
+
+    /// The core watchpoints the session's data breakpoints planted, as (target, watchpoint ID);
+    /// any other one was set on the core directly (Tcl `wp`).
+    pub fn session_watchpoints(&self) -> Vec<(usize, u32)> {
+        self.bps.lock().unwrap().core_watchpoints()
     }
 
     /// The breakpoint `id` with its TCF status (`Instances`, `Error`).

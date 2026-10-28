@@ -73,8 +73,17 @@ export interface BreakpointData {
     Location?: string;
     BreakpointType?: BreakpointType;
     ContextIds?: string[];
+    /** A data breakpoint: `AccessMode` bits (read 1, write 2), watching `Size` bytes. */
+    AccessMode?: number;
+    Size?: number;
+    /** C expression the server evaluates on a hit; the core is resumed when it is zero. */
+    Condition?: string;
     //TODO: ... and many more properties
 }
+
+/** TCF `AccessMode` bits of a data breakpoint. */
+export const ACCESS_READ = 0x01;
+export const ACCESS_WRITE = 0x02;
 /* eslint-enable */
 
 //see https://download.eclipse.org/tools/tcf/tcf-docs/TCF%20Service%20-%20Breakpoints.html#CmdSet

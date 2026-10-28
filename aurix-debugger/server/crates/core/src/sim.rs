@@ -380,6 +380,34 @@ impl SimAdapter {
         }
     }
 
+    /// A store of core `i` (running) to `addr`: halts it at an armed store trigger as the chip
+    /// does, after the store. A trigger compares the start address of the access: equal to its
+    /// address, or for a range in `[TRxADR, TRx+1ADR)`. Returns whether the core halted.
+    pub fn store(&mut self, i: usize, addr: u32) -> bool {
+        if self.halted[i] {
+            return false;
+        }
+        let base = 0xF881_0000 + 0x2_0000 * i as u32;
+        let word = |s: &Self, a: u32| *s.mem.get(&a).unwrap_or(&0);
+        let mut n = 0;
+        while n < 8u32 {
+            let evt = word(self, base + 0xF000 + 8 * n);
+            let range = evt & (1 << 13) != 0;
+            if evt & (1 << 12) == 0 && evt & 7 != 0 && (evt >> 27) & 1 != 0 {
+                let lo = word(self, base + 0xF004 + 8 * n);
+                let hit = if range { (lo..word(self, base + 0xF004 + 8 * (n + 1))).contains(&addr) } else { addr == lo };
+                if hit {
+                    self.halted[i] = true;
+                    self.evtsrc[i] = 16 + n;
+                    self.pc[i] = self.pc[i].wrapping_add(4);
+                    return true;
+                }
+            }
+            n += if range { 2 } else { 1 };
+        }
+        false
+    }
+
     fn resume_core(&mut self, i: usize) {
         self.halted[i] = false;
         let base = 0xF881_0000 + 0x2_0000 * i as u32;

@@ -193,6 +193,89 @@ impl TasAdapter {
 /// Interval of device connect attempts while no device is connected.
 const CONNECT_RETRY: Duration = Duration::from_millis(500);
 
+/// How long a TasServer started by [`start_local_server`] gets to accept connections.
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Connect timeout of [`server_listening`]. A server on this host accepts within microseconds.
+const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
+fn is_local(host: &str) -> bool {
+    matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Whether something accepts connections on `port` of this host. Windows retries a refused SYN
+/// on loopback for ~2 s before it reports the refusal, so a plain connect takes that long to
+/// find that no server runs; a short timeout gives the same answer at once.
+fn server_listening(port: u16) -> bool {
+    // TasServer listens on IPv4 only.
+    std::net::TcpStream::connect_timeout(&(std::net::Ipv4Addr::LOCALHOST, port).into(), LOCAL_PROBE_TIMEOUT).is_ok()
+}
+
+/// Starts the local TasServer when Infineon's own TAS clients (DAS, Memtool) would: they run
+/// `start_tas_server.bat` from `TAS_INSTALL_DIR`, its `bin` or its `servers` folder (the DAS
+/// installer sets the variable). That script checks the Visual C++ runtime with
+/// `check_redistributable.exe` and then runs `tas_server.exe` - and waits for it in a console
+/// window that stays open as long as the server runs. Doing the two steps here needs no window:
+/// `tas_server.exe` is a GUI program (tray icon). Without DAS, `tas_server.exe` from `PATH` (DAS
+/// also puts it into System32). Returns the program started.
+///
+/// It is started through `cmd /c start`: the server outlives this process and is shared with
+/// other TAS clients, so it must not be its child. The `cmd` in between exits at once, which also
+/// keeps the server out of a `taskkill /T` of this process.
+#[cfg(windows)]
+fn start_local_server() -> Result<std::path::PathBuf> {
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let find = |dirs: Vec<PathBuf>| dirs.into_iter().map(|d| d.join("tas_server.exe")).find(|p| p.is_file());
+    let das = std::env::var_os("TAS_INSTALL_DIR")
+        .map(PathBuf::from)
+        .and_then(|dir| find(["", "bin", "servers"].iter().map(|sub| dir.join(sub)).collect()));
+    let program = das
+        .or_else(|| std::env::var_os("PATH").and_then(|path| find(std::env::split_paths(&path).collect())))
+        .ok_or_else(|| {
+            Error::Adapter(
+                "TAS: no TasServer running, and none to start (no tas_server.exe under TAS_INSTALL_DIR \
+                 or on PATH) - install Infineon DAS"
+                    .into(),
+            )
+        })?;
+    let dir = program.parent().unwrap_or(&program);
+    let check = dir.join("check_redistributable.exe");
+    if check.is_file() {
+        let out = Command::new(&check)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| Error::Adapter(format!("TAS: cannot run {}: {e}", check.display())))?;
+        if !out.status.success() {
+            return Err(Error::Adapter(format!(
+                "TAS: no TasServer running, and it cannot be started: {} failed ({}) - install or repair the \
+                 Microsoft Visual C++ redistributable. {}",
+                check.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stdout).trim()
+            )));
+        }
+    }
+    Command::new("cmd")
+        .raw_arg(format!("/c start \"\" /d \"{}\" \"{}\"", dir.display(), program.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| Error::Adapter(format!("TAS: cannot start {}: {e}", program.display())))?;
+    Ok(program)
+}
+
+#[cfg(not(windows))]
+fn start_local_server() -> Result<std::path::PathBuf> {
+    Err(Error::Adapter("TAS: no TasServer running (it is only started automatically on Windows)".into()))
+}
+
 impl Adapter for TasAdapter {
     fn driver_name(&self) -> &'static str {
         "tas_client"
@@ -258,9 +341,18 @@ impl Adapter for TasAdapter {
 
     /// Connects to the TasServer. The device may be missing (target not powered): the server then
     /// starts anyway and every access tries to connect it again (see [`Self::connect_device`]).
+    /// A local TasServer that is not running (e.g. after a reboot) is started first.
     fn init(&mut self, s: &AdapterSettings) -> Result<DeviceInfo> {
-        let (c, info) = TasClient::connect(&self.host, self.port, "aurix-dbg")
-            .map_err(|e| Error::Adapter(format!("TAS: cannot connect to TasServer at {}:{}: {e}", self.host, self.port)))?;
+        let cannot = |e: tas::Error| Error::Adapter(format!("TAS: cannot connect to TasServer at {}:{}: {e}", self.host, self.port));
+        if is_local(&self.host) && !server_listening(self.port) {
+            let program = start_local_server()?;
+            log_info!("TAS: no TasServer running, started {}", program.display());
+            let deadline = Instant::now() + SERVER_START_TIMEOUT;
+            while !server_listening(self.port) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let (c, info) = TasClient::connect(&self.host, self.port, "aurix-dbg").map_err(cannot)?;
         log_info!("TAS: {} v{}.{}", info.name, info.v_major, info.v_minor);
         self.client = Some(c);
         self.settings = s.clone();

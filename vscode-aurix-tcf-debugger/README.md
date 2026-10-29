@@ -28,7 +28,7 @@ The extension uses `aurix-dbg`, a debug server that reaches the target through I
 
 - Windows (x64)
 - Visual Studio Code 1.79.0 or higher
-- Infineon `tas_server` (TAS) and a miniWiggler/DAP probe
+- Infineon `tas_server` (TAS, installed with Infineon DAS) and a miniWiggler/DAP probe. If the server isn't running, `aurix-dbg` starts it.
 - OpenOCD configuration scripts for the board. OpenOCD's own scripts (`board/`, `target/`, ...) are bundled; the TC3xx setup [`tc3xx_ocds.cfg`](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/tc3xx_ocds.cfg) and a board file like [`tc37x_ocds_init.cfg`](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/tc37x_ocds_init.cfg) come from the `aurix-debugger` folder
 - Peripheral Inspector extension (installed automatically as a dependency)
 - Memory Inspector extension (installed automatically as a dependency)

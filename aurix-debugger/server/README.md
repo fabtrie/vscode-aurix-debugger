@@ -414,6 +414,8 @@ Only the core thread touches the adapter and the Tcl interpreter. Frontends use 
 | `sim` | built-in TC37x model | as above, against the model |
 | `winidea` | **iSYSTEM BlueBox**, through a winIDEA instance | winIDEA's |
 
+If no `tas_server` is running on the local host (after a reboot, say), `init` starts one, as Infineon's own TAS clients do. It takes `tas_server.exe` from `TAS_INSTALL_DIR`, or from its `bin` or `servers` folder (the DAS installer sets that variable), and otherwise from `PATH`. First it runs `check_redistributable.exe` from the same folder, as `start_tas_server.bat` does, but without that script's console window. The server keeps running after `aurix-dbg` exits, with only its tray icon showing. A `tas-client host` on another machine is never started.
+
 ### How the winIDEA backend differs
 
 winIDEA is itself a debugger and owns OCDS, so it will not let a second master drive the debug registers underneath it. The backend therefore sits at two levels:

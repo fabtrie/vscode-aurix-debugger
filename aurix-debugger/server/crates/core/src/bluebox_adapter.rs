@@ -25,7 +25,11 @@
 //! bluebox attach_replay C:/traces/x.jsonl ;# optional; another target or setup
 //! ```
 //!
-//! Reset is not decoded either: `reset` fails on this driver.
+//! `reset run|halt|init` reset the chip with the probe's reset (`bluebox::reset`),
+//! which always halts cpu0 at its start address. For `reset run` the core treats
+//! it as a halting reset (so `tc3xx_ocds.cfg` starts the HSM as after `reset
+//! halt`) and resumes the halted cores after `reset-end`.
+//! `reset_config connect_assert_srst` resets and halts right after connecting.
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -46,6 +50,7 @@ type Probe = bluebox::Probe<bluebox::usb::UsbLink>;
 #[derive(Default)]
 pub struct BlueBoxAdapter {
     replay: Option<(PathBuf, String)>,
+    srst_pending: bool,
     kernel: Option<PathBuf>,
     #[cfg(windows)]
     probe: Option<Probe>,
@@ -55,6 +60,18 @@ pub struct BlueBoxAdapter {
 impl BlueBoxAdapter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reset with halt (see [`Adapter::deassert_srst`]).
+    #[cfg(windows)]
+    fn reset(&mut self) -> Result<()> {
+        let st = self.probe()?.reset_halt().map_err(|e| other(format!("bluebox: reset: {e}")))?;
+        if st.halted() {
+            crate::log_info!("[bluebox] reset; cpu0 halted at 0x{:08x}", st.pc);
+        } else {
+            crate::log_warn!("[bluebox] after the reset cpu0 is not halted (DBGSR 0x{:08x})", st.dbgsr);
+        }
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -128,6 +145,11 @@ impl BlueBoxAdapter {
             )));
         }
         let chipid = u32::from_le_bytes(id.data[..4].try_into().unwrap());
+        if settings.connect_under_srst {
+            // `reset_config connect_assert_srst`: connect with reset and halt.
+            let st = probe.reset_halt().map_err(bb)?;
+            crate::log_info!("[bluebox] connected under reset; cpu0 halted at 0x{:08x}", st.pc);
+        }
         self.status = format!("{path}, SCU_CHIPID 0x{chipid:08x}");
         self.status.push_str(&format!(", {kernel_note}, {script_note}"));
         self.probe = Some(probe);
@@ -247,12 +269,35 @@ impl Adapter for BlueBoxAdapter {
         BatchLimits { max_num_rw: 16, max_rq: bluebox::MAX_CHUNK, max_rsp: bluebox::MAX_CHUNK }
     }
 
+    /// Records the request: the probe has no assert/release split. The reset
+    /// happens in [`Adapter::deassert_srst`], where the halt-or-run choice is known.
     fn assert_srst(&mut self) -> Result<()> {
-        Err(other("bluebox: reset is not decoded yet"))
+        if !self.initialized() {
+            return Err(Error::Usage(NOT_CONNECTED.into()));
+        }
+        self.srst_pending = true;
+        Ok(())
     }
 
+    /// The whole reset (`bluebox::reset`): the chip resets and cpu0 halts at
+    /// its start address. There is no reset without halt; for `reset run` the
+    /// core resumes afterwards ([`Adapter::reset_always_halts`]).
     fn deassert_srst(&mut self, _halt_after_reset: bool) -> Result<()> {
-        Err(other("bluebox: reset is not decoded yet"))
+        if !std::mem::take(&mut self.srst_pending) {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            self.reset()
+        }
+        #[cfg(not(windows))]
+        {
+            Err(Error::Usage(NOT_CONNECTED.into()))
+        }
+    }
+
+    fn reset_always_halts(&self) -> bool {
+        true
     }
 
     fn take_resets(&mut self) -> u64 {
@@ -301,6 +346,7 @@ mod tests {
         b.read32(0x7000_0000);
         assert!(matches!(a.execute(&b), Err(Error::Usage(_))));
         assert!(a.run_control().is_none());
-        assert!(a.assert_srst().is_err());
+        assert!(a.assert_srst().is_err(), "no reset before init");
+        assert!(a.deassert_srst(true).is_ok(), "nothing pending: nothing to do");
     }
 }

@@ -11,6 +11,12 @@ The protocol was read off USB captures of winIDEA 9.21.356 driving a TC377. The 
 
 Neither step resets the target. Every `init` runs both: the probe keeps no session across connects.
 
+## Reset
+
+`reset` (`src/reset.rs`): three of the 151 messages winIDEA's `CExecutionController.reset()` sends. `//2///7/ 01`, then `//7///7/` with eight zero bytes (the reset), then `//2///38/ 01`, which reconnects and returns cpu0's `DBGSR` and PC. The chip resets and cpu0 halts at its start address (`0x800a8000` here).
+
+There is no reset without halt. The driver says so (`Adapter::reset_always_halts`): `reset run` runs as a halting reset, so `tc3xx_ocds.cfg`'s reset hooks see halted cores and start the HSM. Then the core resumes the halted cores through the normal resume path.
+
 ## What works (tested on hardware, TC377TP, iC5700 A)
 
 - Connecting with nothing but the probe and `iC6kKrnl.s`: after a power cycle of the BlueBox and with the kernel running, both through `aurix-dbg`. The target kept running (STM0 uptime kept counting).
@@ -18,6 +24,11 @@ Neither step resets the target. Every `init` runs both: the probe keeps no sessi
   - Reads from 1 byte to 64 KiB, split into 8 KiB requests.
   - About 1.2 ms per small access; 0.3 MB/s on long reads.
   - A refused write (read-only register) is reported failed. A write of RAM reads back.
+- Reset, through `aurix-dbg` with the board cfg plus `tc37x_ocds_init.cfg` (MCS targets off):
+  - `reset halt`: the chip restarts (STM0 uptime about 0.4 s), cpu0 halts at `0x800a8000`, the cfg's hooks run (HSM found at its boot-ROM breakpoint, STM suspend set). About 0.8 s.
+  - `resume` after it starts the application: cpu0 and cpu1 run.
+  - `reset run`: the chip restarts, cpu0 and cpu1 run. About 0.8 s.
+  - With the board cfg alone, cpu1 stays in boot halt after any reset: the boot ROM halts the HSM on a halting reset, and only the cfg starts it again.
 - Run control through OCDS register accesses, with the board cfg plus `tc37x_ocds_init.cfg` (MCS and HSM targets off). Tested with the earlier replay-based attach:
   - `init` examines all three cores.
   - `halt` takes 17 ms and stops cpu0 and cpu1 together over trigger line 1.
@@ -35,7 +46,7 @@ Neither step resets the target. Every `init` runs both: the probe keeps no sessi
 - **The kernel does not survive our sessions.** After a run of this crate the next handshake usually finds no kernel; winIDEA's close leaves it running. The driver reloads it (260 ms). A proper close is not decoded.
 - **The `I` answer** showed a third value once (`01`, besides `00` = no kernel and `2f` = kernel). It is treated as "kernel running"; that worked.
 - **FPGA image.** The debug FPGA keeps its image across power cycles; winIDEA replaces it only when the hash differs (another winIDEA version). This crate does not check or load it.
-- **Reset.** `reset` fails on this driver.
+- **Reset without halt.** Not found: winIDEA's `resetAndRun()` also resets with halt and runs afterwards.
 - **JTAG id.** Not read; `DeviceInfo.device_id` is 0.
 - **Trigger setup.** The attach enables capture-and-hold on trigger line 1, so any halt holds all cores until `CBS_TLCHS` is written. Load `tc3xx_ocds.cfg`, whose resume and step hooks do that. Without it, the cores stay held.
 - **Resets after resume (open).** Twice, the target dropped off the debug port right after `resume` released trigger line 1, and the chip restarted. The suspect is the board's SBC watchdog. After such a reset the driver does not reconnect by itself: restart the server.
@@ -45,6 +56,7 @@ Neither step resets the target. Every `init` runs both: the probe keeps no sessi
 ```bash
 # winIDEA must be closed; MinGW on PATH for the GNU toolchain (see rust-toolchain.toml)
 cargo run -p bluebox --example probe -- --attach [--watch 2]           # bring-up + built-in attach
+    [--then <trace> <step> [--then-only a-b,c] [--then-skip a-b]]...  # then captured steps, e.g. "reset: reset()"
 cargo run -p bluebox --example probe -- --script <trace.jsonl> [--until-a] [--skip a-b,c] [--drop path:b0:len]
     [--list | --export <file>] [--watch 2]                              # try or reduce a captured attach
 cargo run -p bluebox --example probe -- --replay <trace.jsonl>          # byte-for-byte playback (resets the target)

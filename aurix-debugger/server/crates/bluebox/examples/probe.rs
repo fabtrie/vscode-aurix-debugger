@@ -60,6 +60,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut list = false;
     let mut builtin_attach = false;
     let mut until_a = false;
+    // Captured steps to send after the attach: (trace, step, only these, skip these).
+    #[allow(clippy::type_complexity)]
+    let mut then: Vec<(std::path::PathBuf, String, Vec<usize>, Vec<(usize, usize)>)> = Vec::new();
     let mut drop_kinds: Vec<(String, u8, usize)> = Vec::new();
     let mut export: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
@@ -79,6 +82,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--list" => list = true,
             "--attach" => builtin_attach = true,
             "--until-a" => until_a = true,
+            "--then" => {
+                let t = val()?;
+                let st = val()?;
+                then.push((std::path::PathBuf::from(t), st, Vec::new(), Vec::new()));
+            }
+            "--then-only" => {
+                let v = val()?;
+                let last = then.last_mut().ok_or("--then-only after --then")?;
+                for r in v.split(',') {
+                    let (a, b) = r.split_once('-').unwrap_or((r, r));
+                    let (a, b): (usize, usize) = (a.parse()?, b.parse()?);
+                    last.2.extend(a..=b);
+                }
+            }
+            "--then-skip" => {
+                let v = val()?;
+                let last = then.last_mut().ok_or("--then-skip after --then")?;
+                for r in v.split(',') {
+                    let (a, b) = r.split_once('-').unwrap_or((r, r));
+                    last.3.push((a.parse()?, b.parse()?));
+                }
+            }
             "--export" => export = Some(std::path::PathBuf::from(val()?)),
             "--drop" => {
                 // path:body0:len, e.g. //5///19/:00:24
@@ -196,6 +221,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ms(t),
                 rep.other_len.len()
             );
+            for (trace, st, then_only, then_skip) in &then {
+                watch_target(&mut p, 0.1)?;
+                // One captured step (e.g. "reset: reset()"), sent as exchanges.
+                let mut r = Replay::from_trace(trace, st)?;
+                r.disarm_breakpoints();
+                let xs = r.exchanges()?;
+                let t = Instant::now();
+                let mut sent = 0;
+                for (i, x) in xs.iter().enumerate() {
+                    if (!then_only.is_empty() && !then_only.contains(&i)) || then_skip.iter().any(|&(a, b)| i >= a && i <= b) {
+                        continue;
+                    }
+                    let got = p.exchange(x).map_err(|e| format!("then {i} ({}): {e}", label(&x.payload)))?;
+                    sent += 1;
+                    if list {
+                        println!("  then {i:3} {:<34} -> {}", label(&x.payload), hex(got.first().map_or(&[][..], |g| &g[16.min(g.len())..]), 24));
+                    }
+                }
+                println!("then '{st}': {sent} of {} exchanges in {:.0} ms", xs.len(), ms(t));
+            }
             watch_target(&mut p, watch.unwrap_or(2.0))?;
             return Ok(());
         }

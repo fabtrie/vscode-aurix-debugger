@@ -60,6 +60,13 @@ pub trait Adapter {
     fn deassert_srst(&mut self, halt_after_reset: bool) -> Result<()>;
     /// Number of device resets noticed since the last call.
     fn take_resets(&mut self) -> u64;
+    /// Whether every reset this probe performs leaves the cores halted (the
+    /// BlueBox has only a halting reset). `reset run` then resets as a halting
+    /// reset, so the cfg's reset hooks see halted cores, and resumes the
+    /// debug-halted cores after `reset-end` through the normal resume path.
+    fn reset_always_halts(&self) -> bool {
+        false
+    }
     fn set_speed_khz(&mut self, khz: u32) -> Result<()>;
     /// Run control the probe performs itself, when it does not expose the raw
     /// OCDS registers the TriCore target drives.

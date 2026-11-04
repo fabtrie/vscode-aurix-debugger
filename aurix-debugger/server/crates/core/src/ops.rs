@@ -559,6 +559,9 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
 }
 
 fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
+    // A probe that can only reset with halt: reset as `reset halt`, run afterwards.
+    let run_after = !halt && cx.with(|c| c.adapter.as_deref().is_some_and(|a| a.reset_always_halts()));
+    let halt = halt || run_after;
     let n = cx.with(|c| c.targets.len());
     let all: Vec<usize> = (0..n).collect();
     for &t in &all {
@@ -634,6 +637,21 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     }
     for &t in &all {
         fire(cx, t, "reset-end");
+    }
+    if run_after {
+        // The cores the reset halted; boot-halted ones are the application's to start.
+        for &t in &all {
+            let resume_it = cx.with(|c| {
+                let core = &c.targets[t].core;
+                core.halts_after_reset()
+                    && core.examined()
+                    && core.state() == TargetState::Halted
+                    && core.reason() != DebugReason::BootHalt
+            });
+            if resume_it {
+                resume(cx, t, None)?;
+            }
+        }
     }
     Ok(())
 }

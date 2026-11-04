@@ -60,6 +60,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut list = false;
     let mut builtin_attach = false;
     let mut until_a = false;
+    let mut raw_after: Vec<u32> = Vec::new();
+    let mut provoke: Option<f64> = None;
+    let mut reattach_from = 0usize;
     // Captured steps to send after the attach: (trace, step, only these, skip these).
     #[allow(clippy::type_complexity)]
     let mut then: Vec<(std::path::PathBuf, String, Vec<usize>, Vec<(usize, usize)>)> = Vec::new();
@@ -82,6 +85,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--list" => list = true,
             "--attach" => builtin_attach = true,
             "--until-a" => until_a = true,
+            "--raw" => raw_after.push(parse_u32(&val()?)?),
+            "--provoke-reset" => provoke = Some(val()?.parse()?),
+            "--reattach-from" => reattach_from = val()?.parse()?,
             "--then" => {
                 let t = val()?;
                 let st = val()?;
@@ -240,6 +246,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 println!("then '{st}': {sent} of {} exchanges in {:.0} ms", xs.len(), ms(t));
+            }
+            if let Some(secs) = provoke {
+                // This application restarts the chip when it resumes after a halt of a
+                // few seconds: an external reset to test recovery with.
+                const DBGSR0: u32 = 0xF881_FD00;
+                const CBS_TLCHS: u32 = 0xF000_049C;
+                p.write_memory(DBGSR0, &0x6u32.to_le_bytes())?;
+                println!("cpu0 halt requested; waiting {secs} s");
+                std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+                p.write_memory(DBGSR0, &0x4u32.to_le_bytes())?;
+                p.write_memory(CBS_TLCHS, &0x2u32.to_le_bytes())?;
+                println!("resumed");
+                watch_target(&mut p, 1.0)?;
+                let t = Instant::now();
+                match p.core_state() {
+                    Ok(st) => println!("reconnect (//2///38/ 01) in {:.1} ms: DBGSR 0x{:08x} PC 0x{:08x}", ms(t), st.dbgsr, st.pc),
+                    Err(e) => println!("reconnect failed: {e}"),
+                }
+                watch_target(&mut p, 0.3)?;
+                let t = Instant::now();
+                let mut sc = bluebox::attach::Script::tc37x();
+                sc.exchanges.drain(..reattach_from.min(sc.exchanges.len()));
+                let rep = p.attach(&sc)?;
+                println!(
+                    "attach again from #{reattach_from} (same session): {} exchanges in {:.0} ms, {} replies of another length",
+                    rep.sent,
+                    ms(t),
+                    rep.other_len.len()
+                );
+            }
+            // Raw replies to 4-byte reads, for telling failure kinds apart.
+            for &a in &raw_after {
+                let r = p.transact(&bluebox::memory::request(a, 4, None))?;
+                println!("  raw read 0x{a:08x}: {}", hex(&r, 80));
             }
             watch_target(&mut p, watch.unwrap_or(2.0))?;
             return Ok(());

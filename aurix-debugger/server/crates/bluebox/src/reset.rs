@@ -66,11 +66,19 @@ impl<L: Link> Probe<L> {
     /// Resets the target and leaves cpu0 halted at its start address. Returns
     /// cpu0's state after the reset.
     pub fn reset_halt(&mut self) -> Result<CoreState> {
+        self.reset_without_reconnect()?;
+        self.core_state()
+    }
+
+    /// The reset without the reconnect that follows it: the chip resets and
+    /// the probe's target connection stays broken, as after a reset the
+    /// target did by itself. A test aid for recovery.
+    pub fn reset_without_reconnect(&mut self) -> Result<()> {
         for (path, body) in [("//2///7/", &[0x01][..]), ("//7///7/", &[0u8; 8][..])] {
             let r = self.exchange(&exchange(path, body))?.remove(0);
             service_reply(path, &r)?;
         }
-        self.core_state()
+        Ok(())
     }
 }
 

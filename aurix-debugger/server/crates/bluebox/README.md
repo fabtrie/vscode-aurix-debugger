@@ -17,7 +17,18 @@ Neither step resets the target. Every `init` runs both: the probe keeps no sessi
 
 There is no reset without halt. The driver says so (`Adapter::reset_always_halts`): `reset run` runs as a halting reset, so `tc3xx_ocds.cfg`'s reset hooks see halted cores and start the HSM. Then the core resumes the halted cores through the normal resume path.
 
+## Recovery
+
+The `bluebox` driver does what the TAS server does for a miniWiggler: it notices a lost connection and reconnects, and the core re-examines the targets.
+- **Target lost** (it reset or lost power): a batch with failed accesses is followed by a read of `SCU_CHIPID`; if that fails too, the driver sends the attach's connect part again (from its last `L`, about 290 exchanges, 0.4 s), at most once a second, and reports a reset (`take_resets`).
+- **Probe lost** (USB or protocol errors, e.g. a BlueBox power cycle): the probe is opened again and the whole connect runs (kernel load and attach, about 4.6 s), at most every 3 s. No reset is reported.
+- `bluebox drop_target` resets the target and leaves the connection broken, to try the target case.
+
 ## What works (tested on hardware, TC377TP, iC5700 A)
+
+- Recovery, through `aurix-dbg` with `tc37x_ocds_init.cfg`:
+  - after `bluebox drop_target`: reconnected in 357 ms, "Device reset detected", all four cores re-examined, the application ran on;
+  - after a BlueBox power cycle during a session: reconnected in 4.6 s once the probe was back, cores re-examined, the application kept running throughout (STM0 uptime unbroken).
 
 - Connecting with nothing but the probe and `iC6kKrnl.s`: after a power cycle of the BlueBox and with the kernel running, both through `aurix-dbg`. The target kept running (STM0 uptime kept counting).
 - Memory read and write through the memory service `//2///16/`, with a per-byte failure bitmap.
@@ -49,7 +60,8 @@ There is no reset without halt. The driver says so (`Adapter::reset_always_halts
 - **Reset without halt.** Not found: winIDEA's `resetAndRun()` also resets with halt and runs afterwards.
 - **JTAG id.** Not read; `DeviceInfo.device_id` is 0.
 - **Trigger setup.** The attach enables capture-and-hold on trigger line 1, so any halt holds all cores until `CBS_TLCHS` is written. Load `tc3xx_ocds.cfg`, whose resume and step hooks do that. Without it, the cores stay held.
-- **Resets after resume (open).** Twice, the target dropped off the debug port right after `resume` released trigger line 1, and the chip restarted. The suspect is the board's SBC watchdog. After such a reset the driver does not reconnect by itself: restart the server.
+- **Resets after resume (open).** Twice, the target dropped off the debug port right after `resume` released trigger line 1, and the chip restarted; the driver now reconnects. With `tc37x_ocds_init.cfg` a 3 s halt and resume did not restart the chip. Without it (DBGSR written directly) it did every time: the application restarts the chip, and about 0.2 s later the connection breaks.
+- **Resets that keep the connection** go unnoticed: right after such a restart reads still worked for about 0.2 s. A reset only shows once the connection breaks.
 
 ## Prototype
 

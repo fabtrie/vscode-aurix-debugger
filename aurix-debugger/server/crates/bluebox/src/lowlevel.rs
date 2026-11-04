@@ -2,8 +2,8 @@
 //!
 //! The order is what winIDEA 9.21.356 does on every attach (`tests/data/attach_*.txt`):
 //!
-//! 1. **Hello**: four frames on channel 0 (`42`, `85`, `c9`, `02`). They put both
-//!    toggles in a known state: next service message 0, next channel-2 read 1.
+//! 1. **Hello**: four frames on channel 0 (`42`, `85`, `c9`, `02`). They reset the
+//!    toggle: the next service message carries 0 (its fetch frame 1).
 //! 2. **Handshake**: low-level commands `03 21 <letter> <args>`, each sent as a
 //!    service-channel frame. Its answer is fetched with a channel-2 read
 //!    (`04 <len BE16> 00 00 00 00 02`) and comes back as `08` + answer. The
@@ -16,7 +16,7 @@
 //! The values in `G` and in the session message are winIDEA 9.21.356's: identical in
 //! every session captured, version-specific, meaning not decoded.
 
-use crate::frame::{padded, Header, PIPE_IN, PIPE_OUT};
+use crate::frame::{padded, PIPE_IN, PIPE_OUT};
 use crate::kernel::{Kernel, ENTRY};
 use crate::{hex, message, Error, Link, Probe, Result};
 
@@ -111,15 +111,14 @@ impl<L: Link> Probe<L> {
     /// Opens a probe session on a freshly opened link: hello, then the
     /// toggles winIDEA's first frames use.
     pub fn start(mut link: L) -> Result<Probe<L>> {
+        link.drain();
         hello(&mut link)?;
-        Ok(Probe::with_toggles(link, false, true))
+        Ok(Probe::new(link, false))
     }
 
     /// Reads the answer, `n` bytes, to the last low-level command or control message.
     pub fn low_read(&mut self, n: usize) -> Result<Vec<u8>> {
-        let t = self.next_low_toggle();
-        let h = Header { kind: KIND_LOW_READ, toggle: t, len: n as u16, channel: CHANNEL_LOW }.encode();
-        self.link_mut().write(PIPE_OUT, &h)?;
+        self.fetch(crate::probe::Fetch::new(KIND_LOW_READ, n as u16, CHANNEL_LOW))?;
         let r = self.link_mut().read(PIPE_IN, padded(n + 1))?;
         if r.len() < n + 1 || r[0] != 0x08 {
             return Err(Error::Protocol(format!("answer of {n} bytes: {}", hex(&r, 24))));
@@ -137,7 +136,9 @@ impl<L: Link> Probe<L> {
     pub fn handshake(&mut self) -> Result<Handshake> {
         let ident = self.command(b'I', &[], 7)?;
         let kernel_running = match ident.last() {
-            Some(0x2f) => true,
+            // 2f after winIDEA and in most of our sessions; 01 once, after a
+            // session of ours that left out the bulk reads. Both had a kernel.
+            Some(0x2f) | Some(0x01) => true,
             Some(0x00) => false,
             _ => return Err(Error::Protocol(format!("answer to I: {}", hex(&ident, 8)))),
         };
@@ -275,7 +276,7 @@ mod tests {
                 _ => data.len(),
             };
             if *pipe == PIPE_OUT && data.len() == 8 {
-                split_len = Header::decode(data).filter(|h| h.kind == crate::frame::KIND_SPLIT).map(|h| h.len as usize);
+                split_len = crate::frame::Header::decode(data).filter(|h| h.kind == crate::frame::KIND_SPLIT).map(|h| h.len as usize);
             }
             match chunk {
                 None => {

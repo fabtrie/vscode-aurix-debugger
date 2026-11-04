@@ -10,28 +10,75 @@ pub const WRITE_CHECK_ADDR: u32 = 0xF000_1010;
 
 pub struct Probe<L: Link> {
     link: L,
-    /// The toggle the next service message carries.
+    /// The toggle the next service message carries. A fetch frame (the read
+    /// request after a message, on any channel) carries this value too, that
+    /// is, the inverse of the message it answers: checked on all 3498 fetches
+    /// of a captured attach.
     toggle: bool,
-    /// The toggle the next channel-2 read carries (see [`crate::lowlevel`]).
-    low_toggle: bool,
+}
+
+/// How the reply to one message is fetched: a header-only frame, kept whole
+/// (bytes 1-7) because not every kind leaves bytes 3-6 zero: the bulk fetch
+/// `0c 00 00 00 0e 00 00 05` carries its size, 0x0e0000, there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fetch {
+    /// `0x0e` (service reply), `0x04` (low-level answer), `0x0c` (bulk, channel 5).
+    pub kind: u8,
+    /// Header bytes 1..8: the length field, bytes 3-6, and the channel.
+    pub rest: [u8; 7],
+}
+
+impl Fetch {
+    /// The usual form: a length field and a channel, bytes 3-6 zero.
+    pub fn new(kind: u8, len: u16, channel: u8) -> Fetch {
+        let l = len.to_be_bytes();
+        Fetch { kind, rest: [l[0], l[1], 0, 0, 0, 0, channel] }
+    }
+
+    pub fn from_header(b: &[u8]) -> Option<Fetch> {
+        Some(Fetch { kind: *b.first()? & 0x7f, rest: b.get(1..8)?.try_into().ok()? })
+    }
+
+    pub fn channel(&self) -> u8 {
+        self.rest[6]
+    }
+
+    pub fn encode(&self, toggle: bool) -> [u8; 8] {
+        let mut h = [0u8; 8];
+        h[0] = (self.kind & 0x7f) | ((toggle as u8) << 7);
+        h[1..].copy_from_slice(&self.rest);
+        h
+    }
+}
+
+/// One message and how its reply is read: the unit an attach is made of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchange {
+    pub payload: Vec<u8>,
+    pub fetch: Fetch,
+    /// IN transfers that follow, by capacity (usually one; two for a bulk `0x0c`).
+    pub reads: Vec<usize>,
+    /// The replies captured with it, for comparison.
+    pub expect: Vec<Vec<u8>>,
 }
 
 impl<L: Link> Probe<L> {
     /// A session on `link`. `toggle` is what the probe expects next: after a
     /// [`crate::replay::Replay`], take [`crate::replay::Replay::toggle_after`].
     pub fn new(link: L, toggle: bool) -> Self {
-        Probe { link, toggle, low_toggle: true }
+        Probe { link, toggle }
     }
 
-    /// A session with both toggles given: what [`Probe::start`] uses after hello.
-    pub fn with_toggles(link: L, toggle: bool, low_toggle: bool) -> Self {
-        Probe { link, toggle, low_toggle }
+    /// Sends a fetch frame for the last message (carrying the current toggle).
+    pub fn fetch(&mut self, f: Fetch) -> Result<()> {
+        self.link.write(PIPE_OUT, &f.encode(self.toggle))
     }
 
-    pub(crate) fn next_low_toggle(&mut self) -> bool {
-        let t = self.low_toggle;
-        self.low_toggle = !t;
-        t
+    /// Sends one exchange as captured, with this session's toggles, and returns the replies.
+    pub fn exchange(&mut self, x: &Exchange) -> Result<Vec<Vec<u8>>> {
+        self.send(&x.payload)?;
+        self.fetch(x.fetch)?;
+        x.reads.iter().map(|&cap| self.link.read(PIPE_IN, cap)).collect()
     }
 
     pub fn toggle(&self) -> bool {

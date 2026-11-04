@@ -4,6 +4,9 @@
 //! cargo run -p bluebox --example probe -- --replay <trace.jsonl> [--step "connect: begin_attach"]
 //!     [--serial 01ABC] [--toggle 0|1] [--rewrite 0x70000000]
 //!     [--kernel C:/winIDEA/iC6kKrnl.s] [--restart-kernel] [--no-bringup]
+//! cargo run -p bluebox --example probe -- --attach [--watch 2]   # bring-up + built-in attach
+//! cargo run -p bluebox --example probe -- --script <trace.jsonl> [--skip a-b,c] [--drop path:b0:len]
+//!     [--list | --export <file>] [--watch 2]                      # reduce a captured attach
 //! ```
 //!
 //! 1. Opens the probe over WinUSB and brings the link up (`bluebox::lowlevel`):
@@ -52,6 +55,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut bringup = true;
     let mut map: Vec<(u32, usize)> = Vec::new();
     let mut watch: Option<f64> = None;
+    let mut script: Option<std::path::PathBuf> = None;
+    let mut skip: Vec<(usize, usize)> = Vec::new();
+    let mut list = false;
+    let mut builtin_attach = false;
+    let mut until_a = false;
+    let mut drop_kinds: Vec<(String, u8, usize)> = Vec::new();
+    let mut export: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().ok_or_else(|| format!("{a} needs a value"));
@@ -65,6 +75,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--restart-kernel" => restart_kernel = true,
             "--no-bringup" => bringup = false,
             "--watch" => watch = Some(val()?.parse()?),
+            "--script" => script = Some(std::path::PathBuf::from(val()?)),
+            "--list" => list = true,
+            "--attach" => builtin_attach = true,
+            "--until-a" => until_a = true,
+            "--export" => export = Some(std::path::PathBuf::from(val()?)),
+            "--drop" => {
+                // path:body0:len, e.g. //5///19/:00:24
+                let v = val()?;
+                let mut it = v.rsplitn(3, ':');
+                let len = it.next().ok_or("--drop path:b0:len")?.parse()?;
+                let b0 = u8::from_str_radix(it.next().ok_or("--drop path:b0:len")?, 16)?;
+                let path = it.next().ok_or("--drop path:b0:len")?.to_string();
+                drop_kinds.push((path, b0, len));
+            }
+            "--skip" => {
+                for r in val()?.split(',') {
+                    let (a, b) = r.split_once('-').unwrap_or((r, r));
+                    skip.push((a.parse()?, b.parse()?));
+                }
+            }
             "--map" => {
                 let addr = parse_u32(&val()?)?;
                 let len = parse_u32(&val()?)? as usize;
@@ -74,6 +104,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if let (true, Some(path)) = (list, &script) {
+        for (i, x) in select_script(path, &step, until_a)?.iter().enumerate() {
+            println!("{i:5} {}", label(&x.payload));
+        }
+        return Ok(());
+    }
+    if let (Some(out), Some(path)) = (&export, &script) {
+        let xs = select_script(path, &step, until_a)?;
+        let keep: Vec<&bluebox::Exchange> = xs
+            .iter()
+            .enumerate()
+            .filter(|(i, x)| {
+                !skip.iter().any(|&(a, b)| *i >= a && *i <= b)
+                    && !bluebox::message::decode(&x.payload).is_some_and(|(_, p, body)| {
+                        drop_kinds.iter().any(|(dp, b0, n)| dp == p && body.first() == Some(b0) && body.len() == *n)
+                    })
+            })
+            .map(|(_, x)| x)
+            .collect();
+        let note = format!(
+            "exchanges from {} (step '{step}'), selected with: {}",
+            path.file_name().map(|f| f.to_string_lossy()).unwrap_or_default(),
+            {
+                // the selection, without the local paths of --script and --export
+                let a: Vec<String> = std::env::args().skip(1).collect();
+                let mut kept = Vec::new();
+                let mut it = a.iter();
+                while let Some(x) = it.next() {
+                    if x == "--script" || x == "--export" {
+                        it.next();
+                    } else {
+                        kept.push(x.clone());
+                    }
+                }
+                kept.join(" ")
+            }
+        );
+        std::fs::write(out, bluebox::attach::Script::render(&keep, &note))?;
+        println!("wrote {} exchanges to {}", keep.len(), out.display());
+        return Ok(());
+    }
+
     let paths = usb::device_paths()?;
     println!("probes: {paths:?}");
     let t = Instant::now();
@@ -81,6 +153,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("opened {} in {:.1} ms", link.path(), ms(t));
 
     if bringup {
+        let drained = bluebox::Link::drain(&mut link);
+        if drained > 0 {
+            println!("discarded {drained} stale bytes from the IN pipe");
+        }
         let t = Instant::now();
         let mut p = Probe::start(link)?;
         let mut hs = p.handshake()?;
@@ -110,6 +186,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!();
             p.set_session(&bluebox::lowlevel::SESSION_9_21_356)?;
             println!("kernel loaded from {} ({total} bytes) and started in {:.0} ms; session set", path.display(), ms(t));
+        }
+        if builtin_attach {
+            let t = Instant::now();
+            let rep = p.attach(&bluebox::attach::Script::tc37x())?;
+            println!(
+                "built-in attach: {} exchanges in {:.0} ms, {} replies of another length",
+                rep.sent,
+                ms(t),
+                rep.other_len.len()
+            );
+            watch_target(&mut p, watch.unwrap_or(2.0))?;
+            return Ok(());
+        }
+        if let Some(path) = &script {
+            // The captured attach after its handshake, exchange by exchange, in
+            // this session (live toggles), without the ranges in --skip.
+            let xs = select_script(path, &step, until_a)?;
+            if list {
+                for (i, x) in xs.iter().enumerate() {
+                    println!("{i:5} {}", label(&x.payload));
+                }
+                return Ok(());
+            }
+            let t = Instant::now();
+            let (mut sent, mut differ) = (0, 0);
+            for (i, x) in xs.iter().enumerate() {
+                if skip.iter().any(|&(a, b)| i >= a && i <= b) {
+                    continue;
+                }
+                if let Some((_, path, body)) = bluebox::message::decode(&x.payload) {
+                    if drop_kinds.iter().any(|(p, b0, n)| p == path && body.first() == Some(b0) && body.len() == *n) {
+                        continue;
+                    }
+                }
+                let got = p
+                    .exchange(x)
+                    .map_err(|e| format!("exchange {i} ({}), fetch {:?}, reads {:?}: {e}", label(&x.payload), x.fetch, x.reads))?;
+                sent += 1;
+                if got.iter().map(|g| g.len()).ne(x.expect.iter().map(|e| e.len())) {
+                    differ += 1;
+                }
+            }
+            println!("script: {sent} of {} exchanges sent in {:.0} ms, {differ} replies of another length", xs.len(), ms(t));
+            watch_target(&mut p, watch.unwrap_or(2.0))?;
+            return Ok(());
         }
         drop(p);
         // What follows (a replay, or direct reads) starts on a fresh open.
@@ -160,26 +281,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(secs) = watch {
-        // Target health after the attach: chip id and STM0 uptime (TIM6:TIM0 at 100 MHz).
         let mut probe = Probe::new(link, toggle.unwrap_or(false));
-        let t0 = Instant::now();
-        while t0.elapsed().as_secs_f64() < secs {
-            let id = probe.read_memory(0xF003_6140, 4)?;
-            let lo = probe.read_memory(0xF000_1010, 4)?;
-            let hi = probe.read_memory(0xF000_1028, 4)?;
-            let up = (u32::from_le_bytes(hi.data[..4].try_into().unwrap()) as f64 * 4294967296.0
-                + u32::from_le_bytes(lo.data[..4].try_into().unwrap()) as f64)
-                / 1e8;
-            println!(
-                "  t={:5.2}s chipid {} ok={}  uptime {:9.3}s ok={}",
-                t0.elapsed().as_secs_f64(),
-                hex(&id.data, 4),
-                id.all_ok(),
-                up,
-                lo.all_ok() && hi.all_ok()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
+        watch_target(&mut probe, secs)?;
         return Ok(());
     }
 
@@ -259,6 +362,57 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+/// A trace's attach script (`Replay::attach_script`), cut after its first `A`
+/// command with `until_a`: where the connect ends and winIDEA's own work starts.
+#[cfg(windows)]
+fn select_script(path: &std::path::Path, step: &str, until_a: bool) -> Result<Vec<bluebox::Exchange>, Box<dyn std::error::Error>> {
+    let mut xs = bluebox::replay::Replay::from_trace(path, step)?.attach_script()?.exchanges;
+    if until_a {
+        if let Some(i) = xs.iter().position(|x| x.payload.starts_with(&[0x03, 0x21, b'A'])) {
+            xs.truncate(i + 1);
+        }
+    }
+    Ok(xs)
+}
+
+/// Target health: chip id and STM0 uptime (TIM6:TIM0 at 100 MHz), every 200 ms.
+#[cfg(windows)]
+fn watch_target(probe: &mut bluebox::Probe<bluebox::usb::UsbLink>, secs: f64) -> Result<(), Box<dyn std::error::Error>> {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed().as_secs_f64() < secs {
+        let id = probe.read_memory(0xF003_6140, 4)?;
+        let lo = probe.read_memory(0xF000_1010, 4)?;
+        let hi = probe.read_memory(0xF000_1028, 4)?;
+        let up = (u32::from_le_bytes(hi.data[..4].try_into().unwrap()) as f64 * 4294967296.0
+            + u32::from_le_bytes(lo.data[..4].try_into().unwrap()) as f64)
+            / 1e8;
+        // cpu0 DBGSR: a core's CSFR space, reached only once the cores are set up.
+        let dbg = probe.read_memory(0xF881_FD00, 4)?;
+        println!(
+            "  t={:5.2}s chipid {} ok={}  uptime {:9.3}s ok={}  cpu0 DBGSR {} ok={}",
+            t0.elapsed().as_secs_f64(),
+            hex(&id.data, 4),
+            id.all_ok(),
+            up,
+            lo.all_ok() && hi.all_ok(),
+            hex(&dbg.data, 4),
+            dbg.all_ok()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+/// `//path body0/len` for a service message, `cmd X` for a low-level command.
+#[cfg(windows)]
+fn label(p: &[u8]) -> String {
+    match bluebox::message::decode(p) {
+        Some((k, path, body)) => format!("{path} k{k:02x} {}/{}", hex(&body[..body.len().min(4)], 4), body.len()),
+        None if p.starts_with(&[0x03, 0x21]) && p.len() > 2 => format!("cmd {}", p[2] as char),
+        None => hex(p, 8),
+    }
 }
 
 /// Opens the probe again, retrying for a few seconds in case it is still settling.

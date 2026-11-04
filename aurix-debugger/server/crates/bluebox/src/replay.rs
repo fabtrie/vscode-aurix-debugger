@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::frame::{Header, CHANNEL_SERVICE, KIND_INLINE, KIND_SPLIT, PIPE_OUT};
+use crate::frame::{Header, CHANNEL_SERVICE, KIND_INLINE, KIND_SPLIT, PIPE_OUT, PIPE_OUT_BULK};
+use crate::probe::{Exchange, Fetch};
 use crate::{Error, Link, Result};
 
 const WRITE_PIPE: &str = "0x3508021";
@@ -152,6 +153,91 @@ impl Replay {
             }
         }
         n
+    }
+
+    /// The trace as exchanges (message, fetch frame, replies), from the first
+    /// message after the hello frames. Fails on a transfer that does not fit
+    /// that shape.
+    pub fn exchanges(&self) -> Result<Vec<Exchange>> {
+        let mut out: Vec<Exchange> = Vec::new();
+        let mut split: Option<usize> = None;
+        let mut in_hello = true;
+        for (i, t) in self.transfers.iter().enumerate() {
+            let bad = |why: &str| Error::Trace(format!("transfer {i}: {why}"));
+            match t {
+                Transfer::Write { pipe: PIPE_OUT_BULK, data } => {
+                    let n = split.take().ok_or_else(|| bad("bulk payload without a split header"))?;
+                    out.push(Exchange {
+                        payload: data[..n.min(data.len())].to_vec(),
+                        fetch: Fetch { kind: 0, rest: [0; 7] },
+                        reads: Vec::new(),
+                        expect: Vec::new(),
+                    });
+                }
+                Transfer::Write { data, .. } => {
+                    let h = Header::decode(data).ok_or_else(|| bad("short frame"))?;
+                    match h.kind {
+                        KIND_SPLIT if h.channel == CHANNEL_SERVICE => split = Some(h.len as usize),
+                        KIND_INLINE if h.channel == CHANNEL_SERVICE => {
+                            in_hello = false;
+                            out.push(Exchange {
+                                payload: data[8..8 + h.len as usize].to_vec(),
+                                fetch: Fetch { kind: 0, rest: [0; 7] },
+                                reads: Vec::new(),
+                                expect: Vec::new(),
+                            });
+                        }
+                        _ if in_hello && h.channel == 0 => {} // hello frames
+                        _ => {
+                            in_hello = false;
+                            let x = out.last_mut().ok_or_else(|| bad("fetch frame before any message"))?;
+                            if x.fetch.kind != 0 {
+                                return Err(bad("second fetch frame for one message"));
+                            }
+                            x.fetch = Fetch::from_header(data).ok_or_else(|| bad("short fetch frame"))?;
+                        }
+                    }
+                }
+                Transfer::Read { cap, expect, .. } => {
+                    if in_hello {
+                        continue;
+                    }
+                    let x = out.last_mut().ok_or_else(|| bad("reply before any message"))?;
+                    x.reads.push(*cap);
+                    x.expect.push(expect.clone());
+                }
+            }
+        }
+        // The step's end marker can fall between a fetch and its reply: such a
+        // trailing exchange would leave its reply queued for the next caller.
+        while out.last().is_some_and(|x| x.fetch.kind == 0 || x.reads.is_empty()) {
+            out.pop();
+        }
+        if let Some(i) = out.iter().position(|x| x.fetch.kind == 0) {
+            return Err(Error::Trace(format!("exchange {i} has no fetch frame")));
+        }
+        Ok(out)
+    }
+
+    /// The trace's exchanges after its link bring-up, breakpoints disarmed:
+    /// an attach script for [`crate::Probe::attach`]. The bring-up ends after
+    /// the handshake's `L` command, or, in a trace captured right after a
+    /// power cycle, after the kernel load and the session message
+    /// (`//1///28/`), which this crate sends itself.
+    pub fn attach_script(&self) -> Result<crate::attach::Script> {
+        let mut copy = self.clone();
+        copy.disarm_breakpoints();
+        let xs = copy.exchanges()?;
+        let l = xs
+            .iter()
+            .position(|x| x.payload == [0x03, 0x21, 0x4c])
+            .ok_or_else(|| Error::Trace("no handshake (L command) in the trace".into()))?;
+        let session = crate::message::encode(crate::lowlevel::KIND_CONTROL, crate::lowlevel::SESSION_SERVICE, &[]);
+        let start = match xs.iter().position(|x| x.payload.starts_with(&session[..7 + crate::lowlevel::SESSION_SERVICE.len()])) {
+            Some(i) if self.loads_kernel() => i + 1,
+            _ => l + 1,
+        };
+        Ok(crate::attach::Script { exchanges: xs[start..].to_vec() })
     }
 
     /// Whether the trace loads the probe's kernel itself (low-level `W` commands,
@@ -296,6 +382,37 @@ mod tests {
         // Header (toggle, length) untouched; a second pass finds nothing armed.
         assert_eq!(&data[..8], &frames[0].1[..8]);
         assert_eq!(r.disarm_breakpoints(), 0);
+    }
+
+    #[test]
+    fn exchanges_pair_messages_with_their_fetch_and_replies() {
+        let msg = crate::message::encode(1, "//1///12/", &[0]);
+        let mut t = vec![
+            Transfer::Write { pipe: 0x08, data: vec![0x42, 0, 2, 0, 0, 0, 0, 0] }, // hello
+            Transfer::Write { pipe: 0x08, data: vec![0x85, 0, 0, 0, 0, 0, 0, 0] },
+            Transfer::Read { pipe: 0x82, cap: 8, expect: vec![0; 8] },
+        ];
+        for (p, d) in crate::frame::message_transfers(&msg, false, 0x14) {
+            t.push(Transfer::Write { pipe: p, data: d });
+        }
+        t.push(Transfer::Write { pipe: 0x08, data: vec![0x8e, 0xf0, 0x00, 0, 0, 0, 0, 0x02] });
+        t.push(Transfer::Read { pipe: 0x82, cap: 62480, expect: vec![1, 2, 3] });
+        let big = vec![0x23u8; 100];
+        for (p, d) in crate::frame::message_transfers(&big, true, 0x14) {
+            t.push(Transfer::Write { pipe: p, data: d });
+        }
+        t.push(Transfer::Write { pipe: 0x08, data: vec![0x0c, 0, 0, 0, 0x0e, 0, 0, 0x05] });
+        t.push(Transfer::Read { pipe: 0x82, cap: 458752, expect: vec![9] });
+        t.push(Transfer::Read { pipe: 0x82, cap: 458752, expect: vec![9] });
+        let x = Replay { transfers: t }.exchanges().unwrap();
+        assert_eq!(x.len(), 2);
+        assert_eq!(x[0].payload, msg);
+        assert_eq!(x[0].fetch, Fetch::new(0x0e, 0xf000, 2));
+        assert_eq!(x[0].reads, vec![62480]);
+        assert_eq!(x[1].payload, big, "a split payload is cut to its header's length");
+        assert_eq!(x[1].fetch, Fetch { kind: 0x0c, rest: [0, 0, 0, 0x0e, 0, 0, 0x05] });
+        assert_eq!(x[1].fetch.encode(true), [0x8c, 0, 0, 0, 0x0e, 0, 0, 0x05]);
+        assert_eq!(x[1].reads.len(), 2);
     }
 
     #[test]

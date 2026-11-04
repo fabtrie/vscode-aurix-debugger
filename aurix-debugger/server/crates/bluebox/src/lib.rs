@@ -22,6 +22,7 @@
 //! [`Probe`](probe::Probe) does not need because the TriCore debug registers
 //! are reachable as memory.
 
+pub mod attach;
 pub mod frame;
 pub mod kernel;
 pub mod link;
@@ -37,7 +38,7 @@ pub use link::Link;
 pub use memory::{MemReply, MAX_CHUNK};
 pub use kernel::Kernel;
 pub use lowlevel::{bring_up, Handshake};
-pub use probe::Probe;
+pub use probe::{Exchange, Fetch, Probe};
 
 /// USB ids of the iC5700 BlueBox.
 pub const VID: u16 = 0x06f9;

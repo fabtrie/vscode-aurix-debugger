@@ -9,6 +9,11 @@ pub trait Link {
     fn write(&mut self, pipe: u8, data: &[u8]) -> Result<()>;
     /// Reads one transfer of at most `cap` bytes from an IN pipe.
     fn read(&mut self, pipe: u8, cap: usize) -> Result<Vec<u8>>;
+    /// Discards whatever the probe still has queued for the host (left by an
+    /// earlier session that stopped mid-reply). Returns the bytes discarded.
+    fn drain(&mut self) -> usize {
+        0
+    }
 }
 
 impl<L: Link + ?Sized> Link for Box<L> {
@@ -17,6 +22,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
     }
     fn read(&mut self, pipe: u8, cap: usize) -> Result<Vec<u8>> {
         (**self).read(pipe, cap)
+    }
+    fn drain(&mut self) -> usize {
+        (**self).drain()
     }
 }
 

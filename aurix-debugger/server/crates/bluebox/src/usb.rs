@@ -166,6 +166,21 @@ impl UsbLink {
 }
 
 impl Link for UsbLink {
+    fn drain(&mut self) -> usize {
+        // Until one read times out; a stopped bulk transfer can leave MBs queued.
+        let _ = self.set_timeout(200);
+        let t0 = std::time::Instant::now();
+        let mut n = 0;
+        while t0.elapsed().as_secs() < 3 {
+            match self.read(PIPE_IN, 1 << 20) {
+                Ok(b) if !b.is_empty() => n += b.len(),
+                _ => break,
+            }
+        }
+        let _ = self.set_timeout(DEFAULT_TIMEOUT_MS);
+        n
+    }
+
     fn write(&mut self, pipe: u8, data: &[u8]) -> Result<()> {
         let mut n = 0u32;
         if unsafe { WinUsb_WritePipe(self.usb, pipe, data.as_ptr(), data.len() as u32, &mut n, null()) } == 0 {

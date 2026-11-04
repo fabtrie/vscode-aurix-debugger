@@ -154,6 +154,17 @@ impl Replay {
         n
     }
 
+    /// Whether the trace loads the probe's kernel itself (low-level `W` commands,
+    /// `03 21 57`): an attach captured right after a power cycle. Such a trace
+    /// must not be played onto a probe whose kernel runs; use one captured with
+    /// the kernel running, after [`crate::lowlevel::bring_up`].
+    pub fn loads_kernel(&self) -> bool {
+        self.transfers.iter().any(|t| match t {
+            Transfer::Write { data, .. } => data.starts_with(&[0x03, 0x21, 0x57]) || data.get(8..11) == Some(&[0x03, 0x21, 0x57][..]),
+            _ => false,
+        })
+    }
+
     pub fn writes(&self) -> usize {
         self.transfers.iter().filter(|t| matches!(t, Transfer::Write { .. })).count()
     }

@@ -12,16 +12,20 @@
 //! * [`memory`]: the memory service, request and reply.
 //! * [`probe::Probe`]: a session on top of a link: it keeps the toggle bit and
 //!   splits long accesses.
-//! * [`replay`]: plays back a captured winIDEA attach, the only way known so far
-//!   to bring the probe and target connection up.
+//! * [`lowlevel`] and [`kernel`]: the link bring-up: hello, the handshake, and
+//!   loading the probe's kernel (`iC6kKrnl.s` from a winIDEA install) after a
+//!   power cycle.
+//! * [`replay`]: plays back a captured winIDEA attach for what follows (target
+//!   connection, core discovery), which is not decoded yet.
 //!
-//! What is not decoded yet: the bring-up itself (target connection, core
-//! discovery), reset, and the services behind run control, which
+//! What is not decoded yet: the target connection, reset, and the services behind run control, which
 //! [`Probe`](probe::Probe) does not need because the TriCore debug registers
 //! are reachable as memory.
 
 pub mod frame;
+pub mod kernel;
 pub mod link;
+pub mod lowlevel;
 pub mod memory;
 pub mod message;
 pub mod probe;
@@ -31,6 +35,8 @@ pub mod usb;
 
 pub use link::Link;
 pub use memory::{MemReply, MAX_CHUNK};
+pub use kernel::Kernel;
+pub use lowlevel::{bring_up, Handshake};
 pub use probe::Probe;
 
 /// USB ids of the iC5700 BlueBox.
@@ -47,6 +53,8 @@ pub enum Error {
     Protocol(String),
     /// Reading a replay trace failed.
     Trace(String),
+    /// Loading the probe's kernel failed, or it is needed and missing.
+    Kernel(String),
 }
 
 impl std::fmt::Display for Error {
@@ -63,6 +71,7 @@ impl std::fmt::Display for Error {
             Error::NotFound(s) => write!(f, "no BlueBox found: {s}"),
             Error::Protocol(s) => write!(f, "unexpected answer from the probe: {s}"),
             Error::Trace(s) => write!(f, "replay trace: {s}"),
+            Error::Kernel(s) => write!(f, "probe kernel: {s}"),
         }
     }
 }

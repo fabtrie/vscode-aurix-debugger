@@ -12,13 +12,26 @@ pub struct Probe<L: Link> {
     link: L,
     /// The toggle the next service message carries.
     toggle: bool,
+    /// The toggle the next channel-2 read carries (see [`crate::lowlevel`]).
+    low_toggle: bool,
 }
 
 impl<L: Link> Probe<L> {
     /// A session on `link`. `toggle` is what the probe expects next: after a
     /// [`crate::replay::Replay`], take [`crate::replay::Replay::toggle_after`].
     pub fn new(link: L, toggle: bool) -> Self {
-        Probe { link, toggle }
+        Probe { link, toggle, low_toggle: true }
+    }
+
+    /// A session with both toggles given: what [`Probe::start`] uses after hello.
+    pub fn with_toggles(link: L, toggle: bool, low_toggle: bool) -> Self {
+        Probe { link, toggle, low_toggle }
+    }
+
+    pub(crate) fn next_low_toggle(&mut self) -> bool {
+        let t = self.low_toggle;
+        self.low_toggle = !t;
+        t
     }
 
     pub fn toggle(&self) -> bool {

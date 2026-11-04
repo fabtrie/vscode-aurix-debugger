@@ -57,6 +57,8 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "tas-client", cmd_driver_group);
     #[cfg(feature = "winidea")]
     reg(interp, sh, "winidea", cmd_driver_group);
+    #[cfg(feature = "bluebox")]
+    reg(interp, sh, "bluebox", cmd_driver_group);
     reg(interp, sh, "transport", cmd_transport);
     reg(interp, sh, "reset_config", cmd_reset_config);
     reg(interp, sh, "ifxdap", cmd_ifxdap);

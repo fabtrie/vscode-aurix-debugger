@@ -87,10 +87,14 @@ pub trait Adapter {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-#[cfg(feature = "winidea")]
-pub const DRIVERS: &[&str] = &["tas_client", "sim", "winidea"];
-#[cfg(not(feature = "winidea"))]
-pub const DRIVERS: &[&str] = &["tas_client", "sim"];
+pub const DRIVERS: &[&str] = &[
+    "tas_client",
+    "sim",
+    #[cfg(feature = "winidea")]
+    "winidea",
+    #[cfg(feature = "bluebox")]
+    "bluebox",
+];
 
 pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
     match name {
@@ -98,6 +102,8 @@ pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
         "sim" => Some(Box::new(crate::sim::SimAdapter::new())),
         #[cfg(feature = "winidea")]
         "winidea" => Some(Box::new(crate::winidea_adapter::WinIdeaAdapter::new())),
+        #[cfg(feature = "bluebox")]
+        "bluebox" => Some(Box::new(crate::bluebox_adapter::BlueBoxAdapter::new())),
         _ => None,
     }
 }

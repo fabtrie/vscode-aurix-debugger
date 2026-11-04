@@ -45,6 +45,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 name = "aurix-core"
 version = "0.1.0"
 dependencies = [
+ "bluebox",
  "isa",
  "jim",
  "openocd-tcl",
@@ -148,6 +149,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "bluebox"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows-sys",
 ]
 
 [[package]]

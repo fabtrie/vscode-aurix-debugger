@@ -6,6 +6,7 @@ members = [
     "crates/api",
     "crates/api-spec",
     "crates/aurix-dbg",
+    "crates/bluebox",
     "crates/core",
     "crates/isa",
     "crates/jim",
@@ -35,6 +36,7 @@ isa = { path = "crates/isa" }
 api-spec = { path = "crates/api-spec" }
 api = { path = "crates/api" }
 winidea-sdk = { path = "crates/winidea-sdk" }
+bluebox = { path = "crates/bluebox" }
 serde_json = "1"
 base64 = "0.22"
 gimli = "0.34"

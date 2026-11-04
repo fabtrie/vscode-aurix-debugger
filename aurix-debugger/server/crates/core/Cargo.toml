@@ -11,13 +11,17 @@ tas.workspace = true
 jim.workspace = true
 isa.workspace = true
 winidea-sdk = { workspace = true, optional = true }
+bluebox = { workspace = true, optional = true }
 
 [features]
-default = ["winidea"]
+default = ["winidea", "bluebox"]
 # iSYSTEM BlueBox support, through a winIDEA instance driven by the SDK.
 # The DLL is loaded lazily when the driver is selected, so this costs nothing
 # at runtime on the TAS path; it is a feature so a minimal build can drop it.
 winidea = ["dep:winidea-sdk"]
+# iSYSTEM BlueBox straight over USB (WinUSB), without winIDEA. Memory only:
+# run control goes through OCDS as on the TAS path. See crates/bluebox.
+bluebox = ["dep:bluebox"]
 
 [dev-dependencies]
 openocd-tcl.workspace = true

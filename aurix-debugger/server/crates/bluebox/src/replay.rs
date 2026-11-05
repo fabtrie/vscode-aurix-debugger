@@ -43,6 +43,10 @@ pub const PAUSE_MIN_MS: i64 = 3;
 /// Longest pause kept: longer ones are the end of a step, not part of it.
 pub const PAUSE_MAX_MS: i64 = 1000;
 
+/// The service that arms and clears breakpoints (winIDEA 9.21.417; `//3///10/`
+/// in 9.21.356): body `00 00 00 00 <addr u32 LE> <enable> 00 80 00 00`.
+pub const BREAKPOINT_SERVICE: &str = "//3///7/";
+
 #[derive(Debug, Clone)]
 pub struct Diff {
     pub index: usize,
@@ -142,24 +146,26 @@ impl Replay {
     /// how many were armed.
     ///
     /// winIDEA arms the breakpoints of its session during the attach: the
-    /// captured attach sets `//3///10/` (body `00 00 00 00 <addr u32 LE> 01 00 80 00 00`)
+    /// captured attach sets [`BREAKPOINT_SERVICE`] (body `00 00 00 00 <addr u32 LE> 01 00 80 00 00`)
     /// for 0x80120ae0, left over from an earlier session. Played back as is,
     /// it halted cpu0 there, and cpu1 with it over the break bus. The enable byte
     /// is patched to 00 rather than the message dropped, because the frames
     /// around it carry toggles and lengths that must stay as captured.
     pub fn disarm_breakpoints(&mut self) -> usize {
-        const PREFIX: &[u8] = b"\x23\x00\x00\x00\x00\x01\x09//3///10/\x00\x00\x00\x0d";
+        // The message head up to and with the body length, 13.
+        let mut head = crate::message::encode(crate::message::KIND, BREAKPOINT_SERVICE, &[0; 13]);
+        head.truncate(head.len() - 13);
         let mut n = 0;
         for t in &mut self.transfers {
             let Transfer::Write { data, .. } = t else { continue };
             let mut from = 0;
-            while let Some(p) = data[from..].windows(PREFIX.len()).position(|w| w == PREFIX) {
-                let enable = from + p + PREFIX.len() + 8;
+            while let Some(p) = data[from..].windows(head.len()).position(|w| w == head.as_slice()) {
+                let enable = from + p + head.len() + 8;
                 if data.get(enable) == Some(&1) {
                     data[enable] = 0;
                     n += 1;
                 }
-                from += p + PREFIX.len();
+                from += p + head.len();
             }
         }
         n
@@ -361,8 +367,11 @@ mod tests {
 {"ev":"ioctl_out","pid":7,"tid":1,"code":"0x3508021","n":8,"hex":"0e00000000000014"}
 "#;
 
+    /// The trace in a file of its own per test (tests run in parallel).
     fn trace() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("bluebox-replay-test-{}.jsonl", std::process::id()));
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("bluebox-replay-test-{}-{n}.jsonl", std::process::id()));
         std::fs::write(&p, TRACE).unwrap();
         p
     }
@@ -395,14 +404,14 @@ mod tests {
 
     #[test]
     fn armed_breakpoints_are_turned_into_clears() {
-        let msg = crate::message::encode(1, "//3///10/", &[0, 0, 0, 0, 0xe0, 0x0a, 0x12, 0x80, 1, 0, 0x80, 0, 0]);
+        let msg = crate::message::encode(1, BREAKPOINT_SERVICE, &[0, 0, 0, 0, 0xe0, 0x0a, 0x12, 0x80, 1, 0, 0x80, 0, 0]);
         let frames = crate::frame::message_transfers(&msg, true, 0x14);
         assert_eq!(frames.len(), 1, "a breakpoint message travels inline");
         let mut r = Replay { transfers: vec![Transfer::Write { pipe: 0x08, data: frames[0].1.clone() }], times: Vec::new() };
         assert_eq!(r.disarm_breakpoints(), 1);
         let Transfer::Write { data, .. } = &r.transfers[0] else { unreachable!() };
         let (_, path, body) = crate::message::decode(&data[8..]).unwrap();
-        assert_eq!(path, "//3///10/");
+        assert_eq!(path, BREAKPOINT_SERVICE);
         assert_eq!(body, &[0, 0, 0, 0, 0xe0, 0x0a, 0x12, 0x80, 0, 0, 0x80, 0, 0]);
         // Header (toggle, length) untouched; a second pass finds nothing armed.
         assert_eq!(&data[..8], &frames[0].1[..8]);

@@ -2,26 +2,44 @@
 
 Talks to an iSYSTEM BlueBox (iC5700, USB `06F9:5700`, or iC5000, `06F9:3200`) directly over WinUSB, without winIDEA or `isystemConnect.dll`. It backs the server's `bluebox` adapter driver (`crates/core/src/bluebox_adapter.rs`).
 
-The protocol was read off USB captures of winIDEA 9.21.356 driving a TC377. The module docs (`frame`, `message`, `memory`, `lowlevel`, `kernel`, `attach`) give the layouts. The tests check them against captured bytes; `tests/data/attach_*.txt` hold winIDEA's link bring-up, without kernel data.
+The protocol was read off USB captures of winIDEA (9.21.356 first, now 9.21.417) driving a TC377. The module docs (`frame`, `message`, `memory`, `lowlevel`, `kernel`, `attach`) give the layouts. The tests check them against captured bytes; `tests/data/attach_*.txt` hold winIDEA's link bring-up, without kernel data.
 
 ## Connecting
 
-Everything version-specific (kernel, service numbers, session value, attach) is winIDEA 9.21.356's (`kernel::WINIDEA_VERSION`). Service numbers differ from version to version and the probe does not tell them, so the crate works with that version only.
+Everything version-specific (kernel, service numbers, session value, attach) is winIDEA 9.21.417's (`kernel::WINIDEA_VERSION`). Service numbers differ from version to version and the probe does not tell them, so the crate works with that version only.
 
-1. **Link bring-up** (`lowlevel`): hello and handshake. After a power cycle no kernel runs; the driver loads `iC6kKrnl.s` (2.45 MB, about 260 ms), starts it and sets the session. This is byte-identical to winIDEA's, apart from its stale padding bytes.
-   - The kernel comes only from a winIDEA 9.21.356 install. That's the version its `deploy.json` gives, in a folder from `bluebox winidea <folder>`, or found in `C:\winIDEA`, `C:\winIDEA*` or `C:\iSYSTEM\*` (`kernel::find_kernel`).
-   - Without one, the error lists the versions found and asks to install 9.21.356 or point to its folder.
-2. **Kernel version** (`Probe::kernel_state`): a running kernel is asked with `//1///25/` and `//1///27/` whether it is 9.21.356's, with its session.
-   - The `I` state alone can't tell: 9.21.356 saw `64` with 9.21.417's kernel, and `2f` with its own.
-   - Another version's kernel is stopped (`L`, `//1///3/ 00`, `////// 01`) and replaced, as winIDEA does (`tests/data/attach_foreign.txt`). Its service numbers differ, so nothing else may go to it.
-3. **Debug FPGA** (`fpga`): after the attach's first three messages, the status query `//1///35/` gives the image's size and MD5. 9.21.356 needs `0x30553a` bytes with MD5 `84a3470a…`.
+1. **Link bring-up** (`lowlevel`): hello and handshake. After a power cycle no kernel runs; the driver loads the kernel (`iC6kKrnl.s`, 2.59 MB, or `iC3kKrnl.s` on an iC5000, about 300 ms), starts it and sets the session. This is byte-identical to winIDEA's, apart from its stale padding bytes (`tests/data/attach_*.txt`).
+   - The kernel comes only from a winIDEA 9.21.417 install. That's the version its `deploy.json` gives, in a folder from `bluebox winidea <folder>`, or found in `%WINIDEA_DIR%`, `C:\winIDEA`, `C:\winIDEA*`, `C:\iSYSTEM\*` or Chocolatey's `lib\winidea.*` (`kernel::find_kernel`).
+   - Without one, the error lists the versions found and asks to install 9.21.417 or point to its folder.
+2. **Kernel version** (`Probe::kernel_state`): a running kernel is asked with `//1///26/` and `//1///28/` whether it is 9.21.417's, with its session.
+   - The `I` state alone can't tell: 9.21.417 saw `2f` with 9.21.356's kernel, as with its own.
+   - Another version's kernel answers both with an echo. It is stopped (`L`, `//1///3/ 00`, `////// 01`) and replaced, as winIDEA does (`tests/data/attach_ic5000_foreign.txt`). Its service numbers differ, so nothing else may go to it.
+3. **Debug FPGA** (`fpga`): on an iC5700, after the attach's first three messages, the status query `//1///37/` gives the image's size and MD5. 9.21.417 needs `0x316fd8` bytes with MD5 `ed36b5cf…`.
    - The image is kept in the probe's flash, so another winIDEA version leaves its own behind.
-   - The driver then stops with an error that asks to connect once with winIDEA 9.21.356, which loads its image (about 90 s in all). The crate does not load FPGA images.
-4. **Target connection** (`attach`): `src/attach_tc37x.txt`, the messages winIDEA 9.21.356 sent after the kernel when attaching to a TC377 right after a power cycle. 3582 exchanges, sent with this session's toggles, take about 3.2 s.
-   - **With or without active probe:** the attach's node-5 scan (`//5///22/ 00 … c8`) answers with a node count, 2 with an active probe and 1 without, as winIDEA uses it. The exchanges up to it are the same in both setups.
-   - Then the driver goes on with that setup's attach: `attach_tc37x.txt` (captured with the active probe) or `attach_tc37x_system.txt` (winIDEA's attach without one, from iC5700 B, 4114 exchanges, about 2.3 s).
-   - Without an active probe the clock is set with `//4///7/ 01 00 <kHz>` instead of `//7//1//`.
-   - Tested on both setups: attach, 25 MHz, `reset halt`, `reset run`.
+   - The driver then stops with an error that asks to connect once with winIDEA 9.21.417, which loads its image. The crate does not load iC5700 FPGA images. (The iC5000's is uploaded on every attach; see below.)
+4. **Target connection** (`attach`): a script of winIDEA's attach, sent with this session's toggles.
+   - **iC5000:** `src/attach_tc37x_ic5000.txt`, winIDEA 9.21.417's hot attach (261 exchanges, about 2.3 s); see "iC5000".
+   - **iC5700 without active probe:** `src/attach_tc37x_system.txt`, winIDEA 9.21.417's hot attach on iC5700 B (3532 exchanges, about 2.3 s), from `no-ap-417-warm.jsonl`. It asks for the FPGA status after three messages, scans the nodes and sets the clock with `//4///7/ 01 00 <kHz>` (10,000 kHz), as with 9.21.356.
+   - **iC5700 with active probe:** `src/attach_tc37x.txt`, winIDEA 9.21.417's hot attach on iC5700 B with the active probe (3705 exchanges, about 2.4 s), from `ap-417-warm.jsonl`. It sets the clock through the probe with `//7//1// <Hz>` next to `//4///7/`, 10 MHz each.
+   - **With or without active probe:** the two attaches are the same up to and with their node-5 scan (`//5///22/ 00 … c8`), which answers with a node count, 2 with an active probe and 1 without, as winIDEA uses it. The driver sends that part, reads the count and continues with the matching script (`Setup::script`). A replayed attach captured in the other setup (`Script::captured_setup`) stops after the scan with an error, unless its first part is the built-in one.
+
+### winIDEA 9.21.417 against 9.21.356
+
+Captured on the iC5000 (`ic5000-417*.jsonl`) and, for the iC5700's bring-up, `first.jsonl`. Frames, the hello, the memory request and reply data, node 5, the reset `//7///7/`, the kernel transport and the iC5000's FPGA image are the same. Different:
+
+| | 9.21.356 | 9.21.417 |
+|---|---|---|
+| Host id in `G` | `a6 64` | `a6 a1` |
+| Session set / kernel check / session read | `//1///28/`, `//1///25/`, `//1///27/` | `//1///29/`, `//1///26/`, `//1///28/` |
+| Memory service | `//2///16/` | `//2///14/` |
+| Result in a memory reply | 36 bytes + bitmap + data | 40 bytes + bitmap + data (the tail is 4 bytes longer) |
+| Reset reconnect | `//2///38/` | `//2///34/` |
+| Breakpoint service | `//3///10/` | `//3///7/` |
+| iC5700 FPGA status | `//1///35/` | `//1///37/` |
+| iC5000 FPGA upload after | `//1///41/` | `//1///43/` |
+| SoC / core tables | `//2///30/` (7337 B), `//3/…/9/` (5663 B) | `//2///26/` (7378 B), `//3/…/6/` (5699 B) |
+
+Node-1 to node-3 services moved by different amounts, and some bodies changed size (`//1///13/` 9 bytes instead of 8), so every captured script belongs to its version. A cold 9.21.417 capture also showed winIDEA re-syncing the frame bits with a longer hello (`42 85 c9 05 42 89 c2`) on a probe our driver had used; the driver drains the pipe and uses the plain hello, which worked every time.
 
 None of these resets the target. Every `init` runs them all: the probe keeps no session across connects.
 
@@ -87,7 +105,20 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
 
 `Probe::access` (used by the driver) plans the messages with `memory::plan`: reads share a message of at most 64 accesses and a 60,000-byte reply; a write has a message of its own followed by the `STM0_TIM0` check read, so it runs only after everything before it succeeded and nothing runs after it before its outcome is known. The results stop at the first failed op, which the driver reports like a TAS packet (the rest consequential). Not yet run on hardware through the driver.
 
-## What works on the iC5000 (TC377TP, through `aurix-dbg`)
+## What works with winIDEA 9.21.417 (iC5000, TC377TP, through `aurix-dbg`)
+
+- Connect with its kernel running (recognized as its own) and after loading it; the target keeps running (uptime 1077 s, counting).
+- Write and read back, halt, `reset halt`, `reset run` (cpu0 and the HSM run), `adapter speed` 30 MHz, recovery after `drop_target` (0.8 s).
+- Fixed on the way: the 417 script armed winIDEA's leftover breakpoint (0x80120ae0) until the disarm used 417's breakpoint service; `step` was checked only before that fix.
+- iC5700 B without active probe: connect with its kernel running and after loading it, the target keeps running (three connects in a row, uptime counting); write back and read, halt, `step` (0x800a8000, 4, 8), `reset halt`, `reset run` (cpu0 and the HSM run), 25 MHz, recovery after `drop_target` (0.6 s). 600 writes without a failure. Writing changing values into the application's RAM (0x70000000) restarted the chip now and then, through its watchdog: test writes should keep the data.
+- After `reset run` the driver briefly lost the target and reconnected (0.6 to 0.8 s), on both probes with 9.21.417; not explained.
+- iC5700 B with the active probe: detected by the node scan, attach 2.4 s, 25 MHz through `//7//1//`, `reset halt`, `step` (0x800a8000 to 4), `reset run` (cpu0, cpu1 and the HSM run), recovery after `drop_target` (0.4 s), 8 KiB reads of RAM (20 of 20 clean).
+- **Flash reads restart the chip in this state.** With the active probe, reads of program flash (8 KiB, 1 KiB and 4 bytes alike) came back partly failed and the chip restarted (STM0 back near 0); winIDEA 9.21.417's own flash-read messages, replayed, did the same. RAM and registers were not affected. Flash reads without the active probe and on the iC5000 were not tried with 9.21.417; with 9.21.356 (iC5000, and the active probe on iC5700 A) 64 KiB to 256 KiB of flash read clean. Not explained; probably the board's application reacting to debugger flash access.
+- iC5700 A could not be captured: winIDEA 9.21.417 refused it ("License has expired"); the active probe was moved to iC5700 B for the capture.
+- Not run on hardware through the driver: another version's kernel being replaced (fixture only).
+- The board fell several times into a state where nothing reached the target, winIDEA 9.21.417's attach included ("External reset detected - possible watchdog activity", then a reset). On a freshly powered board winIDEA's own attach resets it too.
+
+## What works on the iC5000 with winIDEA 9.21.356 (TC377TP, through `aurix-dbg`)
 
 - Connect after a power cycle and with the kernel running: kernel load, FPGA upload, attach, about 3.5 s in all. The target keeps running (STM0 uptime kept counting).
 - `reset halt` (cpu0 halted at `0x800a8000`) and `reset run`, with the board cfg plus `tc37x_ocds_init.cfg`: cpu0, cpu1 and the HSM run, as after winIDEA's `resetAndRun()`. `reset halt` then `resume` does the same.
@@ -125,7 +156,7 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
   - Its tables describe the SoC and the debug setup of the workspace it was captured with: `//2///30/` (7337 bytes), `//3/<core>/9/` (5663 bytes each), `/////6/` (4107 bytes). So it fits a TC37x with those settings. Another derivative or setup needs a capture, used with `bluebox attach_replay <trace.jsonl>`, or reduced to a script with `examples/probe.rs --script <trace> --export`.
   - Shorter scripts connected on a probe that earlier sessions had set up: down to 53 messages. After a power cycle they failed and left the probe hung until the next power cycle. The node-5 setup and winIDEA's follow-up after the connect turned out to be needed then.
 - **Do not replay a trace byte for byte** (`Replay::play`): that reset the target chip on every connect. Sent as exchanges with live toggles (`Probe::attach`), the same messages do not.
-- **Version-bound values.** The kernel, the node-1 service numbers, the host id in `G`, the session value and the attach all belong to winIDEA 9.21.356.
+- **Version-bound values.** The kernel, the node-1 to node-3 service numbers, the host id in `G`, the session value, the memory reply's result length and the attach all belong to winIDEA 9.21.417.
 - **The kernel does not survive our sessions.** After a run of this crate the next handshake usually finds no kernel; winIDEA's close leaves it running. The driver reloads it (260 ms). A proper close is not decoded.
 - **The `I` answer** showed a third value once (`01`, besides `00` = no kernel and `2f` = kernel). It is treated as "kernel running"; that worked.
 - **FPGA image.** The debug FPGA keeps its image across power cycles; winIDEA replaces it only when the hash differs (another winIDEA version). This crate does not check or load it.
@@ -158,7 +189,7 @@ cargo run -p bluebox --example probe -- --replay <trace.jsonl>          # byte-f
 ```tcl
 adapter driver bluebox
 adapter serial 01ABC                        ;# only with several probes
-bluebox winidea C:/winIDEA                  ;# optional: a winIDEA 9.21.356 install (kernel, iC5000 FPGA image)
+bluebox winidea C:/tools/winIDEA_9_21_417                      ;# optional: a winIDEA 9.21.417 install (kernel, iC5000 FPGA image)
 bluebox kernel C:/winIDEA/iC6kKrnl.s        ;# optional: the kernel file itself (iC3kKrnl.s for an iC5000)
 bluebox attach_replay C:/traces/x.jsonl     ;# optional: another target or setup; step defaults to "connect: begin_attach"
 ```

@@ -8,37 +8,37 @@
 //! Connecting:
 //!
 //! Everything version-specific (kernel, service numbers, session value,
-//! attach) is winIDEA 9.21.356's: service numbers differ from version to
-//! version, so the driver works with that version only.
+//! attach) is winIDEA 9.21.417's: service numbers differ from version to
+//! version (9.21.356's node-1 to node-3 services were numbered differently),
+//! so the driver works with that version only.
 //!
 //! 1. Link bring-up (`bluebox::lowlevel`): hello and handshake. A running
-//!    kernel is asked whether it is winIDEA 9.21.356's. Another version's (the
+//!    kernel is asked whether it is winIDEA 9.21.417's. Another version's (the
 //!    BlueBox was last used by another winIDEA) is stopped and replaced, as
 //!    winIDEA does; nothing else may go to it. After a power cycle no kernel
 //!    runs. Either way the driver loads the kernel (`iC6kKrnl.s`, `iC3kKrnl.s`
 //!    on an iC5000, which it tells by its USB ids) and sets the session: from
-//!    `bluebox kernel <file>`, or from a winIDEA 9.21.356 install, given by
-//!    `bluebox winidea <folder>` or found in `C:\winIDEA`, `C:\winIDEA*` or
-//!    `C:\iSYSTEM\*` (its `deploy.json` gives the version). Without one, the
-//!    error says which versions were found and asks for 9.21.356.
+//!    `bluebox kernel <file>`, or from a winIDEA 9.21.417 install, given by
+//!    `bluebox winidea <folder>` or found in `%WINIDEA_DIR%`, `C:\winIDEA`,
+//!    `C:\winIDEA*`, `C:\iSYSTEM\*` or Chocolatey's `lib\winidea.*` (its
+//!    `deploy.json` gives the version). Without one, the error says which
+//!    versions were found and asks for 9.21.417.
 //! 2. The debug FPGA image. An iC5700 keeps it in flash: it must be
-//!    9.21.356's. Another version's leaves the probe unusable for this driver;
-//!    the error asks to connect once with winIDEA 9.21.356, which loads its
+//!    9.21.417's. Another version's leaves the probe unusable for this driver;
+//!    the error asks to connect once with winIDEA 9.21.417, which loads its
 //!    image. An iC5000 gets it on every connect, as winIDEA does it: the driver
 //!    takes it from the install's `ICWHW32.HRS` and uploads it inside the attach.
-//! 3. The target connection (`bluebox::attach`): winIDEA 9.21.356's attach to
-//!    a TC377 after a power cycle, 3582 messages, built in (about 3.2 s).
-//!    `bluebox attach_replay <trace.jsonl>` uses another captured attach
-//!    instead, sent message by message after the driver's own bring-up.
-//!    Whether an active probe sits between BlueBox and target is told by the
-//!    node count of the attach's node-5 scan (`//5///22/ 00 ... c8`, 2 with
-//!    one, 1 without), as winIDEA does: the built-in attach then continues
-//!    with that setup's script (`Script::tc37x` or `Script::tc37x_system`).
-//!    The setup also decides how the DAP clock is set: `//7//1//` (Hz) with an
-//!    active probe, `//4///7/` (kHz) without. An iC5000 has its own attach
-//!    (`Script::tc37x_ic5000`, winIDEA's hot attach, 272 messages, 2.6 s) and
-//!    no node scan; it sets its DAP clock through node 5 (30 MHz divided by an
-//!    integer, 2 to 30 MHz).
+//! 3. The target connection (`bluebox::attach`): winIDEA 9.21.417's hot
+//!    attach, built in. iC5000: `Script::tc37x_ic5000` (261 messages, about
+//!    2.3 s), no node scan; it sets its DAP clock through node 5 (30 MHz
+//!    divided by an integer, 2 to 30 MHz). iC5700: `Script::tc37x_system`
+//!    (without active probe, 3532 messages) and `Script::tc37x` (with one,
+//!    3705), the same up to their node-5 scan (`//5///22/ 00 ... c8`), whose
+//!    node count (2 with an active probe, 1 without) picks the one the driver
+//!    continues with, as winIDEA does. The setup also decides how the DAP
+//!    clock is set: `//7//1//` (Hz) with an active probe, `//4///7/` (kHz)
+//!    without. `bluebox attach_replay <trace.jsonl>` sends another captured
+//!    attach message by message after the driver's own bring-up.
 //!
 //! Neither resets the target. The probe keeps no session across connects:
 //! every `init` runs both steps.
@@ -59,7 +59,7 @@
 //! ```tcl
 //! adapter driver bluebox
 //! adapter serial 01ABC                    ;# optional, when several probes are plugged in
-//! bluebox winidea C:/winIDEA_9_21_356     ;# optional; a winIDEA 9.21.356 install, for its kernel
+//! bluebox winidea C:/winIDEA_9_21_417     ;# optional; a winIDEA 9.21.417 install (kernel, iC5000 FPGA image)
 //! bluebox kernel C:/winIDEA/iC6kKrnl.s    ;# optional; that version's kernel file itself, unchecked
 //! bluebox attach_replay C:/traces/x.jsonl ;# optional; another target or setup
 //! ```
@@ -130,7 +130,7 @@ pub struct BlueBoxAdapter {
     replay: Option<(PathBuf, String)>,
     srst_pending: bool,
     kernel: Option<PathBuf>,
-    /// `bluebox winidea`: the folder of a winIDEA 9.21.356 install, for its kernel.
+    /// `bluebox winidea`: the folder of a winIDEA 9.21.417 install, for its kernel and the iC5000's FPGA image.
     winidea: Option<PathBuf>,
     #[cfg(windows)]
     probe: Option<Probe>,
@@ -336,7 +336,7 @@ impl BlueBoxAdapter {
         Ok(out)
     }
 
-    /// Makes winIDEA 9.21.356's kernel run on `probe`, given whose ran
+    /// Makes winIDEA 9.21.417's kernel run on `probe`, given whose ran
     /// (`bluebox::Probe::kernel_state`). Returns a note for the status.
     #[cfg(windows)]
     fn ensure_kernel(&self, probe: &mut Probe, state: bluebox::KernelState) -> Result<String> {
@@ -348,7 +348,7 @@ impl BlueBoxAdapter {
             KernelState::Foreign => "the probe runs another winIDEA version's kernel",
             _ => "the probe has no kernel running (it was power cycled)",
         };
-        // Only winIDEA 9.21.356's kernel: this driver's service numbers and attach are that version's.
+        // Only winIDEA 9.21.417's kernel: this driver's service numbers and attach are that version's.
         let kpath = match &self.kernel {
             Some(k) => k.clone(),
             None => bluebox::kernel::find_kernel(self.winidea.as_deref(), probe.model()).map_err(|e| {
@@ -421,6 +421,14 @@ impl BlueBoxAdapter {
         let (mut probe, hs) = open().map_err(bb)?;
         let model = probe.model();
         self.model = Some(model);
+        let builtin = bluebox::attach::Script::builtin(model);
+        if builtin.is_none() && self.replay.is_none() {
+            return Err(other(format!(
+                "bluebox: the {} has no built-in winIDEA {WINIDEA} attach yet (its 9.21.356 attaches no longer fit). \
+                 Give a captured one with 'bluebox attach_replay <trace.jsonl>'",
+                model.name()
+            )));
+        }
         let state = probe.kernel_state(&hs).map_err(bb)?;
         let kernel_note = self.ensure_kernel(&mut probe, state)?;
         // The iC5000 gets its debug FPGA on every connect, from winIDEA's files.
@@ -437,14 +445,13 @@ impl BlueBoxAdapter {
                 let r = Replay::from_trace(trace, step).map_err(bb)?;
                 (r.attach_script().map_err(bb)?, format!("attach from {}", trace.display()))
             }
-            None => (bluebox::attach::Script::builtin(model), "built-in TC37x attach".to_string()),
+            None => (builtin.expect("checked above"), "built-in TC37x attach".to_string()),
         };
         // iC5700: the debug FPGA status, then the node scan, whose node count
-        // tells whether an active probe sits between BlueBox and target; the
-        // built-in attach continues with that setup's script. iC5000: the FPGA
-        // upload inside the attach. See `bluebox::Probe::connect_target`.
+        // tells whether an active probe sits between BlueBox and target.
+        // iC5000: the FPGA upload inside the attach. See `bluebox::Probe::connect_target`.
         let t0 = std::time::Instant::now();
-        let c = probe.connect_target(&script, self.replay.is_none(), image.as_deref()).map_err(bb)?;
+        let c = probe.connect_target(&script, image.as_deref()).map_err(bb)?;
         for n in &c.notes {
             crate::log_warn!("[bluebox] {script_note}: {n}");
         }
@@ -724,8 +731,8 @@ mod tests {
         assert_eq!(a.replay.as_ref().unwrap().1, "connect: other");
         a.command(&["bluebox", "kernel", "C:/winIDEA/iC6kKrnl.s"]).unwrap();
         assert_eq!(a.kernel, Some(PathBuf::from("C:/winIDEA/iC6kKrnl.s")));
-        a.command(&["bluebox", "winidea", "C:/winIDEA_9_21_356"]).unwrap();
-        assert_eq!(a.winidea, Some(PathBuf::from("C:/winIDEA_9_21_356")));
+        a.command(&["bluebox", "winidea", "C:/winIDEA_9_21_417"]).unwrap();
+        assert_eq!(a.winidea, Some(PathBuf::from("C:/winIDEA_9_21_417")));
         assert!(a.command(&["bluebox", "winidea"]).is_err());
         assert_eq!(a.command(&["bluebox", "status"]).unwrap(), "not connected");
         assert!(a.command(&["bluebox", "frobnicate"]).is_err());
@@ -733,31 +740,32 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_attach_splits_at_the_fpga_status() {
-        let full = bluebox::attach::Script::tc37x();
+    fn an_attach_splits_at_the_fpga_status() {
+        // An iC5700 attach starts /////6/, //1///12/, //1///13/, then the status query.
+        let x = |path: &str| bluebox::Exchange {
+            payload: bluebox::message::encode(1, path, &[0]),
+            fetch: bluebox::Fetch::new(0x0e, 0xf000, 2),
+            reads: vec![62480],
+            expect: vec![vec![0; 32]],
+            pause_ms: 0,
+        };
+        let full = bluebox::attach::Script {
+            exchanges: ["/////6/", "//1///12/", "//1///13/", bluebox::fpga::STATUS, "//1///43/"].map(x).to_vec(),
+        };
         let (head, rest) = bluebox::attach::split_at_fpga_status(&full);
-        let head = head.expect("the built-in attach asks for the FPGA status");
-        let path = |x: &bluebox::Exchange| bluebox::message::decode(&x.payload).map(|(_, p, _)| p.to_string());
-        let paths: Vec<_> = head.exchanges.iter().filter_map(path).collect();
-        assert_eq!(paths, ["/////6/", "//1///12/", "//1///13/"], "what winIDEA sends before the status");
-        assert_eq!(head.exchanges.len() + 1 + rest.exchanges.len(), full.exchanges.len());
-        assert_eq!(rest.exchanges.last(), full.exchanges.last());
-        let none = bluebox::attach::Script { exchanges: rest.exchanges[..10].to_vec() };
-        assert!(bluebox::attach::split_at_fpga_status(&none).0.is_none());
+        assert_eq!(head.expect("a status query").exchanges.len(), 3);
+        assert_eq!(rest.exchanges, [x("//1///43/")]);
+        assert!(bluebox::attach::split_at_fpga_status(&rest).0.is_none());
     }
 
     #[test]
     fn the_connect_part_starts_at_the_last_l_command() {
-        let full = bluebox::attach::Script::tc37x();
+        // The iC5000's attach has its second handshake, and no FPGA upload in it.
+        let full = bluebox::attach::Script::tc37x_ic5000();
         let part = connect_part(&full);
         assert_eq!(part.exchanges.first().unwrap().payload, [0x03, 0x21, b'L']);
-        assert!(part.exchanges.len() < full.exchanges.len() / 10, "{} of {}", part.exchanges.len(), full.exchanges.len());
+        assert!(part.exchanges.len() < full.exchanges.len());
         assert_eq!(part.exchanges.last(), full.exchanges.last());
-        // The iC5000's has its second handshake too, and no FPGA upload in it.
-        let ic5000 = bluebox::attach::Script::tc37x_ic5000();
-        let part = connect_part(&ic5000);
-        assert_eq!(part.exchanges.first().unwrap().payload, [0x03, 0x21, b'L']);
-        assert!(part.exchanges.len() < ic5000.exchanges.len());
     }
 
     #[test]

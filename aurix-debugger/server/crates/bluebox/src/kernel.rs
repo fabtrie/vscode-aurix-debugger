@@ -5,12 +5,13 @@
 //! ([`crate::Model::kernel_file`]); both are loaded the same way. After a power cycle of the BlueBox, winIDEA loads it into probe
 //! RAM before anything else. Every later attach finds it running. The
 //! upload captured after a power cycle is byte-identical to the S-record
-//! data (2,452,880 bytes at 0x100000 for winIDEA 9.21.356).
+//! data (2,589,304 bytes at 0x100000 for winIDEA 9.21.417's `iC6kKrnl.s`,
+//! 2,589,516 for its `iC3kKrnl.s`).
 //!
 //! Each winIDEA version has its own kernel. Its services are numbered
 //! differently (9.21.417's node-1 services are two higher), so the kernel and
 //! the paths a client uses must come from the same winIDEA version: this
-//! crate's are 9.21.356's ([`WINIDEA_VERSION`]), and [`find_kernel`] only takes
+//! crate's are 9.21.417's ([`WINIDEA_VERSION`]), and [`find_kernel`] only takes
 //! the kernel from an install of that version.
 
 use std::path::{Path, PathBuf};
@@ -109,10 +110,10 @@ impl Kernel {
 /// The winIDEA version this crate's protocol comes from: its kernel, service
 /// numbers, session value and attach. Another version's kernel speaks
 /// another numbering, so only this one may be loaded.
-pub const WINIDEA_VERSION: &str = "9.21.356";
+pub const WINIDEA_VERSION: &str = "9.21.417";
 
 /// A winIDEA install: a folder with a BlueBox kernel file, and its version as its
-/// `deploy.json` gives it (`{"Deploy": {"Version": "9.21.356"}}`).
+/// `deploy.json` gives it (`{"Deploy": {"Version": "9.21.417"}}`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Install {
     pub dir: PathBuf,
@@ -149,8 +150,10 @@ impl Install {
     }
 }
 
-/// Folders winIDEA is usually installed in: `WINIDEA_DIR`, `C:\winIDEA`, and
-/// `C:\winIDEA*` and `C:\iSYSTEM\*` folders (installs side by side).
+/// Folders winIDEA is usually installed in: `WINIDEA_DIR`, `C:\winIDEA`,
+/// `C:\winIDEA*` and `C:\iSYSTEM\*` folders (installs side by side), and
+/// Chocolatey's `winidea.*` packages (in `%ChocolateyInstall%\lib`, by default
+/// `C:\ProgramData\chocolatey\lib`).
 fn usual_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(d) = std::env::var("WINIDEA_DIR") {
@@ -171,6 +174,8 @@ fn usual_dirs() -> Vec<PathBuf> {
     };
     dirs.extend(listed(r"C:\", "winidea"));
     dirs.extend(listed(r"C:\iSYSTEM", ""));
+    let choco = std::env::var("ChocolateyInstall").unwrap_or_else(|_| r"C:\ProgramData\chocolatey".into());
+    dirs.extend(listed(&format!(r"{choco}\lib"), "winidea."));
     let mut seen = Vec::new();
     dirs.retain(|d| {
         let k = d.to_string_lossy().to_ascii_lowercase();
@@ -236,14 +241,14 @@ mod tests {
     #[test]
     fn only_the_right_winidea_version_gives_the_kernel() {
         let good = install("good", Some(WINIDEA_VERSION));
-        let other = install("other", Some("9.21.417"));
+        let other = install("other", Some("9.21.356"));
         let unknown = install("unknown", None);
         let m = crate::Model::Ic5700;
         assert_eq!(find_kernel(Some(&good), m).unwrap(), good.join(FILE_NAME));
         let e = find_kernel(Some(&good), crate::Model::Ic5000).unwrap_err();
         assert!(e.contains("iC3kKrnl.s"), "the iC5000 kernel is another file: {e}");
         let e = find_kernel(Some(&other), m).unwrap_err();
-        assert!(e.contains("winIDEA 9.21.417") && e.contains(WINIDEA_VERSION), "{e}");
+        assert!(e.contains("winIDEA 9.21.356") && e.contains(WINIDEA_VERSION), "{e}");
         assert!(find_kernel(Some(&unknown), m).unwrap_err().contains("unknown version"));
         let none = std::env::temp_dir().join("bluebox-kernel-test-none");
         assert!(find_kernel(Some(&none), m).unwrap_err().contains("not a winIDEA install"));
@@ -251,7 +256,7 @@ mod tests {
         let found = [Install::at(&other).unwrap(), Install::at(&good).unwrap()];
         assert_eq!(pick(&found).unwrap().kernel(m), good.join(FILE_NAME), "the right one among several");
         let e = pick(&found[..1]).unwrap_err();
-        assert!(e.contains("not installed") && e.contains("9.21.417"), "{e}");
+        assert!(e.contains("not installed") && e.contains("9.21.356"), "{e}");
         assert!(pick(&[]).unwrap_err().contains("no winIDEA found"));
         for d in [good, other, unknown] {
             let _ = std::fs::remove_dir_all(d);

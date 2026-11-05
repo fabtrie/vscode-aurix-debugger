@@ -1,4 +1,4 @@
-//! The memory service `//2///16/`.
+//! The memory service `//2///14/` (`//2///16/` in winIDEA 9.21.356; same format).
 //!
 //! One request reads or writes one contiguous block. Its body is a fixed
 //! 182-byte template plus the write data. Offsets are into the body, which
@@ -30,7 +30,7 @@
 //! 0x2b  bitmap, one bit per byte, set = that byte failed
 //! 0x2b+B  N: data length u32 LE (0 for a write)
 //! 0x2f+B  data
-//! then  24 bytes
+//! then  28 bytes (24 in winIDEA 9.21.356's kernel)
 //! ```
 //!
 //! # Batches
@@ -39,7 +39,8 @@
 //! the single form above), then per access the single body without its count
 //! and its last 12 bytes (166 + N bytes), then 12 zero bytes. The reply has
 //! the count at 0x1f and the results packed one after the other from 0x23,
-//! each `u32 0, B, bitmap[B], N, data[N]` and 24 bytes.
+//! each `u32 0, B, bitmap[B], N, data[N]` and 28 bytes (24 with 9.21.356's
+//! kernel: checked on every reply of the captures of both versions).
 //!
 //! Measured on a TC37x: the probe runs every access of a message, also after
 //! one fails (only that one is flagged); a write's bus error shows on the
@@ -49,7 +50,7 @@
 
 use crate::{hex, message, Error, Result};
 
-pub const SERVICE: &str = "//2///16/";
+pub const SERVICE: &str = "//2///14/";
 
 /// Largest block read in one request so far (8192 bytes came back in a
 /// single reply). Longer accesses are split.
@@ -75,8 +76,8 @@ const REQUEST_TAIL: usize = 12;
 const BLOCK_LEN: usize = BODY_LEN - 4 - REQUEST_TAIL;
 /// Reply bytes before the first result.
 const REPLY_HEAD: usize = 0x23;
-/// Bytes of a result besides its bitmap and data.
-const RESULT_LEN: usize = 36;
+/// Bytes of a result besides its bitmap and data (9.21.417; 36 with 9.21.356).
+const RESULT_LEN: usize = 40;
 
 /// One access of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,7 +305,7 @@ pub(crate) fn batch_reply(results: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         r.extend_from_slice(bm);
         r.extend_from_slice(&(d.len() as u32).to_le_bytes());
         r.extend_from_slice(d);
-        r.extend_from_slice(&[0; 24]);
+        r.extend_from_slice(&[0; RESULT_LEN - 12]);
     }
     let n = (r.len() - 16) as u32;
     r[0..4].copy_from_slice(&n.to_le_bytes());
@@ -327,15 +328,15 @@ mod tests {
         vec!["00"; n].join(" ")
     }
 
-    /// The 202 meaningful bytes winIDEA sent to read 4 bytes at 0x80000004.
+    /// The 202 meaningful bytes winIDEA 9.21.417 sent to read 4 bytes at 0x70000100 (`ic5000-417.jsonl`).
     fn captured_read() -> Vec<u8> {
         unhex(&format!(
-            "23 00 00 00 00 01 09 2f 2f 32 2f 2f 2f 31 36 2f
-             00 00 00 b6 01 00 00 00 02 00 00 00 00 00 04 00
-             00 80 00 00 00 00 04 00 00 00 00 00 00 00 01 00
+            "23 00 00 00 00 01 09 2f 2f 32 2f 2f 2f 31 34 2f
+             00 00 00 b6 01 00 00 00 02 00 00 00 00 00 00 01
+             00 70 00 00 00 00 04 00 00 00 00 00 00 00 01 00
              00 00 00 01 {z12}
-             {z12} 01 00 04 00
-             00 80 00 00 00 00 04 00 00 00 00 00 00 00 01 00
+             {z12} 01 00 00 01
+             00 70 00 00 00 00 04 00 00 00 00 00 00 00 01 00
              00 00 00 01 {z12}
              {z16}
              {z12} 01 01 01 00
@@ -350,7 +351,7 @@ mod tests {
 
     #[test]
     fn read_request_is_byte_identical_to_winidea() {
-        let ours = request(0x8000_0004, 4, None);
+        let ours = request(0x7000_0100, 4, None);
         assert_eq!(ours.len(), 202);
         assert_eq!(ours, captured_read());
     }
@@ -423,7 +424,7 @@ mod tests {
     #[test]
     fn a_batch_of_one_is_the_single_request() {
         let data = [1, 2, 3, 4];
-        assert_eq!(batch_request(&[Access::Read { addr: 0x8000_0004, len: 4 }]), captured_read());
+        assert_eq!(batch_request(&[Access::Read { addr: 0x7000_0100, len: 4 }]), captured_read());
         assert_eq!(
             batch_request(&[Access::Write { addr: 0x7000_0000, data: &data }]),
             request(0x7000_0000, 4, Some(&data))
@@ -481,6 +482,24 @@ mod tests {
         let big = Access::Read { addr: 0, len: MAX_CHUNK };
         assert_eq!(plan(&[big; 13]), vec![0..6, 6..12, 12..13]);
     }
+
+    #[test]
+    fn a_captured_batch_reply_of_three_writes_parses() {
+        // winIDEA 9.21.417 writing the trigger setup after a reset (ic5000-417.jsonl):
+        // three results of 40 bytes, no bitmap, no data, a counter in each tail.
+        let r: Vec<u8> = (0..312).step_by(2).map(|i| u8::from_str_radix(&CAPTURED_3_WRITES[i..i + 2], 16).unwrap()).collect();
+        assert_eq!(r.len(), 156);
+        let out = parse_batch_reply(&r, &[4, 4, 4]).unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|m| m.data.is_empty() && m.failed.is_empty()));
+    }
+
+    const CAPTURED_3_WRITES: &str = concat!(
+        "8b000000ffbffffdf67fdffffdfef7ef0800000086010000000000000000010300000000000000000000000000",
+        "000000000000000000000000000000000000990000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000008d0000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000008c000000000000000000000000"
+    );
 
     #[test]
     fn a_reply_with_another_probes_filler_parses() {

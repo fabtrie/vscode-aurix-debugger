@@ -1,6 +1,6 @@
 //! Link bring-up: hello frames, low-level commands, kernel load, session.
 //!
-//! The order is what winIDEA 9.21.356 does on every attach (`tests/data/attach_*.txt`):
+//! The order is what winIDEA 9.21.417 does on every attach (`tests/data/attach_*.txt`):
 //!
 //! 1. **Hello**: four frames on channel 0 (`42`, `85`, `c9`, `02`). They reset the
 //!    toggle: the next service message carries 0 (its fetch frame 1).
@@ -10,18 +10,20 @@
 //!    answer to `I` says whether a kernel runs: last byte `2f` yes, `00` no.
 //! 3. **Kernel** (only when none runs): `L`, then one `W <addr BE32> <len BE16>
 //!    <data>` per [`Kernel::chunks`], then `K <entry BE32>` to start it.
-//! 4. **Session**: `//1///28/` with a 22-byte value, kind 0x11. A running kernel
-//!    returns it through `//1///27/`.
+//! 4. **Session**: `//1///29/` with a 22-byte value, kind 0x11. A running kernel
+//!    returns it through `//1///28/`.
 //!
 //! The `I` state does not tell whose kernel runs: 9.21.356 found `64` with
-//! 9.21.417's kernel, `2f` with its own, and `2f` too right after it had ended
-//! its own kernel. So a probe with a kernel is asked ([`Probe::kernel_state`]),
-//! and another version's kernel is stopped and replaced, as winIDEA does.
+//! 9.21.417's kernel, and 9.21.417 `2f` with 9.21.356's, as with its own. So a
+//! probe with a kernel is asked ([`Probe::kernel_state`]), and another
+//! version's kernel is stopped and replaced, as winIDEA does.
 //!
-//! The values in `G` and in the session message are winIDEA 9.21.356's: identical in
-//! every session captured, version-specific, meaning not decoded.
+//! The values in `G` and in the session message are winIDEA 9.21.417's: identical in
+//! every session captured, version-specific, meaning not decoded. 9.21.356's
+//! node-1 services were numbered one or two lower (session `//1///28/`, check
+//! `//1///25/`), its host id was `a6 64`.
 //!
-//! An iC5000 runs the same steps (`tests/data/attach_ic5000_cold.txt`) with
+//! An iC5000 runs the same steps (`tests/data/attach_ic5000_*.txt`) with
 //! frames padded to 2 bytes, answers rounded to an even length
 //! ([`crate::Model::answer_capacity`]), its own kernel file and session value,
 //! and `I` states `ef` or `eb` without a kernel.
@@ -35,35 +37,36 @@ pub const CHANNEL_LOW: u8 = 0x02;
 /// Frame type of such a read; its length field is the answer's length.
 pub const KIND_LOW_READ: u8 = 0x04;
 
-/// Kind byte of root and node-1 control messages (`//////`, `//1///28/`).
+/// Kind byte of root and node-1 control messages (`//////`, `//1///29/`).
 pub const KIND_CONTROL: u8 = 0x11;
 
-/// Host id in `G`, and (byte-swapped) the start of the session value. winIDEA 9.21.356.
-pub const HOST_ID: [u8; 2] = [0xa6, 0x64];
+/// Host id in `G`, and (byte-swapped) the start of the session value. winIDEA 9.21.417.
+pub const HOST_ID: [u8; 2] = [0xa6, 0xa1];
 
-/// The session value winIDEA 9.21.356 sends to a freshly loaded iC5700 kernel.
-pub const SESSION_9_21_356: [u8; 22] = [
-    0x64, 0xa6, 0xbf, 0xdf, 0xe0, 0x70, 0xd3, 0xf4, 0xc3, 0x54, 0xed, 0xc1, 0x93, 0x36, 0xb4, 0x42, 0x55, 0xc2,
+/// The session value winIDEA 9.21.417 sends to a freshly loaded iC5700 kernel
+/// (`first.jsonl`, the 9.21.417 session after a power cycle).
+pub const SESSION_9_21_417: [u8; 22] = [
+    0xa1, 0xa6, 0xc4, 0xa2, 0x1b, 0x6e, 0x82, 0x08, 0x5d, 0x3d, 0xa2, 0x12, 0xb6, 0x2e, 0x37, 0x82, 0xd6, 0xb8,
     0x00, 0x00, 0x00, 0x00,
 ];
 
-/// The session value winIDEA 9.21.356 sends to a freshly loaded iC5000 kernel
-/// (`ic5000.jsonl`; a later winIDEA attach read the same back).
-pub const SESSION_IC5000_9_21_356: [u8; 22] = [
-    0x64, 0xa6, 0x20, 0xae, 0xb0, 0xa3, 0xc1, 0x3b, 0x07, 0x2b, 0x63, 0xa5, 0x25, 0xe0, 0xe6, 0x0e, 0x86, 0xf3,
+/// The session value winIDEA 9.21.417 sends to a freshly loaded iC5000 kernel
+/// (`ic5000-417.jsonl`, `ic5000-417-foreign.jsonl`; its later attach read the same back).
+pub const SESSION_IC5000_9_21_417: [u8; 22] = [
+    0xa1, 0xa6, 0x77, 0x4b, 0x4f, 0xc4, 0x1c, 0x34, 0x27, 0x74, 0x6e, 0x3a, 0xa4, 0x73, 0xfa, 0xee, 0xcf, 0x69,
     0x00, 0x00, 0x00, 0x00,
 ];
 
-/// The session value winIDEA 9.21.356 gives `model`'s kernel.
+/// The session value winIDEA 9.21.417 gives `model`'s kernel.
 pub fn session_value(model: crate::Model) -> [u8; 22] {
     match model {
-        crate::Model::Ic5700 => SESSION_9_21_356,
-        crate::Model::Ic5000 => SESSION_IC5000_9_21_356,
+        crate::Model::Ic5700 => SESSION_9_21_417,
+        crate::Model::Ic5000 => SESSION_IC5000_9_21_417,
     }
 }
 
-/// Node-1 service that takes the session value, in 9.21.356's kernel.
-pub const SESSION_SERVICE: &str = "//1///28/";
+/// Node-1 service that takes the session value, in 9.21.417's kernel.
+pub const SESSION_SERVICE: &str = "//1///29/";
 
 /// The hello frames, with the reply length each expects (if any).
 const HELLO: [([u8; 8], Option<usize>); 4] = [
@@ -287,18 +290,17 @@ impl<L: Link> Probe<L> {
         Ok(())
     }
 
-    /// Whether the running kernel is winIDEA 9.21.356's, with its session:
-    /// `//1///25/` answers `02 ...` and `//1///27/` returns the session value.
-    /// 9.21.417's kernel answered `//1///25/` with an echo of the request
-    /// header instead. Its service numbers differ (see [`crate::kernel`]), so
-    /// nothing but this check may go to a kernel that is not ours.
+    /// Whether the running kernel is winIDEA 9.21.417's, with its session:
+    /// `//1///26/` answers `02 ...` and `//1///28/` returns the session value.
+    /// 9.21.356's kernel answered `//1///26/` with an echo of the request
+    /// header instead, and `//1///28/` too; winIDEA sends both either way
+    /// (`ic5000-417-foreign.jsonl`), and so does this. Another kernel's service
+    /// numbers differ (see [`crate::kernel`]), so nothing but this check may go
+    /// to a kernel that is not ours.
     pub fn kernel_is_ours(&mut self) -> Result<bool> {
         let a = self.control(VERSION_CHECK, &[0; 8], 9)?;
-        if a[0] != 0x02 {
-            return Ok(false);
-        }
         let s = self.control(SESSION_READ, &[], 23)?;
-        Ok(s.len() >= 18 && s[..2] == HOST_ID && s[2..18] == session_value(self.model())[2..18])
+        Ok(a[0] == 0x02 && s.len() >= 18 && s[..2] == HOST_ID && s[2..18] == session_value(self.model())[2..18])
     }
 
     /// `//1///3/ 00`, a service message, before a kernel is stopped.
@@ -312,8 +314,8 @@ impl<L: Link> Probe<L> {
         Ok(())
     }
 
-    /// Stops another version's kernel, as winIDEA 9.21.356 did with 9.21.417's
-    /// (`tests/data/attach_foreign.txt`): `L`, `//1///3/ 00`, `////// 01`. Load
+    /// Stops another version's kernel, as winIDEA 9.21.417 did with 9.21.356's
+    /// (`tests/data/attach_ic5000_foreign.txt`): `L`, `//1///3/ 00`, `////// 01`. Load
     /// ours right after with [`Probe::load_kernel_after_stop`].
     pub fn stop_foreign_kernel(&mut self) -> Result<()> {
         self.command(b'L', &[], 2)?;
@@ -328,17 +330,17 @@ impl<L: Link> Probe<L> {
     }
 }
 
-/// Node-1 service that tells whether the running kernel is this version's, in 9.21.356's kernel.
-pub const VERSION_CHECK: &str = "//1///25/";
+/// Node-1 service that tells whether the running kernel is this version's, in 9.21.417's kernel.
+pub const VERSION_CHECK: &str = "//1///26/";
 /// Node-1 service that returns the session value of a running kernel.
-pub const SESSION_READ: &str = "//1///27/";
+pub const SESSION_READ: &str = "//1///28/";
 
 /// Whose kernel runs on the probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KernelState {
     /// None (`I` state 00, after a power cycle).
     None,
-    /// winIDEA 9.21.356's, with its session.
+    /// winIDEA 9.21.417's, with its session.
     Ours,
     /// Another one, e.g. another winIDEA version's.
     Foreign,
@@ -388,9 +390,9 @@ pub fn open_ready<L: Link>(
     }
 }
 
-/// Opens, handshakes and makes sure winIDEA 9.21.356's kernel runs with its
+/// Opens, handshakes and makes sure winIDEA 9.21.417's kernel runs with its
 /// session: none running, it loads `kernel`; another one running, it stops that
-/// and loads `kernel`. What a winIDEA 9.21.356 attach does before its target
+/// and loads `kernel`. What a winIDEA 9.21.417 attach does before its target
 /// connection. Returns the handshake and what ran before.
 pub fn bring_up<L: Link>(
     link: L,
@@ -405,7 +407,7 @@ pub fn bring_up<L: Link>(
 }
 
 impl<L: Link> Probe<L> {
-    /// Given what [`Probe::kernel_state`] found, makes winIDEA 9.21.356's kernel run with its session.
+    /// Given what [`Probe::kernel_state`] found, makes winIDEA 9.21.417's kernel run with its session.
     pub fn ensure_kernel(&mut self, state: KernelState, kernel: Option<&Kernel>, progress: impl FnMut(usize)) -> Result<()> {
         if state == KernelState::Ours {
             return Ok(());
@@ -413,7 +415,7 @@ impl<L: Link> Probe<L> {
         let k = kernel.ok_or_else(|| {
             Error::Kernel(match state {
                 KernelState::Foreign => format!(
-                    "the probe runs another winIDEA version's kernel, and no {} of 9.21.356 was given to replace it",
+                    "the probe runs another winIDEA version's kernel, and no {} of 9.21.417 was given to replace it",
                     self.model().kernel_file()
                 ),
                 _ => format!("the probe has no kernel running (power cycled?) and no {} was given", self.model().kernel_file()),
@@ -435,24 +437,38 @@ mod tests {
     use super::*;
     use crate::fixture::{compare, parse as fixture};
 
-    /// The 9.21.356 kernel's shape (contents do not matter for the framing).
-    fn kernel_shape() -> Kernel {
-        Kernel { segments: vec![(0x0010_0000, vec![0x5a; 0x223d5c]), (0x0032_3d60, vec![0xa5; 0x33034])] }
+    /// The 9.21.417 kernels' shapes (contents do not matter for the framing).
+    fn ic6k_shape() -> Kernel {
+        Kernel { segments: vec![(0x0010_0000, vec![0x5a; 0x278278])] }
+    }
+    fn ic3k_shape() -> Kernel {
+        Kernel { segments: vec![(0x0010_0000, vec![0x5a; 0x24c334]), (0x0034_c338, vec![0xa5; 0x2c018])] }
     }
 
     #[test]
     fn a_warm_attach_checks_the_kernel_like_winidea() {
+        let fx = fixture(include_str!("../tests/data/attach_ic5000_warm_check.txt"));
+        let (mut p, hs, state) = bring_up(fx.link_to(crate::Model::Ic5000), None, |_| {}).unwrap();
+        assert_eq!((hs.state(), state), (STATE_KERNEL, KernelState::Ours));
+        assert_eq!(hs.board_ids(), ["0000R000005", "0000R000006"]);
+        compare(&p.link_mut().written, &fx);
+    }
+
+    #[test]
+    fn an_ic5700_checks_its_kernel_like_winidea() {
+        // iC5700 B without active probe, winIDEA 9.21.417's kernel running (no-ap-417-warm.jsonl).
         let fx = fixture(include_str!("../tests/data/attach_warm_check.txt"));
         let (mut p, hs, state) = bring_up(fx.link(), None, |_| {}).unwrap();
         assert_eq!((hs.state(), state), (STATE_KERNEL, KernelState::Ours));
-        assert_eq!(hs.board_ids(), ["0000R000001", "0000R000002"]);
+        assert_eq!(hs.board_ids(), ["0000R000003", "0000R000004"]);
         compare(&p.link_mut().written, &fx);
     }
 
     #[test]
     fn a_cold_attach_loads_the_kernel_like_winidea() {
+        // An iC5700 after a power cycle (first.jsonl, winIDEA 9.21.417).
         let fx = fixture(include_str!("../tests/data/attach_cold.txt"));
-        let k = kernel_shape();
+        let k = ic6k_shape();
         let mut sent = 0;
         let (mut p, hs, state) = bring_up(fx.link(), Some(&k), |n| sent = n).unwrap();
         assert_eq!((hs.state(), state), (STATE_NO_KERNEL, KernelState::None));
@@ -462,24 +478,13 @@ mod tests {
 
     #[test]
     fn another_versions_kernel_is_stopped_and_replaced_like_winidea() {
-        let fx = fixture(include_str!("../tests/data/attach_foreign.txt"));
-        let k = kernel_shape();
-        let (mut p, hs, state) = bring_up(fx.link(), Some(&k), |_| {}).unwrap();
-        assert_eq!((hs.state(), state), (STATE_FOREIGN_KERNEL, KernelState::Foreign));
-        assert!(!hs.needs_restart(), "a known state: no waiting");
-        compare(&p.link_mut().written, &fx);
-    }
-
-    #[test]
-    fn an_ic5000_without_kernel_loads_it_like_winidea() {
-        // ic5000.jsonl: the iC5000's answers are padded to 2 bytes, so `L`, `W`
-        // and `K` answer one byte; its state without kernel was `ef`. The
-        // kernel is iC3kKrnl.s (its shape here), the session value its own.
-        let fx = fixture(include_str!("../tests/data/attach_ic5000_cold.txt"));
-        let k = Kernel { segments: vec![(0x0010_0000, vec![0x5a; 0x223e54]), (0x0032_3e58, vec![0xa5; 0x33034])] };
+        // An iC5000 running winIDEA 9.21.356's kernel: the check and the session
+        // read both answer an echo; then the stop, the chunks of iC3kKrnl.s, the session.
+        let fx = fixture(include_str!("../tests/data/attach_ic5000_foreign.txt"));
+        let k = ic3k_shape();
         let (mut p, hs, state) = bring_up(fx.link_to(crate::Model::Ic5000), Some(&k), |_| {}).unwrap();
-        assert_eq!((hs.state(), state), (0xef, KernelState::None));
-        assert_eq!(hs.board_ids(), ["0000R000005", "0000R000006"]);
+        assert_eq!((hs.state(), state), (STATE_KERNEL, KernelState::Foreign));
+        assert!(!hs.needs_restart(), "a known state: no waiting");
         compare(&p.link_mut().written, &fx);
     }
 
@@ -504,9 +509,9 @@ mod tests {
 
     #[test]
     fn a_probe_without_a_kernel_file_is_an_error() {
-        for f in [include_str!("../tests/data/attach_cold.txt"), include_str!("../tests/data/attach_foreign.txt")] {
-            let fx = fixture(f);
-            assert!(matches!(bring_up(fx.link(), None, |_| {}), Err(Error::Kernel(_))));
-        }
+        let cold = fixture(include_str!("../tests/data/attach_cold.txt"));
+        assert!(matches!(bring_up(cold.link(), None, |_| {}), Err(Error::Kernel(_))));
+        let foreign = fixture(include_str!("../tests/data/attach_ic5000_foreign.txt"));
+        assert!(matches!(bring_up(foreign.link_to(crate::Model::Ic5000), None, |_| {}), Err(Error::Kernel(_))));
     }
 }

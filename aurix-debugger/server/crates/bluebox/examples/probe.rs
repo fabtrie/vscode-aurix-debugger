@@ -11,7 +11,7 @@
 //!
 //! 1. Opens the probe over WinUSB and brings the link up (`bluebox::lowlevel`):
 //!    hello, handshake, and, when no kernel runs (after a power cycle), loads
-//!    `iC6kKrnl.s` from `--kernel` or `C:/winIDEA` and sets the session.
+//!    the kernel (`iC6kKrnl.s`/`iC3kKrnl.s`) from `--kernel` or a winIDEA 9.21.417 install and sets the session.
 //!    `--restart-kernel` first stops a running kernel, as winIDEA does before
 //!    loading another version's, to try the cold path without a power cycle.
 //! 2. With `--replay`, plays back the attach captured in the trace (see
@@ -63,6 +63,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut until_a = false;
     let mut reset_halt = false;
     let mut speed_test = false;
+    let mut write_stats: usize = 0;
     let mut chipid_loop: usize = 0;
     let mut raw_after: Vec<u32> = Vec::new();
     let mut provoke: Option<f64> = None;
@@ -121,6 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--reset-halt" => reset_halt = true,
             "--speed-test" => speed_test = true,
+            "--write-stats" => write_stats = val()?.parse()?,
             "--chipid-loop" => chipid_loop = val()?.parse()?,
             "--then" => {
                 let t = val()?;
@@ -272,13 +274,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("kernel: {state:?}");
         load(&mut p, state)?;
         if fpga_status && model == bluebox::Model::Ic5700 {
-            let builtin = bluebox::attach::Script::tc37x();
-            let (head, _) = bluebox::attach::split_at_fpga_status(&builtin);
-            p.attach(&head.ok_or("the built-in attach has no FPGA status query")?)?;
+            // The messages winIDEA sends before the status query: from a script
+            // given with --script, as there is no built-in iC5700 attach for 9.21.417.
+            let path = script.as_ref().ok_or("--fpga-status on an iC5700 needs --script <trace> for the messages before it")?;
+            let xs = select_script(path, &step, false)?;
+            let (head, _) = bluebox::attach::split_at_fpga_status(&bluebox::attach::Script { exchanges: xs });
+            p.attach(&head.ok_or("the script has no FPGA status query")?)?;
             let st = p.fpga_status()?;
-            let wanted = bluebox::fpga::WANTED_9_21_356;
+            let wanted = bluebox::fpga::WANTED_9_21_417;
             println!(
-                "debug FPGA: type 0x{:08x}, size 0x{:x}, MD5 {}, 9.21.356's: {}",
+                "debug FPGA: type 0x{:08x}, size 0x{:x}, MD5 {}, 9.21.417's: {}",
                 st.kind,
                 st.size,
                 st.md5_hex(),
@@ -296,7 +301,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 bluebox::Model::Ic5700 => None,
             };
-            let c = p.connect_target(&bluebox::attach::Script::builtin(model), true, image.as_deref())?;
+            let builtin = bluebox::attach::Script::builtin(model)
+                .ok_or("no built-in winIDEA 9.21.417 attach for the iC5700 yet; use --script <trace>")?;
+            let c = p.connect_target(&builtin, image.as_deref())?;
             for n in &c.notes {
                 println!("note: {n}");
             }
@@ -364,6 +371,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 p.set_clock_for(c.setup, hz)?;
                 println!("DAP clock {hz} Hz");
             }
+            if write_stats > 0 {
+                // Writes as the driver sends them (write + STM0_TIM0 check read in one
+                // message), then writes alone each followed by a read in its own message.
+                // The value already there, so the application running on the target is not disturbed.
+                let addr = 0x7000_0100u32;
+                let (mut wf, mut cf) = (0, 0);
+                let mut rf = 0;
+                for _ in 0..write_stats {
+                    let m = p.read_memory(addr, 4)?;
+                    if !m.all_ok() {
+                        rf += 1;
+                        continue;
+                    }
+                    let d = m.data;
+                    let w = p.write_memory(addr, &d)?;
+                    if !w.all_ok() {
+                        wf += 1;
+                    }
+                    if !p.read_memory(0xF000_1010, 4)?.all_ok() {
+                        cf += 1000;
+                    }
+                }
+                for _ in 0..write_stats {
+                    let m = p.read_memory(addr, 4)?;
+                    if !m.all_ok() {
+                        rf += 1;
+                        continue;
+                    }
+                    let d = m.data;
+                    let r = p.access(&[bluebox::Access::Write { addr, data: &d }])?;
+                    if !r[0].all_ok() {
+                        cf += 1;
+                    }
+                }
+                println!(
+                    "write stats: {} of {write_stats} driver writes failed; alone: {wf} writes and {} separate reads failed; {rf} reads before a write failed (skipped)",
+                    cf % 1000,
+                    cf / 1000
+                );
+            }
             if speed_test {
                 // 256 KiB of program flash in 8 KiB reads: the DAP clock shows in the rate.
                 let t = Instant::now();
@@ -371,6 +418,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let mut sum = 0xcbf2_9ce4_8422_2325u64;
                 for i in 0..32u32 {
                     let m = p.read_memory(0x8000_0000 + i * 8192, 8192)?;
+                    if !m.all_ok() {
+                        let bad: Vec<usize> = m.failed.iter().enumerate().filter(|(_, f)| **f).map(|(k, _)| k).collect();
+                        println!(
+                            "  read 0x{:08x}+8192: {} bytes failed, first at +0x{:x}, last at +0x{:x}",
+                            0x8000_0000 + i * 8192,
+                            bad.len(),
+                            bad.first().copied().unwrap_or(0),
+                            bad.last().copied().unwrap_or(0)
+                        );
+                    }
                     ok &= m.all_ok();
                     sum = m.data.iter().fold(sum, |h, b| (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3));
                 }
@@ -397,7 +454,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("flags {}", hex(f, 3));
             }
             for spec in &batch_test {
-                // One //2///16/ message with several access blocks: count, the blocks of
+                // One memory-service message with several access blocks: count, the blocks of
                 // the single-access encoding, the 12-byte trailer (as winIDEA's 12-write message).
                 let mut blocks = Vec::new();
                 let mut n = 0u32;
@@ -426,7 +483,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let mut body = n.to_le_bytes().to_vec();
                 body.extend_from_slice(&blocks);
                 body.extend_from_slice(&[0u8; 12]);
-                let msg = bluebox::message::encode(1, "//2///16/", &body);
+                let msg = bluebox::message::encode(1, bluebox::memory::SERVICE, &body);
                 let t = Instant::now();
                 let r = p.transact(&msg)?;
                 println!("batch [{spec}]: {n} accesses, message {} bytes, reply {} bytes in {:.2} ms", msg.len(), r.len(), ms(t));
@@ -515,12 +572,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 watch_target(&mut p, 1.0)?;
                 let t = Instant::now();
                 match p.core_state() {
-                    Ok(st) => println!("reconnect (//2///38/ 01) in {:.1} ms: DBGSR 0x{:08x} PC 0x{:08x}", ms(t), st.dbgsr, st.pc),
+                    Ok(st) => println!("reconnect ({} 01) in {:.1} ms: DBGSR 0x{:08x} PC 0x{:08x}", bluebox::reset::RECONNECT, ms(t), st.dbgsr, st.pc),
                     Err(e) => println!("reconnect failed: {e}"),
                 }
                 watch_target(&mut p, 0.3)?;
                 let t = Instant::now();
-                let mut sc = bluebox::attach::Script::tc37x();
+                let mut sc = bluebox::attach::Script::builtin(model).ok_or("no built-in attach for this model")?;
                 sc.exchanges.drain(..reattach_from.min(sc.exchanges.len()));
                 let rep = p.attach(&sc)?;
                 println!(

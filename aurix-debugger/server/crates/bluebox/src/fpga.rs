@@ -6,17 +6,18 @@
 //! replaced 9.21.417's image, about 47 s, then restarted the kernel). This
 //! crate does not load images: the ones winIDEA ships (`ICWHW32.HRS`) are not
 //! decoded. It only checks, after the attach's first messages, that the probe
-//! holds 9.21.356's, the version this crate's attach and service numbers are
+//! holds 9.21.417's, the version this crate's attach and service numbers are
 //! from. A probe with another image is brought back by connecting once with
-//! winIDEA 9.21.356.
+//! winIDEA 9.21.417.
 //!
-//! Status query, kind 0x11 on node 1: `//1///35/ 01`, answered with 34 bytes:
+//! Status query, kind 0x11 on node 1: `//1///37/ 01` (9.21.356: `//1///35/`),
+//! answered with 34 bytes:
 //! `<type u32 BE> <size u32 BE> 42 00 00 01 00 00 00 00 <MD5> 01 03`. The MD5
 //! is that of the first `size` bytes winIDEA uploaded.
 
 use crate::{hex, Error, Link, Probe, Result};
 
-pub const STATUS: &str = "//1///35/";
+pub const STATUS: &str = "//1///37/";
 
 /// The debug FPGA's type, as its status gives it.
 pub const DEBUG_FPGA: u32 = 0x0094_7a5c;
@@ -28,7 +29,14 @@ pub struct Wanted {
     pub md5: [u8; 16],
 }
 
-/// What winIDEA 9.21.356 needs (the status after it loaded its image).
+/// What winIDEA 9.21.417 needs: the status winIDEA 9.21.356 found after
+/// 9.21.417 had loaded its image (`first.jsonl`).
+pub const WANTED_9_21_417: Wanted = Wanted {
+    size: 0x0031_6fd8,
+    md5: [0xed, 0x36, 0xb5, 0xcf, 0x82, 0xfb, 0xeb, 0x5a, 0x05, 0xd8, 0x02, 0xd4, 0xfa, 0x02, 0x64, 0x05],
+};
+
+/// What winIDEA 9.21.356 needed.
 pub const WANTED_9_21_356: Wanted = Wanted {
     size: 0x0030_553a,
     md5: [0x84, 0xa3, 0x47, 0x0a, 0x80, 0x2f, 0x45, 0x4c, 0xe0, 0xca, 0xbd, 0x26, 0x9f, 0x66, 0xf5, 0x5a],
@@ -70,8 +78,9 @@ impl<L: Link> Probe<L> {
     }
 }
 
-/// The iC5000's debug FPGA, which winIDEA 9.21.356 uploads on every attach,
-/// warm or cold (`ic5000.jsonl`, `ic5000-warm.jsonl`): after `//1///41/`,
+/// The iC5000's debug FPGA, which winIDEA uploads on every attach, warm or
+/// cold (9.21.356 and 9.21.417 alike, `ic5000*.jsonl`): after `//1///43/`
+/// (9.21.356: `//1///41/`),
 ///
 /// 1. `//1///7/ 02`,
 /// 2. five `//1///10/` messages, each `<length u32 LE> <data>`, together the
@@ -83,7 +92,7 @@ impl<L: Link> Probe<L> {
 /// `01 83 12 12 09 ff <length u32 LE> <data>`: the second of six entries of
 /// that type. [`ic5000::find_image`] picks it by length and hash, so nothing of it is
 /// kept here. Its chunks are not of one size (61,401 to 61,405 bytes, then the
-/// rest); they are taken over as winIDEA cut them ([`ic5000::IMAGE_9_21_356`]).
+/// rest); they are taken over as winIDEA cut them ([`ic5000::IMAGE_9_21_417`]).
 pub mod ic5000 {
     use crate::frame::{READ_WINDOW, REPLY_CAPACITY};
     use crate::probe::{Exchange, Fetch};
@@ -108,8 +117,9 @@ pub mod ic5000 {
         pub chunks: [usize; 5],
     }
 
-    /// The image winIDEA 9.21.356 uploads (MD5 `919fd732af530d8d48a8f247939e5982`).
-    pub const IMAGE_9_21_356: Image =
+    /// The image winIDEA 9.21.417 uploads, the same as 9.21.356's (MD5
+    /// `919fd732af530d8d48a8f247939e5982`, in both versions' `ICWHW32.HRS`).
+    pub const IMAGE_9_21_417: Image =
         Image { len: 266_599, fnv: 0xed41_5f83_0f80_98b4, chunks: [61_405, 61_405, 61_401, 61_403, 20_985] };
 
     pub fn fnv1a(d: &[u8]) -> u64 {
@@ -138,12 +148,12 @@ pub mod ic5000 {
     pub fn image_from(dir: &std::path::Path) -> std::result::Result<Vec<u8>, String> {
         let p = dir.join(HRS_FILE);
         let hrs = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        find_image(&hrs, &IMAGE_9_21_356).ok_or_else(|| {
+        find_image(&hrs, &IMAGE_9_21_417).ok_or_else(|| {
             format!(
                 "{} holds no iC5000 debug FPGA image of winIDEA {} ({} bytes)",
                 p.display(),
                 crate::kernel::WINIDEA_VERSION,
-                IMAGE_9_21_356.len
+                IMAGE_9_21_417.len
             )
         })
     }
@@ -161,9 +171,9 @@ pub mod ic5000 {
     impl<L: Link> Probe<L> {
         /// Uploads the iC5000's debug FPGA `image` (from [`image_from`]), as winIDEA does.
         pub fn load_fpga_ic5000(&mut self, image: &[u8]) -> Result<()> {
-            let want = &IMAGE_9_21_356;
+            let want = &IMAGE_9_21_417;
             if image.len() != want.len || fnv1a(image) != want.fnv {
-                return Err(Error::Fpga(format!("not winIDEA 9.21.356's iC5000 image ({} bytes)", image.len())));
+                return Err(Error::Fpga(format!("not winIDEA 9.21.417's iC5000 image ({} bytes)", image.len())));
             }
             let mut steps = vec![exchange(BEGIN, &[0x02], 0x02)];
             let mut at = 0;
@@ -192,7 +202,7 @@ pub mod ic5000 {
 
         #[test]
         fn the_chunks_make_the_image() {
-            assert_eq!(IMAGE_9_21_356.chunks.iter().sum::<usize>(), IMAGE_9_21_356.len);
+            assert_eq!(IMAGE_9_21_417.chunks.iter().sum::<usize>(), IMAGE_9_21_417.len);
         }
 
         #[test]
@@ -228,7 +238,7 @@ pub mod ic5000 {
 
         #[test]
         fn the_installed_image_loads_like_winidea() {
-            // Only where winIDEA 9.21.356 is installed.
+            // Only where a winIDEA with this image is installed (C:\winIDEA: 9.21.356, the same image as 9.21.417's).
             let Ok(image) = image_from(std::path::Path::new(r"C:\winIDEA")) else { return };
             let mut link = ScriptedLink::default();
             link.replies.extend(std::iter::repeat_n(ok_reply(), 7));
@@ -283,9 +293,10 @@ mod tests {
         let s = Status::parse(&STATUS_9_21_417).unwrap();
         assert_eq!((s.kind, s.size), (DEBUG_FPGA, 0x0031_6fd8));
         assert_eq!(s.md5_hex(), "ed36b5cf82fbeb5a05d802d4fa026405");
+        assert!(s.holds(&WANTED_9_21_417), "9.21.417's own image");
         assert!(!s.holds(&WANTED_9_21_356));
-        let ours = Status { kind: DEBUG_FPGA, size: WANTED_9_21_356.size, md5: WANTED_9_21_356.md5 };
-        assert!(ours.holds(&WANTED_9_21_356));
+        let old = Status { kind: DEBUG_FPGA, size: WANTED_9_21_356.size, md5: WANTED_9_21_356.md5 };
+        assert!(!old.holds(&WANTED_9_21_417));
         assert!(Status::parse(&STATUS_9_21_417[..20]).is_err());
     }
 

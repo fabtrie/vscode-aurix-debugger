@@ -1,6 +1,6 @@
 //! Direct USB access to an iSYSTEM BlueBox (iC5700 or iC5000), without winIDEA.
 //!
-//! Everything here was read off USB captures of winIDEA 9.21.356 driving a
+//! Everything here was read off USB captures of winIDEA (9.21.356, then 9.21.417) driving a
 //! TC377 through the probe; nothing comes from iSYSTEM documentation. The
 //! layers, bottom up:
 //!

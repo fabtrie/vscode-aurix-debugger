@@ -1,4 +1,5 @@
-//! Target reset, as winIDEA 9.21.356's `CExecutionController.reset()` does it.
+//! Target reset, as winIDEA's `CExecutionController.reset()` does it (found
+//! with 9.21.356; 9.21.417 sends the same with the reconnect renumbered).
 //!
 //! winIDEA's reset step sends 151 messages. Sent one at a time on a TC377 with
 //! the core running (`reset.jsonl`, `examples/probe.rs --then`), three were
@@ -8,7 +9,7 @@
 //! 1. `//2///7/` body `01`: prepares the reset. Alone it changes nothing.
 //! 2. `//7///7/` body eight zero bytes: the reset. Without the next message
 //!    the debug connection stays broken (every read fails).
-//! 3. `//2///38/` body `01 00 00 00`: reconnects. Its reply carries cpu0's
+//! 3. `//2///34/` (9.21.356: `//2///38/`) body `01 00 00 00`: reconnects. Its reply carries cpu0's
 //!    `DBGSR` and PC (`0x1013`, `0x800a8000` after the reset). Sent on its own,
 //!    it reports the running core's state without resetting anything.
 //!
@@ -27,10 +28,13 @@ use crate::frame::REPLY_CAPACITY;
 use crate::probe::{Exchange, Fetch};
 use crate::{hex, message, Error, Link, Model, Probe, Result};
 
+/// The reconnect after the reset, which also reports cpu0's state (winIDEA 9.21.417).
+pub const RECONNECT: &str = "//2///34/";
+
 /// How long an iC5000 waits between the reset and the reconnect, as winIDEA does.
 pub const RECONNECT_WAIT_IC5000: std::time::Duration = std::time::Duration::from_millis(110);
 
-/// cpu0's state as `//2///38/` reports it.
+/// cpu0's state as [`RECONNECT`] reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreState {
     /// cpu0 `DBGSR` (bit 1 set: halted).
@@ -62,14 +66,14 @@ fn service_reply(path: &str, r: &[u8]) -> Result<()> {
 }
 
 impl<L: Link> Probe<L> {
-    /// cpu0's `DBGSR` and PC (`//2///38/ 01`). Changes nothing on the target.
+    /// cpu0's `DBGSR` and PC (`//2///34/ 01`). Changes nothing on the target.
     pub fn core_state(&mut self) -> Result<CoreState> {
-        let r = self.exchange(&exchange("//2///38/", &[0x01, 0, 0, 0]))?.remove(0);
-        service_reply("//2///38/", &r)?;
+        let r = self.exchange(&exchange(RECONNECT, &[0x01, 0, 0, 0]))?.remove(0);
+        service_reply(RECONNECT, &r)?;
         let word = |o: usize| r.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
         match (word(0x1e), word(0x22)) {
             (Some(dbgsr), Some(pc)) => Ok(CoreState { dbgsr, pc }),
-            _ => Err(Error::Protocol(format!("//2///38/ reply too short: {}", hex(&r, 48)))),
+            _ => Err(Error::Protocol(format!("{RECONNECT} reply too short: {}", hex(&r, 48)))),
         }
     }
 
@@ -122,7 +126,7 @@ mod tests {
         assert_eq!(w[0], "6a 00 14 00 00 00 00 14 23 00 00 00 00 01 08 2f 2f 32 2f 2f 2f 37 2f 00 00 00 01 01");
         assert_eq!(w[1], "8e f0 00 00 00 00 00 02");
         assert!(w[2].starts_with("ea 00 1b 00 00 00 00 14 23 00 00 00 00 01 08 2f 2f 37 2f 2f 2f 37 2f 00 00 00 08 00 00"));
-        assert!(w[4].starts_with("6a 00 18 00 00 00 00 14 23 00 00 00 00 01 09 2f 2f 32 2f 2f 2f 33 38 2f 00 00 00 04 01"));
+        assert!(w[4].starts_with("6a 00 18 00 00 00 00 14 23 00 00 00 00 01 09 2f 2f 32 2f 2f 2f 33 34 2f 00 00 00 04 01"));
     }
 
     #[test]

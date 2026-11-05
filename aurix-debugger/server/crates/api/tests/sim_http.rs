@@ -32,7 +32,7 @@ fn server() -> ServerHandle {
             c.adapter_override = Some("sim".into());
             c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
         });
-        s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
+        s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
         s.interp
             .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
             .unwrap();
@@ -285,7 +285,7 @@ fn enc(s: &str) -> String {
 
 /// `info` and the variable operations before anything is loaded.
 fn variables_without_symbols(http: &Http, h: &ServerHandle) {
-    const CPU0: &str = "tc37x_ext.cpu0";
+    const CPU0: &str = "tc37x.cpu0";
     let info = http.ok("GET", "/api/v1/info", None);
     assert_eq!(info["server"], "aurix-dbg");
     assert_eq!(info["api_version"], api_spec::API_VERSION);
@@ -347,7 +347,7 @@ fn variables(http: &Http, vs: &mut Tcf) {
     let files = info["symbol_files"].as_array().unwrap();
     assert_eq!(files.len(), 2, "{info}");
     assert!(files[0]["path"].as_str().unwrap().ends_with("app.asm"), "{info}");
-    assert!(files[0]["targets"].as_array().unwrap().iter().any(|t| t == "tc37x_ext.cpu0"), "{info}");
+    assert!(files[0]["targets"].as_array().unwrap().iter().any(|t| t == "tc37x.cpu0"), "{info}");
 
     // Sorted by name, case-insensitively; each says how to name and sample it.
     let all = http.ok("GET", "/api/v1/globals", None);
@@ -390,7 +390,7 @@ fn variables(http: &Http, vs: &mut Tcf) {
     assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
     let (status, e) = http.request("GET", "/api/v1/expressions?expression=g_counter&target=nope", None, &[]);
     assert_eq!(status, 404, "{e}");
-    assert_eq!(http.ok("GET", "/api/v1/expressions?expression=g_counter&target=tc37x_ext.cpu0", None)["value"], 42);
+    assert_eq!(http.ok("GET", "/api/v1/expressions?expression=g_counter&target=tc37x.cpu0", None)["value"], 42);
 
     // Write: numbers, exact 64-bit hex strings, and range checks. VS Code is told to refresh.
     vs.events.clear();
@@ -656,9 +656,9 @@ fn core_local_variables(http: &Http, vs: &mut Tcf) {
     assert!(e["message"].as_str().unwrap().contains("no TriCore core 5"), "{e}");
     let (status, e) = eval("CRASH_state@6");
     assert_eq!(status, 404, "core 6 is the HSM, not a TriCore: {e}");
-    let (status, e) = http.request("GET", &format!("/api/v1/expressions?expression={}&target=tc37x_ext.cpu0", enc("CRASH_state@2")), None, &[]);
+    let (status, e) = http.request("GET", &format!("/api/v1/expressions?expression={}&target=tc37x.cpu0", enc("CRASH_state@2")), None, &[]);
     assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
-    assert_eq!(get(&format!("/api/v1/expressions?expression={}&target=tc37x_ext.cpu2", enc("CRASH_state@2")))["value"], 3);
+    assert_eq!(get(&format!("/api/v1/expressions?expression={}&target=tc37x.cpu2", enc("CRASH_state@2")))["value"], 3);
     // DAQ: the bare name is refused per point, a copy samples over the system bus.
     let mut ws = Ws::connect(http.0, &[]).unwrap();
     ws.send(json!({ "op": "subscribe", "id": 1, "points": [{ "expression": "CRASH_state", "rate_hz": 100 }, { "expression": "CRASH_state@2", "rate_hz": 100 }] }));
@@ -721,7 +721,7 @@ fn sse_event(sse: &Receiver<Value>, kind: &str, target: &str) -> Value {
 
 /// Watchpoints on expressions, shared by the API and VS Code, with conditions.
 fn watchpoints(http: &Http, vs: &mut Tcf, h: &ServerHandle, sse: &Receiver<Value>) {
-    const CPU0: &str = "tc37x_ext.cpu0";
+    const CPU0: &str = "tc37x.cpu0";
     let c0 = tcf::cores(h).into_iter().find(|c| c.idx == 0).unwrap().id;
     let dir = std::env::temp_dir().join(format!("aurix-watch-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -794,7 +794,7 @@ fn watchpoints(http: &Http, vs: &mut Tcf, h: &ServerHandle, sse: &Receiver<Value
     let at: Vec<(String, u64)> = w["instances"].as_array().unwrap().iter().map(|i| (i["target"].as_str().unwrap().to_string(), i["address"].as_u64().unwrap())).collect();
     assert_eq!(
         at,
-        [("tc37x_ext.cpu0".to_string(), 0x6000_0100), ("tc37x_ext.cpu1".to_string(), 0xD000_0100), ("tc37x_ext.cpu2".to_string(), 0x6000_0100)],
+        [("tc37x.cpu0".to_string(), 0x6000_0100), ("tc37x.cpu1".to_string(), 0xD000_0100), ("tc37x.cpu2".to_string(), 0x6000_0100)],
         "{w}"
     );
 
@@ -929,7 +929,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     }
     let sse = http.events();
     let c0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
-    const CPU0: &str = "tc37x_ext.cpu0";
+    const CPU0: &str = "tc37x.cpu0";
 
     // Generated routes and the spec.
     let targets = http.ok("GET", "/api/v1/targets", None);

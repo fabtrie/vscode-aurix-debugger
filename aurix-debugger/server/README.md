@@ -29,7 +29,7 @@ The command-line options are the same as OpenOCD's:
 ```powershell
 cd aurix-debugger
 .\server\target\debug\aurix-dbg.exe -s server/target/openocd-tcl/tcl `
-    -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3] [-l log.txt]
+    -f board/infineon/kit_a2g_tc375_lite.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3] [-l log.txt]
 ```
 
 `server/target/openocd-tcl/tcl` holds OpenOCD's board/target scripts, fetched by `cargo build`. The VS Code extension ships the same folder and passes it as a search directory itself.
@@ -107,8 +107,8 @@ Python ([python/](../python)): `pip install -e python`, then:
 ```python
 from aurix_dbg import Client
 dbg = Client("http://127.0.0.1:8080")
-dbg.halt("tc37x_ext.cpu0")
-print(hex(dbg.read_register("tc37x_ext.cpu0", "pc").value))
+dbg.halt("tc37x.cpu0")
+print(hex(dbg.read_register("tc37x.cpu0", "pc").value))
 data = dbg.read_bytes(0x70000000, 256)   # any length, split into 64 KB calls
 for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients
 ```
@@ -427,7 +427,7 @@ Only TriCore cores are taken over. The HSM (through its debug bridge) and the GT
 
 ### Tcl on this backend
 
-Unsupported **actions** fail loudly; **declarations** are accepted and reported. The split is forced by the cfg chain: `board/infineon/kit_a2g_tc377tx_3v3_trb.cfg` sources `interface/tas_client.cfg` and sets `adapter speed 5000`, and those are third-party files nobody can add an `if` to.
+Unsupported **actions** fail loudly; **declarations** are accepted and reported. The split is forced by the cfg chain: `board/infineon/kit_a2g_tc375_lite.cfg` sources `interface/tas_client.cfg` and sets `adapter speed 5000`, and those are third-party files nobody can add an `if` to.
 
 | | Behaviour |
 |---|---|
@@ -464,7 +464,7 @@ winidea status
 
 ```powershell
 aurix-dbg.exe --adapter winidea -s server/target/openocd-tcl/tcl `
-    -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg `
+    -f board/infineon/kit_a2g_tc375_lite.cfg -f tc37x_ocds_init.cfg `
     -c "winidea workspace C:/ws/app.xjrf" -c "init"
 ```
 

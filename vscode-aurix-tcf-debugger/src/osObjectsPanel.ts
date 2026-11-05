@@ -13,7 +13,7 @@
 import * as vscode from 'vscode';
 import type { PanelPlacement } from './debugLayout';
 import { LiveUpdater } from './liveUpdate';
-import { describeOsError } from './tcf/osaware';
+import { describeOsError, isOsReadDropped } from './tcf/osaware';
 import type { OsInfo, OsObjectList, OsStack, OsStackList, OsTypeInfo } from './tcf/osaware';
 
 /** One table as the webview renders it. */
@@ -176,7 +176,10 @@ export class OsObjectsPanel {
 			}
 			this.post(this.table(list.Reads), highlight);
 		} catch (e) {
-			this.post({ ...this.empty(), error: describeOsError(e) }, highlight);
+			// A read dropped for a resume keeps the table shown.
+			if (!isOsReadDropped(e) || !this.full.has(this.kind)) {
+				this.post({ ...this.empty(), error: describeOsError(e) }, highlight);
+			}
 		} finally {
 			this.busy = false;
 		}

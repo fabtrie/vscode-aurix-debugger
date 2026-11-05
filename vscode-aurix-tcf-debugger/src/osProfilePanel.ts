@@ -82,6 +82,8 @@ export class OsProfilePanel {
 			// hidden or paused panel stops the sampler outright rather than just not drawing.
 			onActiveChanged: active => void (active ? this.startSampling() : this.stopSampling()),
 			onChanged: () => this.post(),
+			// Starting the sampler clears its statistics, so a halt must not stop it.
+			pauseWhileHalted: false,
 		});
 		this.live.setVisible(panel.visible);
 		this.disposables.push(

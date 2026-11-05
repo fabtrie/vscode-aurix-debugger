@@ -726,6 +726,11 @@
 					"default": 1000,
 					"minimum": 200,
 					"description": "How often the live views re-read the target while it runs: the Live Watch, the AUTOSAR OS view and the OS Objects panel. A Live Watch can have its own interval (its gear button), which this one then leaves alone. A view that is not on screen reads nothing."
+				},
+				"aurix-debugger.liveWatch.pauseWhileHalted": {
+					"type": "boolean",
+					"default": true,
+					"description": "While every TriCore core is halted, the live views (Live Watch, AUTOSAR OS view, OS Objects panel) stop re-reading the target: they refresh once on the halt, after a write and when something is expanded, and start again on resume. Turn off to keep reading peripherals that run on while the cores are halted (timers without suspend, DMA, GTM). The OS profiler is not affected."
 				}
 			}
 		},

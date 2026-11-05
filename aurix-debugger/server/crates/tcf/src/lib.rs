@@ -12,6 +12,7 @@ mod expressions;
 mod forwarder;
 mod osaware;
 mod profile;
+mod queue;
 mod stack;
 mod stepping;
 mod symstore;

@@ -11,7 +11,7 @@
 
 import * as vscode from 'vscode';
 import { LiveUpdater } from './liveUpdate';
-import { describeOsError } from './tcf/osaware';
+import { describeOsError, isOsReadDropped } from './tcf/osaware';
 import type { OsAttributeValue, OsInfo, OsObject, OsObjectList } from './tcf/osaware';
 
 /** Attributes of the OS object worth putting in a narrow sidebar, in this order. */
@@ -128,7 +128,10 @@ export class OsViewProvider implements vscode.TreeDataProvider<Node>, vscode.Dis
 			}
 			this.error = undefined;
 		} catch (e) {
-			this.error = describeOsError(e);
+			// A read dropped for a resume keeps the values shown.
+			if (!isOsReadDropped(e) || this.values.size === 0) {
+				this.error = describeOsError(e);
+			}
 		} finally {
 			this.refreshing = false;
 			this.changed.fire(undefined);

@@ -20,7 +20,13 @@ import { OsObjectsPanel } from './osObjectsPanel';
 import { OsProfilePanel } from './osProfilePanel';
 import { DebugLayout, focusEditorGroup } from './debugLayout';
 import { describeOsError } from './tcf/osaware';
-import { notifyLiveUpdateBreak, setLiveUpdateIntervalMs, setLiveUpdateSessionActive } from './liveUpdate';
+import {
+	notifyLiveUpdateBreak,
+	setLiveUpdateIntervalMs,
+	setLiveUpdatePauseWhileHalted,
+	setLiveUpdateSessionActive,
+	setLiveUpdateTargetHalted,
+} from './liveUpdate';
 import { OsViewProvider } from './osView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
 import { findSvdForDevice, SvdCatalogEntry } from './svdCatalog';
@@ -89,6 +95,7 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	void ensureMemoryInspectorSettings();
+	applyLiveWatchPauseWhileHalted();
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration((event) => {
 			if (enforcingMemoryInspectorSettings) {
@@ -101,6 +108,9 @@ export function activate(context: vscode.ExtensionContext) {
 				event.affectsConfiguration('memory-inspector.periodicRefreshInterval')
 			) {
 				void ensureMemoryInspectorSettings();
+			}
+			if (event.affectsConfiguration('aurix-debugger.liveWatch.pauseWhileHalted')) {
+				applyLiveWatchPauseWhileHalted();
 			}
 			if (event.affectsConfiguration('aurix-debugger.disassembly.opcodeBytes')) {
 				const opcodeBytes = getDisassemblyOpcodeBytes();
@@ -371,10 +381,14 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.debug.registerDebugAdapterTrackerFactory('aurixdbg', {
 			createDebugAdapterTracker: () => ({
-				onDidSendMessage: (message: { type?: string; event?: string }) => {
+				onDidSendMessage: (message: { type?: string; event?: string; body?: { allHalted?: unknown } }) => {
 					if (message?.type === 'event' && message.event === 'stopped') {
 						// Paused live views still update on a halt, the way the Watch view does.
 						notifyLiveUpdateBreak();
+					}
+					if (message?.type === 'event' && message.event === 'aurix/runState') {
+						// Every TriCore core halted: the periodic loops rest (liveWatch.pauseWhileHalted).
+						setLiveUpdateTargetHalted(message.body?.allHalted === true);
 					}
 				},
 			}),
@@ -1696,6 +1710,15 @@ async function setLiveWatchInterval(value: number): Promise<void> {
 	setLiveUpdateSessionActive(sessionActive);
 }
 
+function liveWatchPausesWhileHalted(): boolean {
+	return vscode.workspace.getConfiguration('aurix-debugger').get<boolean>('liveWatch.pauseWhileHalted', true);
+}
+
+function applyLiveWatchPauseWhileHalted(): void {
+	setLiveUpdatePauseWhileHalted(liveWatchPausesWhileHalted());
+	updateLiveWatchStatus(activeAurixSessions > 0);
+}
+
 function updateLiveWatchStatus(visible: boolean): void {
 	if (!liveWatchStatusItem) {
 		return;
@@ -1704,7 +1727,10 @@ function updateLiveWatchStatus(visible: boolean): void {
 	const overrides = liveWatches?.hasIntervalOverride()
 		? ' Live Watches with their own interval (set with their gear button) keep it.'
 		: '';
-	liveWatchStatusItem.tooltip = `The live views refresh every ${lastLiveWatchIntervalMs} ms while the target runs.${overrides} A view that is not on screen reads nothing. Click to change.`;
+	const halted = liveWatchPausesWhileHalted()
+		? ' While every TriCore core is halted they only refresh once on the halt (setting liveWatch.pauseWhileHalted).'
+		: ' They also refresh while the target is halted (setting liveWatch.pauseWhileHalted).';
+	liveWatchStatusItem.tooltip = `The live views refresh every ${lastLiveWatchIntervalMs} ms while the target runs.${halted}${overrides} A view that is not on screen reads nothing. Click to change.`;
 	if (visible) {
 		liveWatchStatusItem.show();
 	} else {

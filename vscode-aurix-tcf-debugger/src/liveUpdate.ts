@@ -9,6 +9,9 @@
  * - **nothing is read unless the view is on screen** - a hidden panel costs the target nothing;
  * - pause means "only on halt", not "stop": a paused view still updates when a core stops, the
  *   way the Watch view does;
+ * - while every TriCore core is halted the loop rests (`aurix-debugger.liveWatch.pauseWhileHalted`,
+ *   on by default): the values only change when the cores run, and the reads would queue ahead
+ *   of the variables and stacks being looked at. The halt itself still refreshes once;
  * - the next refresh is timed from the *start* of the previous one, so a slow read delays the
  *   next one instead of queueing another on top of it.
  *
@@ -42,6 +45,11 @@ export interface LiveUpdateOptions {
 	 * reads rather than only stopping the drawing.
 	 */
 	onActiveChanged?: (active: boolean) => void;
+	/**
+	 * Whether the loop rests while the target is halted, when that is configured. Default true;
+	 * the profiler says false, since stopping its sampler would start its statistics over.
+	 */
+	pauseWhileHalted?: boolean;
 }
 
 export class LiveUpdater implements vscode.Disposable {
@@ -86,7 +94,12 @@ export class LiveUpdater implements vscode.Disposable {
 
 	/** Whether the periodic loop is running, i.e. whether the target is being read. */
 	get active(): boolean {
-		return this.sessionActive && this.visible && !this.pausedFlag && (this.opts.canRefresh?.() ?? true);
+		return this.sessionActive && this.visible && !this.pausedFlag && !this.restingWhileHalted && (this.opts.canRefresh?.() ?? true);
+	}
+
+	/** The target is halted and this view does not read it periodically meanwhile. */
+	get restingWhileHalted(): boolean {
+		return sharedHalted && sharedPauseWhileHalted && (this.opts.pauseWhileHalted ?? true);
 	}
 
 	/** A one-line state for a view title, matching what the Live Watch shows. */
@@ -94,7 +107,15 @@ export class LiveUpdater implements vscode.Disposable {
 		if (!this.sessionActive) {
 			return '';
 		}
-		return this.pausedFlag ? 'paused' : `${this.intervalMs} ms`;
+		if (this.pausedFlag) {
+			return 'paused';
+		}
+		return this.restingWhileHalted ? `${this.intervalMs} ms, halted` : `${this.intervalMs} ms`;
+	}
+
+	/** The target's halted state or the pause-while-halted setting changed. */
+	haltStateChanged(): void {
+		this.reschedule(0);
 	}
 
 	setVisible(visible: boolean): void {
@@ -229,6 +250,34 @@ const updaters = new Set<LiveUpdater>();
 const defaultIntervalMs = 1000;
 let sharedIntervalMs = defaultIntervalMs;
 let sharedSessionActive = false;
+/** Every TriCore core is halted (the adapter's `aurix/runState` event). */
+let sharedHalted = false;
+let sharedPauseWhileHalted = true;
+
+/**
+ * Whether every TriCore core is halted. While it is, and `pauseWhileHalted` is set, the periodic
+ * loops rest; a resume starts them again at once.
+ */
+export function setLiveUpdateTargetHalted(halted: boolean): void {
+	if (sharedHalted === halted) {
+		return;
+	}
+	sharedHalted = halted;
+	for (const u of updaters) {
+		u.haltStateChanged();
+	}
+}
+
+/** `aurix-debugger.liveWatch.pauseWhileHalted`. */
+export function setLiveUpdatePauseWhileHalted(on: boolean): void {
+	if (sharedPauseWhileHalted === on) {
+		return;
+	}
+	sharedPauseWhileHalted = on;
+	for (const u of updaters) {
+		u.haltStateChanged();
+	}
+}
 
 /** The interval the Live Watch has always used: at least 200 ms, at most 10 s. */
 export function normalizeIntervalMs(value: unknown): number {
@@ -254,6 +303,10 @@ export function setLiveUpdateIntervalMs(ms: number): void {
 /** Starts the live views when a session begins and stops them when the last one ends. */
 export function setLiveUpdateSessionActive(active: boolean): void {
 	sharedSessionActive = active;
+	if (!active) {
+		// A new session starts out running as far as this knows, until its adapter says otherwise.
+		sharedHalted = false;
+	}
 	for (const u of updaters) {
 		u.setSessionActive(active);
 	}

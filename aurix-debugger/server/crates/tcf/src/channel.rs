@@ -5,6 +5,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aurix_core::unwind::Frame;
@@ -20,6 +21,7 @@ use aurix_core::{log_debug, log_warn, ops};
 
 use crate::contexts::{chip_name, cores, find_core, owning_core, read_pc, reason_text, CoreInfo, CONTAINER};
 use crate::symstore::elf_id;
+use crate::queue::{self, Queue};
 use crate::wire::{self, Reader};
 use crate::{osaware, profile, Shared, SERVICES};
 
@@ -93,18 +95,40 @@ pub fn run(shared: Arc<Shared>, id: u64, stream: TcpStream) {
     writer.send(&wire::event("Locator", "Hello", &[j(SERVICES)]));
     shared.channels.lock().unwrap().insert(id, writer.clone());
 
-    let ch = Channel { shared: shared.clone(), id, writer: writer.clone() };
-    let mut reader = Reader::new(stream);
-    loop {
-        match reader.next_message() {
-            Ok(Some(fields)) => ch.message(&fields),
-            Ok(None) => break,
-            Err(e) => {
-                log_debug!("TCF: read error: {e}");
-                break;
+    let ch = Arc::new(Channel { shared: shared.clone(), id, writer: writer.clone() });
+    // Read on a thread of its own, so a run command can drop the reads queued
+    // before it (see `queue`); this thread runs the commands in order.
+    let queue = Arc::new(Queue::default());
+    let reading = {
+        let (queue, ch) = (queue.clone(), ch.clone());
+        thread::spawn(move || {
+            let mut reader = Reader::new(stream);
+            loop {
+                match reader.next_message() {
+                    Ok(Some(fields)) => {
+                        let why = queue::command(&fields).map(|(s, c)| format!("{s}.{c}")).unwrap_or_default();
+                        let dropped = queue.push(fields);
+                        if !dropped.is_empty() {
+                            log_debug!("TCF: {} read(s) dropped for {why}", dropped.len());
+                        }
+                        for m in dropped {
+                            ch.drop_read(&m, &why);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        log_debug!("TCF: read error: {e}");
+                        break;
+                    }
+                }
             }
-        }
+            queue.close();
+        })
+    };
+    while let Some(fields) = queue.pop() {
+        ch.message(&fields);
     }
+    let _ = reading.join();
 
     shared.channels.lock().unwrap().remove(&id);
     shared.remove_owned(id);
@@ -129,6 +153,15 @@ impl Channel {
             }
             Some("E") | Some("F") | Some("R") | Some("N") | Some("P") => {}
             _ => log_warn!("TCF: ignoring malformed message {f:?}"),
+        }
+    }
+
+    /// Answers a read that a later run command took out of the queue, as a
+    /// read of a running context (which frontends already take quietly).
+    fn drop_read(&self, m: &[String], why: &str) {
+        if let Some((service, command)) = queue::command(m) {
+            let e = err(ERR_IS_RUNNING, format!("Execution context is running (read dropped for {why})"));
+            self.reply(&m[1], service, command, Err(e));
         }
     }
 

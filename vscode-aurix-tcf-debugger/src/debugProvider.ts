@@ -193,6 +193,36 @@ enum StoppedEventReason {
 	step = 'step',
 }
 
+/** A Set that calls `onChange` whenever its contents change. */
+export class NotifyingSet<T> extends Set<T> {
+	constructor(private readonly onChange: () => void) {
+		super();
+	}
+
+	override add(value: T): this {
+		if (!this.has(value)) {
+			super.add(value);
+			this.onChange();
+		}
+		return this;
+	}
+
+	override delete(value: T): boolean {
+		const removed = super.delete(value);
+		if (removed) {
+			this.onChange();
+		}
+		return removed;
+	}
+
+	override clear(): void {
+		if (this.size > 0) {
+			super.clear();
+			this.onChange();
+		}
+	}
+}
+
 class DebugLogger implements TCFLogger {
 	private debugTCF = false;
 	private prefix = '';
@@ -423,7 +453,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	private tcfLogger: DebugLogger;
 	private tcfClient: TCFClient;
-	private suspendedContextIds = new Set<string>();
+	/** Every change is reported to the live views as `aurix/runState` (see reportRunState). */
+	private suspendedContextIds = new NotifyingSet<string>(() => this.reportRunState());
+	private lastAllHalted: boolean | undefined;
 	private pendingStepThreads = new Set<number>();
 	private configuredGlobals: string[] = [];
 	private liveWatchEvaluator: LiveWatchEvaluator;
@@ -1163,6 +1195,22 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.contextMachines.set(t.info.ID, AurixTCFDebugSession.contextMachine(t.info));
 			}
 		}
+		this.reportRunState();
+	}
+
+	/**
+	 * Tells the extension (`aurix/runState`) whether every TriCore core is halted, when that
+	 * changes: the live views rest meanwhile (`aurix-debugger.liveWatch.pauseWhileHalted`). The
+	 * HSM and the MCS channels do not count; they often run on while the TriCores are halted.
+	 */
+	private reportRunState(): void {
+		const tricores = Array.from(this.contextMachines).filter(([, machine]) => machine === 44).map(([id]) => id);
+		const allHalted = tricores.length > 0 && tricores.every((id) => this.suspendedContextIds.has(id));
+		if (allHalted === this.lastAllHalted) {
+			return;
+		}
+		this.lastAllHalted = allHalted;
+		this.sendEvent(new Event('aurix/runState', { allHalted }));
 	}
 
 	/** Whether a "cores" entry names the context: ID, name or name without the chip prefix, `*` and `?` as wildcards. */
@@ -1211,6 +1259,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 					?? AurixTCFDebugSession.extractCoreType(contextName);
 				const machine = AurixTCFDebugSession.contextMachine(thread.info);
 				this.contextMachines.set(contextId, machine);
+				this.reportRunState();
 
 				// Primary ELF first, then the matching symbol files. A file of another
 				// architecture (e.g. the TriCore program on the HSM) is left out.

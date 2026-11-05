@@ -455,7 +455,8 @@ export class LiveWatchInstance implements vscode.Disposable {
 		// One result per item, in order.
 		roots.forEach((root, index) => {
 			const value = values[index];
-			if (value && this.expressions.has(root)) {
+			// A read the server dropped for a resume keeps the value shown; the next refresh reads it.
+			if (value && this.expressions.has(root) && !(value.stale && this.results.has(root))) {
 				this.results.set(root, { ...value, name: root });
 			}
 		});

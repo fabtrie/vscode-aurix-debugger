@@ -35,7 +35,17 @@ export type LiveWatchNode = {
 export type LiveWatchRootResult = LiveWatchNode & {
 	available: boolean;
 	error?: string;
+	/**
+	 * The read was not done because the target started running (the server drops reads queued
+	 * before a resume, step or reset). The view keeps the value it has.
+	 */
+	stale?: boolean;
 };
+
+/** A read refused because the context runs, or dropped for a resume queued after it. */
+export function isRunningError(e: unknown): boolean {
+	return formatError(e).includes('Execution context is running');
+}
 
 export type LiveWatchRequestItem = {
 	expression: string;
@@ -158,6 +168,7 @@ export class LiveWatchEvaluator {
 					hasChildren: false,
 					available: false,
 					error: formatError(e),
+					stale: isRunningError(e),
 				};
 			}
 		}));
@@ -179,7 +190,11 @@ export class LiveWatchEvaluator {
 		if (entry) {
 			try {
 				variable = await this.createRootVariable(ctx, entry, explicitCore);
-			} catch {
+			} catch (e) {
+				if (isRunningError(e)) {
+					// Not read (a resume came after it), but the expression is still good.
+					throw e;
+				}
 				// The cached expression may have become invalid (e.g. a reset); create it again.
 				this.dropRoot(key);
 				entry = undefined;

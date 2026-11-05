@@ -379,3 +379,11 @@ export function parseTaskFilter(condition: string | undefined): TaskFilter | und
 	}
 	return /^[A-Za-z_]\w*$/.test(text) ? { task: text, negate: false } : undefined;
 }
+
+/**
+ * The read was not done because the target started running: the server drops reads queued
+ * before a resume, step or reset. A view keeps what it shows; the next refresh reads again.
+ */
+export function isOsReadDropped(e: unknown): boolean {
+	return describeOsError(e).includes('Execution context is running');
+}

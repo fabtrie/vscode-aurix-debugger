@@ -1,5 +1,12 @@
 import * as assert from 'assert';
-import { LiveUpdater, notifyLiveUpdateBreak, setLiveUpdateIntervalMs, setLiveUpdateSessionActive } from '../../liveUpdate';
+import {
+	LiveUpdater,
+	notifyLiveUpdateBreak,
+	setLiveUpdateIntervalMs,
+	setLiveUpdatePauseWhileHalted,
+	setLiveUpdateSessionActive,
+	setLiveUpdateTargetHalted,
+} from '../../liveUpdate';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -92,5 +99,67 @@ suite('LiveUpdater interval per view', () => {
 		assert.strictEqual(a.onBreak(), 1);
 		assert.strictEqual(b.onBreak(), 1);
 		assert.strictEqual(hidden.onBreak(), 0);
+	});
+});
+
+suite('LiveUpdater while the target is halted', () => {
+	const updaters: LiveUpdater[] = [];
+
+	setup(() => {
+		setLiveUpdateIntervalMs(200);
+		setLiveUpdatePauseWhileHalted(true);
+		setLiveUpdateSessionActive(true);
+	});
+
+	teardown(() => {
+		updaters.splice(0).forEach((u) => u.dispose());
+		setLiveUpdateTargetHalted(false);
+		setLiveUpdatePauseWhileHalted(true);
+		setLiveUpdateSessionActive(false);
+		setLiveUpdateIntervalMs(1000);
+	});
+
+	test('the loop rests while halted, a break still refreshes, a resume starts it again', async () => {
+		const v = counting();
+		updaters.push(v.updater);
+		setLiveUpdateTargetHalted(true);
+		assert.strictEqual(v.updater.active, false);
+		assert.strictEqual(v.updater.description, '200 ms, halted');
+		notifyLiveUpdateBreak();
+		await wait(450);
+		assert.strictEqual(v.periodic(), 0);
+		assert.strictEqual(v.onBreak(), 1);
+		setLiveUpdateTargetHalted(false);
+		assert.strictEqual(v.updater.active, true);
+		await wait(50);
+		assert.strictEqual(v.periodic(), 1, 'a resume refreshes at once');
+	});
+
+	test('with the setting off it keeps reading while halted', async () => {
+		const v = counting();
+		updaters.push(v.updater);
+		setLiveUpdatePauseWhileHalted(false);
+		setLiveUpdateTargetHalted(true);
+		assert.strictEqual(v.updater.active, true);
+		assert.strictEqual(v.updater.description, '200 ms');
+		await wait(450);
+		assert.ok(v.periodic() >= 2, `refreshed ${v.periodic()} times`);
+	});
+
+	test('a view can opt out, like the profiler', () => {
+		const own = new LiveUpdater({ refresh: async () => undefined, pauseWhileHalted: false });
+		updaters.push(own);
+		own.setVisible(true);
+		setLiveUpdateTargetHalted(true);
+		assert.strictEqual(own.active, true);
+	});
+
+	test('the end of a session forgets the halt', () => {
+		const v = counting();
+		updaters.push(v.updater);
+		setLiveUpdateTargetHalted(true);
+		setLiveUpdateSessionActive(false);
+		setLiveUpdateSessionActive(true);
+		assert.strictEqual(v.updater.active, true);
 	});
 });

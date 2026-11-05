@@ -1,4 +1,4 @@
-//! Direct USB access to an iSYSTEM BlueBox (iC5700), without winIDEA.
+//! Direct USB access to an iSYSTEM BlueBox (iC5700 or iC5000), without winIDEA.
 //!
 //! Everything here was read off USB captures of winIDEA 9.21.356 driving a
 //! TC377 through the probe; nothing comes from iSYSTEM documentation. The
@@ -13,8 +13,11 @@
 //! * [`probe::Probe`]: a session on top of a link: it keeps the toggle bit and
 //!   splits long accesses.
 //! * [`lowlevel`] and [`kernel`]: the link bring-up: hello, the handshake, and
-//!   loading the probe's kernel (`iC6kKrnl.s` from a winIDEA install) after a
-//!   power cycle.
+//!   loading the probe's kernel (`iC6kKrnl.s`, or `iC3kKrnl.s` for an iC5000,
+//!   from a winIDEA install) after a power cycle, or in place of another
+//!   winIDEA version's.
+//! * [`fpga`]: which debug FPGA image an iC5700 holds; the iC5000's upload.
+//! * [`Model`]: what differs between the two BlueBoxes.
 //! * [`replay`]: plays back a captured winIDEA attach for what follows (target
 //!   connection, core discovery), which is not decoded yet.
 //!
@@ -23,6 +26,9 @@
 //! are reachable as memory.
 
 pub mod attach;
+#[cfg(test)]
+mod fixture;
+pub mod fpga;
 pub mod frame;
 pub mod kernel;
 pub mod link;
@@ -36,14 +42,75 @@ pub mod reset;
 pub mod usb;
 
 pub use link::Link;
-pub use memory::{MemReply, MAX_CHUNK};
+pub use memory::{Access, MemReply, MAX_CHUNK};
 pub use kernel::Kernel;
-pub use lowlevel::{bring_up, Handshake};
+pub use lowlevel::{bring_up, Handshake, KernelState};
 pub use probe::{Exchange, Fetch, Probe};
 
-/// USB ids of the iC5700 BlueBox.
+/// USB vendor id of iSYSTEM probes.
 pub const VID: u16 = 0x06f9;
-pub const PID: u16 = 0x5700;
+
+/// The BlueBox models this crate drives. Both speak the same frames, messages
+/// and services (the memory service byte for byte); they differ in the bring-up
+/// (kernel file, session value, answer padding, debug FPGA) and in the attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Model {
+    /// iC5700 (USB PID 5700): kernel `iC6kKrnl.s`, debug FPGA kept in flash.
+    #[default]
+    Ic5700,
+    /// iC5000 (USB PID 3200): kernel `iC3kKrnl.s`, debug FPGA uploaded on
+    /// every attach ([`fpga::ic5000`]).
+    Ic5000,
+}
+
+impl Model {
+    pub const ALL: [Model; 2] = [Model::Ic5700, Model::Ic5000];
+
+    pub fn pid(self) -> u16 {
+        match self {
+            Model::Ic5700 => 0x5700,
+            Model::Ic5000 => 0x3200,
+        }
+    }
+
+    pub fn from_pid(pid: u16) -> Option<Model> {
+        Model::ALL.into_iter().find(|m| m.pid() == pid)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::Ic5700 => "iC5700",
+            Model::Ic5000 => "iC5000",
+        }
+    }
+
+    /// The kernel file in a winIDEA install.
+    pub fn kernel_file(self) -> &'static str {
+        match self {
+            Model::Ic5700 => "iC6kKrnl.s",
+            Model::Ic5000 => "iC3kKrnl.s",
+        }
+    }
+
+    /// What a frame's payload is padded to a multiple of.
+    pub fn frame_pad(self) -> usize {
+        match self {
+            Model::Ic5700 => 4,
+            Model::Ic5000 => 2,
+        }
+    }
+
+    /// Capacity of the read that fetches an `n`-byte low-level answer, as
+    /// winIDEA asks for it: `08` plus the answer, padded to 4 bytes on the
+    /// iC5700; `n` rounded up to even on the iC5000, which answers that many
+    /// bytes, `08` included, so an even-length answer loses its last byte.
+    pub fn answer_capacity(self, n: usize) -> usize {
+        match self {
+            Model::Ic5700 => frame::padded(n + 1),
+            Model::Ic5000 => n.next_multiple_of(2),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -57,6 +124,8 @@ pub enum Error {
     Trace(String),
     /// Loading the probe's kernel failed, or it is needed and missing.
     Kernel(String),
+    /// The probe's debug FPGA: its image, or loading one.
+    Fpga(String),
 }
 
 impl std::fmt::Display for Error {
@@ -74,6 +143,7 @@ impl std::fmt::Display for Error {
             Error::Protocol(s) => write!(f, "unexpected answer from the probe: {s}"),
             Error::Trace(s) => write!(f, "replay trace: {s}"),
             Error::Kernel(s) => write!(f, "probe kernel: {s}"),
+            Error::Fpga(s) => write!(f, "probe FPGA: {s}"),
         }
     }
 }

@@ -33,7 +33,15 @@ pub enum Transfer {
 #[derive(Debug, Clone, Default)]
 pub struct Replay {
     pub transfers: Vec<Transfer>,
+    /// When each transfer completed, in ms (from the trace; empty if unknown).
+    pub times: Vec<i64>,
 }
+
+/// Shortest pause of winIDEA's between a reply and its next message that an
+/// exchange keeps ([`Exchange::pause_ms`]); shorter ones are host jitter.
+pub const PAUSE_MIN_MS: i64 = 3;
+/// Longest pause kept: longer ones are the end of a step, not part of it.
+pub const PAUSE_MAX_MS: i64 = 1000;
 
 #[derive(Debug, Clone)]
 pub struct Diff {
@@ -69,6 +77,7 @@ impl Replay {
         // completion, logged later and possibly after other calls on the thread.
         let mut pending: HashMap<(i64, String), (u8, usize)> = HashMap::new();
         let mut transfers = Vec::new();
+        let mut times = Vec::new();
         for (no, line) in BufReader::new(f).lines().enumerate() {
             let line = line.map_err(|e| Error::Trace(e.to_string()))?;
             // Cheap filter: the trace is mostly lines this does not need.
@@ -107,14 +116,15 @@ impl Replay {
                     pending.insert((tid, code), (pipe, cap));
                 }
                 "ioctl_out" => {
-                    let (pipe, cap) = pending.remove(&(tid, code.clone())).ok_or_else(|| {
-                        Error::Trace(format!("line {}: completion without its call", no + 1))
-                    })?;
+                    // A call made before the step's begin marker completes inside it:
+                    // part of the step before, so left out.
+                    let Some((pipe, cap)) = pending.remove(&(tid, code.clone())) else { continue };
                     transfers.push(if code == WRITE_PIPE {
                         Transfer::Write { pipe, data: bytes }
                     } else {
                         Transfer::Read { pipe, cap, expect: bytes }
                     });
+                    times.push(r["t"].as_i64().unwrap_or(0));
                 }
                 _ => {}
             }
@@ -125,7 +135,7 @@ impl Replay {
         if transfers.is_empty() {
             return Err(Error::Trace(format!("no probe transfers inside '{step}'")));
         }
-        Ok(Replay { transfers })
+        Ok(Replay { transfers, times })
     }
 
     /// Turns every breakpoint the attach would arm into a clear, and returns
@@ -162,6 +172,15 @@ impl Replay {
         let mut out: Vec<Exchange> = Vec::new();
         let mut split: Option<usize> = None;
         let mut in_hello = true;
+        // winIDEA's pause before a message: from the last reply to its first transfer.
+        let mut last_reply: Option<i64> = None;
+        let pause_at = |i: usize, last: Option<i64>| -> u32 {
+            match (self.times.get(i), last) {
+                (Some(t), Some(l)) if t - l >= PAUSE_MIN_MS => (t - l).min(PAUSE_MAX_MS) as u32,
+                _ => 0,
+            }
+        };
+        let mut split_pause = 0;
         for (i, t) in self.transfers.iter().enumerate() {
             let bad = |why: &str| Error::Trace(format!("transfer {i}: {why}"));
             match t {
@@ -172,12 +191,16 @@ impl Replay {
                         fetch: Fetch { kind: 0, rest: [0; 7] },
                         reads: Vec::new(),
                         expect: Vec::new(),
+                        pause_ms: split_pause,
                     });
                 }
                 Transfer::Write { data, .. } => {
                     let h = Header::decode(data).ok_or_else(|| bad("short frame"))?;
                     match h.kind {
-                        KIND_SPLIT if h.channel == CHANNEL_SERVICE => split = Some(h.len as usize),
+                        KIND_SPLIT if h.channel == CHANNEL_SERVICE => {
+                            split = Some(h.len as usize);
+                            split_pause = pause_at(i, last_reply);
+                        }
                         KIND_INLINE if h.channel == CHANNEL_SERVICE => {
                             in_hello = false;
                             out.push(Exchange {
@@ -185,6 +208,7 @@ impl Replay {
                                 fetch: Fetch { kind: 0, rest: [0; 7] },
                                 reads: Vec::new(),
                                 expect: Vec::new(),
+                                pause_ms: pause_at(i, last_reply),
                             });
                         }
                         _ if in_hello && h.channel == 0 => {} // hello frames
@@ -199,6 +223,7 @@ impl Replay {
                     }
                 }
                 Transfer::Read { cap, expect, .. } => {
+                    last_reply = self.times.get(i).copied();
                     if in_hello {
                         continue;
                     }
@@ -373,7 +398,7 @@ mod tests {
         let msg = crate::message::encode(1, "//3///10/", &[0, 0, 0, 0, 0xe0, 0x0a, 0x12, 0x80, 1, 0, 0x80, 0, 0]);
         let frames = crate::frame::message_transfers(&msg, true, 0x14);
         assert_eq!(frames.len(), 1, "a breakpoint message travels inline");
-        let mut r = Replay { transfers: vec![Transfer::Write { pipe: 0x08, data: frames[0].1.clone() }] };
+        let mut r = Replay { transfers: vec![Transfer::Write { pipe: 0x08, data: frames[0].1.clone() }], times: Vec::new() };
         assert_eq!(r.disarm_breakpoints(), 1);
         let Transfer::Write { data, .. } = &r.transfers[0] else { unreachable!() };
         let (_, path, body) = crate::message::decode(&data[8..]).unwrap();
@@ -382,6 +407,25 @@ mod tests {
         // Header (toggle, length) untouched; a second pass finds nothing armed.
         assert_eq!(&data[..8], &frames[0].1[..8]);
         assert_eq!(r.disarm_breakpoints(), 0);
+    }
+
+    #[test]
+    fn pauses_come_from_the_trace_times() {
+        // hello, then two messages: the second 10 ms after the first one's reply.
+        let msg = crate::message::encode(1, "//1///12/", &[0]);
+        let mut t = vec![Transfer::Write { pipe: 0x08, data: vec![0x42, 0, 2, 0, 0, 0, 0, 0] }];
+        let mut times = vec![0];
+        for (gap, toggle) in [(0, false), (10, true)] {
+            for (p, d) in crate::frame::message_transfers(&msg, toggle, 0x14) {
+                t.push(Transfer::Write { pipe: p, data: d });
+                times.push(times.last().unwrap() + gap);
+            }
+            t.push(Transfer::Write { pipe: 0x08, data: vec![0x0e, 0xf0, 0, 0, 0, 0, 0, 0x02] });
+            t.push(Transfer::Read { pipe: 0x82, cap: 62480, expect: vec![1] });
+            times.extend([times.last().unwrap() + 1, times.last().unwrap() + 2]);
+        }
+        let x = Replay { transfers: t, times }.exchanges().unwrap();
+        assert_eq!(x.iter().map(|x| x.pause_ms).collect::<Vec<_>>(), [0, 10]);
     }
 
     #[test]
@@ -404,7 +448,7 @@ mod tests {
         t.push(Transfer::Write { pipe: 0x08, data: vec![0x0c, 0, 0, 0, 0x0e, 0, 0, 0x05] });
         t.push(Transfer::Read { pipe: 0x82, cap: 458752, expect: vec![9] });
         t.push(Transfer::Read { pipe: 0x82, cap: 458752, expect: vec![9] });
-        let x = Replay { transfers: t }.exchanges().unwrap();
+        let x = Replay { transfers: t, times: Vec::new() }.exchanges().unwrap();
         assert_eq!(x.len(), 2);
         assert_eq!(x[0].payload, msg);
         assert_eq!(x[0].fetch, Fetch::new(0x0e, 0xf000, 2));

@@ -7,7 +7,8 @@
 //! byte 7     channel (0x14: service messages)
 //! ```
 //!
-//! A payload is padded to 4 bytes. One that fits in a single 64-byte USB
+//! A payload is padded to 4 bytes (to 2 on an iC5000: [`crate::Model::frame_pad`];
+//! its largest inline payload is 56 bytes, its smallest split one 63). One that fits in a single 64-byte USB
 //! packet together with its header travels with it on [`PIPE_OUT`]
 //! ([`KIND_INLINE`]); a longer one goes alone on [`PIPE_OUT_BULK`] after a
 //! header-only transfer ([`KIND_SPLIT`]). In the captures, the largest inline
@@ -82,11 +83,16 @@ pub fn padded(n: usize) -> usize {
     (n + 3) & !3
 }
 
-/// The OUT transfers, as `(pipe, bytes)`, that carry one message.
+/// The OUT transfers, as `(pipe, bytes)`, that carry one message to an iC5700.
 pub fn message_transfers(payload: &[u8], toggle: bool, channel: u8) -> Vec<(u8, Vec<u8>)> {
+    message_transfers_padded(payload, toggle, channel, 4)
+}
+
+/// The same with the payload padded to a multiple of `pad` bytes.
+pub fn message_transfers_padded(payload: &[u8], toggle: bool, channel: u8, pad: usize) -> Vec<(u8, Vec<u8>)> {
     assert!(payload.len() <= u16::MAX as usize, "frame payload too long");
     let mut body = payload.to_vec();
-    body.resize(padded(payload.len()), 0);
+    body.resize(payload.len().next_multiple_of(pad), 0);
     let inline = 8 + body.len() <= USB_PACKET;
     let kind = if inline { KIND_INLINE } else { KIND_SPLIT };
     let header = Header { kind, toggle, len: payload.len() as u16, channel }.encode();
@@ -132,6 +138,16 @@ mod tests {
         assert_eq!(t[0], (PIPE_OUT, vec![0xe3, 0x00, 0xca, 0, 0, 0, 0, 0x14]));
         assert_eq!(t[1].0, PIPE_OUT_BULK);
         assert_eq!(t[1].1.len(), 204);
+    }
+
+    #[test]
+    fn an_ic5000_pads_to_two_bytes() {
+        // `E R2) 00 00 80`, 9 bytes, as winIDEA sent it to the iC5000 (ic5000.jsonl).
+        let t = message_transfers_padded(&[0x03, 0x21, 0x45, 0x52, 0x32, 0x29, 0x00, 0x00, 0x80], true, CHANNEL_SERVICE, 2);
+        assert_eq!(t, vec![(PIPE_OUT, vec![0xea, 0, 9, 0, 0, 0, 0, 0x14, 0x03, 0x21, 0x45, 0x52, 0x32, 0x29, 0, 0, 0x80, 0])]);
+        assert_eq!(message_transfers_padded(&[0; 56], false, CHANNEL_SERVICE, 2).len(), 1, "56 bytes inline");
+        let t = message_transfers_padded(&[0; 259], false, CHANNEL_SERVICE, 2);
+        assert_eq!((t.len(), t[1].1.len()), (2, 260), "G: 259 bytes split, padded to 260");
     }
 
     #[test]

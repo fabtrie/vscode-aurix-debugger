@@ -12,6 +12,12 @@
 //!    `DBGSR` and PC (`0x1013`, `0x800a8000` after the reset). Sent on its own,
 //!    it reports the running core's state without resetting anything.
 //!
+//! On an iC5000 the reconnect must wait until the target has come out of
+//! reset: sent 10 ms after the reset, it found cpu0 halted, and the connection
+//! dropped about 30 ms later for good. winIDEA waits 110 ms there
+//! (`ic5000.jsonl`), and so does [`Probe::reset_halt`] ([`RECONNECT_WAIT_IC5000`]);
+//! the target then stayed reachable.
+//!
 //! The reset clears the OCDS trigger setup. winIDEA's `resetAndRun()` writes it
 //! again (CBS_TLCHE, TL1ST, TRCx, TRHSM, TLC, OCNTRL, STMx_OCS) before it runs;
 //! `tc3xx_ocds.cfg` does the same in its reset hooks. Running after the reset is
@@ -19,7 +25,10 @@
 
 use crate::frame::REPLY_CAPACITY;
 use crate::probe::{Exchange, Fetch};
-use crate::{hex, message, Error, Link, Probe, Result};
+use crate::{hex, message, Error, Link, Model, Probe, Result};
+
+/// How long an iC5000 waits between the reset and the reconnect, as winIDEA does.
+pub const RECONNECT_WAIT_IC5000: std::time::Duration = std::time::Duration::from_millis(110);
 
 /// cpu0's state as `//2///38/` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,11 +50,12 @@ fn exchange(path: &str, body: &[u8]) -> Exchange {
         fetch: Fetch::new(0x0e, crate::frame::READ_WINDOW, 0x02),
         reads: vec![REPLY_CAPACITY],
         expect: Vec::new(),
+        pause_ms: 0,
     }
 }
 
 fn service_reply(path: &str, r: &[u8]) -> Result<()> {
-    if r.len() < 0x1e || r[4..16].iter().any(|b| *b != 0x55) {
+    if r.len() < 0x1e || !message::is_reply(r) {
         return Err(Error::Protocol(format!("{path}: {}", hex(r, 32))));
     }
     Ok(())
@@ -67,6 +77,9 @@ impl<L: Link> Probe<L> {
     /// cpu0's state after the reset.
     pub fn reset_halt(&mut self) -> Result<CoreState> {
         self.reset_without_reconnect()?;
+        if self.model() == Model::Ic5000 {
+            std::thread::sleep(RECONNECT_WAIT_IC5000);
+        }
         self.core_state()
     }
 

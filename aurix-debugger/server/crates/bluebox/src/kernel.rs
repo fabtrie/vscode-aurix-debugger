@@ -1,14 +1,17 @@
 //! The probe's kernel: a PowerPC program the probe loses at power-off.
 //!
-//! winIDEA ships it as Motorola S-records, `iC6kKrnl.s` in its install
-//! folder. After a power cycle of the BlueBox, winIDEA loads it into probe
+//! winIDEA ships it as Motorola S-records in its install folder:
+//! `iC6kKrnl.s` for the iC5700, `iC3kKrnl.s` for the iC5000
+//! ([`crate::Model::kernel_file`]); both are loaded the same way. After a power cycle of the BlueBox, winIDEA loads it into probe
 //! RAM before anything else. Every later attach finds it running. The
 //! upload captured after a power cycle is byte-identical to the S-record
 //! data (2,452,880 bytes at 0x100000 for winIDEA 9.21.356).
 //!
 //! Each winIDEA version has its own kernel. Its services are numbered
 //! differently (9.21.417's node-1 services are two higher), so the kernel and
-//! the paths a client uses must come from the same winIDEA version.
+//! the paths a client uses must come from the same winIDEA version: this
+//! crate's are 9.21.356's ([`WINIDEA_VERSION`]), and [`find_kernel`] only takes
+//! the kernel from an install of that version.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +23,7 @@ pub const CHUNK: usize = 0xc000;
 /// Where winIDEA starts the kernel (`K` command); also its load address.
 pub const ENTRY: u32 = 0x0010_0000;
 
-/// File name of the BlueBox kernel in a winIDEA install.
+/// File name of the iC5700 kernel in a winIDEA install.
 pub const FILE_NAME: &str = "iC6kKrnl.s";
 
 /// A kernel image: contiguous segments in address order.
@@ -103,19 +106,157 @@ impl Kernel {
     }
 }
 
-/// `iC6kKrnl.s` in the usual winIDEA install folders, newest name first.
-pub fn find_in_winidea() -> Option<PathBuf> {
+/// The winIDEA version this crate's protocol comes from: its kernel, service
+/// numbers, session value and attach. Another version's kernel speaks
+/// another numbering, so only this one may be loaded.
+pub const WINIDEA_VERSION: &str = "9.21.356";
+
+/// A winIDEA install: a folder with a BlueBox kernel file, and its version as its
+/// `deploy.json` gives it (`{"Deploy": {"Version": "9.21.356"}}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Install {
+    pub dir: PathBuf,
+    pub version: Option<String>,
+}
+
+impl Install {
+    /// The install in `dir`, if it holds a kernel file.
+    pub fn at(dir: &Path) -> Option<Install> {
+        if !crate::Model::ALL.iter().any(|m| dir.join(m.kernel_file()).is_file()) {
+            return None;
+        }
+        let version = std::fs::read_to_string(dir.join("deploy.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.pointer("/Deploy/Version").and_then(|s| s.as_str()).map(str::to_string));
+        Some(Install { dir: dir.to_path_buf(), version })
+    }
+
+    pub fn kernel(&self, model: crate::Model) -> PathBuf {
+        self.dir.join(model.kernel_file())
+    }
+
+    /// This is the winIDEA version the crate needs.
+    pub fn fits(&self) -> bool {
+        self.version.as_deref() == Some(WINIDEA_VERSION)
+    }
+
+    fn describe(&self) -> String {
+        match &self.version {
+            Some(v) => format!("winIDEA {v} in {}", self.dir.display()),
+            None => format!("a winIDEA of unknown version in {} (no deploy.json)", self.dir.display()),
+        }
+    }
+}
+
+/// Folders winIDEA is usually installed in: `WINIDEA_DIR`, `C:\winIDEA`, and
+/// `C:\winIDEA*` and `C:\iSYSTEM\*` folders (installs side by side).
+fn usual_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(d) = std::env::var("WINIDEA_DIR") {
         dirs.push(d.into());
     }
     dirs.push(PathBuf::from(r"C:\winIDEA"));
-    dirs.into_iter().map(|d| d.join(FILE_NAME)).find(|p| p.is_file())
+    let listed = |parent: &str, prefix: &str| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_ascii_lowercase().starts_with(prefix)))
+            .collect();
+        v.sort();
+        v
+    };
+    dirs.extend(listed(r"C:\", "winidea"));
+    dirs.extend(listed(r"C:\iSYSTEM", ""));
+    let mut seen = Vec::new();
+    dirs.retain(|d| {
+        let k = d.to_string_lossy().to_ascii_lowercase();
+        let new = !seen.contains(&k);
+        seen.push(k);
+        new
+    });
+    dirs
+}
+
+/// The winIDEA installs in the usual folders.
+pub fn installs() -> Vec<Install> {
+    usual_dirs().iter().filter_map(|d| Install::at(d)).collect()
+}
+
+/// `model`'s kernel file of winIDEA [`WINIDEA_VERSION`]: from `dir` if given, else
+/// from the first install of that version in the usual folders. The error
+/// says what was found instead.
+pub fn find_kernel(dir: Option<&Path>, model: crate::Model) -> std::result::Result<PathBuf, String> {
+    let file = model.kernel_file();
+    let found = |i: &Install| {
+        let k = i.kernel(model);
+        if k.is_file() { Ok(k) } else { Err(format!("{} has no {file}", i.describe())) }
+    };
+    match dir {
+        Some(d) => match Install::at(d) {
+            Some(i) if i.fits() => found(&i),
+            Some(i) => Err(format!("{} holds {}, not winIDEA {WINIDEA_VERSION}", d.display(), i.describe())),
+            None => Err(format!("{} is not a winIDEA install (no {file})", d.display())),
+        },
+        None => pick(&installs()).and_then(|i| found(&i)),
+    }
+}
+
+/// The install of winIDEA [`WINIDEA_VERSION`] among `found`.
+fn pick(found: &[Install]) -> std::result::Result<Install, String> {
+    if let Some(i) = found.iter().find(|i| i.fits()) {
+        return Ok(i.clone());
+    }
+    if found.is_empty() {
+        return Err(format!("winIDEA {WINIDEA_VERSION} is not installed (no winIDEA found in C:\\winIDEA)"));
+    }
+    let list: Vec<String> = found.iter().map(Install::describe).collect();
+    Err(format!("winIDEA {WINIDEA_VERSION} is not installed (found {})", list.join(", ")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fake install in a fresh temporary folder.
+    fn install(name: &str, version: Option<&str>) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bluebox-kernel-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(FILE_NAME), "S00600004844521B\n").unwrap();
+        if let Some(v) = version {
+            std::fs::write(d.join("deploy.json"), format!(r#"{{"Deploy": {{"Deployment": "winIDEA", "Version": "{v}"}}}}"#)).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn only_the_right_winidea_version_gives_the_kernel() {
+        let good = install("good", Some(WINIDEA_VERSION));
+        let other = install("other", Some("9.21.417"));
+        let unknown = install("unknown", None);
+        let m = crate::Model::Ic5700;
+        assert_eq!(find_kernel(Some(&good), m).unwrap(), good.join(FILE_NAME));
+        let e = find_kernel(Some(&good), crate::Model::Ic5000).unwrap_err();
+        assert!(e.contains("iC3kKrnl.s"), "the iC5000 kernel is another file: {e}");
+        let e = find_kernel(Some(&other), m).unwrap_err();
+        assert!(e.contains("winIDEA 9.21.417") && e.contains(WINIDEA_VERSION), "{e}");
+        assert!(find_kernel(Some(&unknown), m).unwrap_err().contains("unknown version"));
+        let none = std::env::temp_dir().join("bluebox-kernel-test-none");
+        assert!(find_kernel(Some(&none), m).unwrap_err().contains("not a winIDEA install"));
+
+        let found = [Install::at(&other).unwrap(), Install::at(&good).unwrap()];
+        assert_eq!(pick(&found).unwrap().kernel(m), good.join(FILE_NAME), "the right one among several");
+        let e = pick(&found[..1]).unwrap_err();
+        assert!(e.contains("not installed") && e.contains("9.21.417"), "{e}");
+        assert!(pick(&[]).unwrap_err().contains("no winIDEA found"));
+        for d in [good, other, unknown] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
 
     fn rec(kind: char, addr: u32, data: &[u8]) -> String {
         let alen = match kind {

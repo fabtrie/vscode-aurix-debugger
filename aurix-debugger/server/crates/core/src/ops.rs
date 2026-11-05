@@ -641,6 +641,13 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     if run_after {
         // The cores the reset halted; boot-halted ones are the application's to start.
         for &t in &all {
+            // The background poll is off during the reset, so a state can be stale:
+            // the HSM is still "halted at its first instruction" when `reset-end`
+            // (tc3xx_ocds.cfg) has released it. Resuming it on that state kept the
+            // application from starting cpu1 (BlueBox iC5000).
+            if cx.with(|c| c.targets[t].core.examined()) {
+                poll_one(cx, t);
+            }
             let resume_it = cx.with(|c| {
                 let core = &c.targets[t].core;
                 core.halts_after_reset()
@@ -654,6 +661,18 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Polls target `t` alone and reports what changed, as the background poll
+/// would. A failed poll leaves the state as it was.
+fn poll_one(cx: &Cx, t: usize) {
+    let tr = cx.with(|c| -> Result<Transition> {
+        let (mut io, e) = c.target_io(t)?;
+        e.core.poll(&mut io)
+    });
+    if let Ok(tr) = tr {
+        handle_transition(cx, t, tr);
+    }
 }
 
 /// `init`: adapter, targets, examination.
@@ -694,6 +713,12 @@ pub fn init(cx: &Cx) -> Result<()> {
         if c.poll_period_ms == crate::ctx::DEFAULT_POLL_PERIOD_MS {
             if let Some(ms) = c.adapter.as_deref().and_then(|a| a.default_poll_period_ms()) {
                 c.poll_period_ms = ms;
+            }
+        }
+        // Likewise the DAQ gap: where an access costs more, a larger hole is worth reading.
+        if c.daq_gap == crate::daq::DEFAULT_COALESCE_GAP {
+            if let Some(g) = c.adapter.as_deref().and_then(|a| a.default_coalesce_gap()) {
+                c.daq_gap = g;
             }
         }
         if c.current.is_none() && !c.targets.is_empty() {

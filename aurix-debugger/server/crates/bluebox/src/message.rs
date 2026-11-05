@@ -20,6 +20,14 @@ pub fn encode(kind: u8, path: &str, body: &[u8]) -> Vec<u8> {
     m
 }
 
+/// Whether `r` looks like the reply to a service message: `<length u32 LE>`,
+/// 12 filler bytes, then `08` at 0x10. The filler is not checked: one probe
+/// (iC5700 A) always sends `55` there, another (iC5700 B) stale bytes that change
+/// after a power cycle. A refused request comes back as 16 bytes, without the `08`.
+pub fn is_reply(r: &[u8]) -> bool {
+    r.get(0x10) == Some(&0x08)
+}
+
 /// A message's kind, path and body, if `b` starts with one.
 pub fn decode(b: &[u8]) -> Option<(u8, &str, &[u8])> {
     if b.len() < 7 || b[..5] != [0x23, 0, 0, 0, 0] {

@@ -1,7 +1,6 @@
-# winIDEA 9.21.356 attach with the kernel already running: hello and handshake (followup.jsonl)
-# W <pipe> <hex>            host write
-# K <pipe> <len> <hex>      host write of a kernel chunk: length and first 9 bytes only
-# R <cap> <hex>             probe reply, for reference
+# winIDEA 9.21.356 attach with its own kernel running: hello, handshake, version check (followup.jsonl, pid 21548, hello:1 to path:1://1///27/)
+# W <pipe> <hex> host write; K <pipe> <len> <hex> large write, length and first bytes;
+# R <cap> <hex> probe reply; B <cap> <len> FPGA read-back reply, contents left out
 W 08 4200020000000000
 W 08 8500000000000000
 R 8 0002830000000000
@@ -60,3 +59,9 @@ R 260 08001407e603120100010100009ca04b101000000000000000000000000000000000000000
 W 08 6a0003000000001403214c00
 W 08 8400020000000002
 R 4 08334c07
+W 08 ea001c0000000014230000000011092f2f312f2f2f32352f000000080000000000000000
+W 08 0400090000000002
+R 12 080200000000000000312f2f
+W 08 6a00140000000014230000000011092f2f312f2f2f32372f00000000
+W 08 8400170000000002
+R 24 08a664bfdfe070d3f4c354edc19336b44255c20000000000

@@ -1,4 +1,4 @@
-//! The probe's pipes through WinUSB, the driver the iC5700 is installed with.
+//! The probe's pipes through WinUSB, the driver the iC5700 and iC5000 are installed with.
 //!
 //! winIDEA sends WinUSB's kernel IOCTLs directly. `winusb.dll`'s
 //! `WinUsb_WritePipe`/`ReadPipe` wrap the same IOCTLs, so the bytes on the
@@ -27,7 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::frame::{PIPE_IN, PIPE_OUT, PIPE_OUT_BULK};
-use crate::{Error, Link, Result, PID, VID};
+use crate::{Error, Link, Model, Result, VID};
 
 /// Default per-transfer timeout. A memory read takes about 2 ms; the
 /// bring-up's longest wait in the captures was well under a second.
@@ -37,10 +37,10 @@ fn last_error(op: &'static str) -> Error {
     Error::Usb { op, code: unsafe { GetLastError() } }
 }
 
-/// Device paths of every plugged-in iC5700, e.g.
-/// `\\?\usb#vid_06f9&pid_5700#01abc#{a5dcbf10-...}`. The serial is the third part.
+/// Device paths of every plugged-in BlueBox of a known [`Model`], e.g.
+/// `\\?\usb#vid_06f9&pid_5700#01abc#{a5dcbf10-...}` (an iC5000 has
+/// `pid_3200`). The serial is the third part.
 pub fn device_paths() -> Result<Vec<String>> {
-    let needle = format!("vid_{VID:04x}&pid_{PID:04x}");
     let mut out = Vec::new();
     unsafe {
         let set = SetupDiGetClassDevsW(
@@ -74,13 +74,26 @@ pub fn device_paths() -> Result<Vec<String>> {
             let max = (need as usize - 4) / 2;
             let len = (0..max).take_while(|&k| *p.add(k) != 0).count();
             let path = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
-            if path.to_ascii_lowercase().contains(&needle) {
+            if model_of(&path).is_some() {
                 out.push(path);
             }
         }
         SetupDiDestroyDeviceInfoList(set);
     }
     Ok(out)
+}
+
+/// `BLUEBOX_TRACE` is set: every transfer is logged to stderr, its first 24
+/// bytes (`BLUEBOX_TRACE=2`: all of it).
+fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BLUEBOX_TRACE").is_some())
+}
+
+/// The model a device path names, by its USB ids.
+pub fn model_of(path: &str) -> Option<Model> {
+    let p = path.to_ascii_lowercase();
+    Model::ALL.into_iter().find(|m| p.contains(&format!("vid_{VID:04x}&pid_{:04x}", m.pid())))
 }
 
 /// The serial number in a device path (`01ABC` in `...#vid_06f9&pid_5700#01abc#{...}`).
@@ -92,6 +105,7 @@ pub struct UsbLink {
     file: HANDLE,
     usb: WINUSB_INTERFACE_HANDLE,
     path: String,
+    model: Model,
 }
 
 // The handles are plain kernel handles, usable from any thread; the link is
@@ -110,13 +124,14 @@ impl UsbLink {
             [one] => UsbLink::open_path(one),
             [] => Err(Error::NotFound(match serial {
                 Some(s) => format!("serial {s} not among {paths:?}"),
-                None => "no device with VID 06f9, PID 5700 is present".into(),
+                None => "no device with VID 06f9 and PID 5700 (iC5700) or 3200 (iC5000) is present".into(),
             })),
             _ => Err(Error::NotFound(format!("several probes, pick one by serial: {paths:?}"))),
         }
     }
 
     pub fn open_path(path: &str) -> Result<UsbLink> {
+        let model = model_of(path).ok_or_else(|| Error::NotFound(format!("{path} is no known BlueBox")))?;
         let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
         unsafe {
             let file = CreateFileW(
@@ -137,7 +152,7 @@ impl UsbLink {
                 CloseHandle(file);
                 return Err(e);
             }
-            let link = UsbLink { file, usb, path: path.to_string() };
+            let link = UsbLink { file, usb, path: path.to_string(), model };
             // As winIDEA does: a split frame's payload ends in a short packet.
             link.policy(PIPE_OUT_BULK, SHORT_PACKET_TERMINATE, &1u8 as *const u8 as *const c_void, 1)?;
             link.set_timeout(DEFAULT_TIMEOUT_MS)?;
@@ -166,6 +181,10 @@ impl UsbLink {
 }
 
 impl Link for UsbLink {
+    fn model(&self) -> Model {
+        self.model
+    }
+
     fn drain(&mut self) -> usize {
         // Until one read times out; a stopped bulk transfer can leave MBs queued.
         let _ = self.set_timeout(200);
@@ -182,6 +201,10 @@ impl Link for UsbLink {
     }
 
     fn write(&mut self, pipe: u8, data: &[u8]) -> Result<()> {
+        if trace() {
+            let full = std::env::var("BLUEBOX_TRACE").is_ok_and(|v| v == "2");
+            eprintln!("[usb] -> {pipe:02x} {}", crate::hex(data, if full { 8192 } else { 24 }));
+        }
         let mut n = 0u32;
         if unsafe { WinUsb_WritePipe(self.usb, pipe, data.as_ptr(), data.len() as u32, &mut n, null()) } == 0 {
             return Err(last_error("WinUsb_WritePipe"));
@@ -196,9 +219,17 @@ impl Link for UsbLink {
         let mut buf = vec![0u8; cap];
         let mut n = 0u32;
         if unsafe { WinUsb_ReadPipe(self.usb, pipe, buf.as_mut_ptr(), cap as u32, &mut n, null()) } == 0 {
-            return Err(last_error("WinUsb_ReadPipe"));
+            let e = last_error("WinUsb_ReadPipe");
+            if trace() {
+                eprintln!("[usb] <- {pipe:02x} cap {cap}: {e}");
+            }
+            return Err(e);
         }
         buf.truncate(n as usize);
+        if trace() {
+            let full = std::env::var("BLUEBOX_TRACE").is_ok_and(|v| v == "2");
+            eprintln!("[usb] <- {pipe:02x} cap {cap}: {}", crate::hex(&buf, if full { 4096 } else { 24 }));
+        }
         Ok(buf)
     }
 }

@@ -14,6 +14,10 @@ pub trait Link {
     fn drain(&mut self) -> usize {
         0
     }
+    /// Which BlueBox is at the other end.
+    fn model(&self) -> crate::Model {
+        crate::Model::Ic5700
+    }
 }
 
 impl<L: Link + ?Sized> Link for Box<L> {
@@ -26,6 +30,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
     fn drain(&mut self) -> usize {
         (**self).drain()
     }
+    fn model(&self) -> crate::Model {
+        (**self).model()
+    }
 }
 
 /// A link that records what is written and answers reads from a queue.
@@ -33,6 +40,7 @@ impl<L: Link + ?Sized> Link for Box<L> {
 pub struct ScriptedLink {
     pub written: Vec<(u8, Vec<u8>)>,
     pub replies: std::collections::VecDeque<Vec<u8>>,
+    pub model: crate::Model,
 }
 
 impl Link for ScriptedLink {
@@ -44,5 +52,8 @@ impl Link for ScriptedLink {
         self.replies
             .pop_front()
             .ok_or(crate::Error::Usb { op: "ScriptedLink::read", code: 121 })
+    }
+    fn model(&self) -> crate::Model {
+        self.model
     }
 }

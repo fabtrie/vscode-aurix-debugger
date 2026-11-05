@@ -90,6 +90,11 @@ pub trait Adapter {
     fn default_poll_period_ms(&self) -> Option<u64> {
         None
     }
+    /// The DAQ coalescing gap this probe wants when the cfg sets none
+    /// (`daq gap`). `None`: [`crate::daq::DEFAULT_COALESCE_GAP`], measured on a miniWiggler.
+    fn default_coalesce_gap(&self) -> Option<u32> {
+        None
+    }
     fn quit(&mut self) {}
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }

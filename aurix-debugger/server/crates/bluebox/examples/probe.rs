@@ -52,6 +52,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut rewrite: Option<u32> = None;
     let mut kernel_path: Option<std::path::PathBuf> = None;
     let mut restart_kernel = false;
+    let mut fpga_status = false;
     let mut bringup = true;
     let mut map: Vec<(u32, usize)> = Vec::new();
     let mut watch: Option<f64> = None;
@@ -60,9 +61,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut list = false;
     let mut builtin_attach = false;
     let mut until_a = false;
+    let mut reset_halt = false;
+    let mut speed_test = false;
+    let mut chipid_loop: usize = 0;
     let mut raw_after: Vec<u32> = Vec::new();
     let mut provoke: Option<f64> = None;
     let mut reattach_from = 0usize;
+    let mut sweep: Vec<u32> = Vec::new();
+    let mut batch_test: Vec<String> = Vec::new();
+    let mut clock: Option<u32> = None;
+    let mut flag_sets: Vec<[u8; 3]> = Vec::new();
+    let mut block_sets: Vec<(usize, u8)> = Vec::new();
     // Captured steps to send after the attach: (trace, step, only these, skip these).
     #[allow(clippy::type_complexity)]
     let mut then: Vec<(std::path::PathBuf, String, Vec<usize>, Vec<(usize, usize)>)> = Vec::new();
@@ -79,6 +88,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--rewrite" => rewrite = Some(parse_u32(&val()?)?),
             "--kernel" => kernel_path = Some(std::path::PathBuf::from(val()?)),
             "--restart-kernel" => restart_kernel = true,
+            // --fpga-status: ask for the debug FPGA's status (after the attach's first messages)
+            "--fpga-status" => fpga_status = true,
             "--no-bringup" => bringup = false,
             "--watch" => watch = Some(val()?.parse()?),
             "--script" => script = Some(std::path::PathBuf::from(val()?)),
@@ -88,6 +99,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--raw" => raw_after.push(parse_u32(&val()?)?),
             "--provoke-reset" => provoke = Some(val()?.parse()?),
             "--reattach-from" => reattach_from = val()?.parse()?,
+            // --batch "r:ADDR:LEN,w:ADDR:HEX,..." (repeatable): one multi-access message
+            "--batch" => batch_test.push(val()?),
+            "--clock" => clock = Some(val()?.parse()?),
+            // --block-set OFF=VAL: one byte of every access block (block = body without the count)
+            "--block-set" => {
+                let v = val()?;
+                let (o, b) = v.split_once('=').ok_or("--block-set OFF=VAL")?;
+                block_sets.push((usize::from_str_radix(o.trim_start_matches("0x"), 16)?, u8::from_str_radix(b.trim_start_matches("0x"), 16)?));
+            }
+            // --flags 000100: access flags (block offset 0x74) for the --batch messages; repeatable
+            "--flags" => {
+                let v = val()?;
+                let b: Vec<u8> = (0..6).step_by(2).map(|i| u8::from_str_radix(&v[i..i + 2], 16).unwrap()).collect();
+                flag_sets.push([b[0], b[1], b[2]]);
+            }
+            "--speed-sweep" => {
+                for v in val()?.split(',') {
+                    sweep.push(v.parse()?);
+                }
+            }
+            "--reset-halt" => reset_halt = true,
+            "--speed-test" => speed_test = true,
+            "--chipid-loop" => chipid_loop = val()?.parse()?,
             "--then" => {
                 let t = val()?;
                 let st = val()?;
@@ -189,12 +223,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("discarded {drained} stale bytes from the IN pipe");
         }
         let t = Instant::now();
-        let mut p = Probe::start(link)?;
-        let mut hs = p.handshake()?;
+        drop(link);
+        let ser = serial.clone();
+        let (mut p, mut hs) = bluebox::lowlevel::open_ready(
+            || reopen(ser.as_deref()).map_err(|e| bluebox::Error::NotFound(e.to_string())),
+            std::time::Duration::from_secs(20),
+            |m| println!("{m}"),
+        )?;
         println!(
-            "handshake in {:.0} ms: kernel running {}, board ids {:?}",
+            "handshake in {:.0} ms: kernel running {} (I answer {}), board ids {:?}",
             ms(t),
             hs.kernel_running,
+            hex(&hs.ident, 7),
             hs.board_ids()
         );
         if restart_kernel && hs.kernel_running {
@@ -205,28 +245,89 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             hs = p.handshake()?;
             println!("handshake again: kernel running {}", hs.kernel_running);
         }
-        if !hs.kernel_running {
-            let path = kernel_path
-                .clone()
-                .or_else(bluebox::kernel::find_in_winidea)
-                .ok_or("no kernel running and no iC6kKrnl.s found; pass --kernel")?;
-            let k = bluebox::Kernel::from_file(&path)?;
+        let model = p.model();
+        println!("model {}", model.name());
+        let kernel_file = || -> Result<bluebox::Kernel, Box<dyn std::error::Error>> {
+            let path = match &kernel_path {
+                Some(p) => p.clone(),
+                None => bluebox::kernel::find_kernel(None, model)
+                    .map_err(|e| format!("a kernel is needed: {e}; install it or pass --kernel"))?,
+            };
+            println!("kernel file {}", path.display());
+            Ok(bluebox::Kernel::from_file(&path)?)
+        };
+        let load = |p: &mut Probe<UsbLink>, state: bluebox::KernelState| -> Result<(), Box<dyn std::error::Error>> {
+            if state == bluebox::KernelState::Ours {
+                return Ok(());
+            }
+            let k = kernel_file()?;
             let total = k.len();
             let t = Instant::now();
-            p.load_kernel(&k, |n| eprint!("\r  kernel {n}/{total}"))?;
+            p.ensure_kernel(state, Some(&k), |n| eprint!("\r  kernel {n}/{total}"))?;
             eprintln!();
-            p.set_session(&bluebox::lowlevel::SESSION_9_21_356)?;
-            println!("kernel loaded from {} ({total} bytes) and started in {:.0} ms; session set", path.display(), ms(t));
+            println!("kernel ({state:?} before) loaded ({total} bytes) and started in {:.0} ms; session set", ms(t));
+            Ok(())
+        };
+        let state = p.kernel_state(&hs)?;
+        println!("kernel: {state:?}");
+        load(&mut p, state)?;
+        if fpga_status && model == bluebox::Model::Ic5700 {
+            let builtin = bluebox::attach::Script::tc37x();
+            let (head, _) = bluebox::attach::split_at_fpga_status(&builtin);
+            p.attach(&head.ok_or("the built-in attach has no FPGA status query")?)?;
+            let st = p.fpga_status()?;
+            let wanted = bluebox::fpga::WANTED_9_21_356;
+            println!(
+                "debug FPGA: type 0x{:08x}, size 0x{:x}, MD5 {}, 9.21.356's: {}",
+                st.kind,
+                st.size,
+                st.md5_hex(),
+                st.holds(&wanted)
+            );
         }
         if builtin_attach {
             let t = Instant::now();
-            let rep = p.attach(&bluebox::attach::Script::tc37x())?;
+            // The iC5000 needs its debug FPGA image from the winIDEA install.
+            let image = match model {
+                bluebox::Model::Ic5000 => {
+                    let dir = bluebox::kernel::find_kernel(None, model)?;
+                    let dir = dir.parent().ok_or("kernel path")?;
+                    Some(bluebox::fpga::ic5000::image_from(dir)?)
+                }
+                bluebox::Model::Ic5700 => None,
+            };
+            let c = p.connect_target(&bluebox::attach::Script::builtin(model), true, image.as_deref())?;
+            for n in &c.notes {
+                println!("note: {n}");
+            }
             println!(
-                "built-in attach: {} exchanges in {:.0} ms, {} replies of another length",
-                rep.sent,
+                "built-in attach ({:?}): {} exchanges in {:.0} ms, {} replies of another length",
+                c.setup,
+                c.sent,
                 ms(t),
-                rep.other_len.len()
+                c.other_len
             );
+            for d in &c.other_desc {
+                println!("  other length at {d}");
+            }
+            if reset_halt {
+                let t = Instant::now();
+                let st = p.reset_halt()?;
+                println!("reset: cpu0 DBGSR 0x{:08x}, PC 0x{:08x}, halted {} ({:.0} ms)", st.dbgsr, st.pc, st.halted(), ms(t));
+            }
+            if chipid_loop > 0 && then.is_empty() {
+                // SCU_CHIPID every 20 ms: when does the connection drop?
+                let t = Instant::now();
+                let mut last = None;
+                for _ in 0..chipid_loop {
+                    let ok = p.read_memory(0xF003_6140, 4)?.all_ok();
+                    if last != Some(ok) {
+                        println!("  {:6.0} ms: SCU_CHIPID {}", ms(t), if ok { "reads" } else { "fails" });
+                        last = Some(ok);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
             for (trace, st, then_only, then_skip) in &then {
                 watch_target(&mut p, 0.1)?;
                 // One captured step (e.g. "reset: reset()"), sent as exchanges.
@@ -246,6 +347,159 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 println!("then '{st}': {sent} of {} exchanges in {:.0} ms", xs.len(), ms(t));
+            }
+            if chipid_loop > 0 && !then.is_empty() {
+                let t = Instant::now();
+                let mut last = None;
+                for _ in 0..chipid_loop {
+                    let ok = p.read_memory(0xF003_6140, 4)?.all_ok();
+                    if last != Some(ok) {
+                        println!("  {:6.0} ms: SCU_CHIPID {}", ms(t), if ok { "reads" } else { "fails" });
+                        last = Some(ok);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            if let Some(hz) = clock {
+                p.set_clock_for(c.setup, hz)?;
+                println!("DAP clock {hz} Hz");
+            }
+            if speed_test {
+                // 256 KiB of program flash in 8 KiB reads: the DAP clock shows in the rate.
+                let t = Instant::now();
+                let mut ok = true;
+                let mut sum = 0xcbf2_9ce4_8422_2325u64;
+                for i in 0..32u32 {
+                    let m = p.read_memory(0x8000_0000 + i * 8192, 8192)?;
+                    ok &= m.all_ok();
+                    sum = m.data.iter().fold(sum, |h, b| (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3));
+                }
+                let s = t.elapsed().as_secs_f64();
+                println!("speed test: 256 KiB in {:.0} ms, {:.0} KB/s, all ok {ok}, FNV {sum:016x}", s * 1000.0, 256.0 * 1.024 / s);
+                // 500 single-word reads: their DAP time shows the clock better.
+                let t = Instant::now();
+                let mut ok = true;
+                for i in 0..500u32 {
+                    ok &= p.read_memory(0x7000_0000 + (i % 64) * 4, 4)?.all_ok();
+                }
+                println!("speed test: 500 word reads in {:.0} ms, all ok {ok}", ms(t));
+                // A batch of 64 word reads in one message, 20 times.
+                let ops: Vec<bluebox::Access> = (0..64u32).map(|i| bluebox::Access::Read { addr: 0x7000_0000 + i * 4, len: 4 }).collect();
+                let t = Instant::now();
+                for _ in 0..20 {
+                    p.access(&ops)?;
+                }
+                println!("speed test: 20 batches of 64 word reads in {:.0} ms", ms(t));
+            }
+            let flag_list: Vec<Option<[u8; 3]>> = if flag_sets.is_empty() { vec![None] } else { flag_sets.iter().map(|f| Some(*f)).collect() };
+            for flags in &flag_list {
+            if let Some(f) = flags {
+                println!("flags {}", hex(f, 3));
+            }
+            for spec in &batch_test {
+                // One //2///16/ message with several access blocks: count, the blocks of
+                // the single-access encoding, the 12-byte trailer (as winIDEA's 12-write message).
+                let mut blocks = Vec::new();
+                let mut n = 0u32;
+                for item in spec.split(',') {
+                    let f: Vec<&str> = item.split(':').collect();
+                    let addr = parse_u32(f[1])?;
+                    let one = match f[0] {
+                        "r" => bluebox::memory::request(addr, f[2].parse()?, None),
+                        "w" => {
+                            let d: Vec<u8> = (0..f[2].len()).step_by(2).map(|i| u8::from_str_radix(&f[2][i..i + 2], 16).unwrap()).collect();
+                            bluebox::memory::request(addr, d.len(), Some(&d))
+                        }
+                        _ => return Err(format!("bad batch item {item}").into()),
+                    };
+                    let body = &one[20..];
+                    let mut blk = body[4..body.len() - 12].to_vec();
+                    if let Some(f) = flags {
+                        blk[0x74..0x77].copy_from_slice(f);
+                    }
+                    for &(o, b) in &block_sets {
+                        blk[o] = b;
+                    }
+                    blocks.extend_from_slice(&blk);
+                    n += 1;
+                }
+                let mut body = n.to_le_bytes().to_vec();
+                body.extend_from_slice(&blocks);
+                body.extend_from_slice(&[0u8; 12]);
+                let msg = bluebox::message::encode(1, "//2///16/", &body);
+                let t = Instant::now();
+                let r = p.transact(&msg)?;
+                println!("batch [{spec}]: {n} accesses, message {} bytes, reply {} bytes in {:.2} ms", msg.len(), r.len(), ms(t));
+                // Results: count u32 at 0x1f; each: u32 0, u32 B, bitmap[B], u32 N, data[N], 24 bytes.
+                let u32at = |o: usize| r.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+                let count = u32at(0x1f).unwrap_or(0);
+                let total = u32at(0).unwrap_or(0) as usize + 16;
+                println!("  header {}  count {count}, length field {total}", hex(&r[16..0x23.min(r.len())], 19));
+                let mut o = 0x23;
+                for k in 0..count {
+                    let (Some(z), Some(nb)) = (u32at(o), u32at(o + 4)) else { println!("  result {k}: cut off at 0x{o:x}"); break };
+                    let nb = nb as usize;
+                    let bm = r.get(o + 8..o + 8 + nb).unwrap_or(&[]);
+                    let n = u32at(o + 8 + nb).unwrap_or(0) as usize;
+                    let d = r.get(o + 12 + nb..o + 12 + nb + n).unwrap_or(&[]);
+                    let tail = r.get(o + 12 + nb + n..o + 36 + nb + n).unwrap_or(&[]);
+                    println!(
+                        "  result {k} @0x{o:03x}: lead {z:#x}, bitmap {} ({} bytes), data {} bytes {}, tail nonzero {}",
+                        hex(bm, 8), nb, n, hex(d, 16), tail.iter().any(|b| *b != 0)
+                    );
+                    o += 36 + nb + n;
+                }
+                println!("  parsed to 0x{o:x} of {} (length field {total})", r.len());
+                if count == 0 {
+                    println!("  reply: {}", hex(&r, 48));
+                }
+            }
+            }
+            if !sweep.is_empty() {
+                // //7//1// <Hz u32 LE>: the clock the attach sets (10 MHz there).
+                let set = |p: &mut bluebox::Probe<bluebox::usb::UsbLink>, hz: u32| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+                    let x = bluebox::Exchange {
+                        payload: bluebox::message::encode(1, "//7//1//", &hz.to_le_bytes()),
+                        fetch: bluebox::Fetch::new(0x0e, 0xf000, 2),
+                        reads: vec![62480],
+                        expect: Vec::new(),
+                        pause_ms: 0,
+                    };
+                    Ok(p.exchange(&x)?.remove(0))
+                };
+                let timed = |p: &mut bluebox::Probe<bluebox::usb::UsbLink>| -> Result<(f64, Vec<u8>, usize), Box<dyn std::error::Error>> {
+                    let t = Instant::now();
+                    // Application code: programmed throughout, so every byte must read back.
+                    let m = p.read_memory(0x8012_0000, 65536)?;
+                    let el = ms(t);
+                    let bad = m.failed.iter().filter(|f| **f).count();
+                    Ok((el, m.data, bad))
+                };
+                let (base_ms, base, base_bad) = timed(&mut p)?;
+                println!("baseline (10 MHz): 64 KiB in {base_ms:.1} ms, {base_bad} failed bytes");
+                for &hz in &sweep {
+                    let r = set(&mut p, hz)?;
+                    let id = p.read_memory(0xF003_6140, 4)?;
+                    if !id.all_ok() {
+                        println!("{:>9} Hz: reply {} -> chip id read FAILED; stopping", hz, hex(&r[16.min(r.len())..], 16));
+                        break;
+                    }
+                    let (el, data, bad) = timed(&mut p)?;
+                    let stop = bad > 0 || data != base;
+                    println!(
+                        "{:>9} Hz: reply {}  64 KiB in {el:7.1} ms ({:.2} MB/s), {bad} failed bytes, data {}",
+                        hz,
+                        hex(&r[16.min(r.len())..], 16),
+                        65536.0 / el / 1000.0,
+                        if data == base { "same" } else { "DIFFERENT" }
+                    );
+                    if stop {
+                        println!("stopping the sweep");
+                        break;
+                    }
+                }
+                let r = set(&mut p, 10_000_000)?;
+                println!("back to 10 MHz: reply {}", hex(&r[16.min(r.len())..], 16));
             }
             if let Some(secs) = provoke {
                 // This application restarts the chip when it resumes after a halt of a

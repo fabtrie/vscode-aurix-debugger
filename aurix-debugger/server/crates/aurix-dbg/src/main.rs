@@ -1,7 +1,7 @@
 //! aurix-dbg: OpenOCD-compatible AURIX debug server over Infineon TAS.
 //!
 //! Usage (same as OpenOCD):
-//!   aurix-dbg -s <dir> -f board/infineon/kit_a2g_tc377tx_3v3_trb.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3]
+//!   aurix-dbg -s <dir> -f board/infineon/kit_a2g_tc375_lite.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3]
 //! Remote console client:
 //!   aurix-dbg --remote [host:]port "halt" "reg pc" "resume"
 

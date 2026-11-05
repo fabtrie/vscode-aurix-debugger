@@ -596,7 +596,7 @@ fn board_server() -> Server {
         c.adapter_override = Some("sim".into());
         c.search_dirs.push(std::path::PathBuf::from(openocd_tcl::TCL_DIR));
     });
-    s.interp.eval_global("script board/infineon/kit_a2g_tc377tx_3v3_trb.cfg").unwrap();
+    s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
     s.interp.eval_global(&format!("script {}", jim::quote(&path(repo.join("tc37x_ocds_init.cfg"))))).unwrap();
     s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
     s.interp.eval_global("init").unwrap();

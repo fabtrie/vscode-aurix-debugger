@@ -175,7 +175,7 @@ impl WinIdeaAdapter {
     ///
     /// Settings -- unlike actions -- are accepted rather than refused, because
     /// they appear in board cfg files we do not own and cannot guard: the
-    /// stock `kit_a2g_tc377tx_3v3_trb.cfg` sets `adapter speed 5000` before
+    /// stock `kit_a2g_tc375_lite.cfg` sets `adapter speed 5000` before
     /// anything else runs.
     pub fn ignore(&mut self, what: impl Into<String>) {
         let what = what.into();

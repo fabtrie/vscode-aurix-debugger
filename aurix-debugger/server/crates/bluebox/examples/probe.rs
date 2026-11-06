@@ -487,7 +487,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let t = Instant::now();
                 let r = p.transact(&msg)?;
                 println!("batch [{spec}]: {n} accesses, message {} bytes, reply {} bytes in {:.2} ms", msg.len(), r.len(), ms(t));
-                // Results: count u32 at 0x1f; each: u32 0, u32 B, bitmap[B], u32 N, data[N], 24 bytes.
+                // Results: count u32 at 0x1f; each: u32 0, u32 B, bitmap[B], u32 N, data[N], 28 bytes (9.21.417).
                 let u32at = |o: usize| r.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
                 let count = u32at(0x1f).unwrap_or(0);
                 let total = u32at(0).unwrap_or(0) as usize + 16;
@@ -499,12 +499,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let bm = r.get(o + 8..o + 8 + nb).unwrap_or(&[]);
                     let n = u32at(o + 8 + nb).unwrap_or(0) as usize;
                     let d = r.get(o + 12 + nb..o + 12 + nb + n).unwrap_or(&[]);
-                    let tail = r.get(o + 12 + nb + n..o + 36 + nb + n).unwrap_or(&[]);
+                    let tail = r.get(o + 12 + nb + n..o + 40 + nb + n).unwrap_or(&[]);
                     println!(
                         "  result {k} @0x{o:03x}: lead {z:#x}, bitmap {} ({} bytes), data {} bytes {}, tail nonzero {}",
                         hex(bm, 8), nb, n, hex(d, 16), tail.iter().any(|b| *b != 0)
                     );
-                    o += 36 + nb + n;
+                    o += 40 + nb + n;
                 }
                 println!("  parsed to 0x{o:x} of {} (length field {total})", r.len());
                 if count == 0 {

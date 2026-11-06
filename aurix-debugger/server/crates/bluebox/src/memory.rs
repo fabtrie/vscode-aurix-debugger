@@ -10,14 +10,43 @@
 //! 0x0a  address u64 LE     0x12  length u64 LE     (0x1a, 0x1f: 01)
 //! 0x3a  address u64 LE     0x42  length u64 LE     (0x38, 0x4a, 0x4f: 01)  the same again
 //! 0x68  01 = write, 00 = read
-//! 0x78  01 01 01           access flags; this is what the SDK's real-time direct access sends
+//! 0x78  3 bytes            access flags, see below
 //! 0x7b  N u32 LE           bytes of write data that follow (0 for a read)
 //! 0x7f  data, N bytes
 //! then  8 x 00, e8 03 00 01, zeros to the end
 //! ```
 //!
-//! Every byte outside address, length, direction and data was identical
-//! in the 1382 requests captured.
+//! Every byte outside address, length, direction, flags and data was
+//! identical in the 1382 requests captured.
+//!
+//! # Access flags
+//!
+//! winIDEA sends three kinds, the same in 9.21.356 and 9.21.417 (one hour of
+//! winIDEA 9.21.417 sessions, `cycle-417.jsonl`, `no-ap-417.jsonl`):
+//!
+//! - `00 01 00` ([`FLAGS_SFR`]): its own accesses to segment `0xF` (SCU, CBS,
+//!   STM, ...), also on a running target.
+//! - `00 01 01` ([`FLAGS_MEMORY`]): its own accesses to RAM and flash
+//!   (segments `0x6`, `0x7`, `0x8` seen).
+//! - `01 01 01` ([`FLAGS_REALTIME`]): the SDK's real-time direct access
+//!   (`CDataController2`). **This driver sends it for everything.**
+//!   `01 01 00` once, for winIDEA's TL1 setup.
+//!
+//! Measured on the TC377 board (iC5700 B, 9.21.417), with the application running
+//! and `STM0_ACCEN0` = 0x4, `STM1_ACCEN0` = 0x40 (`examples/probe.rs --batch
+//! ... --flags`):
+//!
+//! - Both kinds read the same values, also SFRs (`SCU_CHIPID`, CBS, DBGSR, STM).
+//! - With `01 01 01` a write that the bus refuses (`STMx_OCS` here) shows as a
+//!   failed access right after it, as the module docs below describe.
+//! - With `00 01 00` the same write is acknowledged and the next access
+//!   succeeds, but the register is unchanged: the probe hides the refusal.
+//!   Results carry no bitmap (B = 0), and a failed access only `lead` = 1.
+//!
+//! So winIDEA's own kinds do not get past an application's access protection;
+//! they only stop reporting it. That is why the traces suggested winIDEA's
+//! `STMx_OCS` writes landed. The driver keeps the real-time kind, which
+//! reports refused writes.
 //!
 //! The reply comes in one IN transfer, also for 8192 bytes, the largest
 //! read tried:
@@ -78,6 +107,24 @@ const BLOCK_LEN: usize = BODY_LEN - 4 - REQUEST_TAIL;
 const REPLY_HEAD: usize = 0x23;
 /// Bytes of a result besides its bitmap and data (9.21.417; 36 with 9.21.356).
 const RESULT_LEN: usize = 40;
+
+/// winIDEA's own access to special function registers (segment `0xF`).
+pub const FLAGS_SFR: [u8; 3] = [0x00, 0x01, 0x00];
+/// winIDEA's own access to RAM and flash.
+pub const FLAGS_MEMORY: [u8; 3] = [0x00, 0x01, 0x01];
+/// The SDK's real-time direct access.
+pub const FLAGS_REALTIME: [u8; 3] = [0x01, 0x01, 0x01];
+
+/// The access flags winIDEA itself uses at `addr` (see the module docs):
+/// [`FLAGS_SFR`] in segment `0xF`, [`FLAGS_MEMORY`] elsewhere. For comparison
+/// with captures; the driver sends [`FLAGS_REALTIME`].
+pub fn winidea_flags(addr: u32) -> [u8; 3] {
+    if addr >> 28 == 0xF {
+        FLAGS_SFR
+    } else {
+        FLAGS_MEMORY
+    }
+}
 
 /// One access of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,10 +225,19 @@ pub fn batch_request(acc: &[Access]) -> Vec<u8> {
 
 /// The service message for one access: a read of `len` bytes, or a write of `data`.
 pub fn request(addr: u32, len: usize, data: Option<&[u8]>) -> Vec<u8> {
-    message::encode(message::KIND, SERVICE, &body(addr, len, data))
+    request_with(addr, len, data, FLAGS_REALTIME)
+}
+
+/// [`request`] with other access flags (see the module docs).
+pub fn request_with(addr: u32, len: usize, data: Option<&[u8]>, flags: [u8; 3]) -> Vec<u8> {
+    message::encode(message::KIND, SERVICE, &body_with(addr, len, data, flags))
 }
 
 fn body(addr: u32, len: usize, data: Option<&[u8]>) -> Vec<u8> {
+    body_with(addr, len, data, FLAGS_REALTIME)
+}
+
+fn body_with(addr: u32, len: usize, data: Option<&[u8]>, flags: [u8; 3]) -> Vec<u8> {
     let n = data.map_or(0, |d| d.len());
     if let Some(d) = data {
         assert_eq!(d.len(), len, "a write's length is its data's");
@@ -197,7 +253,7 @@ fn body(addr: u32, len: usize, data: Option<&[u8]>) -> Vec<u8> {
         b[o] = 0x01;
     }
     b[0x68] = data.is_some() as u8;
-    b[0x78..0x7b].copy_from_slice(&[1, 1, 1]);
+    b[0x78..0x7b].copy_from_slice(&flags);
     b[0x7b..0x7f].copy_from_slice(&(n as u32).to_le_bytes());
     if let Some(d) = data {
         b[DATA..DATA + n].copy_from_slice(d);
@@ -356,6 +412,60 @@ mod tests {
         assert_eq!(ours, captured_read());
     }
 
+    /// A captured message: its meaningful bytes, then zeros to `len`.
+    fn captured(s: &str, len: usize) -> Vec<u8> {
+        let mut m: Vec<u8> = (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect();
+        assert!(m.len() <= len);
+        m.resize(len, 0);
+        m
+    }
+
+    /// Requests winIDEA 9.21.417 sent for its own accesses (`cycle-417.jsonl`), whole messages.
+    #[test]
+    fn requests_are_byte_identical_to_winideas_own() {
+        // Read of STM0_TIM0 (an SFR), 4 bytes.
+        let stm = concat!(
+            "230000000001092f2f322f2f2f31342f000000b601000000020000000000101000f000000000040000000000000001\
+             00000000010000000000000000000000000000000000000000000000000100101000f0000000000400000000000000\
+             0100000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             0100000000000000000000000000e8030001"
+        );
+        assert_eq!(request_with(0xF000_1010, 4, None, winidea_flags(0xF000_1010)), captured(stm, 202));
+        // Read of RAM, 128 bytes.
+        let ram = concat!(
+            "230000000001092f2f322f2f2f31342f000000b6010000000200000000000099007000000000800000000000000001\
+             00000000010000000000000000000000000000000000000000000000000100009900700000000080000000000000\
+             0001000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             000101000000000000000000000000e8030001"
+        );
+        assert_eq!(request_with(0x7000_9900, 128, None, winidea_flags(0x7000_9900)), captured(ram, 202));
+        // Read of program flash, 512 bytes.
+        let flash = concat!(
+            "230000000001092f2f322f2f2f31342f000000b60100000002000000000000800a8000000000000200000000000001",
+            "0000000001000000000000000000000000000000000000000000000000010000800a80000000000002000000000000",
+            "0100000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "0101000000000000000000000000e8030001",
+        );
+        assert_eq!(request_with(0x800A_8000, 512, None, winidea_flags(0x800A_8000)), captured(flash, 202));
+        // Write of STM0_OCS (refused by the application's STM0_ACCEN0, but acknowledged with these flags).
+        let ocs = concat!(
+            "230000000001092f2f322f2f2f31342f000000ba01000000020000000000e81000f000000000040000000000000001\
+             00000000010000000000000000000000000000000000000000000000000100e81000f0000000000400000000000000\
+             0100000000010000000000000000000000000000000000000000000000000100000000000000000000000000000000\
+             010004000000000000120000000000000000e8030001"
+        );
+        assert_eq!(request_with(0xF000_10E8, 4, Some(&[0, 0, 0, 0x12]), winidea_flags(0xF000_10E8)), captured(ocs, 206));
+    }
+
+    #[test]
+    fn the_driver_sends_the_real_time_flags_everywhere() {
+        for addr in [0xF881_FD00, 0xF000_10E8, 0x7000_0000, 0x8000_0000, 0xD000_0000] {
+            assert_eq!(&request(addr, 4, None)[0x8c..0x8f], &FLAGS_REALTIME);
+        }
+        assert_eq!(winidea_flags(0xF000_0494), FLAGS_SFR);
+        assert_eq!(winidea_flags(0x6000_0000), FLAGS_MEMORY);
+    }
+
     #[test]
     fn write_request_matches_the_captured_64_byte_write() {
         let data: Vec<u8> = (0x10..0x50).collect();
@@ -365,7 +475,8 @@ mod tests {
         assert_eq!(&m[0x10..0x15], &[0x00, 0x00, 0x00, 0xf6, 0x01]);
         assert_eq!(&m[0x1e..0x22], &[0x00, 0x00, 0x00, 0x70]);
         assert_eq!(m[0x7c], 0x01);
-        assert_eq!(&m[0x8c..0x93], &[0x01, 0x01, 0x01, 0x40, 0x00, 0x00, 0x00]);
+        assert_eq!(&m[0x8c..0x8f], &FLAGS_REALTIME);
+        assert_eq!(&m[0x8f..0x93], &[0x40, 0x00, 0x00, 0x00]);
         assert_eq!(&m[0x93..0xd3], &data[..]);
         assert_eq!(&m[0xd3..0xdf], &unhex("00 00 00 00 00 00 00 00 e8 03 00 01"));
     }

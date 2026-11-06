@@ -43,6 +43,14 @@
 //! Neither resets the target. The probe keeps no session across connects:
 //! every `init` runs both steps.
 //!
+//! A target that does not answer after the attach (not powered, held in reset,
+//! or reset over and over by an external watchdog that cannot be turned off)
+//! does not fail `init`, as with a miniWiggler: the session starts, the core
+//! leaves the cores unexamined, and the driver tries the target connection
+//! again once a second until it answers (see Recovery). A `reset` then tries
+//! the probe's reset at once, and so does `reset_config connect_assert_srst`
+//! at connect.
+//!
 //! Recovery, in the place of what the TAS server does for a miniWiggler:
 //! after a batch with failed accesses the driver reads `SCU_CHIPID`. If that
 //! fails too, the target connection is lost (seen after the target reset
@@ -108,8 +116,13 @@ const SCU_CHIPID: u32 = 0xF003_6140;
 #[cfg(windows)]
 const ATTACH_CLOCK_HZ: u32 = 10_000_000;
 
-/// Interval of reconnect attempts after the target stopped answering.
+/// Interval of reconnect attempts after the target stopped answering, from the
+/// end of one attempt to the start of the next. It doubles with each failed
+/// attempt up to [`TARGET_RETRY_MAX`]: an attempt on an unpowered target takes
+/// about 1.75 s (iC5700), and back to back they kept the core thread busy.
 const TARGET_RETRY: Duration = Duration::from_secs(1);
+/// Longest interval between target reconnect attempts.
+const TARGET_RETRY_MAX: Duration = Duration::from_secs(5);
 /// Interval of reconnect attempts after the probe was lost (each a full connect, ~3.5 s).
 const PROBE_RETRY: Duration = Duration::from_secs(3);
 
@@ -141,7 +154,10 @@ pub struct BlueBoxAdapter {
     /// The attach `init` used; its connect part is what a reconnect sends.
     script: Option<bluebox::attach::Script>,
     lost: Option<Lost>,
+    /// When the last reconnect attempt ended.
     last_try: Option<Instant>,
+    /// The current interval between target reconnect attempts (see [`TARGET_RETRY`]).
+    target_retry: Option<Duration>,
     resets: u64,
     /// Debug clock from `adapter speed`, in Hz; `None`: the attach's 10 MHz.
     clock_hz: Option<u32>,
@@ -163,7 +179,12 @@ impl BlueBoxAdapter {
     /// Reset with halt (see [`Adapter::deassert_srst`]).
     #[cfg(windows)]
     fn reset(&mut self) -> Result<()> {
-        self.ensure_connected()?;
+        // With the target not answering, the probe's reset is tried at once: it
+        // can catch a target that an external watchdog keeps resetting.
+        let target_down = self.lost == Some(Lost::Target) && self.probe.is_some();
+        if !target_down {
+            self.ensure_connected()?;
+        }
         let clock = self.clock_hz.map(|hz| self.dap_clock(hz).0);
         let setup = self.setup();
         let probe = self.probe()?;
@@ -173,6 +194,13 @@ impl BlueBoxAdapter {
             probe.set_clock_for(setup, ATTACH_CLOCK_HZ).map_err(|e| other(format!("bluebox: reset: {e}")))?;
         }
         let st = probe.reset_halt().map_err(|e| other(format!("bluebox: reset: {e}")))?;
+        if target_down {
+            if !self.target_answers() {
+                return Err(other("bluebox: reset: the target does not answer"));
+            }
+            crate::log_info!("[bluebox] the target answers after the reset");
+            self.lost = None;
+        }
         self.apply_clock();
         if st.halted() {
             crate::log_info!("[bluebox] reset; cpu0 halted at 0x{:08x}", st.pc);
@@ -249,12 +277,11 @@ impl BlueBoxAdapter {
     #[cfg(windows)]
     fn ensure_connected(&mut self) -> Result<()> {
         let Some(kind) = self.lost else { return Ok(()) };
-        let wait = if kind == Lost::Target { TARGET_RETRY } else { PROBE_RETRY };
+        let wait = if kind == Lost::Target { self.target_retry.unwrap_or(TARGET_RETRY) } else { PROBE_RETRY };
         let what = if kind == Lost::Target { "the target does not answer" } else { "the probe is not connected" };
         if self.last_try.is_some_and(|t| t.elapsed() < wait) {
             return Err(Error::Adapter(format!("bluebox: {what}; reconnecting")));
         }
-        self.last_try = Some(Instant::now());
         let t0 = Instant::now();
         let r = match kind {
             Lost::Target => self.reconnect_target(),
@@ -263,7 +290,20 @@ impl BlueBoxAdapter {
                 self.connect(&settings, false).map(|_| ())
             }
         };
+        self.last_try = Some(Instant::now());
+        // Back off while the target stays away; a success starts over at TARGET_RETRY.
+        let target_down = self.lost == Some(Lost::Target) && (r.is_err() || kind == Lost::Probe);
+        self.target_retry = target_down.then(|| match self.target_retry {
+            Some(d) if kind == Lost::Target => (d * 2).min(TARGET_RETRY_MAX),
+            _ => TARGET_RETRY,
+        });
         match r {
+            // The probe is back, but `connect` found the target not answering: it
+            // stays lost, and the next tries go to the target.
+            Ok(()) if self.lost == Some(Lost::Target) && kind == Lost::Probe => {
+                crate::log_info!("[bluebox] probe reconnected in {} ms; the target does not answer yet", t0.elapsed().as_millis());
+                Err(Error::Adapter("bluebox: the target does not answer; reconnecting".into()))
+            }
             Ok(()) => {
                 self.lost = None;
                 // Losing the target means it reset (or lost power). Losing the probe
@@ -472,27 +512,39 @@ impl BlueBoxAdapter {
             crate::log_debug!("[bluebox] other length at {d}");
         }
         let script = c.script;
-        let id = probe.read_memory(SCU_CHIPID, 4).map_err(bb)?;
-        if !id.all_ok() {
-            return Err(other(format!(
-                "bluebox: the attach ran ({script_note}) but the target does not answer: is it powered \
-                 and is it a TC37x (the built-in attach is for that derivative)?"
-            )));
-        }
-        let chipid = u32::from_le_bytes(id.data[..4].try_into().unwrap());
         self.probe = Some(probe);
-        self.apply_clock();
-        let probe = self.probe.as_mut().unwrap();
-        if first && settings.connect_under_srst {
-            // `reset_config connect_assert_srst`: connect with reset and halt.
-            let st = probe.reset_halt().map_err(bb)?;
-            crate::log_info!("[bluebox] connected under reset; cpu0 halted at 0x{:08x}", st.pc);
-        }
-        self.status = format!("{path}, SCU_CHIPID 0x{chipid:08x}");
-        self.status.push_str(&format!(", {kernel_note}, {script_note}"));
         self.script = Some(script);
+        if first && settings.connect_under_srst {
+            // `reset_config connect_assert_srst`: connect with reset and halt, at the
+            // attach's clock, also when the target did not answer the attach (a
+            // board whose external watchdog keeps resetting it).
+            let answered = self.target_answers();
+            match self.probe.as_mut().unwrap().reset_halt() {
+                Ok(st) => crate::log_info!("[bluebox] connected under reset; cpu0 halted at 0x{:08x}", st.pc),
+                Err(e) if answered => return Err(bb(e)),
+                Err(e) => crate::log_debug!("[bluebox] reset at connect: {e}"),
+            }
+        }
+        let id = self.probe.as_mut().unwrap().read_memory(SCU_CHIPID, 4).map_err(bb)?;
         // The JTAG id is not read here: where the probe exposes it is unknown,
         // and `ops::init` skips the `-expected-id` check on 0.
+        if !id.all_ok() {
+            // As with a miniWiggler: the session starts without the target (not
+            // powered, held in reset, or reset over and over by an external
+            // watchdog). The core leaves its cores unexamined and examines them
+            // again; each batch tries the target connection again, once a second.
+            crate::log_warn!(
+                "[bluebox] the target does not answer ({script_note}): not powered, held in reset or \
+                 resetting itself? The session starts; the driver connects once the target answers"
+            );
+            self.lost = Some(Lost::Target);
+            self.last_try = Some(Instant::now());
+            self.status = format!("{path}, target not answering, {kernel_note}, {script_note}");
+            return Ok(DeviceInfo { device_id: 0, description: format!("BlueBox {}", self.status) });
+        }
+        let chipid = u32::from_le_bytes(id.data[..4].try_into().unwrap());
+        self.apply_clock();
+        self.status = format!("{path}, SCU_CHIPID 0x{chipid:08x}, {kernel_note}, {script_note}");
         Ok(DeviceInfo { device_id: 0, description: format!("BlueBox {}", self.status) })
     }
 }
@@ -576,10 +628,11 @@ impl Adapter for BlueBoxAdapter {
             if let Some(khz) = settings.speed_khz {
                 self.clock_hz = Some(khz_to_hz(khz)?);
             }
+            // `connect` marks the target lost if it does not answer; the session starts anyway.
+            self.lost = None;
             let info = self.connect(settings, true)?;
             self.settings = settings.clone();
             self.inited = true;
-            self.lost = None;
             Ok(info)
         }
         #[cfg(not(windows))]

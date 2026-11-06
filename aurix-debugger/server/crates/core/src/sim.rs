@@ -281,6 +281,17 @@ impl SimAdapter {
             }
             return;
         }
+        // CBS_TLC: forcing trigger line 1 (TLSP1 = 3) halts the cores it is routed to (CBS_TRCx), as on
+        // the chip; a core in boot halt stays there.
+        if addr == 0xF000_0490 && v & 0x30 == 0x30 {
+            for i in 0..NUM_CORES {
+                let routed = self.mem.get(&(0xF000_0420 + 4 * i as u32)).is_some_and(|t| t & 0x100 != 0);
+                if routed && !self.bhalt[i] && !self.halted[i] {
+                    self.halted[i] = true;
+                    self.evtsrc[i] = 0;
+                }
+            }
+        }
         if let Some((i, off)) = Self::core_of(addr) {
             match off {
                 0xFD00 => {
@@ -527,6 +538,10 @@ impl Adapter for SimAdapter {
                 self.sbc_reset_at = Some(Instant::now() + SBC_LOOP_DELAY);
             }
             self.pc = [0x800A_8000, 0x8010_0000, 0x8020_0000];
+            // A reset clears the STM suspend (STMx_OCS), as on the chip.
+            for stm in 0..NUM_CORES as u32 {
+                self.mem.remove(&(0xF000_10E8 + 0x100 * stm));
+            }
             // With a debugger connected the HSM boot ROM halts at its first user instruction
             // (breakpoint in FP_COMP0); the debug units are reset.
             let debug_enabled = self.hsm.debug_enabled;

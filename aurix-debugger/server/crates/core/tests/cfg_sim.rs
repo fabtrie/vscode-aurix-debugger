@@ -309,16 +309,20 @@ fn reset_halt_runs_reset_sequence() {
 }
 
 #[test]
-fn halting_reset_is_repeated_until_the_sbc_reset_loop_ends() {
+fn halting_reset_lost_to_an_sbc_reset_waits_for_it_and_halts() {
+    // An SBC that resets the device after a debugger reset (RSTB on the reset line): another halting
+    // reset would only start it again, so the reset waits until the SBC resets have settled and halts
+    // the cores by debug request.
     let s = server();
     s.interp.eval("set tc3xx_reset_settle_ms 400").unwrap();
+    s.interp.eval("set tc3xx_reset_quiet_ms 300").unwrap();
     s.interp.eval("init").unwrap();
     with_sim(&s, |sim| sim.sbc_loop_resets = 3);
     s.interp.eval("reset halt").unwrap();
-    assert_eq!(with_sim(&s, |sim| sim.sbc_loop_resets), 0, "SBC loop not run to its end");
+    assert_eq!(with_sim(&s, |sim| sim.sbc_loop_resets), 2, "the reset was repeated");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
-    assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
-    // The loop's resets belong to the reset: none is reported as detected afterwards.
+    assert_eq!(s.interp.eval("set tc3xx_sbc_halted").unwrap(), "1");
+    // The SBC's reset belongs to the reset: not reported as detected afterwards.
     assert_eq!(with_sim(&s, |sim| sim.pending_resets), 0);
 }
 

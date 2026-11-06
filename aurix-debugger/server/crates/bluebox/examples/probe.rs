@@ -65,6 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut speed_test = false;
     let mut write_stats: usize = 0;
     let mut chipid_loop: usize = 0;
+    let mut follow: usize = 0;
     let mut raw_after: Vec<u32> = Vec::new();
     let mut provoke: Option<f64> = None;
     let mut reattach_from = 0usize;
@@ -124,6 +125,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--speed-test" => speed_test = true,
             "--write-stats" => write_stats = val()?.parse()?,
             "--chipid-loop" => chipid_loop = val()?.parse()?,
+            // --follow <n>: n times every 20 ms the fast reconnect (//2///34/) and SCU_CHIPID, STM0, OSTATE
+            "--follow" => follow = val()?.parse()?,
             "--then" => {
                 let t = val()?;
                 let st = val()?;
@@ -321,6 +324,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let t = Instant::now();
                 let st = p.reset_halt()?;
                 println!("reset: cpu0 DBGSR 0x{:08x}, PC 0x{:08x}, halted {} ({:.0} ms)", st.dbgsr, st.pc, st.halted(), ms(t));
+            }
+            if follow > 0 {
+                // After an external reset (an SBC on the reset line): does the fast reconnect bring
+                // the target back, and how soon?
+                let t = Instant::now();
+                let mut last = String::new();
+                for _ in 0..follow {
+                    let st = match p.core_state() {
+                        Ok(s) => format!("DBGSR {:08x} PC {:08x}", s.dbgsr, s.pc),
+                        Err(e) => format!("reconnect error {e}"),
+                    };
+                    let rd = |p: &mut bluebox::Probe<_>, a: u32| match p.read_memory(a, 4) {
+                        Ok(m) if m.all_ok() => format!("{:08x}", u32::from_le_bytes(m.data[..4].try_into().unwrap())),
+                        _ => "--------".to_string(),
+                    };
+                    let (id, stm, ost) = (rd(&mut p, 0xF003_6140), rd(&mut p, 0xF000_1010), rd(&mut p, 0xF000_0480));
+                    let line = format!("{st} chipid {id} OSTATE {ost}");
+                    if line != last {
+                        println!("  {:6.0} ms: {line} STM0 {stm}", ms(t));
+                        last = line;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
             }
             if chipid_loop > 0 && then.is_empty() {
                 // SCU_CHIPID every 20 ms: when does the connection drop?

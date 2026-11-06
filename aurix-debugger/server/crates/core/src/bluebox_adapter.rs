@@ -125,6 +125,9 @@ const TARGET_RETRY: Duration = Duration::from_secs(1);
 const TARGET_RETRY_MAX: Duration = Duration::from_secs(5);
 /// Interval of reconnect attempts after the probe was lost (each a full connect, ~3.5 s).
 const PROBE_RETRY: Duration = Duration::from_secs(3);
+/// How long a lost target is tried with the probe's fast reconnect (`//2///34/`, as after its own
+/// reset) before the attach's connect part. After an external reset it answers within ~40 ms.
+const FAST_RECONNECT_FOR: Duration = Duration::from_millis(300);
 
 #[cfg(windows)]
 type Probe = bluebox::Probe<bluebox::usb::UsbLink>;
@@ -321,9 +324,18 @@ impl BlueBoxAdapter {
         }
     }
 
-    /// The connect part of the attach again, in the probe session that is open.
+    /// Reconnects to a target that stopped answering, in the probe session that is open: first
+    /// with the probe's fast reconnect, then with the connect part of the attach.
+    ///
+    /// After an external reset (an SBC whose RSTB is wired to the debugger's reset line resets
+    /// the board right after a debugger reset) the fast reconnect brings the target back within
+    /// ~40 ms; the connect part takes ~0.6 s. An application that checks at start-up whether a
+    /// debugger is connected (to turn the SBC's watchdog off) sees it only with the fast one.
     #[cfg(windows)]
     fn reconnect_target(&mut self) -> Result<()> {
+        if self.fast_reconnect() {
+            return Ok(());
+        }
         let part = match &self.script {
             Some(s) => connect_part(s),
             None => return Err(Error::Usage(NOT_CONNECTED.into())),
@@ -339,6 +351,23 @@ impl BlueBoxAdapter {
         }
         self.apply_clock();
         Ok(())
+    }
+
+    /// The probe's fast reconnect (`//2///34/`), tried every 1 ms for [`FAST_RECONNECT_FOR`]:
+    /// whether the target answers again.
+    #[cfg(windows)]
+    fn fast_reconnect(&mut self) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < FAST_RECONNECT_FOR {
+            let Some(probe) = self.probe.as_mut() else { return false };
+            if probe.core_state().is_ok() && self.target_answers() {
+                self.apply_clock();
+                crate::log_debug!("[bluebox] fast reconnect after {} ms", t0.elapsed().as_millis());
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
     }
 
     /// Runs a batch: one probe request per op. A probe-level error ends it.

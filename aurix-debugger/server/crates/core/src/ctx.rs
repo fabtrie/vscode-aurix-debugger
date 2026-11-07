@@ -85,6 +85,10 @@ pub struct Ctx {
     pub shutdown: bool,
     pub in_reset: bool,
     pub srst_asserted: bool,
+    /// Tcl proc that handles every reset request (`reset_hook`), called with the mode.
+    pub reset_hook: Option<String>,
+    /// Set while the hook runs: a `reset` inside it is the built-in one.
+    pub in_reset_hook: bool,
 }
 
 impl Default for Ctx {
@@ -124,6 +128,8 @@ impl Ctx {
             shutdown: false,
             in_reset: false,
             srst_asserted: false,
+            reset_hook: None,
+            in_reset_hook: false,
         }
     }
 

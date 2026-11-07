@@ -102,6 +102,14 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
         ok()
     });
     reg(interp, sh, "poll", cmd_poll);
+    // reset_hook ?proc?: every reset request (Tcl, TCF, API, program) calls `proc <mode>` instead;
+    // a `reset` inside the proc is the built-in sequence. An empty name removes the hook.
+    reg(interp, sh, "reset_hook", |cx, a| {
+        if let Some(p) = a.get(1) {
+            cx.with(|c| c.reset_hook = if p.is_empty() { None } else { Some(p.to_string()) });
+        }
+        Ok(cx.with(|c| c.reset_hook.clone().unwrap_or_default()))
+    });
     reg(interp, sh, "polling_period", |cx, a| {
         if let Some(ms) = a.get(1) {
             let ms = num(ms)?.max(1);

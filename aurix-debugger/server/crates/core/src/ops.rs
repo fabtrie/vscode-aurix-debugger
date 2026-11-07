@@ -549,6 +549,15 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
         "run" => false,
         _ => return Err(usage(format!("Invalid mode: {mode}, must be one of: halt, init, or run"))),
     };
+    // A board cfg that steers resets itself (`reset_hook`) gets every request -- from Tcl, TCF,
+    // the API and `program` alike; a `reset` it issues runs the built-in sequence below.
+    let hook = cx.with(|c| if c.in_reset_hook || c.in_reset { None } else { c.reset_hook.clone() });
+    if let Some(hook) = hook {
+        cx.with(|c| c.in_reset_hook = true);
+        let r = cx.interp.eval_global(&format!("{hook} {mode}"));
+        cx.with(|c| c.in_reset_hook = false);
+        return r.map(|_| ()).map_err(other);
+    }
     if cx.with(|c| std::mem::replace(&mut c.in_reset, true)) {
         return Err(usage("'reset' can not be invoked recursively"));
     }

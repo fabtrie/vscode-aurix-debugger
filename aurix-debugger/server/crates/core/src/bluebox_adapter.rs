@@ -357,13 +357,26 @@ impl BlueBoxAdapter {
     /// whether the target answers again.
     #[cfg(windows)]
     fn fast_reconnect(&mut self) -> bool {
+        // Why each try fails is logged (debug level): on the TC37x/FS26 board, after an FS26 reset of
+        // a running application the probe's reconnect answered within ~100 ms, but SCU_CHIPID did not
+        // read for the whole 300 ms (neither at 10 MHz nor with OCDS enabled); the connect part
+        // brought it back after ~850 ms.
         let t0 = Instant::now();
+        let mut last = String::new();
         while t0.elapsed() < FAST_RECONNECT_FOR {
             let Some(probe) = self.probe.as_mut() else { return false };
-            if probe.core_state().is_ok() && self.target_answers() {
-                self.apply_clock();
-                crate::log_debug!("[bluebox] fast reconnect after {} ms", t0.elapsed().as_millis());
-                return true;
+            let why = match probe.core_state() {
+                Ok(_) if self.target_answers() => {
+                    self.apply_clock();
+                    crate::log_debug!("[bluebox] fast reconnect after {} ms", t0.elapsed().as_millis());
+                    return true;
+                }
+                Ok(s) => format!("reconnect answered (DBGSR {:08x}), SCU_CHIPID does not read", s.dbgsr),
+                Err(e) => format!("reconnect: {e}"),
+            };
+            if why != last {
+                crate::log_debug!("[bluebox] fast reconnect at {} ms: {why}", t0.elapsed().as_millis());
+                last = why;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -532,10 +545,13 @@ impl BlueBoxAdapter {
         crate::log_info!("[bluebox] the {} is connected {what}", model.name());
         let script_note = format!("{script_note}, {} {what}", model.name());
         crate::log_info!(
-            "[bluebox] {script_note}: {} exchanges in {} ms{}",
+            "[bluebox] {script_note}: {} exchanges in {} ms{}{}",
             c.sent,
             t0.elapsed().as_millis(),
-            if c.other_len == 0 { String::new() } else { format!(", {} replies of another length than captured", c.other_len) }
+            if c.other_len == 0 { String::new() } else { format!(", {} replies of another length than captured", c.other_len) },
+            // winIDEA's STMx_OCS writes: refused by an application that locked the STMs (SMU alarm,
+            // and a reset where its reaction is armed); the cfg scripts suspend the STMs themselves.
+            if c.skipped == 0 { String::new() } else { format!(", {} STMx_OCS writes left out", c.skipped) }
         );
         for d in &c.other_desc {
             crate::log_debug!("[bluebox] other length at {d}");

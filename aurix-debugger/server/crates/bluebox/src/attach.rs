@@ -17,6 +17,15 @@
 //!   node count of the node-5 scan ([`Setup::from_node_scan`]); with and
 //!   without one, the attaches differ in node 4, node 5 and the clock service.
 //!
+//! - winIDEA's attach writes `STMx_OCS` (its "suspend the STMs with the
+//!   cores"). On an application that has locked STM0/1 against the debugger
+//!   (`STMx_ACCEN0`), the bus refuses those writes and the SMU raises ALM7[20]
+//!   (measured on a TC37x board). An application that
+//!   started without a debugger keeps that alarm's reaction and the FS26's FCCU
+//!   monitoring, so the attach reset the board. [`Probe::attach`] leaves these
+//!   writes out ([`is_stm_ocs_write`]); the cfg scripts write `STMx_OCS` where
+//!   `STMx_ACCEN0` lets them.
+//!
 //! The tables (`//2///26/`, 7378 bytes; `//3/<core>/6/`, 5699 bytes each;
 //! `/////6/`, 4107 bytes) describe the SoC and the debug setup of the winIDEA
 //! workspace, so a script fits a TC37x with those settings. Another
@@ -35,6 +44,8 @@ pub struct Script {
 #[derive(Debug, Clone, Default)]
 pub struct AttachReport {
     pub sent: usize,
+    /// Exchanges left out: writes to `STMx_OCS` ([`is_stm_ocs_write`]).
+    pub skipped: usize,
     /// Exchanges whose replies differed in length from the captured ones.
     pub other_len: Vec<usize>,
     /// The same, described: service, reply lengths got and captured.
@@ -350,6 +361,10 @@ impl<L: Link> Probe<L> {
     pub fn attach(&mut self, script: &Script) -> Result<AttachReport> {
         let mut rep = AttachReport::default();
         for (i, x) in script.exchanges.iter().enumerate() {
+            if is_stm_ocs_write(x) {
+                rep.skipped += 1;
+                continue;
+            }
             let got = self.exchange(x).map_err(|e| match e {
                 Error::Usb { op, code } => Error::Protocol(format!(
                     "attach exchange {i} ({}): {op} failed, Win32 error {code}",
@@ -371,6 +386,22 @@ impl<L: Link> Probe<L> {
         }
         Ok(rep)
     }
+}
+
+/// `STM0_OCS` .. `STM5_OCS`: written by winIDEA's attach, refused (and an SMU
+/// alarm) once the application has locked the STM against the debugger.
+const STM_OCS: [u64; 6] = [0xF000_10E8, 0xF000_11E8, 0xF000_12E8, 0xF000_13E8, 0xF000_14E8, 0xF000_15E8];
+
+/// Whether `x` is a memory-service write ([`crate::memory`]: `//2///14/`, or
+/// 9.21.356's `//2///16/`; direction at body offset 0x68, address u64 at 0x0a)
+/// to an `STMx_OCS`.
+pub fn is_stm_ocs_write(x: &Exchange) -> bool {
+    let Some((_, path, body)) = message::decode(&x.payload) else { return false };
+    if (path != "//2///14/" && path != "//2///16/") || body.len() < 0x7f || body[0x68] != 1 {
+        return false;
+    }
+    let addr = u64::from_le_bytes(body[0x0a..0x12].try_into().unwrap());
+    STM_OCS.contains(&addr)
 }
 
 /// Service that sets the iC5000's DAP clock: body `8e 00 00 b0 <n> ff`, the
@@ -452,6 +483,8 @@ pub struct Connected {
     pub other_desc: Vec<String>,
     /// Things worth a warning.
     pub notes: Vec<String>,
+    /// `STMx_OCS` writes of the script left out ([`is_stm_ocs_write`]).
+    pub skipped: usize,
 }
 
 impl<L: Link> Probe<L> {
@@ -472,9 +505,11 @@ impl<L: Link> Probe<L> {
     pub fn connect_target(&mut self, script: &Script, fpga: Option<&[u8]>) -> Result<Connected> {
         let mut notes = Vec::new();
         let (sent_c, other_c) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let skipped_c = std::cell::Cell::new(0);
         let desc = std::cell::RefCell::new(Vec::new());
         let run = |p: &mut Probe<L>, xs: &[Exchange]| -> Result<()> {
             let r = p.attach(&Script { exchanges: xs.to_vec() })?;
+            skipped_c.set(skipped_c.get() + r.skipped);
             let mut d = desc.borrow_mut();
             for (i, t) in r.other_len.iter().zip(r.other_desc) {
                 if d.len() < 16 {
@@ -496,7 +531,7 @@ impl<L: Link> Probe<L> {
                 let image = fpga.ok_or_else(|| Error::Fpga("the iC5000 needs its debug FPGA image on every attach".into()))?;
                 self.load_fpga_ic5000(image)?;
                 run(self, &s.exchanges[at..])?;
-                Ok(Connected { setup: Setup::System, script: s, sent: sent_c.get(), other_len: other_c.get(), other_desc: desc.take(), notes })
+                Ok(Connected { setup: Setup::System, script: s, sent: sent_c.get(), other_len: other_c.get(), other_desc: desc.take(), notes, skipped: skipped_c.get() })
             }
             Model::Ic5700 => {
                 let (head, rest) = split_at_fpga_status(script);
@@ -531,6 +566,7 @@ impl<L: Link> Probe<L> {
                         other_len: other_c.get(),
                         other_desc: desc.take(),
                         notes,
+                        skipped: skipped_c.get(),
                     });
                 };
                 run(self, &rest.exchanges[..at])?;
@@ -560,7 +596,7 @@ impl<L: Link> Probe<L> {
                     full = other;
                 }
                 run(self, &after)?;
-                Ok(Connected { setup, script: full, sent: sent_c.get(), other_len: other_c.get(), other_desc: desc.take(), notes })
+                Ok(Connected { setup, script: full, sent: sent_c.get(), other_len: other_c.get(), other_desc: desc.take(), notes, skipped: skipped_c.get() })
             }
         }
     }
@@ -837,6 +873,29 @@ mod tests {
         assert!(text.starts_with("# a note\n# second line\n"));
         assert_eq!(text.matches("\np ").count(), 1, "the payload once");
         assert_eq!(Script::parse(&text).unwrap().exchanges, vec![x.clone(), x]);
+    }
+
+    /// winIDEA's attaches write STM0-2_OCS once each (refused by an application that locked the
+    /// STMs, an SMU alarm); nothing else in them is taken for such a write.
+    #[test]
+    fn builtin_attaches_write_stm_ocs_three_times() {
+        for (name, s) in [("tc37x_system", Script::tc37x_system()), ("tc37x", Script::tc37x()), ("tc37x_ic5000", Script::tc37x_ic5000())] {
+            let n = s.exchanges.iter().filter(|x| is_stm_ocs_write(x)).count();
+            assert_eq!(n, 3, "{name}");
+        }
+    }
+
+    #[test]
+    fn attach_leaves_out_stm_ocs_writes() {
+        let s = Script::tc37x_system();
+        let i = s.exchanges.iter().position(is_stm_ocs_write).unwrap();
+        let other = s.exchanges[i - 1].clone();
+        let script = Script { exchanges: vec![s.exchanges[i].clone(), other] };
+        let mut link = ScriptedLink::default();
+        link.replies.extend([vec![0; 76]]);
+        let mut p = Probe::new(link, true);
+        let rep = p.attach(&script).unwrap();
+        assert_eq!((rep.sent, rep.skipped), (1, 1));
     }
 
     #[test]

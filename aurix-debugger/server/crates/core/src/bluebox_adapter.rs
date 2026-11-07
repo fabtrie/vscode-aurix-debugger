@@ -327,10 +327,13 @@ impl BlueBoxAdapter {
     /// Reconnects to a target that stopped answering, in the probe session that is open: first
     /// with the probe's fast reconnect, then with the connect part of the attach.
     ///
-    /// After an external reset (an SBC whose RSTB is wired to the debugger's reset line resets
-    /// the board right after a debugger reset) the fast reconnect brings the target back within
-    /// ~40 ms; the connect part takes ~0.6 s. An application that checks at start-up whether a
-    /// debugger is connected (to turn the SBC's watchdog off) sees it only with the fast one.
+    /// After a reset that followed one of the probe's own (an SBC whose RSTB is wired to the
+    /// debugger's reset line) the probe's reconnect brings the target back within ~40 ms. After a
+    /// reset the probe did not see coming (an SBC resetting a running application) it answers but
+    /// the target stays unreadable; the attach's connect messages without polls
+    /// ([`connect_core`]) bring it back within ~200 ms, the whole connect part takes ~0.85 s. An
+    /// application that checks at start-up whether a debugger is connected (to turn the SBC's
+    /// watchdog off) sees it only with the fast ways.
     #[cfg(windows)]
     fn reconnect_target(&mut self) -> Result<()> {
         if self.fast_reconnect() {
@@ -357,12 +360,16 @@ impl BlueBoxAdapter {
     /// whether the target answers again.
     #[cfg(windows)]
     fn fast_reconnect(&mut self) -> bool {
-        // Why each try fails is logged (debug level): on the TC37x/FS26 board, after an FS26 reset of
-        // a running application the probe's reconnect answered within ~100 ms, but SCU_CHIPID did not
-        // read for the whole 300 ms (neither at 10 MHz nor with OCDS enabled); the connect part
-        // brought it back after ~850 ms.
+        // After a reset the probe did not do itself (an SBC resetting a running application), its
+        // reconnect answers but the target stays unreadable (TC37x/FS26 board: for the whole 300 ms,
+        // neither at 10 MHz nor with OCDS enabled; winIDEA too only got it back with a reset of its
+        // own). The attach's connect messages without polls (connect_core, 34 exchanges, ~100 ms)
+        // bring it back: 207 ms after the loss, in time for the application to see the debugger.
+        // The connect part with its polls took ~850 ms.
+        let core = self.script.as_ref().map(connect_core);
         let t0 = Instant::now();
         let mut last = String::new();
+        let mut core_at: Option<Instant> = None;
         while t0.elapsed() < FAST_RECONNECT_FOR {
             let Some(probe) = self.probe.as_mut() else { return false };
             let why = match probe.core_state() {
@@ -371,7 +378,28 @@ impl BlueBoxAdapter {
                     crate::log_debug!("[bluebox] fast reconnect after {} ms", t0.elapsed().as_millis());
                     return true;
                 }
-                Ok(s) => format!("reconnect answered (DBGSR {:08x}), SCU_CHIPID does not read", s.dbgsr),
+                Ok(s) => {
+                    // After a reset the probe did not do itself, its reconnect answers but the target
+                    // stays unreadable: run the attach's connect messages again (without its polls).
+                    if let Some(c) = core.as_ref().filter(|_| core_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(100))) {
+                        core_at = Some(Instant::now());
+                        let t1 = Instant::now();
+                        let r = self.probe.as_mut().map(|p| p.attach(c));
+                        let ok = matches!(r, Some(Ok(_))) && self.target_answers();
+                        crate::log_debug!(
+                            "[bluebox] short reconnect at {} ms ({} exchanges, {} ms): {}",
+                            t0.elapsed().as_millis(),
+                            c.exchanges.len(),
+                            t1.elapsed().as_millis(),
+                            if ok { "target answers" } else { "target does not answer" }
+                        );
+                        if ok {
+                            self.apply_clock();
+                            return true;
+                        }
+                    }
+                    format!("reconnect answered (DBGSR {:08x}), SCU_CHIPID does not read", s.dbgsr)
+                }
                 Err(e) => format!("reconnect: {e}"),
             };
             if why != last {
@@ -612,6 +640,21 @@ const WINIDEA: &str = bluebox::kernel::WINIDEA_VERSION;
 /// The part of an attach that makes the target connection: from its last `L`
 /// command (the second handshake) on. After the target reset itself, it
 /// restores the connection in about 0.4 s; the whole attach does too, in 3.2 s.
+/// The connect messages of the attach: from its last `L` to its first reset reconnect
+/// (`//2///34/`), without the probe status polls (`//5///19/`) and FPGA status queries
+/// (`//1///35/`) winIDEA sends in between. A short reconnect after a reset the probe did not do.
+fn connect_core(script: &bluebox::attach::Script) -> bluebox::attach::Script {
+    let part = connect_part(script);
+    let path = |x: &bluebox::Exchange| bluebox::message::decode(&x.payload).map(|(_, p, _)| p.to_string());
+    let end = part.exchanges.iter().position(|x| path(x).as_deref() == Some("//2///34/")).map_or(part.exchanges.len(), |i| i + 1);
+    let exchanges = part.exchanges[..end]
+        .iter()
+        .filter(|x| !matches!(path(x).as_deref(), Some("//5///19/") | Some("//1///35/")))
+        .cloned()
+        .collect();
+    bluebox::attach::Script { exchanges }
+}
+
 fn connect_part(script: &bluebox::attach::Script) -> bluebox::attach::Script {
     let from = script.exchanges.iter().rposition(|x| x.payload == [0x03, 0x21, b'L']).unwrap_or(0);
     bluebox::attach::Script { exchanges: script.exchanges[from..].to_vec() }
@@ -864,6 +907,22 @@ mod tests {
         assert_eq!(part.exchanges.first().unwrap().payload, [0x03, 0x21, b'L']);
         assert!(part.exchanges.len() < full.exchanges.len());
         assert_eq!(part.exchanges.last(), full.exchanges.last());
+    }
+
+    /// The short reconnect: the connect messages from the last `L` to the first reset reconnect,
+    /// without polls (measured on the iC5700 without active probe: 34 exchanges, ~100 ms, where
+    /// the connect part took ~850 ms).
+    #[test]
+    fn the_connect_core_runs_from_l_to_the_reset_reconnect_without_polls() {
+        for script in [bluebox::attach::Script::tc37x_system(), bluebox::attach::Script::tc37x(), bluebox::attach::Script::tc37x_ic5000()] {
+            let core = connect_core(&script);
+            let path = |x: &bluebox::Exchange| bluebox::message::decode(&x.payload).map(|(_, p, _)| p.to_string());
+            assert_eq!(core.exchanges.first().unwrap().payload, [0x03, 0x21, b'L']);
+            assert_eq!(path(core.exchanges.last().unwrap()).as_deref(), Some("//2///34/"));
+            assert!(core.exchanges.iter().all(|x| !matches!(path(x).as_deref(), Some("//5///19/") | Some("//1///35/"))));
+            assert!(core.exchanges.len() < 60, "{} exchanges", core.exchanges.len());
+        }
+        assert_eq!(connect_core(&bluebox::attach::Script::tc37x_system()).exchanges.len(), 34);
     }
 
     #[test]

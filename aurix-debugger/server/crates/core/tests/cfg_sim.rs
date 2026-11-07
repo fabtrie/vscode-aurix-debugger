@@ -531,17 +531,15 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     s.interp.eval("reset halt").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset halt: {w:08x?}");
-    // The last TL1 force (after the reset's own halt pulse) latches TL1 after the STM suspend setup.
+    // The quick reset-end suspends the STMs and releases the HSM (boot ROM breakpoint deleted, then
+    // run); once the halt holds, TL1 is routed and latched (its edge halts the HSM with the cores;
+    // continue releases it as after any halt).
     let ocs = pos(&w, (0xF000_10E8, 0x1200_0000));
-    let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched after reset halt");
-    assert!(ocs < latch, "TL1 must be latched after the STM suspend setup: {w:08x?}");
-    // After the TL1 latch (whose edge would halt the HSM again) the boot ROM's HSM breakpoint is
-    // deleted and the HSM runs. (The HSM target also accesses DBGBASE earlier, when it is examined
-    // after the reset.)
-    let dbgbase = latch + pos(&w[latch..], (0xF004_1010, 0xE000_0000));
     let bp = pos(&w, (0xF005_2008, 0));
-    let run = pos(&w, (0xF005_EDF0, 0xA05F_0001));
-    assert!(latch < dbgbase && dbgbase < bp && bp < run, "HSM release order: {w:08x?}");
+    let run = bp + pos(&w[bp..], (0xF005_EDF0, 0xA05F_0001));
+    let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched after reset halt");
+    assert!(ocs < bp && bp < run, "STM suspend, then HSM release: {w:08x?}");
+    assert!(run < latch, "TL1 latched once the halt holds: {w:08x?}");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
 
     // A reset without halt is halted for the init (STM0/1 before the application locks them), then

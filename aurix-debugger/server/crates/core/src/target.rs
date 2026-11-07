@@ -455,6 +455,16 @@ impl Core {
                 if !core.examined() {
                     return Ok(Transition::None);
                 }
+                // MCS channels: examined again by the background poll right after the reset, not
+                // here - they need the GTM, which is off until the startup software enables it.
+                // Done here, the 16 channels cost ~36 ms of the halted phase through a BlueBox, time
+                // a board whose SBC resets a core still halted shortly after the reset (FS26
+                // INIT_FS, less the application's start-up to its FS26 setup) does not have. The
+                // HSM is examined here: that restores its breakpoints before the cfg releases it.
+                if matches!(core, Core::Mcs(_)) {
+                    core.set_examined(false);
+                    return Ok(Transition::None);
+                }
                 match core.examine(io).and_then(|_| core.poll(io)) {
                     Ok(tr) => {
                         core.restore_triggers(io)?;

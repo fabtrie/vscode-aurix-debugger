@@ -630,7 +630,7 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
                 examine_one(cx, t, false).map_err(|_| other(format!("TARGET: {} - Not examined", target_name(cx, t))))?;
             }
             cx.with(|c| c.in_reset = false);
-            let w = wait_state(cx, t, TargetState::Halted, 1000);
+            let w = wait_halted_after_reset(cx, t, 1000);
             cx.with(|c| c.in_reset = true);
             if w.is_err() {
                 return Err(other(format!("TARGET: {} - Not halted", target_name(cx, t))));
@@ -670,6 +670,25 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Waits for core `t` to halt after a halting reset, polling only that core. A `wait_state`
+/// (`poll_all`) would also re-examine every target the reset left unexamined (HSM, MCS channels):
+/// ~60 ms through a BlueBox inside the halted phase, which a board whose SBC resets a core still
+/// halted shortly after a reset (FS26 INIT_FS) does not have. The background poll examines them
+/// once the reset is done.
+fn wait_halted_after_reset(cx: &Cx, t: usize, ms: u64) -> Result<()> {
+    let t0 = Instant::now();
+    loop {
+        poll_one(cx, t);
+        if cx.with(|c| c.targets[t].core.state()) == TargetState::Halted {
+            return Ok(());
+        }
+        if t0.elapsed() >= Duration::from_millis(ms) {
+            return Err(Error::Timeout(format!("[{}] timed out ({ms}ms) while waiting for target halted", target_name(cx, t))));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Polls target `t` alone and reports what changed, as the background poll

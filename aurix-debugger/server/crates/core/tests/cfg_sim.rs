@@ -1,9 +1,10 @@
-//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg (with tc3xx_ocds.cfg) against the
-//! simulated TC37x and checks the event-driven register sequences.
+//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg (with tc3xx_ocds.cfg and fs26_sbc.cfg)
+//! against the simulated TC37x and checks the event-driven register sequences and the FS26 attach and
+//! reset flows.
 
 use std::path::PathBuf;
 
-use aurix_core::sim::SimAdapter;
+use aurix_core::sim::{SimAdapter, SimFs26, APP_DRIVER_STATE, APP_MARKER, APP_MARKER_DEBUGGER};
 use aurix_core::{ops, Server};
 
 fn repo() -> PathBuf {
@@ -27,10 +28,29 @@ fn server() -> Server {
         .unwrap();
     // The simulated HSM never reports ready: don't wait for it after halting resets.
     s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
-    // Halting resets hold: don't wait for an SBC reset loop (see the sbc_reset_loop tests).
-    s.interp.eval_global("set tc3xx_reset_settle_ms 0").unwrap();
+    // No FS26 unless a test adds one: the debugger's reset is not wired to it (the FS26 tests set
+    // this themselves).
+    s.interp.eval_global("set sbc_rstb_wired 0").unwrap();
     s
 }
+
+fn no_violations(s: &Server) {
+    let v = with_sim(s, |sim| sim.violations.clone());
+    assert!(v.is_empty(), "OCS writes the hardware refuses (they reset the board): {v:08x?}");
+}
+
+fn mem(s: &Server, addr: u32) -> u32 {
+    let v = s.interp.eval(&format!("tc3xx_rd {addr:#x}")).unwrap();
+    u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap()
+}
+
+fn ocs_sus(s: &Server, ocs: u32) -> u32 {
+    (mem(s, ocs) >> 24) & 0xF
+}
+
+const STM0_OCS: u32 = 0xF000_10E8;
+const STM1_OCS: u32 = 0xF000_11E8;
+const EVADC_OCS: u32 = 0xF002_0028;
 
 fn with_sim<R>(s: &Server, f: impl FnOnce(&mut SimAdapter) -> R) -> R {
     s.cx().with(|c| f(c.adapter.as_mut().unwrap().as_any_mut().downcast_mut::<SimAdapter>().unwrap()))
@@ -308,50 +328,199 @@ fn reset_halt_runs_reset_sequence() {
     assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
 }
 
+/// Wired board (debugger reset on the FS26 RSTB), wiring not configured: the first halting reset is
+/// lost to the FS26's INIT_FS reset, which tells the wiring; the default then drives the FS26 through
+/// deep fail-safe with halting resets, after which it is in debug mode and the halt at the reset
+/// vector holds. Resumed, the application sees the debugger and disarms the watchdog.
 #[test]
-fn halting_reset_lost_to_an_sbc_reset_waits_for_it_and_halts() {
-    // An SBC that resets the device after a debugger reset (RSTB on the reset line): another halting
-    // reset would only start it again, so the reset waits until the SBC resets have settled and halts
-    // the cores by debug request.
+fn wired_reset_halt_goes_through_deep_fail_safe_and_holds() {
     let s = server();
-    s.interp.eval("set tc3xx_reset_settle_ms 400").unwrap();
-    s.interp.eval("set tc3xx_reset_quiet_ms 300").unwrap();
+    s.interp.eval("set sbc_rstb_wired auto").unwrap();
+    s.interp.eval("set sbc_hold_ms 350").unwrap();
+    with_sim(&s, |sim| {
+        let mut f = SimFs26::new(true, false);
+        f.dfs_limit = 3;
+        sim.fs26 = Some(f);
+    });
     s.interp.eval("init").unwrap();
-    with_sim(&s, |sim| sim.sbc_loop_resets = 3);
     s.interp.eval("reset halt").unwrap();
-    assert_eq!(with_sim(&s, |sim| sim.sbc_loop_resets), 2, "the reset was repeated");
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
-    assert_eq!(s.interp.eval("set tc3xx_sbc_halted").unwrap(), "1");
-    // The SBC's reset belongs to the reset: not reported as detected afterwards.
-    assert_eq!(with_sim(&s, |sim| sim.pending_resets), 0);
+    assert_eq!(s.interp.eval("set sbc_wired_found").unwrap(), "1");
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().dfs_entries), 1, "no deep fail-safe");
+    assert_eq!(s.interp.eval("set sbc_assume").unwrap(), "debug");
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
+    // Holds: the FS26 is in debug mode.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+
+    s.interp.eval("resume").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    ops::poll_all(&s.cx());
+    assert_eq!(with_sim(&s, |sim| sim.mem_word(APP_MARKER)), APP_MARKER_DEBUGGER);
+    assert_eq!(with_sim(&s, |sim| sim.mem_word(APP_DRIVER_STATE)), 3);
+    assert!(with_sim(&s, |sim| { let f = sim.fs26.as_ref().unwrap(); !f.armed && !f.debug_mode }));
+    assert_eq!(s.interp.eval("set sbc_assume").unwrap(), "");
+    no_violations(&s);
 }
 
+/// Explicit sbc_rstb_wired 0 on a board whose debugger reset does reach the FS26: the lost halt is
+/// reported, never repeated - no deep fail-safe on a board said to be unwired.
 #[test]
-fn halting_reset_without_sbc_reset_loop_is_done_once() {
+fn halt_lost_with_rstb_unwired_setting_is_not_repeated() {
     let s = server();
-    s.interp.eval("set tc3xx_reset_settle_ms 1000").unwrap();
+    s.interp.eval("set sbc_hold_ms 350").unwrap();
+    with_sim(&s, |sim| sim.fs26 = Some(SimFs26::new(true, false)));
+    s.interp.eval("init").unwrap();
+    let err = s.interp.eval("reset halt").unwrap_err();
+    assert!(err.contains("not repeated"), "{err}");
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().resets), 1);
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().dfs_entries), 0);
+    no_violations(&s);
+}
+
+/// sbc_wired_reset_halt app: a halting reset the FS26 ends becomes a running reset and a halt in the
+/// application, without deep fail-safe.
+#[test]
+fn wired_reset_halt_app_halts_in_the_application() {
+    let s = server();
+    s.interp.eval("set sbc_rstb_wired auto; set sbc_wired_reset_halt app; set sbc_hold_ms 350").unwrap();
+    with_sim(&s, |sim| sim.fs26 = Some(SimFs26::new(true, false)));
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(mem(&s, 0xF000_10FC), 0x4, "the application did not run before the halt");
+    assert_eq!(ocs_sus(&s, STM0_OCS), 2);
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().dfs_entries), 0);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    no_violations(&s);
+}
+
+/// Unwired board, wiring not configured: the halting reset holds (the FS26 does not see it), so it is
+/// done once, with the STM suspend written before the application runs.
+#[test]
+fn unwired_reset_halt_is_done_once_and_holds() {
+    let s = server();
+    s.interp.eval("set sbc_rstb_wired auto").unwrap();
+    with_sim(&s, |sim| sim.fs26 = Some(SimFs26::new(false, false)));
     s.interp.eval("init").unwrap();
     take_writes(&s);
     s.interp.eval("reset halt").unwrap();
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("set sbc_wired_found").unwrap(), "0");
+    assert_eq!(s.interp.eval("set sbc_assume").unwrap(), "held");
     let w = take_writes(&s);
     let setups = w.iter().filter(|x| **x == (0xF000_0494, 0xB000_003F)).count();
     assert_eq!(setups, 1, "reset repeated: {w:08x?}");
-    // A running reset is not checked (it takes ~100 ms itself).
-    let t0 = std::time::Instant::now();
-    s.interp.eval("reset run").unwrap();
-    assert!(t0.elapsed() < std::time::Duration::from_millis(500), "reset run waited {:?}", t0.elapsed());
+    assert!(w.contains(&(STM0_OCS, 0x1200_0000)), "STM0 suspend not written: {w:08x?}");
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().resets), 0);
+    no_violations(&s);
 }
 
+/// Unwired board, application started without the debugger (watchdog armed): the FS26 does not see
+/// the debugger's reset and would end any halt after its window, the ~150 ms init halt included. So a
+/// reset that runs at once comes first (the application disarms the watchdog), then the halting
+/// reset: no FS26 reset at all, and the halt at the vector holds.
 #[test]
-fn connect_reset_halt_leaves_cores_halted_with_setup() {
+fn unwired_reset_halt_disarms_an_armed_watchdog_first() {
+    let s = server();
+    with_sim(&s, |sim| {
+        sim.fs26 = Some(SimFs26::new(false, true));
+        sim.app_started_without_debugger();
+    });
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
+    assert!(with_sim(&s, |sim| !sim.fs26.as_ref().unwrap().armed), "watchdog still armed");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().resets), 0, "FS26 reset");
+    assert_eq!(ocs_sus(&s, STM0_OCS), 2);
+    no_violations(&s);
+}
+
+/// A reset without halt still gets STM0/1 their suspend: halted for the init, before the application
+/// locks them (ACCEN0), then running; it returns once the application has disarmed the watchdog, and
+/// the first resume suspends the modules the application enables.
+#[test]
+fn reset_run_suspends_stm_before_the_application_locks_it() {
     let s = server();
     s.interp.eval("init").unwrap();
     take_writes(&s);
-    s.interp.eval("tc3xx_connect_reset_halt").unwrap();
+    s.interp.eval("reset run").unwrap();
     let w = take_writes(&s);
-    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
-    assert!(w.contains(&(0xF000_10E8, 0x1200_0000)), "STM suspend not applied: {w:08x?}");
+    assert!(w.contains(&(STM0_OCS, 0x1200_0000)), "STM0 suspend not written: {w:08x?}");
+    assert_eq!(mem(&s, 0xF000_10FC), 0x4, "application did not lock STM0");
+    assert_eq!(ocs_sus(&s, STM0_OCS), 2);
+    assert_eq!(ocs_sus(&s, STM1_OCS), 2);
+    assert_eq!(ocs_sus(&s, EVADC_OCS), 2, "app-class module not suspended after the start");
+    assert_eq!(with_sim(&s, |sim| sim.mem_word(APP_MARKER)), APP_MARKER_DEBUGGER);
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "running");
+    no_violations(&s);
+}
+
+/// Hot attach to an application that started without the debugger: no reset, no halt, and no write
+/// the hardware refuses (STM0/1 are locked: left alone). A halt then makes the FS26 reset the board;
+/// the scripts restore OCDS and the STM suspend at once, the application disarms the watchdog, and
+/// the cores are halted again in the application.
+#[test]
+fn hot_attach_then_halt_while_armed_recovers() {
+    let s = server();
+    with_sim(&s, |sim| {
+        sim.fs26 = Some(SimFs26::new(false, true));
+        sim.app_started_without_debugger();
+    });
+    s.interp.eval("init").unwrap();
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "running");
+    assert_eq!(ocs_sus(&s, STM0_OCS), 0, "STM0 is locked by the application");
+    assert_eq!(ocs_sus(&s, EVADC_OCS), 2, "enabled module not suspended at the hot attach");
+    no_violations(&s);
+
+    s.interp.eval("halt 200").unwrap();
+    ops::poll_all(&s.cx());
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().resets), 1);
+    assert_eq!(with_sim(&s, |sim| sim.mem_word(APP_MARKER)), APP_MARKER_DEBUGGER, "application did not see the debugger");
+    assert!(with_sim(&s, |sim| !sim.fs26.as_ref().unwrap().armed));
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(ocs_sus(&s, STM0_OCS), 2, "STM0 suspend not written after the FS26 reset");
+    no_violations(&s);
+}
+
+/// sbc_attach halt on a disarmed application whose STM0/1 have no suspend (locked): a halt would make
+/// the OS panic on resume, so it resets first, then halts in the application.
+#[test]
+fn attach_halt_resets_first_when_stm_is_not_suspended() {
+    let s = server();
+    s.interp.eval("set sbc_attach_mode halt").unwrap();
+    s.interp.eval("init").unwrap();
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(ocs_sus(&s, STM0_OCS), 2);
+    assert_eq!(ocs_sus(&s, STM1_OCS), 2);
+    assert_eq!(ocs_sus(&s, EVADC_OCS), 2);
+    // Halted in the application (it ran: it locked STM0 against the debugger), not at the vector.
+    assert_eq!(mem(&s, 0xF000_10FC), 0x4, "the application did not run before the halt");
+    assert_eq!(mem(&s, APP_MARKER), APP_MARKER_DEBUGGER);
+    no_violations(&s);
+}
+
+/// Passive attach: nothing written to the target, not even by aurix-dbg's examination (OCDS stays
+/// as it was); memory reads work; resets are refused.
+#[test]
+fn passive_attach_writes_nothing() {
+    let s = server();
+    s.interp.eval("set sbc_attach_mode passive").unwrap();
+    s.interp.eval("init").unwrap();
+    ops::poll_all(&s.cx());
+    assert_eq!(take_writes(&s), vec![]);
+    assert_eq!(with_sim(&s, |sim| sim.ostate & 1), 0, "OCDS enabled");
+    assert_eq!(mem(&s, APP_MARKER), APP_MARKER_DEBUGGER);
+    assert!(s.interp.eval("reset run").is_err());
+    assert_eq!(take_writes(&s), vec![]);
 }
 
 #[test]
@@ -375,10 +544,15 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     assert!(latch < dbgbase && dbgbase < bp && bp < run, "HSM release order: {w:08x?}");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
 
+    // A reset without halt is halted for the init (STM0/1 before the application locks them), then
+    // all cores run: the TL1 hold is dropped after the latch.
     s.interp.eval("reset run").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset run: {w:08x?}");
-    assert!(!w.contains(&(CBS_TLC, 0x30)), "TL1 latched after reset run: {w:08x?}");
+    let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched for the init");
+    assert!(w[latch..].contains(&(CBS_TLCHS, 2)), "TL1 hold not dropped after reset run: {w:08x?}");
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "running");
 }
 
 // --- HSM (Cortex-M3) --------------------------------------------------------------------------
@@ -955,7 +1129,7 @@ fn generic_setup_follows_the_target_cfg() {
     i.eval_global("adapter driver sim; script target/infineon/tc39x.cfg").unwrap();
     i.eval_global("set tc3xx_mcs_modules {0 9}; set tc3xx_mcs_ramsize 0x1800").unwrap();
     i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc3xx_ocds.cfg"))))).unwrap();
-    i.eval_global("tc3xx_ocds_setup tc39x").unwrap();
+    i.eval_global("tc3xx_setup tc39x").unwrap();
     assert_eq!(i.eval("set tc3xx_cores").unwrap(), "tc39x.cpu0 tc39x.cpu1 tc39x.cpu2 tc39x.cpu3 tc39x.cpu4 tc39x.cpu5");
     assert_eq!(i.eval("set tc3xx_dbgsr(tc39x.cpu5)").unwrap(), "0xF88DFD00");
     assert_eq!(i.eval("set tc3xx_coreid(tc39x.cpu5)").unwrap(), "5");
@@ -965,7 +1139,7 @@ fn generic_setup_follows_the_target_cfg() {
     assert_eq!(i.eval("tc39x.mcs9.ch7 cget -ramsize").unwrap(), "0x1800");
     assert_eq!(i.eval("target current").unwrap(), "tc39x.cpu0");
     assert!(i.eval("catch {target create x gtm_mcs -module 10}").unwrap() == "1");
-    assert!(i.eval("catch {tc3xx_ocds_setup tc27x}").unwrap() == "1");
+    assert!(i.eval("catch {tc3xx_setup tc27x}").unwrap() == "1");
 }
 
 /// The cfg drives OCDS itself on the TAS and simulator backends, and steps

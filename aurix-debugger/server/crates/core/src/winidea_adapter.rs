@@ -114,8 +114,8 @@ impl Refusal {
 
 /// Whether a *write* to `addr` would steer OCDS, which winIDEA owns.
 ///
-/// Reads are never refused: `tc3xx_connect_reset_halt` confirms a halt by
-/// reading DBGSR, and the `tc3xx_stm_status` / `tc3xx_wdt_status` diagnostics
+/// Reads are never refused: the cfg scripts confirm a halt by
+/// reading DBGSR, and the `tc3xx_status` / `tc3xx_wdt_status` diagnostics
 /// read ordinary SFRs. Refusing those would break scripts that work fine.
 ///
 /// This is the backstop, not the mechanism -- the cfg guard in `tc3xx_ocds.cfg`

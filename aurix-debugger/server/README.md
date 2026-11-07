@@ -63,7 +63,7 @@ Use a launch configuration of type `aurixdbg`; the extension's [README](../../vs
 | `program` | ELF with debug information (symbols, source breakpoints, variables). |
 | `enableFlashing`, `flashFile` | Run `program {flashFile} preverify verify reset` before the session. `flashFile` defaults to `program`. |
 
-Debug console: `monitor <tcl command>`, for example `monitor tc3xx_stm_status`.
+Debug console: `monitor <tcl command>`, for example `monitor tc3xx_status` or `monitor sbc_status`.
 
 ## REST, MCP and Python API
 
@@ -434,7 +434,7 @@ Unsupported **actions** fail loudly; **declarations** are accepted and reported.
 | `adapter speed`, `reset_config`, `transport select`, `flash bank`, `target create` | accepted, listed by `winidea status` and summarised at `init` |
 | `tas-client …`, `tricore tl1_halt` / `tl1_step` / `irq_mask` / `triggers` | error, naming the adapter |
 | `flash probe` / `info` / `erase_check` / `erase_sector` | error: winIDEA programs from its own download list, so there is no flash controller for us to drive |
-| a `mww` into a core debug register or the CBS trigger fabric | error; reads of the same addresses are allowed, because `tc3xx_connect_reset_halt` and the `tc3xx_stm_status` / `tc3xx_wdt_status` diagnostics read them |
+| a `mww` into a core debug register or the CBS trigger fabric | error; reads of the same addresses are allowed, because the cfg scripts check halts by reading DBGSR and the `tc3xx_status` / `tc3xx_wdt_status` diagnostics read them |
 
 `tc3xx_ocds.cfg` guards itself with `tc3xx_ocds_available` and skips only the OCDS **event wiring** — it still creates every target and still releases the HSM, which is plain SFR and is what starts cpu1 on this board.
 
@@ -502,17 +502,22 @@ Polled DAQ is bounded by the read cost — roughly 250 reads per second across a
 
 ## Cfg scripts and other derivatives
 
-The server itself holds no board or application settings. The cfg scripts come in three layers:
+The server itself holds no board or application settings. The cfg scripts come in four layers:
 
 | File | Content |
 |---|---|
 | OpenOCD target cfg (`target/infineon/tc3?x.cfg`, via the board cfg) | TriCore cores with `-coreid`/`-dbgbase`, PFLASH banks. |
-| [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | Generic TC3xx multi-core setup: TL1 break/step/continue, STM suspend, HSM and MCS targets, HSM start after a halting reset, `tc3xx_connect_reset_halt`, diagnostics. It takes DBGSR (`-dbgbase` + 0x1FD00) and the per-core CBS_TRCx/STMx/WDTCPUx registers (`-coreid`) from the target cfg. |
-| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | A TC377 TriBoard with an application: adapter speed, DFLASH banks, MCS modules used, notes on the application. |
+| [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | Chip mechanics, no board policy: TL1 break/step/continue, STM and peripheral suspend (written only where CLC and ACCEN0 let it land), OCDS enable, HSM and MCS targets, HSM start after a halting reset, a 64-bit STM reset watch, diagnostics. It takes DBGSR (`-dbgbase` + 0x1FD00) and the per-core CBS_TRCx/STMx/WDTCPUx registers (`-coreid`) from the target cfg. |
+| [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Attach modes and reset policy for boards with an NXP FS26 SBC: `passive`, `hot`, `halt`, `reset_halt`, `reset_run`; every reset request (Tcl, VS Code, flashing) goes through its `reset_hook`; every reset followed by the same initialization; a halting reset repeated until it holds (with the debugger reset on the FS26 RSTB: until the FS26 has gone through deep fail-safe, for a lasting halt at the reset vector); the watchdog disarm by the application. |
+| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | The TC37x board with its application: adapter speed, DFLASH banks, MCS modules, the peripheral suspend list, the disarm check (addresses from the application's ELF). |
 
-For another board or derivative, copy `tc37x_ocds_init.cfg`, pass the target cfg's chip name to `tc3xx_ocds_setup` and adjust its settings. Options of `tc3xx_ocds.cfg` (set before `tc3xx_ocds_setup`) are listed at the top of the file: `tc3xx_hsm_target`, `tc3xx_mcs_modules`, `tc3xx_mcs_ramsize`, `tc3xx_hsm_autostart`, `tc3xx_hsm_ready_ms`, `tc3xx_gtm_suspend`, `tc3xx_step_timers`.
+Choose the attach mode before `init`, e.g. `"configCommands": ["set sbc_attach_mode halt", "init"]`.
 
-Console procs: `daq` (what the DAQ sessions are sampling, read-only), `tc3xx_step_timers run|frozen`, `tc3xx_connect_reset_halt ?tries? ?delay_ms?`, `tc3xx_stm_status`, `tc3xx_wdt_status`.
+For another board or derivative, copy `tc37x_ocds_init.cfg`, pass the target cfg's chip name to `tc3xx_setup` and adjust its settings; leave out `fs26_sbc.cfg` on a board without an FS26. Settings of each file are listed at its top. [`probe/`](../probe) holds the Tcl scripts that measured the board behaviour behind these files (which OCS writes land and when, which reset clears what, the FS26 timeline).
+
+`reset_hook ?proc?` (aurix-dbg): every reset request -- the `reset` command, TCF, the REST API, `program` -- calls `proc <mode>` instead; a `reset` inside the proc runs the built-in sequence.
+
+Console procs: `daq` (what the DAQ sessions are sampling, read-only), `tc3xx_step_timers run|frozen`, `tc3xx_status`, `tc3xx_wdt_status`, `sbc_status`, `sbc_attach <mode>`.
 
 TriCore 1.8 (TC4x) is rejected.
 

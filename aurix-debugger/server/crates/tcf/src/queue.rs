@@ -28,6 +28,7 @@ const READS: &[(&str, &str)] = &[
     ("AurixOS", "getObjects"),
     ("AurixOS", "getRunning"),
     ("AurixOS", "getStacks"),
+    ("AurixTarget", "getLiveValues"),
 ];
 
 /// Service and command of a command message (`C token service command ...`).

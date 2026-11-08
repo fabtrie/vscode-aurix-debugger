@@ -7,14 +7,22 @@
  * Refreshing has to be cheap: the TCF expression, its type and symbol information and struct
  * layouts do not change while the program runs, so they are looked up once and cached. A steady
  * state refresh then costs one memory read (or one Expressions.evaluate) per expression.
+ *
+ * A view's periodic refresh goes further: its roots' memory regions form the view's live set on
+ * the server (AurixTarget.setLiveSet, sent again only when the regions or the interval change),
+ * and one AurixTarget.getLiveValues reads all of them. The server decides per region where the
+ * value comes from (sampled by the probe, or the same read Memory.get does); this does not know or
+ * ask which probe is connected. An older server without live sets gets one Memory.get per root.
  */
 
 import type { CoreRef } from './breakpointCondition';
 import { TCFClient, decodeEvaluatedValue } from './tcfclient';
+import { ClearLiveSetAurixTargetCommand, GetLiveValuesAurixTargetCommand, LiveRegion, SetLiveSetAurixTargetCommand } from './tcf/aurixtarget';
+import { TCFErrorCodes } from './tcf/error';
 import { CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, EvaluateResult, GetContextExpressionsCommand } from './tcf/expressions';
 import { GetMemoryCommand } from './tcf/memory';
 import { FindByAddrSymbolsCommand, GetChildrenSymbolsCommand, GetContextSymbolsCommand, TCFSymbolContextData, TCFTypeClass } from './tcf/symbols';
-import { SimpleCommand, TCFPartialResultError } from './tcf/tcfutils';
+import { ServiceNotSupportedError, SimpleCommand, TCFPartialResultError } from './tcf/tcfutils';
 import { ArrayVariable } from './variables/array';
 import { CompositeVariable } from './variables/composite';
 import { DefaultVariableHelper } from './variables/helper';
@@ -56,7 +64,37 @@ export type LiveWatchRequestItem = {
 	bitWidth?: number;
 	/** Shows an integer value as zero-padded hex (a peripheral register). */
 	hex?: boolean;
+	/**
+	 * A raw memory region (a peripheral register): `size` bytes at `address` are read and shown as
+	 * hex (or the bits `bitOffset`/`bitWidth` of them) instead of evaluating `expression`, which
+	 * then only names the result.
+	 */
+	address?: number;
+	size?: number;
 };
+
+/**
+ * Set for a view's periodic refresh: the roots' regions are the live set of `viewId`, sampled
+ * every `intervalMs`.
+ */
+export type LiveWatchLiveOptions = { viewId: string; intervalMs: number };
+
+type ResolvedRoot = {
+	ctx: string;
+	key: string;
+	entry: RootEntry;
+	explicitCore: boolean;
+	/** Found in the cache rather than created for this refresh. */
+	cached: boolean;
+};
+
+/** A root after the first pass of a live refresh. */
+type ResolvedItem =
+	/** Read from memory: through the live set. */
+	| { kind: 'region'; region: LiveRegion; build: (value: Buffer) => Promise<LiveWatchNode>; readFailed: () => void }
+	/** No memory region (a constant, or a value only Expressions.evaluate gives): evaluated as always. */
+	| { kind: 'other' }
+	| { kind: 'error'; error: unknown };
 
 type RootEntry = {
 	exprId: string;
@@ -125,6 +163,13 @@ export class LiveWatchEvaluator {
 	 */
 	private readonly creating = new Map<string, Promise<RootEntry>>();
 	private readonly helper: DefaultVariableHelper;
+	/**
+	 * The live set each view has on the server, by view id: its signature (interval and regions),
+	 * or undefined when the server may have one that is not known to match.
+	 */
+	private readonly liveSets = new Map<string, string | undefined>();
+	/** The server does not know AurixTarget.setLiveSet (an older one): every read is a Memory.get. */
+	private liveSetUnsupported = false;
 
 	/** `coreContext`: the context of core N or the HSM, for `expr@N` and `expr@hsm`. */
 	constructor(
@@ -153,28 +198,190 @@ export class LiveWatchEvaluator {
 		this.symbolCache.clear();
 	}
 
-	async evaluate(ctx: string, items: LiveWatchRequestItem[]): Promise<LiveWatchRootResult[]> {
-		// TCF commands are pipelined, so evaluating all expressions at once saves a round trip each.
-		return Promise.all(items.map(async (item) => {
+	/**
+	 * Evaluates the roots, one result per item in order. With `live` (a view's periodic refresh)
+	 * their memory is read through the view's live set, with one request for all of them.
+	 */
+	async evaluate(ctx: string, items: LiveWatchRequestItem[], live?: LiveWatchLiveOptions): Promise<LiveWatchRootResult[]> {
+		if (!live || this.liveSetUnsupported) {
+			// TCF commands are pipelined, so evaluating all expressions at once saves a round trip each.
+			return Promise.all(items.map((item) => this.evaluateItem(ctx, item)));
+		}
+		// Pass 1: the expressions and symbols, and so the regions (all cached after the first refresh).
+		const resolved = await Promise.all(items.map(async (item): Promise<ResolvedItem> => {
 			try {
-				const expanded = new Set(item.expanded ?? []);
-				const node = await this.evaluateRoot(ctx, item.expression, item.expression, expanded, item);
-				return { ...node, available: true };
+				return await this.resolveItem(ctx, item);
+			} catch (error) {
+				return { kind: 'error', error };
+			}
+		}));
+		// Pass 2: every region in one request.
+		const regions: LiveRegion[] = [];
+		const regionIndex = resolved.map((r) => (r.kind === 'region' ? regions.push(r.region) - 1 : -1));
+		const values = await this.readLive(live, regions);
+		return Promise.all(resolved.map(async (r, index): Promise<LiveWatchRootResult> => {
+			const item = items[index];
+			if (r.kind === 'error') {
+				return errorResult(item, r.error);
+			}
+			if (r.kind === 'other' || !values) {
+				// No region, or no live set to read it with: as a one-off refresh does.
+				return this.evaluateItem(ctx, item);
+			}
+			try {
+				const value = values[regionIndex[index]];
+				if (value instanceof Error) {
+					if (!isRunningError(value)) {
+						r.readFailed();
+					}
+					throw value;
+				}
+				return { ...(await r.build(value)), available: true };
 			} catch (e) {
-				return {
-					name: item.expression,
-					expression: item.expression,
-					value: '',
-					hasChildren: false,
-					available: false,
-					error: formatError(e),
-					stale: isRunningError(e),
-				};
+				return errorResult(item, e);
 			}
 		}));
 	}
 
+	/**
+	 * The view no longer refreshes periodically (hidden, paused, resting while halted, closed):
+	 * the server drops its live set and stops sampling for it. The next live refresh sets it again.
+	 */
+	async stopLive(viewId: string): Promise<void> {
+		if (!this.liveSets.has(viewId)) {
+			return;
+		}
+		this.liveSets.delete(viewId);
+		try {
+			await this.client.sendCommand(new ClearLiveSetAurixTargetCommand(viewId));
+		} catch (e) {
+			this.log(`AurixTarget.clearLiveSet ${viewId} failed: ${formatError(e)}`);
+		}
+	}
+
+	/** One root, read on its own (a one-off refresh, or no live set). */
+	private async evaluateItem(ctx: string, item: LiveWatchRequestItem): Promise<LiveWatchRootResult> {
+		try {
+			const region = rawRegion(ctx, item);
+			if (region) {
+				return { ...rawNode(item, await this.readRegion(region)), available: true };
+			}
+			const expanded = new Set(item.expanded ?? []);
+			const node = await this.evaluateRoot(ctx, item.expression, item.expression, expanded, item);
+			return { ...node, available: true };
+		} catch (e) {
+			return errorResult(item, e);
+		}
+	}
+
+	/** First pass of a live refresh: where the root's value is, without reading it. */
+	private async resolveItem(ctx: string, item: LiveWatchRequestItem): Promise<ResolvedItem> {
+		const raw = rawRegion(ctx, item);
+		if (raw) {
+			return { kind: 'region', region: raw, build: async (value) => rawNode(item, value), readFailed: () => undefined };
+		}
+		const root = await this.resolveRoot(ctx, item.expression);
+		const region = this.rootRegion(root.ctx, root.entry, root.explicitCore);
+		if (!region) {
+			return { kind: 'other' };
+		}
+		const expanded = new Set(item.expanded ?? []);
+		return {
+			kind: 'region',
+			region,
+			build: (value) => this.buildRoot(root.ctx, root.entry, value, item.expression, item.expression, expanded, item),
+			// As for a one-off read: the cached expression may have become invalid (e.g. a reset),
+			// so the next refresh creates it again.
+			readFailed: () => {
+				if (root.cached) {
+					this.dropRoot(root.key);
+				}
+			},
+		};
+	}
+
+	/**
+	 * Reads the regions through the live set of the view, setting it first if it changed. One
+	 * value or error per region, or undefined when there is no live set to read with: an older
+	 * server (remembered for the session), or setting or reading the set failed this time.
+	 */
+	private async readLive(live: LiveWatchLiveOptions, regions: LiveRegion[]): Promise<Array<Buffer | Error> | undefined> {
+		// A register and its fields, or a variable watched twice, are one region of the set.
+		const unique: LiveRegion[] = [];
+		const uniqueIndex = new Map<string, number>();
+		const slots = regions.map((r) => {
+			const key = `${r.ctx}\n${r.addr}\n${r.size}`;
+			let i = uniqueIndex.get(key);
+			if (i === undefined) {
+				i = unique.push({ ctx: r.ctx, addr: r.addr, size: r.size }) - 1;
+				uniqueIndex.set(key, i);
+			}
+			return i;
+		});
+		if (unique.length === 0) {
+			// Nothing in memory to sample (only constants and expressions without an address).
+			await this.stopLive(live.viewId);
+			return [];
+		}
+		const periodUs = Math.max(1, Math.round(live.intervalMs * 1000));
+		const signature = JSON.stringify([periodUs, unique]);
+		try {
+			if (this.liveSets.get(live.viewId) !== signature) {
+				// Until the server confirms, it may or may not have the set: stopLive still clears it.
+				this.liveSets.set(live.viewId, undefined);
+				await this.client.sendCommand(new SetLiveSetAurixTargetCommand(live.viewId, unique, periodUs));
+				this.liveSets.set(live.viewId, signature);
+			}
+			const values = await this.client.sendCommand(new GetLiveValuesAurixTargetCommand(live.viewId));
+			if (values.length !== unique.length) {
+				throw new Error(`AurixTarget.getLiveValues returned ${values.length} values for ${unique.length} regions`);
+			}
+			const decoded = values.map((v) => v.error !== undefined
+				? new Error(v.error)
+				: v.data !== undefined ? Buffer.from(v.data, 'base64') : new Error('No value'));
+			return slots.map((i) => decoded[i]);
+		} catch (e) {
+			if (isUnknownCommand(e)) {
+				this.liveSets.delete(live.viewId);
+				this.liveSetUnsupported = true;
+				this.log('The debug server has no live sets (AurixTarget.setLiveSet): Live Watch reads every value with Memory.get');
+				return undefined;
+			}
+			if (isRunningError(e)) {
+				// Dropped for a resume queued after it, as dropped Memory.gets are: every root keeps
+				// what it shows, and the set stays as it is.
+				const running = e instanceof Error ? e : new Error(formatError(e));
+				return regions.map(() => running);
+			}
+			// Set it again on the next refresh, in case the server lost it.
+			this.liveSets.set(live.viewId, undefined);
+			if (!isRunningError(e)) {
+				this.log(`Live set ${live.viewId} failed, reading every value with Memory.get: ${formatError(e)}`);
+			}
+			return undefined;
+		}
+	}
+
 	private async evaluateRoot(ctx: string, name: string, expression: string, expanded: Set<string>, format?: LiveWatchRequestItem): Promise<LiveWatchNode> {
+		let root = await this.resolveRoot(ctx, expression);
+		let value: Buffer | undefined;
+		try {
+			value = await this.readValue(root.ctx, root.entry, root.explicitCore);
+		} catch (e) {
+			if (!root.cached || isRunningError(e)) {
+				// Running: not read (a resume came after it), but the expression is still good.
+				throw e;
+			}
+			// The cached expression may have become invalid (e.g. a reset); create it again.
+			this.dropRoot(root.key);
+			root = await this.resolveRoot(ctx, expression);
+			value = await this.readValue(root.ctx, root.entry, root.explicitCore);
+		}
+		return this.buildRoot(root.ctx, root.entry, value, name, expression, expanded, format);
+	}
+
+	/** The context to evaluate `expression` in (`expr@N`: core N's) and its cached or new root. */
+	private async resolveRoot(ctx: string, expression: string): Promise<ResolvedRoot> {
 		const { expression: text, core } = splitLiveWatchCore(expression);
 		if (core !== undefined) {
 			const coreCtx = await this.coreContext(core);
@@ -185,25 +392,16 @@ export class LiveWatchEvaluator {
 		}
 		const explicitCore = core !== undefined;
 		const key = `${ctx}\n${expression}`;
-		let entry = this.roots.get(key);
-		let variable: ClientVariable | undefined;
-		if (entry) {
-			try {
-				variable = await this.createRootVariable(ctx, entry, explicitCore);
-			} catch (e) {
-				if (isRunningError(e)) {
-					// Not read (a resume came after it), but the expression is still good.
-					throw e;
-				}
-				// The cached expression may have become invalid (e.g. a reset); create it again.
-				this.dropRoot(key);
-				entry = undefined;
-			}
+		const cached = this.roots.get(key);
+		if (cached) {
+			return { ctx, key, entry: cached, explicitCore, cached: true };
 		}
-		if (!entry) {
-			entry = await this.createRootOnce(ctx, key, text);
-			variable = await this.createRootVariable(ctx, entry, explicitCore);
-		}
+		return { ctx, key, entry: await this.createRootOnce(ctx, key, text), explicitCore, cached: false };
+	}
+
+	/** The node of a root, from its value. */
+	private async buildRoot(ctx: string, entry: RootEntry, value: Buffer | undefined, name: string, expression: string, expanded: Set<string>, format?: LiveWatchRequestItem): Promise<LiveWatchNode> {
+		const variable = this.createRootVariable(entry, value);
 		if (!variable) {
 			throw new Error(`'${expression}' has no displayable value`);
 		}
@@ -261,8 +459,8 @@ export class LiveWatchEvaluator {
 		}
 	}
 
-	private async createRootVariable(ctx: string, entry: RootEntry, explicitCore: boolean): Promise<ClientVariable | undefined> {
-		const value = new BufferValueProvider(await this.readValue(ctx, entry, explicitCore), entry.bigEndian);
+	private createRootVariable(entry: RootEntry, buffer: Buffer | undefined): ClientVariable | undefined {
+		const value = new BufferValueProvider(buffer, entry.bigEndian);
 		const nameProvider = new FixedNameProvider(entry.symbol?.Name ?? '');
 		const variable = this.helper.createVariable(entry.type, entry.symbol, nameProvider, value);
 		if (!variable && !entry.symbol && entry.type.TypeClass === TCFTypeClass.composite) {
@@ -278,15 +476,29 @@ export class LiveWatchEvaluator {
 		if (symbol?.Value) {
 			return Buffer.from(symbol.Value, 'base64');
 		}
-		if (symbol?.Address && symbol.Size) {
-			// A symbol owned by one core (e.g. an HSM variable, or one in the core-local memory of the
-			// core that runs its ELF) is read with that core's memory view.
-			const owner = !explicitCore && typeof symbol.OwnerID === 'string' && /\.C\d+$/.test(symbol.OwnerID) ? symbol.OwnerID : ctx;
-			const r = await this.client.sendCommand(new GetMemoryCommand(owner, symbol.Address, 1, symbol.Size));
-			return Buffer.from(r.base64, 'base64');
+		const region = this.rootRegion(ctx, entry, explicitCore);
+		if (region) {
+			return this.readRegion(region);
 		}
 		const evaluated = await this.evaluateExpression(entry.exprId);
 		return decodeEvaluatedValue(evaluated.value);
+	}
+
+	/** Where a root's value is in memory; undefined for a constant or a value without an address. */
+	private rootRegion(ctx: string, entry: RootEntry, explicitCore: boolean): LiveRegion | undefined {
+		const symbol = entry.symbol;
+		if (symbol?.Value || !symbol?.Address || !symbol.Size) {
+			return undefined;
+		}
+		// A symbol owned by one core (e.g. an HSM variable, or one in the core-local memory of the
+		// core that runs its ELF) is read with that core's memory view.
+		const owner = !explicitCore && typeof symbol.OwnerID === 'string' && /\.C\d+$/.test(symbol.OwnerID) ? symbol.OwnerID : ctx;
+		return { ctx: owner, addr: symbol.Address, size: symbol.Size };
+	}
+
+	private async readRegion(region: LiveRegion): Promise<Buffer> {
+		const r = await this.client.sendCommand(new GetMemoryCommand(region.ctx, region.addr, 1, region.size));
+		return Buffer.from(r.base64, 'base64');
 	}
 
 	private async evaluateExpression(exprId: string): Promise<EvaluateResult> {
@@ -418,13 +630,45 @@ export class LiveWatchEvaluator {
 	}
 }
 
+/** The region of a raw item (a peripheral register), read with `ctx`. */
+function rawRegion(ctx: string, item: LiveWatchRequestItem): LiveRegion | undefined {
+	return item.address !== undefined && item.size !== undefined && item.size > 0
+		? { ctx, addr: item.address, size: item.size }
+		: undefined;
+}
+
+/** A raw item's node: the register as hex, or the field of it. TriCore memory is little-endian. */
+function rawNode(item: LiveWatchRequestItem, value: Buffer): LiveWatchNode {
+	return { name: item.expression, expression: item.expression, value: formatRawBits(value, false, item), hasChildren: false };
+}
+
+function errorResult(item: LiveWatchRequestItem, e: unknown): LiveWatchRootResult {
+	return {
+		name: item.expression,
+		expression: item.expression,
+		value: '',
+		hasChildren: false,
+		available: false,
+		error: formatError(e),
+		stale: isRunningError(e),
+	};
+}
+
+/** The server does not know the command (an older one), or not the AurixTarget service at all. */
+function isUnknownCommand(e: unknown): boolean {
+	return e instanceof ServiceNotSupportedError || (e as any)?.Code === TCFErrorCodes.INV_COMMAND;
+}
+
 /** Register value as hex, or a field of it: hex for multi-bit fields, 0/1 for single bits. */
 async function formatBits(v: ClientVariable, format: LiveWatchRequestItem): Promise<string> {
-	const raw = await v.value();
+	return formatRawBits(await v.value(), v.isBigEndian(), format);
+}
+
+function formatRawBits(raw: Buffer | undefined, bigEndian: boolean, format: LiveWatchRequestItem): string {
 	if (!raw || raw.length === 0) {
 		throw new Error('no value');
 	}
-	const bytes = v.isBigEndian() ? raw : Buffer.from(raw).reverse();
+	const bytes = bigEndian ? raw : Buffer.from(raw).reverse();
 	let value = BigInt(`0x${bytes.toString('hex')}`);
 	let bits = raw.length * 8;
 	if (format.bitWidth !== undefined) {

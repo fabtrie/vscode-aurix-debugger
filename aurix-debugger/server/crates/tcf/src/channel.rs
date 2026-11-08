@@ -23,7 +23,7 @@ use crate::contexts::{chip_name, cores, find_core, owning_core, read_pc, reason_
 use crate::symstore::elf_id;
 use crate::queue::{self, Queue};
 use crate::wire::{self, Reader};
-use crate::{osaware, profile, Shared, SERVICES};
+use crate::{live, osaware, profile, Shared, SERVICES};
 
 // TCF standard error codes
 const ERR_OTHER: i64 = 1;
@@ -401,6 +401,25 @@ impl Channel {
             // What the probe reports about the target connection (null: it cannot tell). Changes
             // come as `AurixTarget.healthChanged`; `AurixTarget.probeLost` asks clients to end.
             ("AurixTarget", "getHealth") => Ok(vec![String::new(), crate::health_json(self.h().status().0.health).to_string()]),
+            // Live sets: a view's regions at its interval; the server picks the probe's sampler or
+            // a plain read per region (see `live`).
+            ("AurixTarget", "setLiveSet") => {
+                let key = a.string(0)?;
+                let regions = live::parse_regions(&a.value(1)?).map_err(|e| err(ERR_JSON_SYNTAX, e))?;
+                let period_us = a.u64(2)?.min(u32::MAX as u64) as u32;
+                live::set(&self.shared, self.id, &key, regions, period_us).map_err(|e| err(ERR_OTHER, e))?;
+                // No result, only the error field (as `ContextReset.reset`).
+                Ok(vec![String::new()])
+            }
+            ("AurixTarget", "getLiveValues") => {
+                let key = a.string(0)?;
+                let v = live::values(&self.shared, self.id, &key).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTarget", "clearLiveSet") => {
+                live::clear(&self.shared, self.id, &a.string(0)?);
+                Ok(vec![String::new()])
+            }
 
             ("Tcl", "eval") => {
                 let cmd = a.string(0)?;
@@ -545,31 +564,15 @@ impl Channel {
         }
     }
 
+    /// Routing and reads are [`live::memory_get`]'s, which live sets read with too.
     fn mem_get(&self, a: &Args) -> Reply {
         let ctx = a.string(0)?;
         let addr = a.u64(1)? as u32;
         let size = a.u64(3)? as usize;
-        if let Some(t) = self.own_access(&ctx, addr, size) {
-            let r = self
-                .h()
-                .call(move |cx| ops::read_memory_partial_as(cx, t, addr, size).map_err(|e| e.to_string()))
-                .unwrap_or_else(|| Err("server stopped".into()));
-            return Ok(Self::partial_reply(addr, size, r));
-        }
-        if aurix_core::cortex_m::word_only(addr, size) {
-            let r = self
-                .h()
-                .call(move |cx| ops::read_memory_partial(cx, addr, size).map_err(|e| e.to_string()))
-                .unwrap_or_else(|| Err("server stopped".into()));
-            return Ok(Self::partial_reply(addr, size, r));
-        }
-        let res = self
-            .h()
-            .call(move |cx| {
-                cx.with(|c| -> Result<tas::OpResult, String> { c.io().map_err(|e| e.to_string())?.read_op(addr, size).map_err(|e| e.to_string()) })
-            })
-            .unwrap_or_else(|| Err("server stopped".into()))
-            .map_err(|e| err(ERR_INV_ADDRESS, e))?;
+        let res = match live::memory_get(&self.shared, &ctx, addr, size) {
+            live::MemGet::Partial(r) => return Ok(Self::partial_reply(addr, size, r)),
+            live::MemGet::Op(r) => r.map_err(|e| err(ERR_INV_ADDRESS, e))?,
+        };
         let err_addrs = if res.ok() {
             "null".to_string()
         } else {

@@ -15,6 +15,19 @@
 //! `Server::new` raises to 1 ms on Windows (the default ~15.6 ms would put a floor under every
 //! rate). A value that lives in a core register or a dirty write-back cache line is not visible
 //! on the bus at all.
+//!
+//! **A probe with a sampler of its own** ([`crate::adapter::ProbeDaq`], the BlueBox) takes the
+//! plain bus points off the host: the registry configures them as probe items (naturally aligned
+//! 1/2/4/8-byte pieces, at the probe's tier for the point's period) and drains the probe's buffer
+//! instead of reading them. Everything else - core-relative points, points over
+//! [`MAX_PROBE_POINT_LEN`], what does not fit the probe's item budget, items the probe never
+//! answered - stays on the host path above, unchanged. Without such a probe (TAS, winIDEA, sim)
+//! no point ever leaves the host path: [`Source::Polled`] is the only state a point gets.
+//!
+//! The probe sends a value when it changed (and once after each configure), stamped with its own
+//! clock, so an `OnChange` point is delivered straight from the drain with that timestamp; an
+//! `EveryTick` point is delivered at its period with the value the probe last sent. The items of
+//! a point over 8 bytes arrive separately: such a point is consistent per item, not as a whole.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant, SystemTime};
@@ -63,6 +76,18 @@ const PERIPHERAL_BASE: u32 = 0xF000_0000;
 const STALL_PERIODS: u32 = 4;
 /// Report a `Gap` once a session missed this many of its own ticks.
 const GAP_REPORT_TICKS: u64 = 3;
+/// Largest point a probe's sampler takes (eight 8-byte items); a larger one is read by the host.
+pub const MAX_PROBE_POINT_LEN: u32 = 64;
+/// Changes to the point set wait this long before the probe is configured again, so a frontend
+/// adding twenty points costs one configure (each one restarts the probe's sampling).
+const PROBE_DEBOUNCE: Duration = Duration::from_millis(50);
+/// How often the probe's buffer is drained while an item is checked every millisecond or faster,
+/// and otherwise. winIDEA drains every 5 to 7 ms; the BlueBox buffers 4096 samples.
+const PROBE_DRAIN_FAST: Duration = Duration::from_millis(5);
+const PROBE_DRAIN_SLOW: Duration = Duration::from_millis(20);
+/// A probe item sends its first value right after the configure, unless the probe cannot read it
+/// (it then sends nothing and says nothing). Waited for at least this long, or three check periods.
+const PROBE_FIRST_SAMPLE: Duration = Duration::from_millis(200);
 
 /// Which memory view a point is read through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +106,31 @@ pub enum SampleMode {
     /// Deliver only when the masked bytes differ from the last delivered ones. The point is still
     /// *read* every period - this saves stream bandwidth, not target accesses.
     OnChange,
+}
+
+/// Where a point's values come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Read by the host, every period.
+    Polled,
+    /// Sampled by the probe; the host drains its buffer.
+    Probe,
+    /// A `probe_only` point not configured on the probe yet.
+    Pending,
+    /// A `probe_only` point the probe cannot take (no sampler, not eligible, never answered). It
+    /// is neither sampled nor read: its owner reads it itself.
+    Refused,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Polled => "host",
+            Source::Probe => "probe",
+            Source::Pending => "pending",
+            Source::Refused => "refused",
+        }
+    }
 }
 
 /// State of a session, reported whenever it changes.
@@ -108,12 +158,32 @@ pub struct PointCfg {
     pub cmp_mask: Option<Vec<u8>>,
     /// Deliver an unchanged `OnChange` point again after this long. 0: never.
     pub resend_after_us: u32,
+    /// Sample this point on the probe or not at all, never by host reads: for a consumer that
+    /// reads it itself when the probe cannot take it ([`Source::Refused`]).
+    pub probe_only: bool,
 }
 
 impl PointCfg {
     /// A point read every tick, with no change filter.
     pub fn new(addr: u32, len: u32, space: Space, interval_us: u32) -> PointCfg {
-        PointCfg { addr, len, space, interval_us, mode: SampleMode::EveryTick, cmp_mask: None, resend_after_us: 0 }
+        PointCfg { addr, len, space, interval_us, mode: SampleMode::EveryTick, cmp_mask: None, resend_after_us: 0, probe_only: false }
+    }
+}
+
+/// A point on the probe: the items serving it and the bytes they last delivered.
+#[derive(Clone, Debug)]
+struct ProbeSlot {
+    /// Per item: its index in the probe's list, and where its bytes go in the point.
+    items: Vec<(usize, u32)>,
+    buf: Vec<u8>,
+    seen: Vec<bool>,
+    /// Every item must have answered by then, or the point leaves the probe.
+    first_by: Instant,
+}
+
+impl ProbeSlot {
+    fn complete(&self) -> bool {
+        self.seen.iter().all(|&s| s)
     }
 }
 
@@ -149,6 +219,10 @@ pub struct Point {
     /// Last *delivered* bytes. `None` makes the next read a baseline delivery.
     last: Option<Vec<u8>>,
     last_sent: Instant,
+    /// Where the values come from; only a probe with a sampler moves it off [`Source::Polled`].
+    pub source: Source,
+    pub probe_only: bool,
+    probe: Option<ProbeSlot>,
 }
 
 impl Point {
@@ -180,6 +254,28 @@ impl Point {
     /// Forgets the change-detection baseline, so the next read is delivered.
     fn rebase(&mut self) {
         self.last = None;
+    }
+
+    /// The bytes the probe last sent for this point, once every item answered.
+    pub fn probe_value(&self) -> Option<&[u8]> {
+        self.probe.as_ref().filter(|s| s.complete()).map(|s| s.buf.as_slice())
+    }
+
+    /// A point on the probe only needs a tick of its own to deliver at its period (`EveryTick`)
+    /// or to resend; `OnChange` deliveries come from the drain.
+    fn ticks(&self) -> bool {
+        match self.source {
+            Source::Polled => true,
+            Source::Probe => self.mode == SampleMode::EveryTick || self.resend_after.is_some(),
+            Source::Pending | Source::Refused => false,
+        }
+    }
+
+    /// Back to where a point starts when no probe sampler serves it.
+    fn leave_probe(&mut self, now: Instant) {
+        self.probe = None;
+        self.source = if self.probe_only { Source::Refused } else { Source::Polled };
+        self.next_due = self.next_due.min(now);
     }
 }
 
@@ -305,11 +401,40 @@ pub struct Registry {
     /// always falling on the same (highest-addressed) points.
     rotate: usize,
     retry_after: Option<Instant>,
+    probe: ProbeState,
+}
+
+/// The registry's side of a probe sampler. Untouched (all `None`/empty) unless the adapter offers
+/// one.
+#[derive(Default)]
+struct ProbeState {
+    /// The last tick found a probe sampler.
+    capable: bool,
+    /// The point set changed: configure the probe at this instant.
+    dirty_at: Option<Instant>,
+    generation: Option<u64>,
+    /// Per configured item: the session and point it serves.
+    owners: Vec<(SessionId, PointId)>,
+    next_drain: Option<Instant>,
+    drain_every: Duration,
+    /// Points whose items never answered: read by the host (or refused) from now on.
+    demoted: Vec<(SessionId, PointId)>,
+    overflow_logged: bool,
 }
 
 impl Registry {
     pub fn next_due(&self) -> Option<Instant> {
         self.next_due
+    }
+
+    /// Where a point's values come from.
+    pub fn source(&self, id: SessionId, p: PointId) -> Option<Source> {
+        self.get(id)?.points.iter().find(|x| x.id == p).map(|x| x.source)
+    }
+
+    /// The point set changed: configure the probe again after [`PROBE_DEBOUNCE`].
+    fn probe_dirty(&mut self, now: Instant) {
+        self.probe.dirty_at.get_or_insert(now + PROBE_DEBOUNCE);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -349,6 +474,10 @@ impl Registry {
         let n = self.sessions.len();
         self.sessions.retain(|s| s.id != id);
         let removed = self.sessions.len() != n;
+        if removed {
+            self.probe.demoted.retain(|(s, _)| *s != id);
+            self.probe_dirty(Instant::now());
+        }
         self.reseat();
         removed
     }
@@ -404,9 +533,13 @@ impl Registry {
                 muted: false,
                 last: None,
                 last_sent: now,
+                source: if cfg.probe_only { Source::Pending } else { Source::Polled },
+                probe_only: cfg.probe_only,
+                probe: None,
             });
             out.push((pid, interval_us));
         }
+        self.probe_dirty(now);
         self.reseat();
         Ok(out)
     }
@@ -414,6 +547,8 @@ impl Registry {
     pub fn remove_points(&mut self, id: SessionId, pts: &[PointId]) -> Result<()> {
         let s = self.session_mut(id)?;
         s.points.retain(|p| !pts.contains(&p.id));
+        self.probe.demoted.retain(|(s, p)| *s != id || !pts.contains(p));
+        self.probe_dirty(Instant::now());
         self.reseat();
         Ok(())
     }
@@ -424,6 +559,8 @@ impl Registry {
         let pt = self.session_mut(id)?.point_mut(p)?;
         pt.period = Duration::from_micros(interval_us as u64);
         pt.next_due = now;
+        // The probe's tier follows the period.
+        self.probe_dirty(now);
         self.reseat();
         Ok(interval_us)
     }
@@ -443,6 +580,7 @@ impl Registry {
         pt.fails = 0;
         pt.next_due = now;
         pt.rebase();
+        self.probe_dirty(now);
         self.reseat();
         Ok(())
     }
@@ -457,15 +595,30 @@ impl Registry {
                 p.rebase();
             }
         }
+        // A paused session's points come off the probe, and go back on when it resumes.
+        self.probe_dirty(now);
         self.reseat();
         Ok(())
     }
 
     /// Recomputes the cached deadline and reaps sessions whose consumer is gone.
     fn reseat(&mut self) {
+        let n = self.sessions.len();
         self.sessions.retain(|s| !s.closing);
-        let live = self.sessions.iter().filter(|s| !s.paused).flat_map(|s| s.points.iter().filter(|p| !p.muted));
+        if self.sessions.len() != n {
+            self.probe_dirty(Instant::now());
+        }
+        let live = self.sessions.iter().filter(|s| !s.paused).flat_map(|s| s.points.iter().filter(|p| !p.muted && p.ticks()));
         self.next_due = live.map(|p| p.next_due).min();
+        // The probe's own deadlines: only once a tick found a probe sampler (or a point that
+        // wants one is waiting), so a host-only probe never wakes for them.
+        let waiting = self.sessions.iter().any(|s| s.points.iter().any(|p| p.source == Source::Pending));
+        if self.probe.capable || waiting {
+            let drain = (!self.probe.owners.is_empty()).then_some(self.probe.next_drain).flatten();
+            for d in [self.probe.dirty_at, drain].into_iter().flatten() {
+                self.next_due = Some(self.next_due.map_or(d, |n| n.min(d)));
+            }
+        }
         if let (Some(due), Some(retry)) = (self.next_due, self.retry_after) {
             self.next_due = Some(due.max(retry));
         }
@@ -513,6 +666,10 @@ pub fn on_reset(c: &mut Ctx, now: Instant) {
         }
     }
     c.daq.retry_after = Some(retry);
+    // The probe may have lost its item list with the target connection.
+    if c.daq.probe.capable {
+        c.daq.probe.dirty_at = Some(retry);
+    }
     c.daq.reseat();
 }
 
@@ -653,7 +810,7 @@ pub fn queue_due(c: &mut Ctx, now: Instant, b: &mut Batch) -> Option<Plan> {
             continue;
         }
         for (pi, p) in s.points.iter().enumerate() {
-            if p.muted || now < p.next_due {
+            if p.muted || now < p.next_due || p.source != Source::Polled {
                 continue;
             }
             match p.space {
@@ -853,7 +1010,274 @@ pub fn batch_failed(c: &mut Ctx, now: Instant) {
     c.daq.reseat();
 }
 
+/// Splits `len` bytes at `addr` into naturally aligned items of at most `max` bytes: (offset, size).
+fn split_items(addr: u32, len: u32, max: u8) -> Vec<(u32, u8)> {
+    let max = (max.clamp(1, 8) as u32).next_power_of_two().min(8);
+    let mut out = Vec::new();
+    let mut off = 0;
+    while off < len {
+        let a = addr.wrapping_add(off);
+        let mut size = max;
+        while size > 1 && (a % size != 0 || size > len - off) {
+            size /= 2;
+        }
+        out.push((off, size as u8));
+        off += size;
+    }
+    out
+}
+
+/// The instant the probe read a sample stamped `t_us`, given that its clock read `now_us` at `at`.
+fn probe_instant(at: Instant, now_us: u64, t_us: u64) -> Instant {
+    at.checked_sub(Duration::from_micros(now_us.saturating_sub(t_us))).unwrap_or(at)
+}
+
+/// The probe's sampler went away (`bluebox daq_offload off`): its points go back to the host.
+fn probe_withdrawn(c: &mut Ctx, now: Instant) {
+    let reg = &mut c.daq;
+    for s in &mut reg.sessions {
+        for p in &mut s.points {
+            if matches!(p.source, Source::Probe | Source::Pending) {
+                p.leave_probe(now);
+            }
+        }
+    }
+    reg.probe = ProbeState::default();
+    reg.reseat();
+}
+
+/// The probe's share of a tick: configure it when the point set changed, drain its buffer,
+/// deliver `EveryTick` probe points at their period, and take points whose items never answered
+/// off it. Does nothing without a probe sampler.
+fn probe_step(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+    let has = c.adapter.as_deref_mut().filter(|a| a.initialized()).is_some_and(|a| a.probe_daq().is_some());
+    if !has {
+        let waiting = c.daq.sessions.iter().any(|s| s.points.iter().any(|p| matches!(p.source, Source::Probe | Source::Pending)));
+        if c.daq.probe.capable || waiting {
+            probe_withdrawn(c, now);
+        }
+        return;
+    }
+    if c.in_reset {
+        return;
+    }
+    c.daq.probe.capable = true;
+    let gen = c.adapter.as_deref_mut().and_then(|a| a.probe_daq()).map(|pd| pd.generation()).unwrap_or(0);
+    if c.daq.probe.generation.is_some_and(|g| g != gen) && !c.daq.probe.owners.is_empty() {
+        // Reconnected: the probe may have dropped its list. Configure at once, no debounce.
+        c.daq.probe.dirty_at = Some(now);
+    }
+    c.daq.probe.generation = Some(gen);
+
+    if c.daq.probe.dirty_at.is_some_and(|t| now >= t) {
+        probe_configure(c, now);
+    }
+    if !c.daq.probe.owners.is_empty() && c.daq.probe.next_drain.is_some_and(|t| now >= t) {
+        probe_drain(c, now, stamp);
+    }
+    probe_deliver_held(c, now, stamp);
+    probe_demote_silent(c, now);
+    c.daq.reseat();
+}
+
+/// Puts every eligible point on the probe and the rest on the host, and configures the probe.
+fn probe_configure(c: &mut Ctx, now: Instant) {
+    let Some(pd) = c.adapter.as_deref_mut().and_then(|a| a.probe_daq()) else { return };
+    let reg = &mut c.daq;
+    let limits = pd.limits();
+    let mut items: Vec<crate::adapter::ProbeItem> = Vec::new();
+    let mut owners: Vec<(SessionId, PointId)> = Vec::new();
+    let mut fastest = u32::MAX;
+    for s in &mut reg.sessions {
+        if s.closing || s.paused {
+            for p in &mut s.points {
+                p.probe = None;
+            }
+            continue;
+        }
+        let sid = s.id;
+        for p in &mut s.points {
+            let pieces = split_items(p.addr, p.len, limits.max_item_size);
+            let eligible = !p.muted
+                && p.space == Space::Host
+                && p.len <= MAX_PROBE_POINT_LEN
+                && !reg.probe.demoted.contains(&(sid, p.id))
+                && items.len() + pieces.len() <= limits.max_items;
+            if !eligible {
+                if matches!(p.source, Source::Probe | Source::Pending) || (p.probe_only && p.source != Source::Refused) {
+                    p.leave_probe(now);
+                }
+                continue;
+            }
+            let period = p.period.as_micros().min(u32::MAX as u128) as u32;
+            let check = pd.check_period_us(period);
+            fastest = fastest.min(check);
+            let wait = PROBE_FIRST_SAMPLE.max(Duration::from_micros(3 * check as u64));
+            let mut slot = ProbeSlot { items: Vec::with_capacity(pieces.len()), buf: vec![0; p.len as usize], seen: vec![false; pieces.len()], first_by: now + wait };
+            for (off, size) in pieces {
+                slot.items.push((items.len(), off));
+                items.push(crate::adapter::ProbeItem { addr: p.addr.wrapping_add(off), size, period_us: period });
+                owners.push((sid, p.id));
+            }
+            if p.source != Source::Probe {
+                // The host's change baseline stays: the probe's first values are delivered only
+                // if they differ from what was delivered last.
+                p.source = Source::Probe;
+            }
+            p.probe = Some(slot);
+        }
+    }
+    reg.probe.dirty_at = None;
+    if items.is_empty() && reg.probe.owners.is_empty() {
+        return;
+    }
+    match pd.configure(&items) {
+        Ok(()) => {
+            crate::log_debug!("DAQ: {} probe item(s) for {} point(s)", items.len(), owners.iter().map(|o| (o.0, o.1)).collect::<std::collections::BTreeSet<_>>().len());
+            reg.probe.owners = owners;
+            reg.probe.drain_every = if fastest <= 1_000 { PROBE_DRAIN_FAST } else { PROBE_DRAIN_SLOW };
+            reg.probe.next_drain = (!reg.probe.owners.is_empty()).then(|| now + reg.probe.drain_every);
+        }
+        Err(e) => {
+            crate::log_debug!("DAQ: configuring the probe failed: {e}");
+            probe_off(reg, now);
+            reg.probe.dirty_at = Some(now + RETRY_BACKOFF);
+        }
+    }
+}
+
+/// The probe holds no items any more: its points go back to the host until it is configured again.
+fn probe_off(reg: &mut Registry, now: Instant) {
+    for s in &mut reg.sessions {
+        for p in &mut s.points {
+            if p.source == Source::Probe {
+                p.leave_probe(now);
+                if p.probe_only {
+                    p.source = Source::Pending;
+                }
+            }
+        }
+    }
+    reg.probe.owners.clear();
+    reg.probe.next_drain = None;
+}
+
+/// Takes the probe's buffer and delivers what changed.
+fn probe_drain(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+    let Some(pd) = c.adapter.as_deref_mut().and_then(|a| a.probe_daq()) else { return };
+    let reg = &mut c.daq;
+    let d = match pd.drain() {
+        Ok(d) => d,
+        Err(e) => {
+            crate::log_debug!("DAQ: draining the probe failed: {e}");
+            for s in &mut reg.sessions {
+                if s.points.iter().any(|p| p.source == Source::Probe) {
+                    s.set_state(DaqState::Unavailable, now);
+                }
+            }
+            probe_off(reg, now);
+            reg.probe.dirty_at = Some(now + RETRY_BACKOFF);
+            return;
+        }
+    };
+    let at = stamp.unwrap_or_else(Instant::now);
+    if d.overflow && !reg.probe.overflow_logged {
+        reg.probe.overflow_logged = true;
+        crate::log_warn!("DAQ: the probe's buffer overflowed; values were lost");
+    }
+    reg.probe.next_drain = Some(if d.more { now } else { now + reg.probe.drain_every });
+    // Per session: the deliveries, by the instant the probe read them.
+    let mut out: Vec<std::collections::BTreeMap<Instant, Vec<Sample>>> = (0..reg.sessions.len()).map(|_| Default::default()).collect();
+    for smp in d.samples {
+        let Some(&(sid, pid)) = reg.probe.owners.get(smp.item) else { continue };
+        let Some(si) = reg.sessions.iter().position(|s| s.id == sid) else { continue };
+        let Some(p) = reg.sessions[si].points.iter_mut().find(|p| p.id == pid) else { continue };
+        let Some(slot) = p.probe.as_mut() else { continue };
+        let Some(k) = slot.items.iter().position(|&(i, _)| i == smp.item) else { continue };
+        let off = slot.items[k].1 as usize;
+        let n = smp.data.len().min(slot.buf.len().saturating_sub(off));
+        slot.buf[off..off + n].copy_from_slice(&smp.data[..n]);
+        slot.seen[k] = true;
+        if !slot.complete() || p.muted {
+            continue;
+        }
+        p.fails = 0;
+        if p.mode == SampleMode::OnChange {
+            let new = slot.buf.clone();
+            if changed(p.last.as_ref(), &new, p.cmp_mask.as_ref()) {
+                let t = probe_instant(at, d.time_us, smp.time_us);
+                p.last = Some(new.clone());
+                p.last_sent = t;
+                out[si].entry(t).or_default().push((p.id, new));
+            }
+        }
+    }
+    for (si, by_time) in out.into_iter().enumerate() {
+        let s = &mut reg.sessions[si];
+        if s.points.iter().any(|p| p.source == Source::Probe) {
+            s.set_state(DaqState::Running, at);
+        }
+        for (t, values) in by_time {
+            s.deliver(values, t);
+        }
+    }
+}
+
+/// `EveryTick` probe points (and resends) at their period, with the value the probe last sent.
+fn probe_deliver_held(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+    let at = stamp.unwrap_or(now);
+    let reg = &mut c.daq;
+    for s in &mut reg.sessions {
+        if s.paused || s.closing {
+            continue;
+        }
+        let mut values = Vec::new();
+        let mut missed = 0;
+        for p in &mut s.points {
+            if p.source != Source::Probe || p.muted || !p.ticks() || now < p.next_due {
+                continue;
+            }
+            missed += advance(p, now);
+            let Some(v) = p.probe_value().map(|v| v.to_vec()) else { continue };
+            let resend = p.resend_after.is_some_and(|d| at.saturating_duration_since(p.last_sent) >= d);
+            if p.mode == SampleMode::EveryTick || resend {
+                p.last = Some(v.clone());
+                p.last_sent = at;
+                values.push((p.id, v));
+            }
+        }
+        s.missed += missed;
+        if !values.is_empty() {
+            s.deliver(values, at);
+        }
+    }
+}
+
+/// A probe item that never sent its first value cannot be read by the probe (it says nothing
+/// else): the point goes to the host, whose read reports why, and the probe is configured without
+/// it - a failing item slows every pass of the probe's loop.
+fn probe_demote_silent(c: &mut Ctx, now: Instant) {
+    let reg = &mut c.daq;
+    let mut any = false;
+    for s in &mut reg.sessions {
+        let sid = s.id;
+        for p in &mut s.points {
+            let late = p.source == Source::Probe && p.probe.as_ref().is_some_and(|sl| !sl.complete() && now >= sl.first_by);
+            if late {
+                crate::log_debug!("DAQ: the probe never answered for 0x{:08x} ({} B); reading it from the host", p.addr, p.len);
+                reg.probe.demoted.push((sid, p.id));
+                p.leave_probe(now);
+                any = true;
+            }
+        }
+    }
+    if any {
+        reg.probe.dirty_at = Some(now);
+    }
+}
+
 fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+    probe_step(c, now, stamp);
     let mut b = Batch::new();
     let Some(plan) = queue_due(c, now, &mut b) else { return };
     let exec = if b.is_empty() {
@@ -898,7 +1322,28 @@ mod tests {
             muted: false,
             last: None,
             last_sent: t0,
+            source: Source::Polled,
+            probe_only: false,
+            probe: None,
         }
+    }
+
+    #[test]
+    fn items_are_naturally_aligned_and_at_most_the_probes_size() {
+        assert_eq!(split_items(0x7000_0000, 4, 8), vec![(0, 4)]);
+        assert_eq!(split_items(0x7000_0000, 16, 8), vec![(0, 8), (8, 8)]);
+        assert_eq!(split_items(0x7000_0004, 12, 8), vec![(0, 4), (4, 8)]);
+        assert_eq!(split_items(0x7000_0001, 7, 8), vec![(0, 1), (1, 2), (3, 4)]);
+        assert_eq!(split_items(0x7000_0000, 3, 8), vec![(0, 2), (2, 1)]);
+        assert_eq!(split_items(0x7000_0000, 16, 4), vec![(0, 4), (4, 4), (8, 4), (12, 4)]);
+    }
+
+    #[test]
+    fn a_probe_timestamp_maps_back_from_the_drain() {
+        let at = Instant::now();
+        assert_eq!(probe_instant(at, 1_000_500, 1_000_000), at - Duration::from_micros(500));
+        // A sample stamped after the drain's clock (it cannot be) lands at the drain.
+        assert_eq!(probe_instant(at, 1_000, 2_000), at);
     }
 
     #[test]

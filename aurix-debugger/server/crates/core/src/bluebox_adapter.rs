@@ -111,6 +111,12 @@
 //! it as a halting reset (so `tc3xx_ocds.cfg` starts the HSM as after `reset
 //! halt`) and resumes the halted cores after `reset-end`.
 //! `reset_config connect_assert_srst` resets and halts right after connecting.
+//!
+//! DAQ: the probe has a sampler of its own (`bluebox::daq`), offered to the core as
+//! [`Adapter::probe_daq`]. The registry hands it plain bus points; the probe checks them in a loop
+//! and buffers the changes, and the core drains the buffer instead of reading each point.
+//! `bluebox daq_offload off` withdraws it, and every point is read by the host again. A probe
+//! that refuses the DAQ services withdraws it by itself.
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -118,7 +124,7 @@ use std::time::{Duration, Instant};
 
 use tas::{Batch, BatchOp, OpResult};
 
-use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth};
+use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth, ProbeDaq, ProbeDaqLimits, ProbeDrain, ProbeItem, ProbeSample};
 use crate::error::{other, Error, Result};
 
 const NOT_CONNECTED: &str = "bluebox: not connected (init has not run, or failed)";
@@ -203,6 +209,17 @@ pub struct BlueBoxAdapter {
     health_period: Option<Duration>,
     /// The probe refused the query or answered implausibly on this connection.
     health_off: bool,
+    /// `bluebox daq_offload off`: no probe sampler for the core; every point is read by the host.
+    daq_offload_off: bool,
+    /// The probe refused a DAQ service: withdrawn for this adapter's life.
+    daq_refused: bool,
+    /// Bumped whenever the probe or target connection is rebuilt (see [`ProbeDaq::generation`]).
+    daq_generation: u64,
+    /// The sampler's limits, asked once per connection.
+    daq_info: Option<bluebox::daq::Info>,
+    /// The items last configured, and the handle the probe gave each.
+    daq_items: Vec<bluebox::daq::Item>,
+    daq_handles: Vec<u16>,
 }
 
 /// Whether a probe error means the probe itself is gone (unplugged, powered off, USB broken).
@@ -248,6 +265,7 @@ impl BlueBoxAdapter {
             probe.set_clock_for(setup, ATTACH_CLOCK_HZ).map_err(|e| other(format!("bluebox: reset: {e}")))?;
         }
         let st = probe.reset_halt().map_err(|e| other(format!("bluebox: reset: {e}")))?;
+        self.daq_connection_rebuilt();
         if target_down {
             if !self.target_answers() {
                 return Err(other("bluebox: reset: the target does not answer"));
@@ -262,6 +280,29 @@ impl BlueBoxAdapter {
             crate::log_warn!("[bluebox] after the reset cpu0 is not halted (DBGSR 0x{:08x})", st.dbgsr);
         }
         Ok(())
+    }
+
+    /// The probe or target connection was rebuilt: the sampler's item list may be gone.
+    fn daq_connection_rebuilt(&mut self) {
+        self.daq_generation += 1;
+        self.daq_info = None;
+        self.daq_items.clear();
+        self.daq_handles.clear();
+    }
+
+    /// A DAQ service failed: a refused request withdraws the sampler, a USB or protocol error
+    /// loses the probe as any other access would.
+    #[cfg(windows)]
+    fn daq_failed(&mut self, e: bluebox::Error, what: &str) -> Error {
+        // `bluebox::daq` reports a reply that is not one (a refused request) with the service path.
+        let refused = matches!(&e, bluebox::Error::Protocol(m) if m.starts_with("//1///") && !m.contains("reply ends"));
+        if refused && !self.daq_refused {
+            self.daq_refused = true;
+            crate::log_warn!("[bluebox] the probe refused the DAQ {what} ({e}); points are read by the host");
+        } else if !refused {
+            self.lose_probe(&e, &format!("probe error in DAQ {what}: {e}"));
+        }
+        other(format!("bluebox: DAQ {what}: {e}"))
     }
 
     #[cfg(windows)]
@@ -456,6 +497,7 @@ impl BlueBoxAdapter {
             }
             Ok(()) => {
                 self.lost = None;
+                self.daq_connection_rebuilt();
                 // Losing the target means it reset (or lost power). Losing the probe
                 // does not: on a BlueBox power cycle the application ran on.
                 if kind == Lost::Target {
@@ -666,6 +708,7 @@ impl BlueBoxAdapter {
         use bluebox::usb::UsbLink;
 
         let bb = |e: bluebox::Error| other(format!("bluebox: {e}"));
+        self.daq_connection_rebuilt();
 
         // The attach runs at the clock it was captured with (10 MHz): a faster one
         // fails when the attach has to bring a target up that is not yet in debug
@@ -912,7 +955,45 @@ impl Adapter for BlueBoxAdapter {
                     Err(Error::Usage(NOT_CONNECTED.into()))
                 }
             }
-            _ => Err(Error::Usage("usage: bluebox attach_replay|kernel|winidea|status|health|health_period|drop_target ...".into())),
+            // The probe's sampler for the core's DAQ points: on (default) or off.
+            Some("daq_offload") => {
+                match args.get(2).copied() {
+                    Some("on") => self.daq_offload_off = false,
+                    Some("off") => self.daq_offload_off = true,
+                    None => {}
+                    Some(_) => return Err(Error::Usage("usage: bluebox daq_offload [on|off]".into())),
+                }
+                Ok(if self.daq_offload_off { "off" } else if self.daq_refused { "refused by the probe" } else { "on" }.into())
+            }
+            // The sampler as the probe reports it, and the items configured.
+            Some("daq") => {
+                #[cfg(windows)]
+                {
+                    let probe = self.probe()?;
+                    let info = probe.daq_info().map_err(|e| other(format!("bluebox: {e}")))?;
+                    let st = probe.daq_control(bluebox::daq::Ctrl::Status).map_err(|e| other(format!("bluebox: {e}")))?;
+                    let mut out = format!(
+                        "{} ({} items of up to {} bytes, buffer {} samples), {} items, {} loops, longest pass {} us{}",
+                        if st.enabled { "enabled" } else { "disabled" },
+                        info.max_items,
+                        info.max_item_size,
+                        info.buffer_samples,
+                        self.daq_items.len(),
+                        st.loops,
+                        st.max_loop_us,
+                        if st.overflow { ", overflow" } else { "" }
+                    );
+                    for it in &self.daq_items {
+                        out.push_str(&format!("\n  0x{:08x}:{} {:?}", it.addr, it.size, it.tier));
+                    }
+                    Ok(out)
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(Error::Usage(NOT_CONNECTED.into()))
+                }
+            }
+            _ => Err(Error::Usage("usage: bluebox attach_replay|kernel|winidea|status|health|health_period|drop_target|daq|daq_offload ...".into())),
         }
     }
 
@@ -1061,6 +1142,15 @@ impl Adapter for BlueBoxAdapter {
         Some(512)
     }
 
+    /// The probe's sampler, unless `bluebox daq_offload off` or the probe refused it.
+    fn probe_daq(&mut self) -> Option<&mut dyn ProbeDaq> {
+        if cfg!(windows) && self.inited && !self.daq_offload_off && !self.daq_refused {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     /// The probe's view of the target connection, asked by [`Adapter::background`]: `ProbeLost`
     /// while USB is gone, `None` while the query is off or refused.
     fn health(&self) -> Option<LinkHealth> {
@@ -1094,6 +1184,109 @@ impl Adapter for BlueBoxAdapter {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl ProbeDaq for BlueBoxAdapter {
+    /// What the probe reported on this connection; before that, what it reported when measured
+    /// (256 items of up to 8 bytes).
+    fn limits(&self) -> ProbeDaqLimits {
+        let i = self.daq_info.unwrap_or(bluebox::daq::Info { max_items: 256, max_item_size: 8, buffer_samples: 4096 });
+        ProbeDaqLimits { max_items: i.max_items as usize, max_item_size: i.max_item_size }
+    }
+
+    fn check_period_us(&self, period_us: u32) -> u32 {
+        bluebox::daq::Tier::for_period_us(period_us).period_us().unwrap_or(0)
+    }
+
+    /// Disables the sampler, configures the items and enables it again, as winIDEA does.
+    fn configure(&mut self, items: &[ProbeItem]) -> Result<()> {
+        #[cfg(not(windows))]
+        {
+            let _ = items;
+            Err(Error::Usage(NOT_CONNECTED.into()))
+        }
+        #[cfg(windows)]
+        {
+            use bluebox::daq::{Ctrl, Item, Tier};
+            if !self.inited {
+                return Err(Error::Usage(NOT_CONNECTED.into()));
+            }
+            self.ensure_connected()?;
+            let want: Vec<Item> = items.iter().map(|i| Item { addr: i.addr, size: i.size, tier: Tier::for_period_us(i.period_us) }).collect();
+            let need_info = self.daq_info.is_none();
+            let probe = self.probe()?;
+            /// The limits (if asked) and the handles, or the error and the step it failed in.
+            type Configured = std::result::Result<(Option<bluebox::daq::Info>, Vec<u16>), (bluebox::Error, &'static str)>;
+            let r = (|| -> Configured {
+                let info = if need_info { Some(probe.daq_info().map_err(|e| (e, "info"))?) } else { None };
+                probe.daq_control(Ctrl::Disable).map_err(|e| (e, "disable"))?;
+                if want.is_empty() {
+                    return Ok((info, Vec::new()));
+                }
+                let handles = probe.daq_configure(&want).map_err(|e| (e, "configure"))?;
+                probe.daq_control(Ctrl::Enable).map_err(|e| (e, "enable"))?;
+                Ok((info, handles))
+            })();
+            match r {
+                Ok((info, handles)) => {
+                    if info.is_some() {
+                        self.daq_info = info;
+                    }
+                    self.daq_items = want;
+                    self.daq_handles = handles;
+                    Ok(())
+                }
+                Err((e, what)) => {
+                    self.daq_items.clear();
+                    self.daq_handles.clear();
+                    Err(self.daq_failed(e, what))
+                }
+            }
+        }
+    }
+
+    fn drain(&mut self) -> Result<ProbeDrain> {
+        #[cfg(not(windows))]
+        {
+            Err(Error::Usage(NOT_CONNECTED.into()))
+        }
+        #[cfg(windows)]
+        {
+            if !self.inited {
+                return Err(Error::Usage(NOT_CONNECTED.into()));
+            }
+            let gen = self.daq_generation;
+            self.ensure_connected()?;
+            if self.daq_generation != gen {
+                // Reconnected just now: the registry configures again before draining.
+                return Ok(ProbeDrain::default());
+            }
+            let r = self.probe()?.daq_read();
+            let (st, samples) = match r {
+                Ok(v) => v,
+                Err(e) => return Err(self.daq_failed(e, "read")),
+            };
+            if !st.enabled && !self.daq_items.is_empty() {
+                // The probe dropped the item list (its kernel restarted): configure again.
+                crate::log_warn!("[bluebox] the probe's DAQ is disabled; configuring it again");
+                self.daq_connection_rebuilt();
+            }
+            let more = samples.len() >= bluebox::daq::READ_MAX as usize;
+            let handles = &self.daq_handles;
+            let samples = samples
+                .into_iter()
+                .filter_map(|s| {
+                    let item = handles.iter().position(|&h| h == s.handle)?;
+                    Some(ProbeSample { item, time_us: s.time_us, data: s.data })
+                })
+                .collect();
+            Ok(ProbeDrain { time_us: st.time_us, samples, overflow: st.overflow, more })
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.daq_generation
     }
 }
 

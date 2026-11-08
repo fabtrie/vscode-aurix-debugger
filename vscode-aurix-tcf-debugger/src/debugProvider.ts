@@ -5050,7 +5050,15 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				bitOffset: optionalNumber(item?.bitOffset),
 				bitWidth: optionalNumber(item?.bitWidth) || undefined,
 				hex: item?.hex === true,
+				// A peripheral register: read as a raw region.
+				address: optionalNumber(item?.address),
+				size: optionalNumber(item?.size) || undefined,
 			}));
+			// `viewId`: the Live Watch instance; its periodic refresh (`live` not false) reads through
+			// the instance's live set on the server, sampled every `intervalMs`.
+			const viewId = typeof args?.viewId === 'string' && args.viewId !== '' ? args.viewId : undefined;
+			const intervalMs = typeof args?.intervalMs === 'number' && Number.isFinite(args.intervalMs) && args.intervalMs > 0 ? args.intervalMs : 1000;
+			const live = viewId !== undefined && args?.live !== false ? { viewId, intervalMs } : undefined;
 			let ctx: string | undefined;
 			try {
 				ctx = await this.pickLiveWatchContextId();
@@ -5059,7 +5067,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			}
 			response.body = {
 				values: ctx
-					? await this.liveWatchEvaluator.evaluate(ctx, items)
+					? await this.liveWatchEvaluator.evaluate(ctx, items, live)
 					: items.map((item) => ({
 						name: item.expression,
 						expression: item.expression,
@@ -5069,6 +5077,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 						error: 'No debug context available',
 					})),
 			};
+			this.sendResponse(response);
+			return;
+		}
+
+		// The Live Watch instance `viewId` stopped refreshing periodically: drop its live set.
+		if (command === 'aurix/liveWatchStop') {
+			const viewId = typeof args?.viewId === 'string' ? args.viewId : '';
+			if (viewId !== '') {
+				await this.liveWatchEvaluator.stopLive(viewId);
+			}
 			this.sendResponse(response);
 			return;
 		}

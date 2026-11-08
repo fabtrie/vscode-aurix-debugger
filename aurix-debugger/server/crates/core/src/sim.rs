@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use tas::{Batch, BatchOp, OpResult, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
 
-use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth};
+use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth, ProbeDaq, ProbeDaqLimits, ProbeDrain, ProbeItem, ProbeSample};
 use crate::arch::{OEC, OSTATE};
 use crate::cortex_m::*;
 use crate::error::Result;
@@ -284,6 +284,27 @@ pub struct SimAdapter {
     srst: bool,
     /// What [`Adapter::health`] reports: set by tests to drive the core's health events.
     pub health: Option<LinkHealth>,
+    /// A probe sampler, for tests of the DAQ offload. `None` (the default): the simulator has
+    /// none, as a TAS probe, and every DAQ point is read by the host.
+    pub sampler: Option<SimSampler>,
+}
+
+/// A probe sampler as the BlueBox's behaves: after a configure every readable item sends one
+/// value, then a value whenever it changed (checked at each drain); an unreadable item (in
+/// [`SIM_UNMAPPED`]) sends nothing.
+#[derive(Debug, Default)]
+pub struct SimSampler {
+    pub items: Vec<ProbeItem>,
+    last: Vec<Option<Vec<u8>>>,
+    pub configures: usize,
+    pub drains: usize,
+    /// The probe's clock, advanced 1 ms per drain.
+    pub time_us: u64,
+    pub generation: u64,
+    /// Configures and drains fail while set.
+    pub fail: bool,
+    /// 0: 256, as the BlueBox.
+    pub max_items: usize,
 }
 
 /// Unmapped as on the chip, so that reads into it fail: the top of segment 9, right below the
@@ -319,6 +340,7 @@ impl SimAdapter {
             initialized: false,
             srst: false,
             health: None,
+            sampler: None,
             app: Some(SimApp::new()),
             fs26: None,
             violations: Vec::new(),
@@ -839,11 +861,85 @@ impl Adapter for SimAdapter {
         self.health
     }
 
+    fn probe_daq(&mut self) -> Option<&mut dyn ProbeDaq> {
+        if self.initialized && self.sampler.is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn set_speed_khz(&mut self, _khz: u32) -> Result<()> {
         Ok(())
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl ProbeDaq for SimAdapter {
+    fn limits(&self) -> ProbeDaqLimits {
+        let n = self.sampler.as_ref().map_or(0, |p| p.max_items);
+        ProbeDaqLimits { max_items: if n == 0 { 256 } else { n }, max_item_size: 8 }
+    }
+
+    /// The BlueBox's tiers: max, 1 ms, 10 ms, 100 ms, 1 s.
+    fn check_period_us(&self, period_us: u32) -> u32 {
+        match period_us {
+            0..=999 => 0,
+            1_000..=9_999 => 1_000,
+            10_000..=99_999 => 10_000,
+            100_000..=999_999 => 100_000,
+            _ => 1_000_000,
+        }
+    }
+
+    fn configure(&mut self, items: &[ProbeItem]) -> Result<()> {
+        let p = self.sampler.as_mut().ok_or_else(|| crate::error::other("no sampler"))?;
+        if p.fail {
+            return Err(crate::error::other("sim sampler: configure failed"));
+        }
+        p.items = items.to_vec();
+        p.last = vec![None; items.len()];
+        p.configures += 1;
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<ProbeDrain> {
+        let items = match self.sampler.as_mut() {
+            Some(p) if p.fail => return Err(crate::error::other("sim sampler: drain failed")),
+            Some(p) => {
+                p.drains += 1;
+                p.time_us += 1_000;
+                p.items.clone()
+            }
+            None => return Err(crate::error::other("no sampler")),
+        };
+        let values: Vec<Option<Vec<u8>>> = items
+            .iter()
+            .map(|it| {
+                let end = it.addr as u64 + it.size as u64;
+                if it.addr < SIM_UNMAPPED.end && end > SIM_UNMAPPED.start as u64 {
+                    return None;
+                }
+                Some((0..it.size as u32).map(|k| self.mem_word(it.addr + k).to_le_bytes()[((it.addr + k) & 3) as usize]).collect())
+            })
+            .collect();
+        let p = self.sampler.as_mut().unwrap();
+        let mut samples = Vec::new();
+        for (i, v) in values.into_iter().enumerate() {
+            if let Some(v) = v {
+                if p.last[i].as_ref() != Some(&v) {
+                    p.last[i] = Some(v.clone());
+                    samples.push(ProbeSample { item: i, time_us: p.time_us, data: v });
+                }
+            }
+        }
+        Ok(ProbeDrain { time_us: p.time_us, samples, overflow: false, more: false })
+    }
+
+    fn generation(&self) -> u64 {
+        self.sampler.as_ref().map_or(0, |p| p.generation)
     }
 }

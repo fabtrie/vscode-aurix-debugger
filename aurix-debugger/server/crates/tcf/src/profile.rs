@@ -187,6 +187,7 @@ pub fn start(sh: &Shared, period_us: u32) -> Result<Arc<Profile>, String> {
             mode: SampleMode::OnChange,
             cmp_mask: None,
             resend_after_us: 0,
+            probe_only: false,
         });
         attrs.push((core, a.clone()));
     }

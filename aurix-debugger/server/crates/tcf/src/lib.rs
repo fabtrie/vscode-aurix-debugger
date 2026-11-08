@@ -10,6 +10,7 @@ mod contexts;
 mod disassembly;
 mod expressions;
 mod forwarder;
+pub mod live;
 mod osaware;
 mod profile;
 mod queue;
@@ -102,6 +103,8 @@ pub struct Shared {
     pub orti: Mutex<Option<Arc<orti::Awareness>>>,
     /// The running task profiler, while one is started.
     pub profile: Mutex<Option<Arc<profile::Profile>>>,
+    /// The live sets of every connection (`AurixTarget.setLiveSet`).
+    pub live: Mutex<live::LiveSets>,
     /// Receivers of [`SessionEvent`]s (bounded: a receiver that does not keep up misses events).
     listeners: Mutex<Vec<SyncSender<SessionEvent>>>,
     next_id: AtomicU64,
@@ -210,6 +213,7 @@ impl Shared {
 
     /// Removes the breakpoints of a closed channel: they must not stay armed.
     fn remove_owned(&self, owner: u64) {
+        live::clear_owner(self, owner);
         let removed: Vec<String> = {
             let mut table = self.bps.lock().unwrap();
             let ids = table.owned_by(owner);
@@ -327,6 +331,7 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         exprs: Mutex::new(ExprTable::default()),
         orti: Mutex::new(None),
         profile: Mutex::new(None),
+        live: Mutex::new(live::LiveSets::default()),
         listeners: Mutex::new(Vec::new()),
         next_id: AtomicU64::new(1),
     })

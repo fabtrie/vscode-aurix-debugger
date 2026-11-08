@@ -17,6 +17,8 @@
 //!   from a winIDEA install) after a power cycle, or in place of another
 //!   winIDEA version's.
 //! * [`fpga`]: which debug FPGA image an iC5700 holds; the iC5000's upload.
+//! * [`daq`]: the probe's own sampler: it checks target addresses in a loop and
+//!   buffers the changes; the host only drains the buffer.
 //! * [`health`]: the probe's view of the target connection (supply, reset
 //!   latch, debug access), without target accesses.
 //! * [`Model`]: what differs between the two BlueBoxes.
@@ -28,6 +30,7 @@
 //! are reachable as memory.
 
 pub mod attach;
+pub mod daq;
 #[cfg(test)]
 mod fixture;
 pub mod fpga;

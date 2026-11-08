@@ -258,6 +258,7 @@ pub fn resolve(session: &tcf::Shared, target: Option<&tcf::CoreInfo>, spec: &Spe
                 mode: spec.mode,
                 cmp_mask: None,
                 resend_after_us: spec.resend_after_us,
+                probe_only: false,
             }),
             error: None,
         };
@@ -315,6 +316,7 @@ pub fn resolve(session: &tcf::Shared, target: Option<&tcf::CoreInfo>, spec: &Spe
             mode: spec.mode,
             cmp_mask,
             resend_after_us: spec.resend_after_us,
+            probe_only: false,
         }),
         decoder,
         error: None,

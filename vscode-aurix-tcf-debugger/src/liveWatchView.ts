@@ -64,6 +64,8 @@ export interface LiveWatchInstanceOptions {
 	intervalMs?: number;
 	/** The webview got the focus, so it is the one "Add to Live Watch" offers first. */
 	onDidFocus?: () => void;
+	/** The debug session to read with; the active one when missing (tests replace it). */
+	debugSession?: () => vscode.DebugSession | undefined;
 }
 
 const PAUSED_GROUP_ID = 'pausedGroup';
@@ -88,14 +90,22 @@ export class LiveWatchInstance implements vscode.Disposable {
 	private hostDisposables: vscode.Disposable[] = [];
 	private selectedId: string | undefined;
 	private refreshQueue: Promise<void> = Promise.resolve();
+	/** The session that has this instance's live set (its periodic refresh was sent there). */
+	private liveSetSession: vscode.DebugSession | undefined;
 	/// The refresh loop, shared with the AUTOSAR OS views: one interval, and nothing read while
 	/// the view is off screen.
 	private readonly live = new LiveUpdater({
 		// A halt refreshes everything, paused expressions included, the way the Watch view does;
 		// the periodic loop only touches the ones that are not paused.
-		refresh: onBreak => (onBreak ? this.refreshNow() : this.refreshRoots(this.liveRoots())),
+		refresh: onBreak => (onBreak ? this.refreshNow() : this.refreshRoots(this.liveRoots(), true)),
 		canRefresh: () => this.hasLiveExpressions(),
 		onChanged: () => this.updateDescription(),
+		// Hidden, paused, resting while halted or closed: the server stops sampling for this view.
+		onActiveChanged: (active) => {
+			if (!active) {
+				this.stopLiveSet();
+			}
+		},
 	});
 
 	constructor(private readonly context: vscode.ExtensionContext, private readonly options: LiveWatchInstanceOptions) {
@@ -426,27 +436,64 @@ export class LiveWatchInstance implements vscode.Disposable {
 		await this.refreshRoots([target.root]);
 	}
 
-	/** Refreshes are queued rather than dropped, so an added or expanded expression is always shown. */
-	private refreshRoots(roots: string[]): Promise<void> {
-		this.refreshQueue = this.refreshQueue.then(() => this.evaluateRoots(roots), () => this.evaluateRoots(roots));
+	/**
+	 * Refreshes are queued rather than dropped, so an added or expanded expression is always shown.
+	 * `periodic`: the refresh loop's own refresh, which reads through this instance's live set on
+	 * the server. Any other (a break, an added or expanded expression) reads its roots one by one.
+	 */
+	private refreshRoots(roots: string[], periodic = false): Promise<void> {
+		return this.enqueue(() => this.evaluateRoots(roots, periodic));
+	}
+
+	/** Refreshes and live set changes go out one at a time, in order. */
+	private enqueue(task: () => Promise<void>): Promise<void> {
+		this.refreshQueue = this.refreshQueue.then(task, task);
 		return this.refreshQueue;
 	}
 
-	private async evaluateRoots(roots: string[]): Promise<void> {
+	private debugSession(): vscode.DebugSession | undefined {
+		return this.options.debugSession ? this.options.debugSession() : vscode.debug.activeDebugSession;
+	}
+
+	/** The loop stopped: once the refreshes before are done, the server drops the live set. */
+	private stopLiveSet(): void {
+		void this.enqueue(async () => {
+			const session = this.liveSetSession;
+			this.liveSetSession = undefined;
+			if (session) {
+				// The session may have ended meanwhile, and its live set with it.
+				await Promise.resolve(session.customRequest('aurix/liveWatchStop', { viewId: this.id })).catch(() => undefined);
+			}
+		});
+	}
+
+	private async evaluateRoots(roots: string[], periodic: boolean): Promise<void> {
 		roots = roots.filter((root) => this.expressions.has(root));
-		const session = vscode.debug.activeDebugSession;
+		const session = this.debugSession();
 		if (roots.length === 0 || !session || session.type !== 'aurixdbg') {
 			return;
 		}
 		const items = roots.map((root) => {
 			const peripheral = this.expressions.get(root)?.peripheral;
 			return peripheral
-				? { expression: peripheralExpression(peripheral), bitOffset: peripheral.bitOffset, bitWidth: peripheral.bitWidth, hex: true }
+				? {
+					expression: peripheralExpression(peripheral),
+					bitOffset: peripheral.bitOffset,
+					bitWidth: peripheral.bitWidth,
+					hex: true,
+					address: peripheral.address,
+					size: peripheralByteSize(peripheral),
+				}
 				: { expression: root, expanded: Array.from(this.expanded.get(root) ?? []) };
 		});
+		// A periodic refresh queued before the loop stopped must not set the live set up again.
+		const live = periodic && this.live.active;
+		if (live) {
+			this.liveSetSession = session;
+		}
 		let values: LiveWatchRootResult[];
 		try {
-			const response = await session.customRequest('aurix/liveWatchEvaluate', { items }) as { values?: LiveWatchRootResult[] } | undefined;
+			const response = await session.customRequest('aurix/liveWatchEvaluate', { items, viewId: this.id, intervalMs: this.live.intervalMs, live }) as { values?: LiveWatchRootResult[] } | undefined;
 			values = response?.values ?? [];
 		} catch (e) {
 			const error = e instanceof Error ? e.message : String(e);
@@ -656,4 +703,9 @@ function classifyValue(value: string): LiveWatchRow['valueKind'] {
 		return 'string';
 	}
 	return Number.isNaN(Number(v)) ? 'other' : 'number';
+}
+
+/** Bytes of a peripheral register, as its expression reads it (unsigned char, short, int, long long). */
+function peripheralByteSize(p: LiveWatchPeripheral): number {
+	return p.sizeBits <= 8 ? 1 : p.sizeBits <= 16 ? 2 : p.sizeBits <= 32 ? 4 : 8;
 }

@@ -107,6 +107,15 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
 
 `Probe::access` (used by the driver) plans the messages with `memory::plan`: reads share a message of at most 64 accesses and a 60,000-byte reply; a write has a message of its own followed by the `STM0_TIM0` check read, so it runs only after everything before it succeeded and nothing runs after it before its outcome is known. The results stop at the first failed op, which the driver reports like a TAS packet (the rest consequential). Not yet run on hardware through the driver.
 
+## DAQ (the probe's own sampler)
+
+`src/daq.rs`: the kernel samples a list of bus addresses in a loop and buffers what changed; the host only drains it. Four node-1 services, from winIDEA 9.21.417's DAQ (*BlueBox SW* mode; the layouts are in the module docs): info `//1///19/`, enable/disable/status `//1///20/`, configure `//1///21/` (1, 2, 4 or 8-byte items at a tier of max, 1 ms, 10 ms, 100 ms or 1 s), read `//1///22/` (19-byte samples, µs timestamps of the probe's clock).
+- The probe sends a sample only when the value changed (and once per item after a configure); an unreadable item sends nothing and says nothing, and slows every loop pass (8 to about 600 µs).
+- 256 items, a buffer of 4096 samples; one 4-byte item at max gives about 3,700 samples a second.
+- The driver offers it to the core as `Adapter::probe_daq` (`bluebox daq` shows it, `bluebox daq_offload off` withdraws it). The core's DAQ registry puts plain bus points of up to 64 bytes on it; the TCF live sets (`AurixTarget.setLiveSet`) that the Live Watch uses go through the registry.
+- Measured through `aurix-dbg` on iC5700 B (2026-11-08): a live set's tier follows the view's interval (200 ms gives 100 ms, 1 s gives 1 s); one `getLiveValues` took 0.3 ms against 12.4 ms for three `Memory.get`s; the items came back after `reset run`, `reset halt` and `drop_target`; an unmapped address went back to a plain read with its error. A DAQ run left the probe as it found it (the next connect was normal).
+- The prototype: `cargo run -p bluebox --example probe -- --attach --daq 0xf0001010:4:10ms,0xf0036140:4:max [--daq-secs 2]`.
+
 ## What works with winIDEA 9.21.417 (iC5000, TC377TP, through `aurix-dbg`)
 
 - Connect with its kernel running (recognized as its own) and after loading it; the target keeps running (uptime 1077 s, counting).

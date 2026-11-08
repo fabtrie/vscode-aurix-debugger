@@ -90,6 +90,64 @@ impl LinkHealth {
     }
 }
 
+/// What a probe's sampler can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeDaqLimits {
+    pub max_items: usize,
+    /// Largest item, in bytes; items are 1, 2, 4 or 8 bytes, naturally aligned.
+    pub max_item_size: u8,
+}
+
+/// One address the probe samples, with the period its point asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeItem {
+    pub addr: u32,
+    pub size: u8,
+    pub period_us: u32,
+}
+
+/// A value the probe read: `item` indexes the list last passed to [`ProbeDaq::configure`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeSample {
+    pub item: usize,
+    /// The probe's clock, in microseconds.
+    pub time_us: u64,
+    pub data: Vec<u8>,
+}
+
+/// What one drain brought.
+#[derive(Debug, Clone, Default)]
+pub struct ProbeDrain {
+    /// The probe's clock when it answered, to place `samples` on the host's timeline.
+    pub time_us: u64,
+    pub samples: Vec<ProbeSample>,
+    /// Samples were lost because the probe's buffer was full.
+    pub overflow: bool,
+    /// The reply was full: more samples are waiting.
+    pub more: bool,
+}
+
+/// A sampler in the probe: it checks a list of bus addresses by itself and buffers what it read,
+/// so the host only drains the buffer instead of reading each point.
+///
+/// Semantics the registry relies on (measured on the BlueBox, see `bluebox::daq`):
+/// * after [`ProbeDaq::configure`], every readable item delivers one sample, and afterwards a
+///   sample whenever its value changed;
+/// * an unreadable item delivers nothing and reports no error.
+pub trait ProbeDaq {
+    fn limits(&self) -> ProbeDaqLimits;
+    /// How often the probe checks an item whose point asked for `period_us`: never less often
+    /// than asked. 0 means "as fast as it can".
+    fn check_period_us(&self, period_us: u32) -> u32;
+    /// Replaces the item list and starts sampling; an empty list stops it.
+    fn configure(&mut self, items: &[ProbeItem]) -> Result<()>;
+    /// Takes what the probe buffered since the last drain.
+    fn drain(&mut self) -> Result<ProbeDrain>;
+    /// Changes whenever the connection to the probe or the target was rebuilt, which may have
+    /// dropped the item list: the registry configures again.
+    fn generation(&self) -> u64;
+}
+
 pub trait Adapter {
     fn driver_name(&self) -> &'static str;
     /// Driver-specific Tcl command groups, e.g. `tas-client`.
@@ -135,6 +193,14 @@ pub trait Adapter {
     /// `None` (the default) means the caller runs the TriCore DMU sequences in
     /// [`crate::flash`]. See [`FlashDownload`].
     fn flash_download(&mut self) -> Option<&mut dyn FlashDownload> {
+        None
+    }
+    /// A sampler in the probe itself, which the DAQ registry hands plain bus points to instead of
+    /// polling them (see [`ProbeDaq`]).
+    ///
+    /// `None` (the default, and what the TAS, winIDEA and simulator adapters return) means every
+    /// point is read by the host, as it always was.
+    fn probe_daq(&mut self) -> Option<&mut dyn ProbeDaq> {
         None
     }
     /// The run-state poll period this probe wants when the cfg sets none

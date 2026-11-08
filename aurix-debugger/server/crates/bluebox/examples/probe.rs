@@ -5,6 +5,7 @@
 //!     [--serial 01ABC] [--toggle 0|1] [--rewrite 0x70000000]
 //!     [--kernel C:/winIDEA/iC6kKrnl.s] [--restart-kernel] [--no-bringup]
 //! cargo run -p bluebox --example probe -- --attach [--watch 2]   # bring-up + built-in attach
+//! cargo run -p bluebox --example probe -- --attach --daq 0xf0001010:4:10ms,0xf0036140:4:max [--daq-secs 2]
 //! cargo run -p bluebox --example probe -- --script <trace.jsonl> [--skip a-b,c] [--drop path:b0:len]
 //!     [--list | --export <file>] [--watch 2]                      # reduce a captured attach
 //! ```
@@ -67,6 +68,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut speed_test = false;
     let mut write_stats: usize = 0;
     let mut chipid_loop: usize = 0;
+    let mut daq_items: Vec<bluebox::daq::Item> = Vec::new();
+    let mut daq_secs: f64 = 2.0;
     let mut follow: usize = 0;
     let mut raw_after: Vec<u32> = Vec::new();
     let mut provoke: Option<f64> = None;
@@ -132,6 +135,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--speed-test" => speed_test = true,
             "--write-stats" => write_stats = val()?.parse()?,
             "--chipid-loop" => chipid_loop = val()?.parse()?,
+            // --daq ADDR:SIZE:TIER[,...]: the probe's own sampler after the attach (TIER max, 1ms,
+            // 10ms, 100ms, 1s); --daq-secs how long to drain it.
+            "--daq" => daq_items = parse_daq(&val()?)?,
+            "--daq-secs" => daq_secs = val()?.parse()?,
             // --follow <n>: n times every 20 ms the fast reconnect (//2///34/) and SCU_CHIPID, STM0, OSTATE
             "--follow" => follow = val()?.parse()?,
             "--then" => {
@@ -385,6 +392,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
+            }
+            if !daq_items.is_empty() {
+                daq_run(&mut p, &daq_items, daq_secs)?;
             }
             for (trace, st, then_only, then_skip) in &then {
                 watch_target(&mut p, 0.1)?;
@@ -925,4 +935,63 @@ fn hex(b: &[u8], max: usize) -> String {
         s.push('…');
     }
     s
+}
+
+/// `ADDR:SIZE:TIER[,...]`, e.g. `0xf0001010:4:10ms`.
+#[cfg(windows)]
+fn parse_daq(spec: &str) -> Result<Vec<bluebox::daq::Item>, Box<dyn std::error::Error>> {
+    use bluebox::daq::{Item, Tier};
+    spec.split(',')
+        .map(|one| {
+            let f: Vec<&str> = one.split(':').collect();
+            let [a, n, t] = f[..] else { return Err(format!("--daq item {one}: ADDR:SIZE:TIER").into()) };
+            let tier = match t {
+                "max" => Tier::Max,
+                "1ms" => Tier::Ms1,
+                "10ms" => Tier::Ms10,
+                "100ms" => Tier::Ms100,
+                "1s" => Tier::S1,
+                _ => return Err(format!("--daq tier {t}: max, 1ms, 10ms, 100ms or 1s").into()),
+            };
+            Ok(Item { addr: parse_u32(a)?, size: n.parse()?, tier })
+        })
+        .collect()
+}
+
+/// Configures the probe's sampler, drains it every 10 ms for `secs` and prints per item how many
+/// samples came and the last value, then disables it again.
+#[cfg(windows)]
+fn daq_run<L: bluebox::Link>(p: &mut bluebox::Probe<L>, items: &[bluebox::daq::Item], secs: f64) -> Result<(), Box<dyn std::error::Error>> {
+    use bluebox::daq::Ctrl;
+    let info = p.daq_info()?;
+    println!("daq: {info:?}");
+    p.daq_control(Ctrl::Disable)?;
+    let handles = p.daq_configure(items)?;
+    let st0 = p.daq_control(Ctrl::Enable)?;
+    let t = std::time::Instant::now();
+    let mut count = vec![0usize; items.len()];
+    let mut last: Vec<Option<(u64, Vec<u8>)>> = vec![None; items.len()];
+    let (mut reads, mut max_loop, mut overflow) = (0usize, 0u32, false);
+    while t.elapsed().as_secs_f64() < secs {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (st, samples) = p.daq_read()?;
+        reads += 1;
+        max_loop = max_loop.max(st.max_loop_us);
+        overflow |= st.overflow;
+        for s in samples {
+            if let Some(i) = handles.iter().position(|&h| h == s.handle) {
+                count[i] += 1;
+                last[i] = Some((s.time_us, s.data));
+            }
+        }
+    }
+    let st = p.daq_control(Ctrl::Disable)?;
+    println!("daq: {reads} reads in {:.0} ms, {} loops, longest pass {max_loop} us, overflow {overflow}", t.elapsed().as_secs_f64() * 1e3, st.loops);
+    for (i, it) in items.iter().enumerate() {
+        let v = last[i].as_ref().map_or("no sample (unreadable or not checked yet)".to_string(), |(ts, d)| {
+            format!("last {} at +{} us", d.iter().rev().map(|b| format!("{b:02x}")).collect::<String>(), ts.saturating_sub(st0.time_us))
+        });
+        println!("  0x{:08x}:{} {:?}: {} samples, {v}", it.addr, it.size, it.tier, count[i]);
+    }
+    Ok(())
 }

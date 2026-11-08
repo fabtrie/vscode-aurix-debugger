@@ -89,7 +89,19 @@ pub struct Ctx {
     pub reset_hook: Option<String>,
     /// Set while the hook runs: a `reset` inside it is the built-in one.
     pub in_reset_hook: bool,
+    /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
+    pub health: Option<crate::adapter::LinkHealth>,
+    /// Since when the adapter reports the probe lost.
+    pub probe_lost_since: Option<std::time::Instant>,
+    /// `Event::ProbeLost` was sent for the current loss.
+    pub probe_lost_reported: bool,
+    /// How long the probe may be gone before the frontends end their sessions
+    /// (`probe_lost_timeout <ms>`); 0: never, keep reconnecting.
+    pub probe_lost_timeout_ms: u64,
 }
+
+/// See [`Ctx::probe_lost_timeout_ms`].
+pub const DEFAULT_PROBE_LOST_TIMEOUT_MS: u64 = 1000;
 
 impl Default for Ctx {
     fn default() -> Self {
@@ -130,6 +142,10 @@ impl Ctx {
             srst_asserted: false,
             reset_hook: None,
             in_reset_hook: false,
+            health: None,
+            probe_lost_since: None,
+            probe_lost_reported: false,
+            probe_lost_timeout_ms: DEFAULT_PROBE_LOST_TIMEOUT_MS,
         }
     }
 

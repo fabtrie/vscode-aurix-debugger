@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use tas::{Batch, BatchOp, OpResult, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
 
-use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo};
+use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth};
 use crate::arch::{OEC, OSTATE};
 use crate::cortex_m::*;
 use crate::error::Result;
@@ -282,6 +282,8 @@ pub struct SimAdapter {
     pub gtm: SimGtm,
     initialized: bool,
     srst: bool,
+    /// What [`Adapter::health`] reports: set by tests to drive the core's health events.
+    pub health: Option<LinkHealth>,
 }
 
 /// Unmapped as on the chip, so that reads into it fail: the top of segment 9, right below the
@@ -316,6 +318,7 @@ impl SimAdapter {
             gtm: SimGtm::new(),
             initialized: false,
             srst: false,
+            health: None,
             app: Some(SimApp::new()),
             fs26: None,
             violations: Vec::new(),
@@ -830,6 +833,10 @@ impl Adapter for SimAdapter {
 
     fn take_resets(&mut self) -> u64 {
         std::mem::take(&mut self.pending_resets)
+    }
+
+    fn health(&self) -> Option<LinkHealth> {
+        self.health
     }
 
     fn set_speed_khz(&mut self, _khz: u32) -> Result<()> {

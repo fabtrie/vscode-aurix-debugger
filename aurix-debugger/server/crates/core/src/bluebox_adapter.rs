@@ -64,12 +64,26 @@
 //! left the application running. A target reconnect right after the target
 //! reset itself was once seen to reset the chip again.
 //!
+//! Health ([`bluebox::health`]): the background poll asks the probe about the target connection
+//! every 100 ms while all is well (`bluebox health_period`, 0 turns it off), every poll period
+//! while the target is lost. The answer (about 1.15 ms, no target access) names the cause for logs
+//! and frontends: no target supply, a reset (the probe latches it until it connects again), no
+//! debug access. While the target is lost the probe is also asked before each reconnect attempt
+//! (an attempt on a target without supply blocks for about 2.6 s): a missing supply holds the
+//! attempts back (one every 5 s still runs), and its return starts one at once. The reset latch never holds anything back. A probe that answers
+//! implausibly at connect (the target reads, the probe says otherwise) is not asked again on that
+//! connection, nor one that refuses the query. A probe lost through USB (unplugged, powered off)
+//! counts as gone: the core ends the frontends' sessions after `probe_lost_timeout` (1 s); other
+//! probe errors keep the reopen every 3 s.
+//!
 //! ```tcl
 //! adapter driver bluebox
 //! adapter serial 01ABC                    ;# optional, when several probes are plugged in
 //! bluebox winidea C:/winIDEA_9_21_417     ;# optional; a winIDEA 9.21.417 install (kernel, iC5000 FPGA image)
 //! bluebox kernel C:/winIDEA/iC6kKrnl.s    ;# optional; that version's kernel file itself, unchecked
 //! bluebox attach_replay C:/traces/x.jsonl ;# optional; another target or setup
+//! bluebox health_period 100               ;# optional; ms between health queries, 0 = off
+//! probe_lost_timeout 1000                 ;# optional; end the sessions after the probe is gone this long, 0 = never
 //! ```
 //!
 //! `adapter speed <kHz>` sets the DAP clock (`//7//1//`): 100 MHz divided by an
@@ -104,7 +118,7 @@ use std::time::{Duration, Instant};
 
 use tas::{Batch, BatchOp, OpResult};
 
-use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo};
+use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth};
 use crate::error::{other, Error, Result};
 
 const NOT_CONNECTED: &str = "bluebox: not connected (init has not run, or failed)";
@@ -125,6 +139,12 @@ const TARGET_RETRY: Duration = Duration::from_secs(1);
 const TARGET_RETRY_MAX: Duration = Duration::from_secs(5);
 /// Interval of reconnect attempts after the probe was lost (each a full connect, ~3.5 s).
 const PROBE_RETRY: Duration = Duration::from_secs(3);
+/// How often the background poll asks the probe about the target connection while all is well
+/// (`bluebox health_period`); while the target is lost or not well, every poll period.
+const HEALTH_PERIOD: Duration = Duration::from_millis(100);
+/// A health answer this old still decides whether a reconnect is worth trying.
+#[cfg(windows)]
+const HEALTH_FRESH: Duration = Duration::from_millis(100);
 /// How long a lost target is tried with the probe's fast reconnect (`//2///34/`, as after its own
 /// reset) before the attach's connect part. After an external reset it answers within ~40 ms.
 const FAST_RECONNECT_FOR: Duration = Duration::from_millis(300);
@@ -172,6 +192,37 @@ pub struct BlueBoxAdapter {
     model: Option<bluebox::Model>,
     /// The iC5000's debug FPGA image, read once from winIDEA's `ICWHW32.HRS`.
     fpga_image: Option<Vec<u8>>,
+    /// The probe is lost because USB failed or it is not plugged in (not a protocol or kernel
+    /// error, which a reopen fixes): the core ends the sessions when this lasts.
+    probe_gone: bool,
+    /// The probe's view of the target connection (see [`bluebox::health`]), when last asked.
+    health: Option<LinkHealth>,
+    health_raw: Option<bluebox::TargetHealth>,
+    health_at: Option<Instant>,
+    /// `bluebox health_period <ms>`; `None`: [`HEALTH_PERIOD`]. Zero turns the query off.
+    health_period: Option<Duration>,
+    /// The probe refused the query or answered implausibly on this connection.
+    health_off: bool,
+}
+
+/// Whether a probe error means the probe itself is gone (unplugged, powered off, USB broken).
+#[cfg(windows)]
+fn probe_gone(e: &bluebox::Error) -> bool {
+    matches!(e, bluebox::Error::Usb { .. } | bluebox::Error::NotFound(_))
+}
+
+/// What a health answer means for the target connection. The reset flag is a latch (it stays set
+/// until the probe connects again), so it only names the cause while the connection is down.
+fn derive_health(h: &bluebox::TargetHealth) -> LinkHealth {
+    if !h.vref_ok {
+        LinkHealth::Unpowered { vref_mv: h.vref_mv }
+    } else if h.comm_works && h.has_access {
+        LinkHealth::Ok
+    } else if h.srst_active {
+        LinkHealth::Reset
+    } else {
+        LinkHealth::NoDebugAccess
+    }
 }
 
 impl BlueBoxAdapter {
@@ -257,6 +308,79 @@ impl BlueBoxAdapter {
         self.setup.unwrap_or(bluebox::attach::Setup::ActiveProbe)
     }
 
+    fn health_period(&self) -> Duration {
+        self.health_period.unwrap_or(HEALTH_PERIOD)
+    }
+
+    /// Takes a health answer: remembers it, and when the target supply came back while the target
+    /// is lost, lets the next batch reconnect at once instead of after the retry interval.
+    #[cfg(windows)]
+    fn take_health(&mut self, raw: bluebox::TargetHealth) {
+        let new = derive_health(&raw);
+        if raw.app_reset && !self.health_raw.is_some_and(|h| h.app_reset) {
+            crate::log_info!("[bluebox] the probe reports an application reset");
+        }
+        let was_unpowered = matches!(self.health, Some(LinkHealth::Unpowered { .. }));
+        if was_unpowered && !matches!(new, LinkHealth::Unpowered { .. }) && self.lost == Some(Lost::Target) {
+            crate::log_debug!("[bluebox] target supply back ({} mV): reconnecting now", raw.vref_mv);
+            self.last_try = None;
+            self.target_retry = None;
+        }
+        if self.health != Some(new) {
+            crate::log_debug!("[bluebox] health {new:?} ({raw:?})");
+        }
+        self.health = Some(new);
+        self.health_raw = Some(raw);
+        self.health_at = Some(Instant::now());
+    }
+
+    /// Asks the probe once at connect, with the target answering: a probe that then reports
+    /// anything but a working connection (another setup, another model) is not believed on this
+    /// connection, so its answers can never hold back a reconnect.
+    #[cfg(windows)]
+    fn check_health_plausible(&mut self) {
+        if self.health_period().is_zero() {
+            return;
+        }
+        let Some(probe) = self.probe.as_mut() else { return };
+        match probe.target_health() {
+            Ok(raw) if derive_health(&raw) == LinkHealth::Ok => self.take_health(raw),
+            Ok(raw) => {
+                crate::log_warn!("[bluebox] health query off for this connection: the probe reports {raw:?} while the target answers");
+                self.health_off = true;
+            }
+            Err(e) => {
+                crate::log_debug!("[bluebox] health query off for this connection: {e}");
+                self.health_off = true;
+            }
+        }
+    }
+
+    /// One health query, unless it is off: takes the answer, notes a lost probe (USB) or switches
+    /// the query off for this connection (any other error).
+    #[cfg(windows)]
+    fn query_health(&mut self) {
+        if self.health_off || self.health_period().is_zero() {
+            return;
+        }
+        let Some(probe) = self.probe.as_mut() else { return };
+        match probe.target_health() {
+            Ok(raw) => self.take_health(raw),
+            Err(e) if probe_gone(&e) => self.lose_probe(&e, &format!("probe error: {e}")),
+            Err(e) => {
+                crate::log_debug!("[bluebox] health query off for this connection: {e}");
+                self.health_off = true;
+            }
+        }
+    }
+
+    /// Notes a probe error: lost, and whether because the probe itself is gone.
+    #[cfg(windows)]
+    fn lose_probe(&mut self, e: &bluebox::Error, why: &str) {
+        self.probe_gone = probe_gone(e);
+        self.lose(Lost::Probe, why);
+    }
+
     /// Notes a lost connection; the next batch tries to reconnect.
     #[cfg(windows)]
     fn lose(&mut self, kind: Lost, why: &str) {
@@ -280,6 +404,29 @@ impl BlueBoxAdapter {
     #[cfg(windows)]
     fn ensure_connected(&mut self) -> Result<()> {
         let Some(kind) = self.lost else { return Ok(()) };
+        if kind == Lost::Target {
+            // Ask the probe before an attempt (about 1.15 ms): an attempt on a target without
+            // supply blocks for about 2.6 s and says nothing. Asked again on every call while the
+            // supply is missing, so its return (also after a dip of a few ms) is seen at once.
+            // An `Ok` answer is from before the loss.
+            let ask = matches!(self.health, Some(LinkHealth::Unpowered { .. }) | Some(LinkHealth::Ok) | None);
+            if ask || self.health_at.is_none_or(|t| t.elapsed() >= HEALTH_FRESH) {
+                self.query_health();
+                if self.lost == Some(Lost::Probe) {
+                    return Err(Error::Adapter("bluebox: the probe is not connected; reconnecting".into()));
+                }
+            }
+            // The probe says the target has no supply: no use trying until that changes
+            // (`take_health` then starts an attempt at once), but still now and then in case the
+            // answer is wrong.
+            let unpowered = matches!(self.health, Some(LinkHealth::Unpowered { .. })) && self.health_at.is_some_and(|t| t.elapsed() < HEALTH_FRESH);
+            if unpowered {
+                let since = *self.last_try.get_or_insert_with(Instant::now);
+                if since.elapsed() < TARGET_RETRY_MAX {
+                    return Err(Error::Adapter("bluebox: the target is not powered; waiting for it".into()));
+                }
+            }
+        }
         let wait = if kind == Lost::Target { self.target_retry.unwrap_or(TARGET_RETRY) } else { PROBE_RETRY };
         let what = if kind == Lost::Target { "the target does not answer" } else { "the probe is not connected" };
         if self.last_try.is_some_and(|t| t.elapsed() < wait) {
@@ -346,7 +493,7 @@ impl BlueBoxAdapter {
         let probe = self.probe.as_mut().ok_or_else(|| Error::Usage(NOT_CONNECTED.into()))?;
         if let Err(e) = probe.attach(&part) {
             // The probe itself failed: next time, open it again.
-            self.lose(Lost::Probe, &format!("probe error while reconnecting: {e}"));
+            self.lose_probe(&e, &format!("probe error while reconnecting: {e}"));
             return Err(other(format!("bluebox: {e}")));
         }
         if !self.target_answers() {
@@ -424,7 +571,14 @@ impl BlueBoxAdapter {
         // Batched (see `bluebox::Probe::access`): reads share a message, a write
         // has its own with the check read, and the results stop at the
         // first failed op, so the rest is consequential as on a TAS packet.
-        let replies = self.probe()?.access(&ops).map_err(|e| other(format!("bluebox: {e}")))?;
+        let replies = match self.probe()?.access(&ops) {
+            Ok(r) => r,
+            Err(e) => {
+                // Classified here, while the error still has its kind (see `execute`).
+                self.probe_gone = probe_gone(&e);
+                return Err(other(format!("bluebox: {e}")));
+            }
+        };
         let mut out = Vec::with_capacity(ops.len());
         for (op, m) in ops.iter().zip(replies) {
             let len = op.len();
@@ -516,7 +670,20 @@ impl BlueBoxAdapter {
         // fails when the attach has to bring a target up that is not yet in debug
         // mode (seen at 25 MHz). `adapter speed` is applied once it is connected.
 
-        let path = UsbLink::open(settings.serial.as_deref()).map_err(bb)?.path().to_string();
+        // A probe that cannot be opened at all is gone; other connect errors are not (they keep
+        // the reopen every few seconds).
+        self.probe_gone = false;
+        self.health = None;
+        self.health_raw = None;
+        self.health_at = None;
+        self.health_off = false;
+        let path = match UsbLink::open(settings.serial.as_deref()) {
+            Ok(l) => l.path().to_string(),
+            Err(e) => {
+                self.probe_gone = probe_gone(&e);
+                return Err(bb(e));
+            }
+        };
         // Link bring-up. It ends any earlier client session; the attach below
         // makes the target connection again. A probe still booting, or with a
         // stuck kernel, is waited for and then restarted (`open_ready`).
@@ -528,7 +695,13 @@ impl BlueBoxAdapter {
                 |m| crate::log_warn!("[bluebox] {m}"),
             )
         };
-        let (mut probe, hs) = open().map_err(bb)?;
+        let (mut probe, hs) = match open() {
+            Ok(x) => x,
+            Err(e) => {
+                self.probe_gone = probe_gone(&e);
+                return Err(bb(e));
+            }
+        };
         let model = probe.model();
         self.model = Some(model);
         let builtin = bluebox::attach::Script::builtin(model);
@@ -617,6 +790,7 @@ impl BlueBoxAdapter {
         }
         let chipid = u32::from_le_bytes(id.data[..4].try_into().unwrap());
         self.apply_clock();
+        self.check_health_plausible();
         self.status = format!("{path}, SCU_CHIPID 0x{chipid:08x}, {kernel_note}, {script_note}");
         Ok(DeviceInfo { device_id: 0, description: format!("BlueBox {}", self.status) })
     }
@@ -670,8 +844,8 @@ impl Adapter for BlueBoxAdapter {
     }
 
     /// `bluebox attach_replay <trace.jsonl> [step]`, `bluebox kernel <iC6kKrnl.s>`, `bluebox winidea <folder>`,
-    /// `bluebox status` and `bluebox drop_target` (a test aid for recovery).
-    /// Only `drop_target` talks to the probe; it is opened in [`Adapter::init`].
+    /// `bluebox health_period <ms>`, `bluebox status`, `bluebox health` and `bluebox drop_target` (a test
+    /// aid for recovery). Only `health` and `drop_target` talk to the probe; it is opened in [`Adapter::init`].
     fn command(&mut self, args: &[&str]) -> Result<String> {
         match args.get(1).copied() {
             Some("attach_replay") => {
@@ -693,6 +867,37 @@ impl Adapter for BlueBoxAdapter {
                 Ok(String::new())
             }
             Some("status") => Ok(if self.initialized() { self.status.clone() } else { "not connected".into() }),
+            // The probe's view of the target connection, asked now.
+            Some("health") => {
+                #[cfg(windows)]
+                {
+                    let raw = self.probe()?.target_health().map_err(|e| other(format!("bluebox: {e}")))?;
+                    let h = derive_health(&raw);
+                    Ok(format!(
+                        "{}: Vref {} mV ({}), reset latch {}, OSTATE 0x{:08x}, access {}, comm {}, application reset {}",
+                        h.text(),
+                        raw.vref_mv,
+                        if raw.vref_ok { "ok" } else { "out of range" },
+                        if raw.srst_active { "set" } else { "clear" },
+                        raw.ostate,
+                        if raw.has_access { "yes" } else { "no" },
+                        if raw.comm_works { "works" } else { "down" },
+                        if raw.app_reset { "yes" } else { "no" }
+                    ))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(Error::Usage(NOT_CONNECTED.into()))
+                }
+            }
+            // How often the background poll asks the probe about the target connection (0: never).
+            Some("health_period") => {
+                if let Some(v) = args.get(2) {
+                    let ms: u64 = v.parse().map_err(|_| Error::Usage("usage: bluebox health_period <ms>".into()))?;
+                    self.health_period = Some(Duration::from_millis(ms));
+                }
+                Ok(self.health_period().as_millis().to_string())
+            }
             // Test aid: reset the target and leave the connection broken, as after
             // a reset the target did by itself. The next accesses reconnect.
             Some("drop_target") => {
@@ -706,7 +911,7 @@ impl Adapter for BlueBoxAdapter {
                     Err(Error::Usage(NOT_CONNECTED.into()))
                 }
             }
-            _ => Err(Error::Usage("usage: bluebox attach_replay|kernel|winidea|status|drop_target ...".into())),
+            _ => Err(Error::Usage("usage: bluebox attach_replay|kernel|winidea|status|health|health_period|drop_target ...".into())),
         }
     }
 
@@ -769,6 +974,7 @@ impl Adapter for BlueBoxAdapter {
                     Ok(out)
                 }
                 Err(e) => {
+                    // `run_batch` noted whether the probe itself is gone.
                     self.lose(Lost::Probe, &format!("probe error: {e}"));
                     Err(e)
                 }
@@ -854,6 +1060,37 @@ impl Adapter for BlueBoxAdapter {
         Some(512)
     }
 
+    /// The probe's view of the target connection, asked by [`Adapter::background`]: `ProbeLost`
+    /// while USB is gone, `None` while the query is off or refused.
+    fn health(&self) -> Option<LinkHealth> {
+        if !self.inited {
+            return None;
+        }
+        if self.lost == Some(Lost::Probe) {
+            return self.probe_gone.then_some(LinkHealth::ProbeLost { why: "the BlueBox does not answer over USB" });
+        }
+        if self.health_off || self.health_period().is_zero() {
+            return None;
+        }
+        self.health
+    }
+
+    /// The health query ([`bluebox::health`], about 1.15 ms): every `health_period` while all is
+    /// well, every poll period while the target is lost or not well.
+    fn background(&mut self) {
+        #[cfg(windows)]
+        {
+            if !self.inited || self.health_off || self.health_period().is_zero() || self.lost == Some(Lost::Probe) {
+                return;
+            }
+            let well = self.lost.is_none() && self.health == Some(LinkHealth::Ok);
+            if well && self.health_at.is_some_and(|t| t.elapsed() < self.health_period()) {
+                return;
+            }
+            self.query_health();
+        }
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -862,6 +1099,19 @@ impl Adapter for BlueBoxAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_answers_name_the_cause() {
+        let ok = bluebox::TargetHealth { vref_mv: 4990, vref_ok: true, has_access: true, comm_works: true, ostate: 1, ..Default::default() };
+        assert_eq!(derive_health(&ok), LinkHealth::Ok);
+        // The reset flag is a latch: with the connection back it is no reason.
+        assert_eq!(derive_health(&bluebox::TargetHealth { srst_active: true, ..ok }), LinkHealth::Ok);
+        let down = bluebox::TargetHealth { comm_works: false, ..ok };
+        assert_eq!(derive_health(&bluebox::TargetHealth { srst_active: true, ..down }), LinkHealth::Reset);
+        assert_eq!(derive_health(&down), LinkHealth::NoDebugAccess);
+        // No supply wins over everything else (the probe then sends no debug subsystem entry).
+        assert_eq!(derive_health(&bluebox::TargetHealth { vref_mv: 609, ..Default::default() }), LinkHealth::Unpowered { vref_mv: 609 });
+    }
 
     #[test]
     fn commands_only_set_fields() {
@@ -876,6 +1126,11 @@ mod tests {
         assert_eq!(a.winidea, Some(PathBuf::from("C:/winIDEA_9_21_417")));
         assert!(a.command(&["bluebox", "winidea"]).is_err());
         assert_eq!(a.command(&["bluebox", "status"]).unwrap(), "not connected");
+        assert_eq!(a.command(&["bluebox", "health_period"]).unwrap(), "100");
+        assert_eq!(a.command(&["bluebox", "health_period", "0"]).unwrap(), "0");
+        assert_eq!(a.health_period, Some(Duration::ZERO));
+        assert!(a.command(&["bluebox", "health_period", "x"]).is_err());
+        assert_eq!(a.health(), None);
         assert!(a.command(&["bluebox", "frobnicate"]).is_err());
         assert!(!a.initialized());
     }

@@ -398,6 +398,10 @@ impl Channel {
                 Ok(vec![String::new()])
             }
 
+            // What the probe reports about the target connection (null: it cannot tell). Changes
+            // come as `AurixTarget.healthChanged`; `AurixTarget.probeLost` asks clients to end.
+            ("AurixTarget", "getHealth") => Ok(vec![String::new(), crate::health_json(self.h().status().0.health).to_string()]),
+
             ("Tcl", "eval") => {
                 let cmd = a.string(0)?;
                 let (res, lines) = self.h().tcl_with_output(&cmd);

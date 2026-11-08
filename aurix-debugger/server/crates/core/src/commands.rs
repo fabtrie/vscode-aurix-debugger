@@ -110,6 +110,15 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
         }
         Ok(cx.with(|c| c.reset_hook.clone().unwrap_or_default()))
     });
+    // probe_lost_timeout ?ms?: how long the probe (BlueBox USB, miniWiggler, TasServer) may be
+    // gone before the frontends end their debug sessions; 0 keeps reconnecting for ever.
+    reg(interp, sh, "probe_lost_timeout", |cx, a| {
+        if let Some(ms) = a.get(1) {
+            let ms = num(ms)?;
+            cx.with(|c| c.probe_lost_timeout_ms = ms);
+        }
+        Ok(format!("{}", cx.with(|c| c.probe_lost_timeout_ms)))
+    });
     reg(interp, sh, "polling_period", |cx, a| {
         if let Some(ms) = a.get(1) {
             let ms = num(ms)?.max(1);

@@ -693,6 +693,21 @@ pub enum ApiEvent {
     Examined { target: String },
     /// A target has not been accessible for a while (e.g. not powered).
     Unreachable { target: String },
+    /// What the probe reports about the target connection changed. Without `state` the probe
+    /// cannot tell (TAS without a failure yet, winIDEA, the simulator).
+    Health {
+        /// `ok`, `unpowered`, `reset`, `noDebugAccess`, `noDevice` or `probeLost`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// The target supply the probe measured, when it reports the target unpowered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vref_mv: Option<u32>,
+    },
+    /// The debug probe has been gone for longer than `probe_lost_timeout`; the debug server's
+    /// frontends end their sessions.
+    ProbeLost { why: String },
     /// Memory written through this API.
     MemoryChanged {
         /// Core view used, if any.

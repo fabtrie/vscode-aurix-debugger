@@ -1,11 +1,24 @@
 //! `adapter driver tas_client`: Infineon TasServer (miniWiggler, DAP).
+//!
+//! Health ([`Adapter::health`]), measured with a miniWiggler on a TC37x board. In normal operation
+//! nothing extra is sent. After a failed access the background poll checks, at most every
+//! [`HEALTH_CHECK`]:
+//!
+//! * `SCU_CHIPID` reads: the target is back.
+//! * It does not, PING works: the target does not answer (power off, held in reset). The
+//!   TasServer keeps reporting the last device type then, so the device type tells nothing.
+//! * PING fails and `get_targets` no longer lists the access hardware: the miniWiggler is
+//!   unplugged (each call then blocks about 2 s). It comes back by itself when plugged in again.
+//! * The TCP connection to the TasServer fails: it is reconnected, session and device included.
+//!
+//! PING costs 6 to 30 ms and `get_targets` about 55 ms, so neither runs while all is well.
 
 use std::any::Any;
 use std::time::{Duration, Instant};
 
 use tas::{Batch, ConnectMode, OpResult, TasClient};
 
-use crate::adapter::{check, Adapter, AdapterSettings, BatchLimits, DeviceInfo};
+use crate::adapter::{check, Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth};
 use crate::error::{Error, Result};
 use crate::util::parse_u32;
 use crate::{log_info, log_warn};
@@ -56,6 +69,15 @@ pub struct TasAdapter {
     device: bool,
     /// Last device connect attempt.
     last_try: Option<Instant>,
+    /// `init` succeeded; the TasServer connection may be lost since (`client` is then `None`).
+    inited: bool,
+    /// The TCP connection to the TasServer failed: reconnecting (see [`Adapter::background`]).
+    server_lost: bool,
+    /// An access failed since the last health check: check at the next background poll.
+    failed: bool,
+    health: Option<LinkHealth>,
+    /// Last health check, or reconnect attempt to the TasServer.
+    check_at: Option<Instant>,
 }
 
 impl Default for TasAdapter {
@@ -71,6 +93,11 @@ impl Default for TasAdapter {
             session: false,
             device: false,
             last_try: None,
+            inited: false,
+            server_lost: false,
+            failed: false,
+            health: None,
+            check_at: None,
         }
     }
 }
@@ -179,6 +206,12 @@ impl TasAdapter {
 
     /// Connects the device if it is not yet, at most every [`CONNECT_RETRY`].
     fn ensure_device(&mut self) -> Result<()> {
+        if self.server_lost {
+            return Err(Error::Adapter(format!("TAS: TasServer at {}:{} not reachable; reconnecting", self.host, self.port)));
+        }
+        if matches!(self.health, Some(LinkHealth::ProbeLost { .. })) {
+            return Err(Error::Adapter("TAS: the access hardware is gone (unplugged?)".into()));
+        }
         if self.device {
             return Ok(());
         }
@@ -190,8 +223,82 @@ impl TasAdapter {
     }
 }
 
+impl TasAdapter {
+    /// Notes the outcome of a client call: an I/O error means the TasServer connection is gone.
+    fn note<T>(&mut self, r: &tas::Result<T>) {
+        match r {
+            Err(tas::Error::Io(e)) => {
+                if !self.server_lost {
+                    log_warn!("TAS: connection to the TasServer lost ({e}); reconnecting");
+                }
+                self.server_lost = true;
+                self.client = None;
+                self.session = false;
+                self.device = false;
+                self.check_at = None;
+            }
+            Err(_) => self.failed = true,
+            Ok(_) => {}
+        }
+    }
+
+    /// Opens the TasServer connection, session and device again after it was lost.
+    fn reconnect_server(&mut self) {
+        // A refused connect to a closed local port takes about 2 s on Windows: look first.
+        if is_local(&self.host) && !server_listening(self.port) {
+            return;
+        }
+        match TasClient::connect(&self.host, self.port, "aurix-dbg") {
+            Ok((c, _)) => {
+                self.client = Some(c);
+                self.server_lost = false;
+                self.failed = true;
+                self.last_try = Some(Instant::now());
+                match self.connect_device() {
+                    Ok(_) => log_info!("TAS: TasServer reconnected"),
+                    Err(e) => log_info!("TAS: TasServer reconnected; no device yet ({e})"),
+                }
+            }
+            Err(e) => crate::log_debug!("TAS: reconnect to the TasServer: {e}"),
+        }
+    }
+
+    /// After a failed access: does the target answer, and is the access hardware still there?
+    fn check_health(&mut self) {
+        let Some(c) = self.client.as_mut() else { return };
+        let read = c.read32(SCU_CHIPID);
+        if read.is_ok() {
+            // Only a single access failed (e.g. an unmapped address): nothing to report.
+            self.failed = false;
+            if self.health.is_some() {
+                self.health = Some(LinkHealth::Ok);
+            }
+            return;
+        }
+        self.note(&read);
+        let Some(c) = self.client.as_mut() else { return };
+        let ping = c.ping();
+        self.note(&ping);
+        let Some(c) = self.client.as_mut() else { return };
+        if ping.is_ok() {
+            self.health = Some(LinkHealth::NoDevice);
+            return;
+        }
+        let targets = c.get_targets();
+        self.note(&targets);
+        if let Ok(t) = targets {
+            let listed = t.iter().any(|t| t.identifier == self.identifier);
+            self.health = Some(if listed { LinkHealth::NoDevice } else { LinkHealth::ProbeLost { why: "the miniWiggler is not found (unplugged?)" } });
+        }
+    }
+}
+
 /// Interval of device connect attempts while no device is connected.
 const CONNECT_RETRY: Duration = Duration::from_millis(500);
+/// Interval of health checks after a failed access, and of reconnects to a lost TasServer.
+const HEALTH_CHECK: Duration = Duration::from_millis(250);
+/// `SCU_CHIPID`: reads whenever the target answers.
+const SCU_CHIPID: u64 = 0xF003_6140;
 
 /// How long a TasServer started by [`start_local_server`] gets to accept connections.
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -355,6 +462,10 @@ impl Adapter for TasAdapter {
         let (c, info) = TasClient::connect(&self.host, self.port, "aurix-dbg").map_err(cannot)?;
         log_info!("TAS: {} v{}.{}", info.name, info.v_major, info.v_minor);
         self.client = Some(c);
+        self.inited = true;
+        self.server_lost = false;
+        self.failed = false;
+        self.health = None;
         self.settings = s.clone();
         self.last_try = Some(Instant::now());
         match self.connect_device() {
@@ -366,13 +477,55 @@ impl Adapter for TasAdapter {
         }
     }
 
+    /// Also while the TasServer connection is lost: the core keeps polling, so the adapter can
+    /// reconnect, and ends the sessions if it stays away.
     fn initialized(&self) -> bool {
-        self.client.is_some()
+        self.inited
     }
 
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         self.ensure_device()?;
-        Ok(self.client()?.execute(batch)?)
+        let r = self.client()?.execute(batch);
+        self.note(&r);
+        if let Ok(out) = &r {
+            if out.iter().any(|o| o.err != tas::PL0_ERR_NO_ERROR && o.err != tas::PL0_ERR_CONSEQUENTIAL) {
+                self.failed = true;
+            } else if self.health.is_some_and(|h| h != LinkHealth::Ok) {
+                self.health = Some(LinkHealth::Ok);
+            }
+        }
+        Ok(r?)
+    }
+
+    /// `ProbeLost` while the TasServer or the access hardware is gone; otherwise what the last
+    /// check after a failed access found (`None` until one failed).
+    fn health(&self) -> Option<LinkHealth> {
+        if !self.inited {
+            return None;
+        }
+        if self.server_lost {
+            return Some(LinkHealth::ProbeLost { why: "the TasServer is not reachable" });
+        }
+        self.health
+    }
+
+    /// Reconnects a lost TasServer; after a failed access, checks the target and the access
+    /// hardware (see the module docs). Nothing while all is well.
+    fn background(&mut self) {
+        if !self.inited || self.check_at.is_some_and(|t| t.elapsed() < HEALTH_CHECK) {
+            return;
+        }
+        if self.server_lost {
+            self.check_at = Some(Instant::now());
+            self.reconnect_server();
+            return;
+        }
+        let lost = matches!(self.health, Some(LinkHealth::ProbeLost { .. }));
+        if !self.failed && !lost {
+            return;
+        }
+        self.check_at = Some(Instant::now());
+        self.check_health();
     }
 
     fn limits(&self) -> BatchLimits {
@@ -414,6 +567,7 @@ impl Adapter for TasAdapter {
         self.client.as_mut().map(|c| c.take_resets()).unwrap_or(0)
     }
 
+
     fn set_speed_khz(&mut self, khz: u32) -> Result<()> {
         // Applied when the device is connected.
         self.settings.speed_khz = Some(khz);
@@ -427,6 +581,9 @@ impl Adapter for TasAdapter {
         self.client = None;
         self.session = false;
         self.device = false;
+        self.inited = false;
+        self.server_lost = false;
+        self.health = None;
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

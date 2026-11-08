@@ -67,7 +67,22 @@ pub const SERVICES: &[&str] = &[
     "MemoryMap",
     "ContextReset",
     "Tcl",
+    "AurixTarget",
 ];
+
+/// The `AurixTarget` health JSON: `{state, text, vrefMv?}`, or null when the probe cannot tell.
+pub fn health_json(h: Option<aurix_core::adapter::LinkHealth>) -> serde_json::Value {
+    match h {
+        None => serde_json::Value::Null,
+        Some(h) => {
+            let mut v = serde_json::json!({ "state": h.state(), "text": h.text() });
+            if let Some(mv) = h.vref_mv() {
+                v["vrefMv"] = mv.into();
+            }
+            v
+        }
+    }
+}
 
 /// State shared by all TCF connections.
 pub struct Shared {

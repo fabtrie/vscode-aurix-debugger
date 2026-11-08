@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tas::Batch;
 
-use crate::adapter::{self, Io};
+use crate::adapter::{self, Io, LinkHealth};
 use crate::arch::*;
 use crate::cortex_m;
 use crate::ctx::{Cx, Mode};
@@ -168,6 +168,13 @@ pub fn poll_all(cx: &Cx) {
     if !go {
         return;
     }
+    // Between polls the adapter may ask the probe about the target connection (the BlueBox's
+    // health query): here, never inside a job or a script, so it cannot delay a sequence.
+    cx.with(|c| {
+        if let Some(a) = c.adapter.as_deref_mut() {
+            a.background();
+        }
+    });
     let res = cx.with(|c| -> Result<(Vec<(usize, Transition)>, u64, Vec<usize>)> {
         // A probe that does its own run control answers "is it stopped?" for
         // the TriCore cores by being asked, not by a batch of DBGSR reads.
@@ -257,6 +264,7 @@ pub fn poll_all(cx: &Cx) {
         Ok((out, resets, failed))
     });
 
+    report_health(cx);
     let mut failed_all = false;
     match res {
         Ok((transitions, resets, failed)) => {
@@ -341,6 +349,44 @@ pub fn poll_all(cx: &Cx) {
     });
     for target in unreachable {
         emit(Event::Unreachable { target });
+    }
+}
+
+/// Tells the frontends what the adapter reports about the target connection when it changes, and
+/// ends their sessions once the probe has been gone for `probe_lost_timeout` (0: never).
+fn report_health(cx: &Cx) {
+    let (changed, lost) = cx.with(|c| {
+        let h = c.adapter.as_deref().and_then(|a| a.health());
+        // A change of state, not of the measured supply while it decays or floats.
+        let changed = (h.map(|h| h.state()) != c.health.map(|h| h.state())).then_some(h);
+        c.health = h;
+        let lost = match h {
+            Some(LinkHealth::ProbeLost { why }) => {
+                let since = *c.probe_lost_since.get_or_insert_with(Instant::now);
+                let due = c.probe_lost_timeout_ms > 0
+                    && !c.probe_lost_reported
+                    && since.elapsed() >= Duration::from_millis(c.probe_lost_timeout_ms);
+                c.probe_lost_reported |= due;
+                due.then_some(why)
+            }
+            _ => {
+                c.probe_lost_since = None;
+                c.probe_lost_reported = false;
+                None
+            }
+        };
+        (changed, lost)
+    });
+    if let Some(h) = changed {
+        match h {
+            Some(LinkHealth::Ok) | None => log_info!("Target connection: {}", h.map_or_else(|| "unknown".into(), |h| h.text())),
+            Some(h) => log_warn!("Target connection: {}", h.text()),
+        }
+        emit(Event::Health { health: h });
+    }
+    if let Some(why) = lost {
+        log_warn!("Debug probe lost ({why}): ending the debug sessions");
+        emit(Event::ProbeLost { why: why.to_string() });
     }
 }
 

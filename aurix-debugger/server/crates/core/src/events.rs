@@ -17,6 +17,10 @@ pub enum Event {
     /// A target has not been accessible for [`crate::target::UNREACHABLE_TIME`] (e.g. target not
     /// powered); it is accessible again with the next `Examined`.
     Unreachable { target: usize },
+    /// What the probe reports about the target connection changed (`None`: it cannot tell).
+    Health { health: Option<crate::adapter::LinkHealth> },
+    /// The probe has been gone for longer than `probe_lost_timeout`: frontends end their sessions.
+    ProbeLost { why: String },
     /// Memory written by a frontend (REST/MCP) the other frontends do not know about;
     /// `target` is the core whose view of memory was used.
     MemoryChanged { target: Option<usize>, addr: u32, len: u32 },

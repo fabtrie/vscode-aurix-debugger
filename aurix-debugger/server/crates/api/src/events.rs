@@ -108,6 +108,12 @@ fn convert(handle: &ServerHandle, names: &mut HashMap<usize, String>, ev: Event)
         Event::ResetDetected => ApiEvent::ResetDetected,
         Event::ResetDone => ApiEvent::ResetDone,
         Event::Unreachable { target } => ApiEvent::Unreachable { target: name(handle, names, target) },
+        Event::Health { health } => ApiEvent::Health {
+            state: health.map(|h| h.state().to_string()),
+            text: health.map(|h| h.text()),
+            vref_mv: health.and_then(|h| h.vref_mv()),
+        },
+        Event::ProbeLost { why } => ApiEvent::ProbeLost { why },
         Event::MemoryChanged { target, addr, len } => {
             ApiEvent::MemoryChanged { target: target.map(|t| name(handle, names, t)), address: addr, length: len }
         }

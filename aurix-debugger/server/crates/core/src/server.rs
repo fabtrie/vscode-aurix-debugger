@@ -36,6 +36,8 @@ pub struct Status {
     /// The adapter is connected to the probe (`init` ran successfully).
     pub connected: bool,
     pub targets: Vec<TargetStatus>,
+    /// What the probe reports about the target connection, when it can tell.
+    pub health: Option<crate::adapter::LinkHealth>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -105,6 +107,7 @@ fn publish(cx: &Cx, out: &Mutex<Published>) {
         let s = &p.status;
         s.adapter.as_deref() == adapter
             && s.connected == connected
+            && s.health == c.health
             && s.targets.len() == c.targets.len()
             && s.targets.iter().zip(&c.targets).all(|(a, t)| {
                 a.examined == t.core.examined() && a.reachable == !t.unreachable && a.coreid == t.core.coreid() && a.name == t.name
@@ -121,6 +124,7 @@ fn publish(cx: &Cx, out: &Mutex<Published>) {
             .iter()
             .map(|t| TargetStatus { name: t.name.clone(), coreid: t.core.coreid(), examined: t.core.examined(), reachable: !t.unreachable })
             .collect(),
+        health: c.health,
     });
 }
 

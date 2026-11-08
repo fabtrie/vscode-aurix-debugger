@@ -68,6 +68,13 @@ pub fn start(shared: Arc<Shared>) {
                     }
                 }
                 Event::ResetDetected => shared.stacks.lock().unwrap().clear(),
+                Event::Health { health } => {
+                    shared.broadcast(&wire::event("AurixTarget", "healthChanged", &[crate::health_json(health).to_string()]));
+                }
+                // The probe is gone for good: clients end their debug sessions.
+                Event::ProbeLost { why } => {
+                    shared.broadcast(&wire::event("AurixTarget", "probeLost", &[json!(why).to_string()]));
+                }
                 Event::Shutdown => break,
                 _ => {}
             }

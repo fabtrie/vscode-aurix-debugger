@@ -17,6 +17,8 @@
 //!   from a winIDEA install) after a power cycle, or in place of another
 //!   winIDEA version's.
 //! * [`fpga`]: which debug FPGA image an iC5700 holds; the iC5000's upload.
+//! * [`health`]: the probe's view of the target connection (supply, reset
+//!   latch, debug access), without target accesses.
 //! * [`Model`]: what differs between the two BlueBoxes.
 //! * [`replay`]: plays back a captured winIDEA attach for what follows (target
 //!   connection, core discovery), which is not decoded yet.
@@ -30,6 +32,7 @@ pub mod attach;
 mod fixture;
 pub mod fpga;
 pub mod frame;
+pub mod health;
 pub mod kernel;
 pub mod link;
 pub mod lowlevel;
@@ -41,6 +44,7 @@ pub mod reset;
 #[cfg(windows)]
 pub mod usb;
 
+pub use health::TargetHealth;
 pub use link::Link;
 pub use memory::{Access, MemReply, MAX_CHUNK};
 pub use kernel::Kernel;

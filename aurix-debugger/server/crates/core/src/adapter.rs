@@ -38,6 +38,58 @@ impl Default for BatchLimits {
     }
 }
 
+/// Why the target, or the probe, is not usable, as far as the probe can tell. Probes report
+/// different parts of it: a BlueBox measures the target supply and latches resets, a miniWiggler
+/// (TasServer) only knows whether it sees a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkHealth {
+    Ok,
+    /// The target supply is missing or outside the probe's limits.
+    Unpowered { vref_mv: u32 },
+    /// The target reset since the probe last connected, and the debug connection is down (a
+    /// BlueBox latches the reset until it connects again).
+    Reset,
+    /// The target is supplied, the debug connection is down.
+    NoDebugAccess,
+    /// The access hardware sees no device (miniWiggler: not powered, not connected).
+    NoDevice,
+    /// The probe itself is gone: unplugged, powered off, or its server (TasServer) stopped.
+    /// The core ends the frontends' sessions when this lasts (`probe_lost_timeout`).
+    ProbeLost { why: &'static str },
+}
+
+impl LinkHealth {
+    /// Short name for frontends: `ok`, `unpowered`, `reset`, `noDebugAccess`, `noDevice`, `probeLost`.
+    pub fn state(&self) -> &'static str {
+        match self {
+            LinkHealth::Ok => "ok",
+            LinkHealth::Unpowered { .. } => "unpowered",
+            LinkHealth::Reset => "reset",
+            LinkHealth::NoDebugAccess => "noDebugAccess",
+            LinkHealth::NoDevice => "noDevice",
+            LinkHealth::ProbeLost { .. } => "probeLost",
+        }
+    }
+
+    pub fn text(&self) -> String {
+        match self {
+            LinkHealth::Ok => "target connected".into(),
+            LinkHealth::Unpowered { vref_mv } => format!("target not powered (Vref {vref_mv} mV)"),
+            LinkHealth::Reset => "target reset, reconnecting".into(),
+            LinkHealth::NoDebugAccess => "no debug access to the target".into(),
+            LinkHealth::NoDevice => "the probe sees no device (target not powered or not connected?)".into(),
+            LinkHealth::ProbeLost { why } => format!("debug probe lost: {why}"),
+        }
+    }
+
+    pub fn vref_mv(&self) -> Option<u32> {
+        match self {
+            LinkHealth::Unpowered { vref_mv } => Some(*vref_mv),
+            _ => None,
+        }
+    }
+}
+
 pub trait Adapter {
     fn driver_name(&self) -> &'static str;
     /// Driver-specific Tcl command groups, e.g. `tas-client`.
@@ -95,6 +147,15 @@ pub trait Adapter {
     fn default_coalesce_gap(&self) -> Option<u32> {
         None
     }
+    /// What the probe knows about the target connection, for logs and frontends. `None`: the
+    /// probe cannot tell (the default).
+    fn health(&self) -> Option<LinkHealth> {
+        None
+    }
+    /// Work the adapter does between polls, once per poll period before the run-state batch
+    /// (e.g. the BlueBox's health query). Never called inside a job or a Tcl script, so it cannot
+    /// delay a time-critical sequence.
+    fn background(&mut self) {}
     fn quit(&mut self) {}
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }

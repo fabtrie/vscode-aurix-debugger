@@ -279,6 +279,58 @@
             "type": "object"
           },
           {
+            "description": "What the probe reports about the target connection changed. Without `state` the probe\ncannot tell (TAS without a failure yet, winIDEA, the simulator).",
+            "properties": {
+              "state": {
+                "description": "`ok`, `unpowered`, `reset`, `noDebugAccess`, `noDevice` or `probeLost`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "health",
+                "type": "string"
+              },
+              "vref_mv": {
+                "description": "The target supply the probe measured, when it reports the target unpowered.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The debug probe has been gone for longer than `probe_lost_timeout`; the debug server's\nfrontends end their sessions.",
+            "properties": {
+              "type": {
+                "const": "probe_lost",
+                "type": "string"
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "why"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Memory written through this API.",
             "properties": {
               "address": {

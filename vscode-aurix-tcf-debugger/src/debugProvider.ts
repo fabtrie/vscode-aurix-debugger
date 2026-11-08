@@ -475,6 +475,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private pendingBreakpointStoppedTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private breakpointStopDelayMs: number = 60;
 	private suppressPauseStoppedUntilMs: number = 0;
+	// Whether the last breakpoint stop was reported with allThreadsStopped. When it was not (a GTM
+	// MCS channel kept running), the pause stops of the other TL1 cores in the suppress window are
+	// still reported, focus preserving, or VS Code would keep showing them as running.
+	private breakpointStopCoversAll: boolean = true;
 	// Thread VS Code has focused (aurix/activeThread from the extension). VS Code's toolbar pause
 	// button pauses the focused thread; a pause for any other thread comes from its Call Stack entry.
 	private activeThreadId: number | undefined;
@@ -784,7 +788,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.tcfLogger.log(
 			`[dap] Refocus: from=${from} requestedThreadId=${requested.threadId} requestedCtx=${requested.ctx} -> breakpointThreadId=${p.threadId} breakpointCtx=${p.ctx}`
 		);
-		this.sendStoppedEvent(StoppedEventReason.breakpoint, p.threadId, { allThreadsStopped: p.ctx ? this.stopsAllCores(p.ctx) : true });
+		this.sendStoppedEvent(StoppedEventReason.breakpoint, p.threadId, { allThreadsStopped: p.ctx ? this.stopCoversAllThreads(p.ctx) : true });
 	}
 
 	private tryResolveFrame(frameId: number): { threadId?: number; ctx?: string; stack?: string } {
@@ -1229,6 +1233,39 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 */
 	private stopsAllCores(contextId: string): boolean {
 		return this.contextMachines.get(contextId) !== AurixTCFDebugSession.MACHINE_MCS_ASM;
+	}
+
+	/** Whether a stop of this context leaves no thread running, so allThreadsStopped is true.
+	 *
+	 *  TL1 does not reach the GTM: its MCS channels run on while the TriCores are halted (and the
+	 *  GTM is not suspended). Claiming all threads stopped then makes VS Code show the running
+	 *  channels as paused, without a call stack, since no stop was ever fetched for them.
+	 */
+	private stopCoversAllThreads(contextId: string): boolean {
+		if (!this.stopsAllCores(contextId)) {
+			return false;
+		}
+		for (const [id, machine] of this.contextMachines) {
+			if (machine === AurixTCFDebugSession.MACHINE_MCS_ASM && id !== contextId && !this.suspendedContextIds.has(id)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** Reports a breakpoint stop. When a channel keeps running (no allThreadsStopped), the other
+	 *  TL1 cores that are suspended already get their own focus preserving stop. */
+	private sendBreakpointStoppedEvent(reason: StoppedEventReason, threadId: number, contextId: string, hitBreakpointIds?: number[]): void {
+		const all = this.stopCoversAllThreads(contextId);
+		this.breakpointStopCoversAll = all;
+		this.sendStoppedEvent(reason, threadId, { allThreadsStopped: all, hitBreakpointIds });
+		if (!all && this.stopsAllCores(contextId)) {
+			for (const ctx of this.suspendedContextIds) {
+				if (ctx !== contextId && this.stopsAllCores(ctx)) {
+					this.sendStoppedEvent(StoppedEventReason.pause, this.getOrAssignThreadId(ctx), { preserveFocus: true });
+				}
+			}
+		}
 	}
 
 	/** Records each context's architecture, so stopsAllCores() also knows contexts that appeared
@@ -4232,10 +4269,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.onThreadSuspended(threadId);
 			this.notePrimaryBreakpointStop(threadId, contextId);
 			const data = this.isDataBreakpointId(id);
-			this.sendStoppedEvent(data ? StoppedEventReason.dataBreakpoint : StoppedEventReason.breakpoint, threadId, {
-				allThreadsStopped: this.stopsAllCores(contextId),
-				hitBreakpointIds: data ? [id] : undefined,
-			});
+			this.sendBreakpointStoppedEvent(data ? StoppedEventReason.dataBreakpoint : StoppedEventReason.breakpoint, threadId, contextId, data ? [id] : undefined);
 			void this.emitSourceLocation(contextId);
 		}, this.breakpointStopDelayMs);
 		this.pendingBreakpointStoppedTimers.set(contextId, timer);
@@ -4404,7 +4438,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.notePrimaryBreakpointStop(threadId, contextId);
 			// VS Code highlights the data breakpoint that hit; it cannot tell from the PC.
 			const hit = reason === StoppedEventReason.dataBreakpoint ? this.hitBreakpointIds(info.data) : undefined;
-			this.sendStoppedEvent(reason, threadId, { allThreadsStopped: this.stopsAllCores(contextId), hitBreakpointIds: hit });
+			this.sendBreakpointStoppedEvent(reason, threadId, contextId, hit);
 			void this.emitSourceLocation(contextId);
 			return;
 		}
@@ -4436,6 +4470,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// Delay pause-type stops slightly. This helps ensure a breakpoint stop becomes the primary
 		// UI context when multiple cores suspend nearly simultaneously.
 		if (Date.now() < this.suppressPauseStoppedUntilMs) {
+			if (!this.breakpointStopCoversAll && this.stopsAllCores(contextId)) {
+				// The breakpoint stop did not claim all threads (an MCS channel runs on): report
+				// this TL1 core's stop without taking the focus from the breakpoint.
+				this.sendStoppedEvent(StoppedEventReason.pause, threadId, { preserveFocus: true });
+				this.invalidateLiveWatchContext();
+				return;
+			}
 			this.focusLog(`suppress pause StoppedEvent for ${contextId} (threadId=${threadId})`);
 			return;
 		}
@@ -4446,6 +4487,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const timer = setTimeout(() => {
 				this.pendingPauseStoppedTimers.delete(contextId);
 				if (!this.suspendedContextIds.has(contextId)) {
+					return;
+				}
+				if (Date.now() < this.suppressPauseStoppedUntilMs && !this.breakpointStopCoversAll && this.stopsAllCores(contextId)) {
+					this.sendStoppedEvent(StoppedEventReason.pause, threadId, { preserveFocus: true });
 					return;
 				}
 				if (Date.now() < this.suppressPauseStoppedUntilMs || Date.now() < this.userPauseUntilMs) {

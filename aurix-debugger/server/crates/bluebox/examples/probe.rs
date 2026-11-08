@@ -54,6 +54,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut restart_kernel = false;
     let mut fpga_status = false;
     let mut bringup = true;
+    let mut handshake_only = false;
+    let mut load_any = false;
     let mut map: Vec<(u32, usize)> = Vec::new();
     let mut watch: Option<f64> = None;
     let mut script: Option<std::path::PathBuf> = None;
@@ -93,6 +95,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // --fpga-status: ask for the debug FPGA's status (after the attach's first messages)
             "--fpga-status" => fpga_status = true,
             "--no-bringup" => bringup = false,
+            // --handshake-only: one handshake (it ends with `L`), print the `I` state, exit.
+            "--handshake-only" => handshake_only = true,
+            // --load-any: one handshake, then load the kernel whatever the state (no waiting, no
+            // `////// 01`), to see what an unknown state takes.
+            "--load-any" => load_any = true,
             "--watch" => watch = Some(val()?.parse()?),
             "--script" => script = Some(std::path::PathBuf::from(val()?)),
             "--list" => list = true,
@@ -226,6 +233,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let drained = bluebox::Link::drain(&mut link);
         if drained > 0 {
             println!("discarded {drained} stale bytes from the IN pipe");
+        }
+        if handshake_only || load_any {
+            let mut p = Probe::start(link)?;
+            let hs = p.handshake()?;
+            println!("raw handshake: I answer {} (state 0x{:02x}), board ids {:?}", hex(&hs.ident, 7), hs.state(), hs.board_ids());
+            if handshake_only {
+                return Ok(());
+            }
+            let path = kernel_path.clone().map_or_else(|| bluebox::kernel::find_kernel(None, p.model()), Ok)?;
+            let k = bluebox::Kernel::from_file(&path)?;
+            let t = Instant::now();
+            p.ensure_kernel(bluebox::KernelState::None, Some(&k), |_| {})?;
+            println!("kernel loaded from state 0x{:02x} in {:.0} ms", hs.state(), ms(t));
+            drop(p);
+            let mut p = Probe::start(reopen(serial.as_deref())?)?;
+            let hs = p.handshake()?;
+            println!("handshake after: I answer {} (state 0x{:02x}), ours {:?}", hex(&hs.ident, 7), hs.state(), p.kernel_state(&hs)?);
+            return Ok(());
         }
         let t = Instant::now();
         drop(link);

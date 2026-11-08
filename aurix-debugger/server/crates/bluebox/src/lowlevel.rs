@@ -78,6 +78,13 @@ const HELLO: [([u8; 8], Option<usize>); 4] = [
 
 /// `I` state after a power cycle: no kernel runs.
 pub const STATE_NO_KERNEL: u8 = 0x00;
+/// `I` state of a boot loader waiting for a kernel: a handshake ran (it ends with `L`, which
+/// starts a kernel load) and no kernel followed, e.g. a connect that stopped after the
+/// handshake because it had no kernel file. It stays until a kernel is loaded or the probe is
+/// power cycled. Loading works from here, as from [`STATE_NO_KERNEL`] (iC5700 B, 2026-11-08); a
+/// kernel restart (`////// 01`) sent here got no answer and the probe answered nothing more
+/// until a power cycle.
+pub const STATE_LOAD_MODE: u8 = 0x01;
 /// `I` states of an iC5000 without a kernel have the two top bits set: `ef`
 /// in winIDEA's cold attach, `eb` right after a power cycle. With its kernel
 /// it reports `2f`, as the iC5700 does.
@@ -102,19 +109,20 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    /// None of the known states (00 no kernel, 2f a kernel, 64 another
+    /// None of the known states (00 or 01 no kernel, 2f a kernel, 64 another
     /// version's kernel): the probe may still be booting, or its kernel is
-    /// stuck (01 and 40 were seen). [`open_ready`] waits; if the state stays,
+    /// stuck (40 was seen). [`open_ready`] waits; if the state stays,
     /// stop the kernel with [`Probe::restart_kernel`] and load it again.
     pub fn needs_restart(&self) -> bool {
         !self.no_kernel() && ![STATE_KERNEL, STATE_FOREIGN_KERNEL].contains(&self.state())
     }
 
-    /// No kernel runs: `I` state 00, or one with [`NO_KERNEL_IC5000_MASK`] set
-    /// (an iC5000; the iC5700 never reported such states).
+    /// No kernel runs: `I` state 00, 01 ([`STATE_LOAD_MODE`], a boot loader left
+    /// waiting for one), or one with [`NO_KERNEL_IC5000_MASK`] set (an iC5000; the
+    /// iC5700 never reported such states).
     pub fn no_kernel(&self) -> bool {
         let s = self.state();
-        s == STATE_NO_KERNEL || s & NO_KERNEL_IC5000_MASK == NO_KERNEL_IC5000_MASK
+        s == STATE_NO_KERNEL || s == STATE_LOAD_MODE || s & NO_KERNEL_IC5000_MASK == NO_KERNEL_IC5000_MASK
     }
 
     /// The `I` answer's state byte.
@@ -205,10 +213,11 @@ impl<L: Link> Probe<L> {
     pub fn handshake(&mut self) -> Result<Handshake> {
         let ident = self.command(b'I', &[], 7)?;
         // Last byte, a state rather than a flag: 00 when no kernel runs (after a
-        // power cycle, once the probe has booted); 2f with a kernel that takes
-        // the attach. 01 and 40 were seen too; attaching in those states timed
-        // out more than once and left the probe hung until a power cycle. Only 2f
-        // counts as a usable kernel; see [`open_ready`] for the others.
+        // power cycle, once the probe has booted); 01 when a handshake left the
+        // boot loader waiting for a kernel ([`STATE_LOAD_MODE`]); 2f with a kernel
+        // that takes the attach. 40 was seen too; attaching in it timed out and
+        // left the probe hung until a power cycle. Only 2f counts as a usable
+        // kernel; see [`open_ready`] for the others.
         let kernel_running = match ident.last() {
             Some(0x2f) => true,
             Some(_) => false,
@@ -380,12 +389,15 @@ pub fn open_ready<L: Link>(
             std::thread::sleep(std::time::Duration::from_secs(1));
             continue;
         }
-        note(&format!("probe state 0x{:02x} after {} s; restarting its kernel", hs.state(), wait.as_secs()));
-        p.restart_kernel()?;
+        let state = hs.state();
+        note(&format!("probe state 0x{state:02x} after {} s; restarting its kernel", wait.as_secs()));
+        // A probe that does not take the restart is beyond what the host can fix.
+        let stuck = |e: Error| Error::Kernel(format!("the probe stayed in state 0x{state:02x} and did not take a kernel restart ({e}); power-cycle the BlueBox"));
+        p.restart_kernel().map_err(stuck)?;
         drop(p);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let mut p = Probe::start(open()?)?;
-        let hs = p.handshake()?;
+        let mut p = Probe::start(open()?).map_err(stuck)?;
+        let hs = p.handshake().map_err(stuck)?;
         return Ok((p, hs));
     }
 }
@@ -495,7 +507,9 @@ mod tests {
             assert!(hs(s).no_kernel() && !hs(s).needs_restart(), "{s:02x}");
         }
         assert!(!hs(0x2f).no_kernel() && !hs(0x2f).needs_restart());
-        assert!(hs(0x01).needs_restart() && hs(0x40).needs_restart(), "the iC5700's stuck states");
+        // A boot loader a handshake left waiting for a kernel: loaded at once, never restarted.
+        assert!(hs(STATE_LOAD_MODE).no_kernel() && !hs(STATE_LOAD_MODE).needs_restart());
+        assert!(hs(0x40).needs_restart(), "the iC5700's stuck state");
     }
 
     #[test]

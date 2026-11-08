@@ -610,7 +610,8 @@ impl BlueBoxAdapter {
         }
         let why = match state {
             KernelState::Foreign => "the probe runs another winIDEA version's kernel",
-            _ => "the probe has no kernel running (it was power cycled)",
+            // After a power cycle, or a connect that stopped before loading one (`I` state 01).
+            _ => "the probe has no kernel running",
         };
         // Only winIDEA 9.21.417's kernel: this driver's service numbers and attach are that version's.
         let kpath = match &self.kernel {

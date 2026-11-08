@@ -152,8 +152,8 @@ impl Install {
 
 /// Folders winIDEA is usually installed in: `WINIDEA_DIR`, `C:\winIDEA`,
 /// `C:\winIDEA*` and `C:\iSYSTEM\*` folders (installs side by side), and
-/// Chocolatey's `winidea.*` packages (in `%ChocolateyInstall%\lib`, by default
-/// `C:\ProgramData\chocolatey\lib`).
+/// Chocolatey's `winidea.*` packages (in the `lib` folder of each Chocolatey root
+/// [`chocolatey_roots`] finds).
 fn usual_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(d) = std::env::var("WINIDEA_DIR") {
@@ -174,8 +174,9 @@ fn usual_dirs() -> Vec<PathBuf> {
     };
     dirs.extend(listed(r"C:\", "winidea"));
     dirs.extend(listed(r"C:\iSYSTEM", ""));
-    let choco = std::env::var("ChocolateyInstall").unwrap_or_else(|_| r"C:\ProgramData\chocolatey".into());
-    dirs.extend(listed(&format!(r"{choco}\lib"), "winidea."));
+    for root in chocolatey_roots(std::env::var_os("ChocolateyInstall"), std::env::var_os("PATH")) {
+        dirs.extend(listed(&root.join("lib").to_string_lossy(), "winidea."));
+    }
     let mut seen = Vec::new();
     dirs.retain(|d| {
         let k = d.to_string_lossy().to_ascii_lowercase();
@@ -184,6 +185,33 @@ fn usual_dirs() -> Vec<PathBuf> {
         new
     });
     dirs
+}
+
+/// Where Chocolatey keeps its packages: `%ChocolateyInstall%` when it is set, the folder above
+/// the `bin` that holds a `choco.exe` on `PATH` (a Chocolatey installed elsewhere than its
+/// default, without the variable, e.g. `D:\tools\chocolatey`), and the default
+/// `C:\ProgramData\chocolatey`. In that order, without repeats.
+fn chocolatey_roots(var: Option<std::ffi::OsString>, path: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(v) = var.filter(|v| !v.is_empty()) {
+        roots.push(v.into());
+    }
+    for dir in path.iter().flat_map(std::env::split_paths) {
+        if dir.join("choco.exe").is_file() {
+            if let Some(root) = dir.parent().filter(|_| dir.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin"))) {
+                roots.push(root.to_path_buf());
+            }
+        }
+    }
+    roots.push(PathBuf::from(r"C:\ProgramData\chocolatey"));
+    let mut seen = Vec::new();
+    roots.retain(|r| {
+        let k = r.to_string_lossy().trim_end_matches(['\\', '/']).to_ascii_lowercase();
+        let new = !seen.contains(&k);
+        seen.push(k);
+        new
+    });
+    roots
 }
 
 /// The winIDEA installs in the usual folders.
@@ -261,6 +289,22 @@ mod tests {
         for d in [good, other, unknown] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    #[test]
+    fn chocolatey_is_found_through_its_variable_or_choco_on_the_path() {
+        let d = std::env::temp_dir().join(format!("bluebox-choco-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::write(d.join("bin").join("choco.exe"), "").unwrap();
+        let path = std::env::join_paths([std::env::temp_dir(), d.join("bin")]).unwrap();
+        let default = PathBuf::from(r"C:\ProgramData\chocolatey");
+        // No variable: the root above the `bin` holding choco.exe, then the default.
+        assert_eq!(chocolatey_roots(None, Some(path.clone())), vec![d.clone(), default.clone()]);
+        // The variable first; the same root found twice is listed once.
+        assert_eq!(chocolatey_roots(Some(d.clone().into()), Some(path)), vec![d.clone(), default.clone()]);
+        assert_eq!(chocolatey_roots(Some("".into()), None), vec![default]);
+        let _ = std::fs::remove_dir_all(d);
     }
 
     fn rec(kind: char, addr: u32, data: &[u8]) -> String {

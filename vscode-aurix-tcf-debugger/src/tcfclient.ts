@@ -20,6 +20,7 @@ import { DefaultVariableHelper } from "./variables/helper";
 import { SymbolRawValueProvider } from "./variables/symbol";
 import { ClientVariable, FixedNameProvider, RawValueProvider, SymbolNameProvider } from "./variables/types";
 import * as validateBreakpointData from './tcf/validators/validate-BreakpointData';
+import { AURIX_TARGET_SERVICE, GetHealthAurixTargetCommand, TargetHealth, parseHealthChangedEvent, parseProbeLostEvent } from './tcf/aurixtarget';
 
 class EvaluatedRawValueProvider implements RawValueProvider {
     constructor(private readonly rawValue: Buffer, private readonly bigEndian: boolean) {
@@ -592,6 +593,51 @@ export abstract class TCFClient extends AbstractTCFClient {
         this.console.log(`${service}.${event}`);
     }
 
+    protected onAurixTargetEvent(event: string, datas: Buffer[]): void {
+        switch (event) {
+            case "healthChanged":
+                let health: TargetHealth | null;
+                try {
+                    health = parseHealthChangedEvent(datas);
+                } catch (e) {
+                    this.console.log(`Bad AurixTarget.healthChanged event: ${String(e)}`);
+                    break;
+                }
+                this.onTargetHealth(health);
+                break;
+            case "probeLost":
+                let why: string;
+                try {
+                    why = parseProbeLostEvent(datas);
+                } catch (e) {
+                    // Still lost, just without a reason.
+                    this.console.log(`Bad AurixTarget.probeLost event: ${String(e)}`);
+                    why = '';
+                }
+                this.onProbeLost(why);
+                break;
+            default:
+                this.console.log(`Unknown AurixTarget event: ${event}`);
+                break;
+        }
+    }
+
+    /** Probe/target health changed (null: unknown). */
+    protected onTargetHealth(body: TargetHealth | null): void {
+    }
+
+    /** The debug probe has been gone for more than 1 s: the debug session must end. */
+    protected onProbeLost(why: string): void {
+    }
+
+    /** One `AurixTarget.getHealth`; undefined when the server has no AurixTarget service. */
+    async getTargetHealth(): Promise<TargetHealth | null | undefined> {
+        if (!this.supportedServices?.includes(AURIX_TARGET_SERVICE)) {
+            return undefined;
+        }
+        return this.sendCommand(new GetHealthAurixTargetCommand());
+    }
+
     //TODO: This design should be changed. Services should register their own event handler somehow then provide a way for the client to be notified...
     protected onEvent(service: string, event: string, datas: Buffer[]): void {
         switch (service) {
@@ -607,6 +653,9 @@ export abstract class TCFClient extends AbstractTCFClient {
             case "Memory": // memoryChanged
             case "Registers": // registerChanged
                 this.onTargetDataChanged(service, event);
+                break;
+            case AURIX_TARGET_SERVICE:
+                this.onAurixTargetEvent(event, datas);
                 break;
             default:
                 this.console.log(`Unknown service event: ${service}.${event}`);

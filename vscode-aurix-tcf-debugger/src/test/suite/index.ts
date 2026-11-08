@@ -23,6 +23,7 @@ export function run(): Promise<void> {
 	mocha.addFile(path.join(testsRoot, 'svdPeripherals.test'));
 	mocha.addFile(path.join(testsRoot, 'svdPeripheralsCommand.test'));
 	mocha.addFile(path.join(testsRoot, 'sourceFileMap.test'));
+	mocha.addFile(path.join(testsRoot, 'targetHealth.test'));
 	mocha.addFile(path.join(testsRoot, 'breakpoint.stopat.test'));
 	mocha.addFile(path.join(testsRoot, 'debug.stress.test'));
 	return new Promise((resolve, reject) => {

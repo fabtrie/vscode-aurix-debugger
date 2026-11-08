@@ -52,6 +52,7 @@ import {
 } from './tcf-all';
 import { GetChildrenRegistersCommand, GetContextRegistersCommand, GetRegistersCommand, SetRegistersCommand } from './tcf/registers';
 import { TCL_SERVICE, TclEvalCommand } from './tcf/tcl';
+import { TargetHealth } from './tcf/aurixtarget';
 import { AssignExpressionsCommand, CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, GetContextExpressionsCommand } from './tcf/expressions';
 import { FindByAddrSymbolsCommand, FindByNameSymbolsCommand, GetChildrenSymbolsCommand, GetContextSymbolsCommand } from './tcf/symbols';
 import { encodeVariableValue } from './variables/encode';
@@ -500,6 +501,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private externalPending = new Set<string>();
 	/** Function breakpoints set in VS Code: name (symbol, address or file:line) -> DAP ID. */
 	private functionBreakpoints = new Map<string, number>();
+	/** `AurixTarget.healthChanged` events so far: a getHealth answer older than one is dropped. */
+	private targetHealthEvents = 0;
+	/** The session already ended because the probe was lost. */
+	private probeLostTerminated = false;
 
 	/** `breakpointUi`: shows the breakpoints of other clients in VS Code (none outside VS Code). */
 	/** `sourceMappingStore`: keeps the learned source path mappings across sessions. */
@@ -559,11 +564,50 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				outer.tcfLogger.error(`Debug server connection error: ${String(err)}`);
 				outer.sendEvent(new TerminatedEvent());
 			}
+			protected onTargetHealth(body: TargetHealth | null): void {
+				outer.targetHealthEvents++;
+				outer.sendEvent(new Event('aurix/targetHealth', body));
+			}
+			protected onProbeLost(why: string): void {
+				outer.onProbeLost(why);
+			}
 		}(this.tcfLogger);
 		this.liveWatchEvaluator = new LiveWatchEvaluator(this.tcfClient, (message) => this.tcfLogger.log(message), (core) => this.contextIdOfCoreRef(core));
 
 		this.setDebuggerLinesStartAt1(true);
 		this.setDebuggerColumnsStartAt1(true);
+	}
+
+	/**
+	 * The probe/target health right after connecting, for the status bar; later changes come as
+	 * `AurixTarget.healthChanged` events. Servers without the AurixTarget service send nothing.
+	 */
+	private async sendInitialTargetHealth(): Promise<void> {
+		const eventsBefore = this.targetHealthEvents;
+		let health: TargetHealth | null | undefined;
+		try {
+			health = await this.tcfClient.getTargetHealth();
+		} catch (e) {
+			this.tcfLogger.log(`AurixTarget.getHealth failed: ${AurixTCFDebugSession.formatError(e)}`);
+			return;
+		}
+		if (health === undefined || this.targetHealthEvents !== eventsBefore) {
+			return;
+		}
+		this.sendEvent(new Event('aurix/targetHealth', health));
+	}
+
+	/** The debug probe has been gone for more than 1 s: end the session like a lost connection. */
+	private onProbeLost(why: string) {
+		if (this.probeLostTerminated) {
+			return;
+		}
+		this.probeLostTerminated = true;
+		const reason = why.trim() !== '' ? why : 'unknown reason';
+		this.tcfLogger.error(`Debug probe lost: ${reason}`);
+		this.sendEvent(new OutputEvent(`Debug probe lost: ${reason}\n`, 'stderr'));
+		this.sendEvent(new Event('aurix/probeLost', { why: reason }));
+		this.sendEvent(new TerminatedEvent());
 	}
 
 	private focusLog(message: string) {
@@ -2431,6 +2475,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.startupLog('connecting...');
 			await this.tcfClient.connect(host, port);
 			this.startupLog('connected');
+			void this.sendInitialTargetHealth();
 			const flashFiles = AurixTCFDebugSession.getFlashFiles(args);
 			if (args.enableFlashing === true) {
 				if (flashFiles.length === 0) {

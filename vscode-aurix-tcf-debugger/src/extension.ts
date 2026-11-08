@@ -36,6 +36,7 @@ import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 import { CoreRef, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
 import { SourceMappingStore, SourcePrefixMapping } from './sourceFileMap';
+import { probeLostReason, targetHealthStatus } from './targetHealth';
 
 let tcfAgentProcess: ChildProcess | undefined;
 let extensionContext: vscode.ExtensionContext;
@@ -56,6 +57,9 @@ let instructionStepStatusItem: vscode.StatusBarItem | undefined;
 const instructionStepStateKey = 'aurix-debugger.instructionSteppingEnabled';
 let lastInstructionSteppingEnabled = false;
 let liveWatchStatusItem: vscode.StatusBarItem | undefined;
+let targetHealthItem: vscode.StatusBarItem | undefined;
+/** Last `aurix/targetHealth` body per debug session ID, in the order they were reported. */
+const targetHealthBySession = new Map<string, unknown>();
 let liveWatches: LiveWatchManager | undefined;
 let osViewProvider: OsViewProvider | undefined;
 let debugLayout: DebugLayout | undefined;
@@ -376,6 +380,10 @@ export function activate(context: vscode.ExtensionContext) {
 	liveWatchStatusItem.command = 'aurix-debugger.configureLiveWatch';
 	liveWatchStatusItem.tooltip = 'Configure the global live update interval';
 	context.subscriptions.push(liveWatchStatusItem);
+	// Probe/target health from the debug server (AurixTarget service); hidden while all is well.
+	targetHealthItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+	targetHealthItem.name = 'AURIX Target Health';
+	context.subscriptions.push(targetHealthItem);
 	// Like the Watch view, every Live Watch updates on a break, also for paused expressions and when
 	// the periodic refresh is off. The adapter's stopped event also covers cores stopping without focus.
 	context.subscriptions.push(
@@ -602,6 +610,17 @@ export function activate(context: vscode.ExtensionContext) {
 			if (e.session.type !== 'aurixdbg') {
 				return;
 			}
+			if (e.event === 'aurix/targetHealth') {
+				// Re-inserted so the most recently reporting session is shown.
+				targetHealthBySession.delete(e.session.id);
+				targetHealthBySession.set(e.session.id, e.body);
+				updateTargetHealthItem();
+				return;
+			}
+			if (e.event === 'aurix/probeLost') {
+				void vscode.window.showErrorMessage('Debug probe lost: ' + probeLostReason(e.body));
+				return;
+			}
 			if (e.event !== 'aurix/sourceLocation') {
 				return;
 			}
@@ -629,7 +648,12 @@ export function activate(context: vscode.ExtensionContext) {
 			missingSourcesLogged.delete(session.id);
 			missingSourcePromptShown.delete(session.id);
 			aurixDebugSessions.delete(session);
+			targetHealthBySession.delete(session.id);
 			activeAurixSessions =Math.max(0, activeAurixSessions - 1);
+			if (activeAurixSessions === 0) {
+				targetHealthBySession.clear();
+			}
+			updateTargetHealthItem();
 			if (activeAurixSessions === 0) {
 				updateInstructionSteppingStatus(lastInstructionSteppingEnabled, false);
 				updateLiveWatchStatus(false);
@@ -1736,6 +1760,23 @@ function updateLiveWatchStatus(visible: boolean): void {
 	} else {
 		liveWatchStatusItem.hide();
 	}
+}
+
+/** Shows the health of the session that reported last; hidden when it is ok or unknown. */
+function updateTargetHealthItem(): void {
+	if (!targetHealthItem) {
+		return;
+	}
+	const latest = [...targetHealthBySession.values()].pop();
+	const status = targetHealthStatus(latest);
+	if (!status) {
+		targetHealthItem.hide();
+		return;
+	}
+	targetHealthItem.text = status.text;
+	targetHealthItem.tooltip = status.tooltip;
+	targetHealthItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+	targetHealthItem.show();
 }
 
 async function setInstructionSteppingEnabled(value: boolean): Promise<void> {

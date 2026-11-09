@@ -9,7 +9,7 @@ The extension uses `aurix-dbg`, a debug server that reaches the target through I
 ## Features
 
 - Multi-core debugging of the TriCore cores, the HSM and the GTM MCS channels
-- Line, function and instruction breakpoints, optionally only on chosen cores (`@1`, `@hsm`), in a chosen AUTOSAR task or under a condition (`count > 100`)
+- Line, function and instruction breakpoints, optionally only on chosen cores (`@1`, `@hsm`, `@scr`), in a chosen AUTOSAR task or under a condition (`count > 100`)
 - Data breakpoints (watchpoints) on variables, watch expressions and addresses: break on write, read or both
 - Step in/out, step over, continue/pause, restart, terminate
 - Call stack and variables, including frames without debug information
@@ -102,9 +102,32 @@ Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the 
 - `sourceFileMap` maps path prefixes in the debug information onto local folders, and `sourceSearchPaths` lists folders searched for sources that are not found, e.g. when a compiler cache supplied objects built in another checkout.
 - `device` selects the SVD file bundled with the extension for the Peripheral view: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
 
+### Standby controller (SCR)
+
+The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSYSTEM BlueBox when the device's debug mode is DAP Standard. Turn it on with a `configCommands` entry:
+
+```json
+{
+  "type": "aurixdbg",
+  "request": "launch",
+  "name": "AURIX Debug with SCR",
+  "autoStartAgent": true,
+  "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
+  "configCommands": ["set tc3xx_scr_target 1"],
+  "symbolFiles": ["${workspaceFolder}/build/app.elf"],
+  "device": "TC37x"
+}
+```
+
+- The SCR shows in the Call Stack as its own thread (`tc37x.scr`), with disassembly, registers, stepping and instruction breakpoints.
+- It is not on the trigger line that halts the TriCores and the HSM together: a TriCore breakpoint or the toolbar's pause leaves it running, and an SCR breakpoint stops only the SCR. Pause it from its own thread.
+- Its code addresses are `0x0000`..`0xFFFF`, the SCR's own code space; they overlap TriCore addresses but mean the SCR's code. **Go to Address or Symbol** and instruction breakpoints take the address on the core whose disassembly is shown.
+- `x@scr` in the Watch or Live Watch evaluates `x` on the SCR; `@scr` in a breakpoint condition halts only the SCR.
+- TriCore ELF files are never mapped to the SCR. An SCR program (SDCC output) is no ELF; list it in `symbolFiles` with `"cores": ["scr"]` to use it for the SCR.
+
 ### Breakpoints on chosen cores
 
-Without anything else, a breakpoint halts every core that reaches it. To halt only some cores, put them in the breakpoint's condition (`@1`, `@0,2`, `@hsm`, or with a task filter `task == ComTask @1`), or after a function breakpoint's name (`Os_Task_10ms@1`). **Halt Only on Core…** and **Halt Only in Task…** on the line number context menu set the same.
+Without anything else, a breakpoint halts every core that reaches it. To halt only some cores, put them in the breakpoint's condition (`@1`, `@0,2`, `@hsm`, `@scr`, or with a task filter `task == ComTask @1`), or after a function breakpoint's name (`Os_Task_10ms@1`). **Halt Only on Core…** and **Halt Only in Task…** on the line number context menu set the same.
 
 ### Conditions
 
@@ -135,7 +158,7 @@ The Live Watch view periodically refreshes selected global variables. Use the vi
 Once configured, the active interval appears in the view header (highlighted in orange). Resume the target to run the cores and observe the selected global variables update automatically.
 
 - Entries look like the WATCH section: `name: value` in the theme's debug colors, with changed values highlighted. Structs and arrays show a short preview (`{a: 1, b: 2, …}`) and can be expanded. Pointers can be expanded to show the value they point to.
-- `expr@N` evaluates an expression on core N (`expr@hsm` on the HSM), e.g. for a variable in a core's local RAM.
+- `expr@N` evaluates an expression on core N (`expr@hsm` on the HSM, `expr@scr` on the SCR), e.g. for a variable in a core's local RAM.
 - Double-click a value (or press Enter) to change it. Double-click the name (or press F2) to edit the expression, e.g. to fix a typo. The context menu also copies the value or the expression.
 - Right-click a register or field in the **XPeripherals** view and choose **Add to Live Watch**. Registers show as hex and can be set. Fields show their bits and are read-only; change them in the XPeripherals view.
 - **Pause Updates** on an entry moves it to the **Paused** group, which is not refreshed while the target runs. **Resume Updates** moves it back.

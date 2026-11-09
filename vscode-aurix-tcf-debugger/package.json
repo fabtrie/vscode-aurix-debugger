@@ -922,7 +922,7 @@
 								}
 							},
 							"scrElfPath": {
-								"description": "Path to the SCR ELF executable",
+								"description": "Path to the symbol file of the SCR (standby controller, an XC800 core). A TriCore ELF is never mapped to the SCR.",
 								"type": "string"
 							},
 							"additionalAgentOptions": {

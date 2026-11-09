@@ -65,6 +65,7 @@ import { GetInfoOsCommand, GetObjectsOsCommand, GetRunningOsCommand, GetProfileO
 import { LiveWatchEvaluator, LiveWatchRequestItem, splitLiveWatchCore } from './liveWatchEvaluator';
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
 import { CoreRef, describeCores, capitalize, parseBreakpointCondition, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
+import * as arch from './coreArchitecture';
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 
 type ElfSymbol = { name: string; address: number; size: number; file?: string };
@@ -440,9 +441,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 * Address picked with "Go to Address or Symbol". VS Code's Disassembly view can only be moved by
 	 * focusing a stack frame, so the target is shown as an extra frame at the bottom of the suspended
 	 * cores' call stacks until a core resumes. It is added to every core because refreshing the call
-	 * stacks may move the focus to another core.
+	 * stacks may move the focus to another core - every core that shares the address space of `ctx`,
+	 * the core it was resolved for: an MCS channel's or the SCR's addresses mean nothing elsewhere.
 	 */
-	private disassemblyJumpTarget: { address: number; label: string } | undefined;
+	private disassemblyJumpTarget: { address: number; label: string; ctx?: string } | undefined;
 	private elfSymbols: { functions: ElfSymbol[]; variables: ElfSymbol[] } | undefined;
 	private disassemblyOpcodeBytes: DisassemblyOpcodeBytes;
 
@@ -666,7 +668,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// Only the cores that break together anyway (the TriCores and the HSM, through TL1) are
 		// paused. A GTM MCS channel is left running: disabling it stops the sequencer the
 		// application drives its PWM with, which changes the machine's behaviour rather than just
-		// observing it. Pausing a single channel stays possible from its own thread.
+		// observing it. Pausing a single channel stays possible from its own thread. The SCR (an
+		// independent core as well) is left running too: it may be the standby supervisor.
 		try {
 			for (let attempt = 0; attempt < 2; attempt++) {
 				const infos = await this.tcfClient.getThreads();
@@ -1210,43 +1213,39 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	/** Symbol file kind of GTM MCS assembler sources (no ELF: the server assembles them). */
-	private static readonly MACHINE_MCS_ASM = -1;
-	/** Size of a GTM MCS module RAM, the whole MCS program space (3072 words, TC3xx UM MCS chapter). */
-	private static readonly MCS_RAM_BYTES = 3072 * 4;
+	private static readonly MACHINE_MCS_ASM = arch.MACHINE_MCS_ASM;
+	/** The TC3xx standby controller (SCR), an XC800 (8051) core: EM_8051. */
+	private static readonly MACHINE_XC800 = arch.MACHINE_XC800;
 
 	/** ELF e_machine of a RunControl context's architecture ("Architecture" property; default TriCore). */
 	private static contextMachine(info: any): number {
-		const arch = typeof info?.Architecture === 'string' ? info.Architecture.toLowerCase() : 'tricore';
-		switch (arch) {
-			case 'arm': return 40;
-			case 'gtm_mcs': return AurixTCFDebugSession.MACHINE_MCS_ASM;
-			default: return 44;
-		}
+		return arch.contextMachine(info);
 	}
 
 	/** Whether a stop of this context also stops the other cores.
 	 *
 	 *  The TriCores (and the HSM) break together through the OTGS trigger line TL1, so reporting
 	 *  allThreadsStopped keeps the UI in step with the hardware. A GTM MCS breakpoint stops only its
-	 *  own channel - claiming all threads stopped would make VS Code show the still running TriCores
-	 *  as paused and ask the user to resume each of them by hand.
+	 *  own channel, an SCR breakpoint only the SCR (both are independent cores, not on TL1) -
+	 *  claiming all threads stopped would make VS Code show the still running TriCores as paused
+	 *  and ask the user to resume each of them by hand.
 	 */
 	private stopsAllCores(contextId: string): boolean {
-		return this.contextMachines.get(contextId) !== AurixTCFDebugSession.MACHINE_MCS_ASM;
+		return !arch.isIndependentCore(this.contextMachines.get(contextId));
 	}
 
 	/** Whether a stop of this context leaves no thread running, so allThreadsStopped is true.
 	 *
-	 *  TL1 does not reach the GTM: its MCS channels run on while the TriCores are halted (and the
-	 *  GTM is not suspended). Claiming all threads stopped then makes VS Code show the running
-	 *  channels as paused, without a call stack, since no stop was ever fetched for them.
+	 *  TL1 does not reach the GTM nor the SCR: the MCS channels and the SCR run on while the
+	 *  TriCores are halted (and the GTM is not suspended). Claiming all threads stopped then makes
+	 *  VS Code show them as paused, without a call stack, since no stop was ever fetched for them.
 	 */
 	private stopCoversAllThreads(contextId: string): boolean {
 		if (!this.stopsAllCores(contextId)) {
 			return false;
 		}
 		for (const [id, machine] of this.contextMachines) {
-			if (machine === AurixTCFDebugSession.MACHINE_MCS_ASM && id !== contextId && !this.suspendedContextIds.has(id)) {
+			if (arch.isIndependentCore(machine) && id !== contextId && !this.suspendedContextIds.has(id)) {
 				return false;
 			}
 		}
@@ -1282,10 +1281,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	/**
 	 * Tells the extension (`aurix/runState`) whether every TriCore core is halted, when that
 	 * changes: the live views rest meanwhile (`aurix-debugger.liveWatch.pauseWhileHalted`). The
-	 * HSM and the MCS channels do not count; they often run on while the TriCores are halted.
+	 * HSM, the MCS channels and the SCR do not count; they often run on while the TriCores are halted.
 	 */
 	private reportRunState(): void {
-		const tricores = Array.from(this.contextMachines).filter(([, machine]) => machine === 44).map(([id]) => id);
+		const tricores = Array.from(this.contextMachines).filter(([, machine]) => machine === arch.MACHINE_TRICORE).map(([id]) => id);
 		const allHalted = tricores.length > 0 && tricores.every((id) => this.suspendedContextIds.has(id));
 		if (allHalted === this.lastAllHalted) {
 			return;
@@ -1345,10 +1344,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				// Primary ELF first, then the matching symbol files. A file of another
 				// architecture (e.g. the TriCore program on the HSM) is left out.
 				const files: string[] = [];
+				const scr = machine === AurixTCFDebugSession.MACHINE_XC800;
 				const primary = this.getElfPathForCore(coreInfo, args);
 				if (primary) {
 					const m = await machineOf(primary);
-					if (coreInfo || m === undefined || m === machine) {
+					// The SCR's file ("scrElfPath") must not be a TriCore ELF: the SCR is an XC800 core
+					// whose code space starts at 0, so TriCore symbols would only mislabel its code.
+					if ((coreInfo && !scr) || m === undefined || m === machine) {
 						files.push(primary);
 					}
 				}
@@ -1358,6 +1360,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 						const m = await machineOf(f.path);
 						if (!f.cores.some(c => AurixTCFDebugSession.coreMatches(c, contextId, contextName))
 							|| (m !== undefined && m !== machine)) {
+							continue;
+						}
+						// SCR programs (SDCC output) are no ELF; a file of unknown kind is only the
+						// SCR's when a "cores" entry names the SCR itself, not by a wildcard.
+						if (scr && m === undefined
+							&& !f.cores.some(c => !/[*?]/.test(c) && AurixTCFDebugSession.coreMatches(c, contextId, contextName))) {
 							continue;
 						}
 					} else if ((await machineOf(f.path)) !== machine) {
@@ -2166,11 +2174,6 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				: 0;
 			const instructionCount = typeof args?.instructionCount === 'number' && args.instructionCount > 0 ? args.instructionCount : 32;
 			const baseAddress = base + offset;
-			// TriCore instructions are 2 or 4 bytes. Use max size to ensure we cover the requested window.
-			const minInstrBytes = 2;
-			const maxInstrBytes = 4;
-			const alignedBaseAddress = baseAddress - (baseAddress % minInstrBytes);
-			let startAddress = alignedBaseAddress + (instructionOffset * maxInstrBytes);
 
 			const ctx = this.focusedCoreContext ?? (await this.pickContextIdForCore(this.launchCore)) ?? (await this.pickAnySuspendedContextId());
 			if (!ctx) {
@@ -2192,29 +2195,34 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.disassemblyCapabilities.set(ctx, isas);
 				this.tcfLogger.log(`Disassembly capabilities of ${ctx} (ISAs): ${isas.join(', ') || '(none reported)'}`);
 			}
-			const isa = isas[0] ?? 'TRICORE';
+			const isa = isas[0] ?? arch.isaOfMachine(this.contextMachines.get(ctx));
+			// TriCore instructions are 2 or 4 bytes, MCS ones 4, XC800 (SCR) ones 1 to 3 at any
+			// address. The longest size makes sure the requested window is covered.
+			const geometry = arch.isaGeometry(isa);
+			const minInstrBytes = geometry.align;
+			const maxInstrBytes = geometry.maxBytes;
+			const alignedBaseAddress = arch.alignInstructionAddress(baseAddress, geometry);
+			let startAddress = alignedBaseAddress + (instructionOffset * maxInstrBytes);
 
 			// Request enough bytes to produce the requested window + a small margin.
 			// The agent disassembler falls back to .byte/.half/.word if ISA-specific decoding is unavailable.
 			const windowInstrs = instructionCount + Math.abs(instructionOffset) + 16;
 			let byteBudget = Math.max(1, windowInstrs * maxInstrBytes);
 
-			// Clip to executable ranges from the ELF (if available). GTM MCS code is in the MCS RAM,
-			// not in an ELF. Code outside the ELF (boot ROM, another core's program) is disassembled
-			// from the target memory as it is.
-			const execRange = isa === 'MCS' ? undefined : this.findExecutableRangeForAddress(alignedBaseAddress, isa === 'TRICORE');
-			if (isa === 'MCS') {
-				// MCS instructions are 4 bytes and the program is the module RAM, 0..MCS_RAM_BYTES.
-				// VS Code also asks for the instructions before the PC, which reaches below 0 near
-				// the start of the RAM (and past its end near the top); the server refuses those.
-				startAddress = Math.max(0, startAddress);
-				startAddress -= startAddress % 4;
-				byteBudget = Math.min(byteBudget, AurixTCFDebugSession.MCS_RAM_BYTES - startAddress);
-				if (byteBudget <= 0) {
+			// Clip to executable ranges from the ELF (if available). GTM MCS code is in the MCS RAM
+			// and SCR code in the SCR's own 64 KB code space, not in the (TriCore) ELF. Code outside
+			// the ELF (boot ROM, another core's program) is disassembled from the target memory as it is.
+			const execRange = geometry.codeEnd !== undefined ? undefined : this.findExecutableRangeForAddress(alignedBaseAddress, isa === 'TRICORE');
+			if (geometry.codeEnd !== undefined) {
+				// The program is the code space 0..codeEnd: the MCS module RAM, the SCR's XRAM/ROM.
+				const window = arch.clampDisassemblyWindow(startAddress, byteBudget, geometry);
+				if (!window) {
 					response.body = { instructions: [] };
 					this.sendResponse(response);
 					return;
 				}
+				startAddress = window.start;
+				byteBudget = window.bytes;
 			}
 			if (execRange) {
 				const maxBytesNeeded = instructionCount * maxInstrBytes;
@@ -2232,8 +2240,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 			}
 			const disassembleAt = async (addr: number) => {
-				// The retry at the base address must not run past the end of the MCS RAM either.
-				const size = isa === 'MCS' ? Math.min(byteBudget, AurixTCFDebugSession.MCS_RAM_BYTES - addr) : byteBudget;
+				// The retry at the base address must not run past the end of the code space either.
+				const size = geometry.codeEnd !== undefined ? Math.min(byteBudget, geometry.codeEnd - addr) : byteBudget;
 				return await this.tcfClient.sendCommand(
 					new DisassembleDisassemblyCommand(ctx, addr, size, {
 						ISA: isa,
@@ -2646,6 +2654,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		const stack = this.trimPostResetStack(await this.tcfClient.getStackTrace(contextId, NEVER_CANCELLED, this.stackTraceDepth));
+		const ipGeometry = arch.isaGeometry(arch.isaOfMachine(this.contextMachines.get(contextId)));
 		const frames: StackFrame[] = [];
 		for (const frame of stack) {
 			const frameId = this.createNextStackFrameId(args.threadId, frame.context);
@@ -2653,8 +2662,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const sourcePath = mapped?.File && mapped?.SLine ? this.resolveMappedSourcePath(mapped) : undefined;
 			this.rememberFrameMeta(frameId, args.threadId, contextId, frame.context?.ID, sourcePath ? { path: sourcePath, line: mapped!.SLine! } : undefined);
 			const ipNum = typeof frame.context?.IP === 'number' ? frame.context.IP : undefined;
-			// Align to instruction boundary (TriCore has 2/4-byte instructions).
-			const ipAligned = ipNum !== undefined ? (ipNum - (ipNum % 2)) : undefined;
+			// Align to instruction boundary (TriCore has 2/4-byte instructions, the SCR's XC800 1-3
+			// byte ones at any address).
+			const ipAligned = ipNum !== undefined ? arch.alignInstructionAddress(ipNum, ipGeometry) : undefined;
 			const ipRef = ipAligned !== undefined ? `0x${ipAligned.toString(16)}` : undefined;
 			if (mapped?.File && mapped?.SLine) {
 				const src = sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined;
@@ -2670,7 +2680,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		const jump = this.disassemblyJumpTarget;
-		if (jump && stack.length > 0) {
+		const jumpHere = jump !== undefined && (jump.ctx === undefined || jump.ctx === contextId
+			|| (this.stopsAllCores(jump.ctx) && this.stopsAllCores(contextId)));
+		if (jump && jumpHere && stack.length > 0) {
 			// Shares the top frame's context so Locals and watches keep working while it is focused.
 			const frameId = this.createNextStackFrameId(args.threadId, stack[0].context);
 			this.rememberFrameMeta(frameId, args.threadId, contextId, stack[0].context?.ID);
@@ -2879,12 +2891,12 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	protected override async setExpressionRequestAsync(response: DebugProtocol.SetExpressionResponse, args: DebugProtocol.SetExpressionArguments): Promise<void> {
 		try {
 			let scope: string | undefined;
-			// `expr@N` (Live Watch): evaluated on core N; `expr@hsm` on the HSM.
+			// `expr@N` (Live Watch): evaluated on core N; `expr@hsm` on the HSM, `expr@scr` on the SCR.
 			const { expression, core } = splitLiveWatchCore(args.expression);
 			if (core !== undefined) {
 				scope = await this.contextIdOfCoreRef(core);
 				if (!scope) {
-					this.sendErrorResponse(response, 0, 'No {core} for {expression}', { core: core === 'hsm' ? 'HSM' : `core ${core}`, expression: args.expression });
+					this.sendErrorResponse(response, 0, 'No {core} for {expression}', { core: typeof core === 'number' ? `core ${core}` : core.toUpperCase(), expression: args.expression });
 					return;
 				}
 				response.body = { value: await this.assignExpression(scope, expression, args.value) };
@@ -3130,16 +3142,28 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return id;
 	}
 
-	/** The context of a breakpoint's core: `@N` as for an expression, `@hsm` the HSM's. */
+	/** The context of a breakpoint's core: `@N` as for an expression, `@hsm` the HSM's, `@scr` the SCR's. */
 	private async contextIdOfCoreRef(core: CoreRef): Promise<string | undefined> {
-		if (core !== 'hsm') {
+		if (typeof core === 'number') {
 			return this.contextIdOfCore(core);
 		}
-		// The HSM is the Arm core among the cores; its number differs between devices.
-		const hsm = (await this.tcfClient.getThreads()).find(
-			t => /^S\d+\.D\d+\.C\d+$/.test(t.info.ID) && AurixTCFDebugSession.contextMachine(t.info) === 40,
+		// The HSM is the Arm core among the cores, the SCR the XC800 one; their numbers differ
+		// between devices.
+		const machine = AurixTCFDebugSession.machineOfNamedCore(core);
+		const found = (await this.tcfClient.getThreads()).find(
+			t => /^S\d+\.D\d+\.C\d+$/.test(t.info.ID) && AurixTCFDebugSession.contextMachine(t.info) === machine,
 		);
-		return hsm?.info.ID;
+		return found?.info.ID;
+	}
+
+	/** The architecture of a core written by name: the HSM is the Arm core, the SCR the XC800 one. */
+	private static machineOfNamedCore(core: 'hsm' | 'scr'): number {
+		return core === 'hsm' ? arch.MACHINE_ARM : AurixTCFDebugSession.MACHINE_XC800;
+	}
+
+	/** The name a core is written with (`hsm`, `scr`), if it is written by name rather than number. */
+	private static namedCoreOfMachine(machine: number | undefined): 'hsm' | 'scr' | undefined {
+		return machine === arch.MACHINE_ARM ? 'hsm' : machine === AurixTCFDebugSession.MACHINE_XC800 ? 'scr' : undefined;
 	}
 
 	/**
@@ -3149,8 +3173,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private async pickLiveWatchContextId(): Promise<string | undefined> {
 		// The core focused in the Call Stack, as for the Watch view: it decides which copy of a
 		// variable in core-local memory is shown.
-		// Only a TriCore core: the HSM and MCS channels have other symbols.
-		if (this.focusedCoreContext && this.contextMachines.get(this.focusedCoreContext) === 44) {
+		// Only a TriCore core: the HSM, the MCS channels and the SCR have other symbols.
+		if (this.focusedCoreContext && this.contextMachines.get(this.focusedCoreContext) === arch.MACHINE_TRICORE) {
 			return this.focusedCoreContext;
 		}
 		if (this.liveWatchContextId) {
@@ -3195,13 +3219,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		let address = parseNumber(input);
 		let label: string | undefined;
+		// An MCS channel or the SCR has a code space of its own, which the (TriCore) ELF does not describe.
+		const machine = this.contextMachines.get(ctx);
+		const geometry = arch.isaGeometry(arch.isaOfMachine(machine));
+		const ownCodeSpace = geometry.codeEnd !== undefined;
 		if (address === undefined) {
 			const m = /^&?\s*([A-Za-z_$.][\w$.]*)\s*(?:([+-])\s*(\S+))?$/.exec(input);
 			const offset = m?.[3] !== undefined ? parseNumber(m[3]) : 0;
 			if (!m || offset === undefined) {
 				throw new Error(`"${input}" is neither an address nor a symbol`);
 			}
-			let base = this.getElfFunctionSymbols().find(s => s.name === m[1])?.address;
+			let base = ownCodeSpace ? undefined : this.getElfFunctionSymbols().find(s => s.name === m[1])?.address;
 			const ids = base === undefined
 				? await this.tcfClient.sendCommand(new FindByNameSymbolsCommand(ctx, 0, m[1])).catch(() => [] as string[])
 				: [];
@@ -3219,9 +3247,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			label = offset ? `${m[1]}${m[2]}0x${offset.toString(16)}` : m[1];
 		}
 
-		// TriCore instructions start on even addresses.
-		address -= address % 2;
-		if (this.execRanges.length > 0 && !this.findExecutableRangeForAddress(address, this.contextMachines.get(ctx) === 44)) {
+		// TriCore instructions start on even addresses, XC800 (SCR) ones on any.
+		address = arch.alignInstructionAddress(address, geometry);
+		if (ownCodeSpace) {
+			if (!arch.inCodeSpace(address, geometry)) {
+				throw new Error(`0x${address.toString(16)} is not in the code space of the core (0x0..0x${(geometry.codeEnd! - 1).toString(16)})`);
+			}
+		} else if (this.execRanges.length > 0 && !this.findExecutableRangeForAddress(address, machine === arch.MACHINE_TRICORE)) {
 			throw new Error(`0x${address.toString(16)} is not in an executable section of the program`);
 		}
 		label ??= await this.symbolLabelForAddress(ctx, address);
@@ -3463,8 +3495,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		//  - toolbar pause button (VS Code sends the focused thread): the launch core (core 0).
 		const requested = this.threadIdToContext.get(args.threadId);
 
-		// A GTM MCS channel is not part of the TL1 group: pausing it stops that channel alone, and
-		// pausing anything else must leave it running.
+		// A GTM MCS channel or the SCR is not part of the TL1 group: pausing it stops that core
+		// alone, and pausing anything else must leave it running.
 		if (requested && !this.stopsAllCores(requested)) {
 			// No stopped event from here: a channel inside a WURM/ARU wait only halts once the wait
 			// ends, so its location is not final yet. The suspend event that follows reports the
@@ -3584,7 +3616,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		// The disassembly view belongs to one core, and its addresses only make sense there
-		// (MCS program addresses start at 0). Remember which core the breakpoint came from.
+		// (MCS and SCR program addresses start at 0). Remember which core the breakpoint came from.
 		const owner = this.focusedCoreContext
 			?? (this.activeThreadId !== undefined ? this.threadIdToContext.get(this.activeThreadId) : undefined);
 		const tuples = this.instructionBreakpointsManager.updateAddresses(addrs, () => this.breakpointsManager.allocateId(), owner);
@@ -3761,13 +3793,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (await this.usesLocals(scope, expression)) {
 			return { address: here.address, size: here.size, context: core };
 		}
-		const hsm = await this.contextIdOfCoreRef('hsm').catch(() => undefined);
-		if (core === hsm) {
+		// The HSM's and the SCR's variables are their own (other symbols, other address spaces):
+		// watched by that core only.
+		if (AurixTCFDebugSession.namedCoreOfMachine(this.contextMachines.get(core)) !== undefined) {
 			return { expression, size: here.size, context: core };
 		}
-		const { core: named } = splitLiveWatchCore(expression);
+		const { core: writtenCore } = splitLiveWatchCore(expression);
 		const coreNum = AurixTCFDebugSession.coreOfContext(core);
-		if (named === undefined && coreNum !== undefined && isCoreLocalAddress(here.address)) {
+		if (writtenCore === undefined && coreNum !== undefined && isCoreLocalAddress(here.address)) {
 			return { expression: `${expression}@${coreNum}`, size: here.size };
 		}
 		return { expression, size: here.size };
@@ -4767,7 +4800,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (!/^S\d+\.D\d+\.C\d+$/.test(id)) {
 				return undefined;
 			}
-			return this.contextMachines.get(id) === 40 ? 'hsm' : AurixTCFDebugSession.coreOfContext(id);
+			return AurixTCFDebugSession.namedCoreOfMachine(this.contextMachines.get(id)) ?? AurixTCFDebugSession.coreOfContext(id);
 		});
 		return cores.every((c): c is CoreRef => c !== undefined) ? cores : undefined;
 	}
@@ -4779,7 +4812,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async customRequestAsync(command: string, response: DebugProtocol.Response, args: any, request?: DebugProtocol.Request): Promise<void> {
-		// The cores (`S0.D0.C<N>`, the HSM included), for picking the cores of a breakpoint (`@N`).
+		// The cores (`S0.D0.C<N>`, the HSM and the SCR included), for picking the cores of a breakpoint (`@N`).
 		if (command === 'aurix/cores') {
 			try {
 				const infos = await this.tcfClient.getThreads();
@@ -4791,7 +4824,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 						name: x.info.Name || x.info.ID,
 						suspended: this.suspendedContextIds.has(x.info.ID),
 						// Picked as `@hsm`, which means the HSM on every device.
-						hsm: AurixTCFDebugSession.contextMachine(x.info) === 40,
+						hsm: AurixTCFDebugSession.contextMachine(x.info) === arch.MACHINE_ARM,
+						// Picked as `@scr`, the standby controller (an XC800 core).
+						scr: AurixTCFDebugSession.contextMachine(x.info) === AurixTCFDebugSession.MACHINE_XC800,
 					}))
 					.sort((a, b) => a.core - b.core);
 				response.body = { cores };
@@ -4941,12 +4976,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		if (command === 'aurix/disassemblyGoTo') {
 			try {
-				const ctx = await this.pickAnySuspendedContextId();
+				// The core of the Disassembly view (the focused one) decides what the address means.
+				const focused = this.focusedCoreContext && this.suspendedContextIds.has(this.focusedCoreContext) ? this.focusedCoreContext : undefined;
+				const ctx = focused ?? (await this.pickAnySuspendedContextId());
 				if (!ctx) {
 					throw new Error('the target is running; halt it first');
 				}
 				const target = await this.resolveDisassemblyTarget(ctx, String(args?.target ?? ''));
-				this.disassemblyJumpTarget = target;
+				this.disassemblyJumpTarget = { ...target, ctx };
 				this.sendEvent(new InvalidatedEvent(['stacks']));
 				response.body = { address: `0x${target.address.toString(16)}`, label: target.label };
 				this.sendResponse(response);
@@ -5213,9 +5250,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				? { Location: t.expression, ContextIds: t.context ? [t.context] : undefined }
 				: { Address: `0x${(t.address ?? 0).toString(16)}`, Size: t.size, ContextIds: t.context ? [t.context] : undefined };
 		} else {
-			// `x@hsm` is the HSM's variable, watched by the HSM; any other expression on the TriCore cores.
-			const hsm = splitLiveWatchCore(expression).core === 'hsm' ? await this.contextIdOfCoreRef('hsm') : undefined;
-			where = { Location: expression, ContextIds: hsm ? [hsm] : undefined };
+			// `x@hsm` is the HSM's variable, watched by the HSM, `x@scr` the SCR's, watched by the SCR;
+			// any other expression on the TriCore cores.
+			const written = splitLiveWatchCore(expression).core;
+			const owner = written === 'hsm' || written === 'scr' ? await this.contextIdOfCoreRef(written) : undefined;
+			where = { Location: expression, ContextIds: owner ? [owner] : undefined };
 		}
 		const name = `${where.Location ?? where.Address} [${accessName}]`;
 		const known = Array.from(this.liveWatchBreakpoints.values()).find(p =>

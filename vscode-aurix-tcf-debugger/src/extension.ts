@@ -459,7 +459,7 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 			const { session, here } = found;
 
-			let cores: Array<{ core: number; id: string; name: string; suspended: boolean; hsm?: boolean }> = [];
+			let cores: Array<{ core: number; id: string; name: string; suspended: boolean; hsm?: boolean; scr?: boolean }> = [];
 			try {
 				cores = ((await session.customRequest('aurix/cores')) as { cores?: typeof cores }).cores ?? [];
 			} catch (e) {
@@ -475,8 +475,8 @@ export function activate(context: vscode.ExtensionContext) {
 			const picked = await vscode.window.showQuickPick(
 				// Named as in the Call Stack; the description shows what the condition will say.
 				cores.map(c => {
-					// The HSM is written `@hsm`, though a typed `@6` (its number) means it too.
-					const core: CoreRef = c.hsm ? 'hsm' : c.core;
+					// The HSM is written `@hsm`, the SCR `@scr`, though a typed `@6` (the number) means it too.
+					const core: CoreRef = c.hsm ? 'hsm' : c.scr ? 'scr' : c.core;
 					return {
 						label: c.name,
 						description: `@${core} · ${c.suspended ? 'suspended' : 'running'}`,

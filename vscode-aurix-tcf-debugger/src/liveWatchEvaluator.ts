@@ -15,7 +15,7 @@
  * ask which probe is connected. An older server without live sets gets one Memory.get per root.
  */
 
-import type { CoreRef } from './breakpointCondition';
+import { CoreRef, parseCoreRef } from './breakpointCondition';
 import { TCFClient, decodeEvaluatedValue } from './tcfclient';
 import { ClearLiveSetAurixTargetCommand, GetLiveValuesAurixTargetCommand, LiveRegion, SetLiveSetAurixTargetCommand } from './tcf/aurixtarget';
 import { TCFErrorCodes } from './tcf/error';
@@ -124,17 +124,17 @@ class BufferValueProvider implements RawValueProvider {
 /**
  * A Live Watch expression with an optional core: `expr@N` is evaluated on core N (e.g. a
  * variable in core-local memory, which every core has its own copy of), `expr@hsm` on the HSM,
- * as for a breakpoint.
+ * `expr@scr` on the standby controller (SCR), as for a breakpoint.
  */
 export function splitLiveWatchCore(expression: string): { expression: string; core?: CoreRef } {
-	const m = /^(.*\S)\s*@\s*(\d+|hsm)$/i.exec(expression.trim());
+	const m = /^(.*\S)\s*@\s*(\d+|hsm|scr)$/i.exec(expression.trim());
 	if (!m) {
 		return { expression: expression.trim() };
 	}
-	return { expression: m[1], core: /^hsm$/i.test(m[2]) ? 'hsm' : Number(m[2]) };
+	return { expression: m[1], core: parseCoreRef(m[2]) };
 }
 
-/** C expression of a child node below a parent expression; a core (`@N`, `@hsm`) carries over. */
+/** C expression of a child node below a parent expression; a core (`@N`, `@hsm`, `@scr`) carries over. */
 export function liveWatchChildExpression(parentExpression: string, childName: string): string {
 	const { expression: parentExpr, core } = splitLiveWatchCore(parentExpression);
 	const child = childExpression(parentExpr, childName);
@@ -171,7 +171,7 @@ export class LiveWatchEvaluator {
 	/** The server does not know AurixTarget.setLiveSet (an older one): every read is a Memory.get. */
 	private liveSetUnsupported = false;
 
-	/** `coreContext`: the context of core N or the HSM, for `expr@N` and `expr@hsm`. */
+	/** `coreContext`: the context of core N, the HSM or the SCR, for `expr@N`, `expr@hsm` and `expr@scr`. */
 	constructor(
 		private readonly client: TCFClient,
 		private readonly log: (message: string) => void,
@@ -386,7 +386,7 @@ export class LiveWatchEvaluator {
 		if (core !== undefined) {
 			const coreCtx = await this.coreContext(core);
 			if (!coreCtx) {
-				throw new Error(core === 'hsm' ? 'No HSM' : `No core ${core}`);
+				throw new Error(typeof core === 'number' ? `No core ${core}` : `No ${core.toUpperCase()}`);
 			}
 			ctx = coreCtx;
 		}

@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { describeCores, parseBreakpointCondition, splitCoreSuffix, withCoreSuffix } from '../../breakpointCondition';
+import { describeCores, parseBreakpointCondition, parseCoreRef, splitCoreSuffix, withCoreSuffix } from '../../breakpointCondition';
 
 suite('Breakpoint conditions', () => {
 	test('splits a core suffix off a function breakpoint name', () => {
@@ -39,10 +39,31 @@ suite('Breakpoint conditions', () => {
 		assert.deepStrictEqual(splitCoreSuffix('a@hsmx'), { text: 'a@hsmx' });
 	});
 
+	test('names the SCR as @scr, after the HSM', () => {
+		assert.deepStrictEqual(splitCoreSuffix('scr_main@scr'), { text: 'scr_main', cores: ['scr'] });
+		assert.deepStrictEqual(splitCoreSuffix('0x0100 @SCR'), { text: '0x0100', cores: ['scr'] });
+		assert.deepStrictEqual(splitCoreSuffix('main.c:42 @scr, hsm, 1'), { text: 'main.c:42', cores: [1, 'hsm', 'scr'] });
+		assert.deepStrictEqual(parseBreakpointCondition('x > 3 @scr'), { cores: ['scr'], expression: 'x > 3' });
+		assert.strictEqual(withCoreSuffix('task == ComTask @1', ['scr', 0, 'hsm']), 'task == ComTask @0,hsm,scr');
+		assert.deepStrictEqual(splitCoreSuffix('a@scrx'), { text: 'a@scrx' });
+		assert.deepStrictEqual(splitCoreSuffix('a@scr,scr'), { text: 'a', cores: ['scr'] });
+	});
+
+	test('parses a single core reference', () => {
+		assert.strictEqual(parseCoreRef('3'), 3);
+		assert.strictEqual(parseCoreRef(' HSM '), 'hsm');
+		assert.strictEqual(parseCoreRef('Scr'), 'scr');
+		assert.strictEqual(parseCoreRef('ppu'), undefined);
+		assert.strictEqual(parseCoreRef(''), undefined);
+	});
+
 	test('describes cores for the hover', () => {
 		assert.strictEqual(describeCores([1]), 'core 1');
 		assert.strictEqual(describeCores([0, 2]), 'cores 0, 2');
 		assert.strictEqual(describeCores(['hsm']), 'the HSM');
 		assert.strictEqual(describeCores(['hsm', 0]), 'core 0 and the HSM');
+		assert.strictEqual(describeCores(['scr']), 'the SCR');
+		assert.strictEqual(describeCores([2, 'scr']), 'core 2 and the SCR');
+		assert.strictEqual(describeCores(['scr', 'hsm', 1, 0]), 'cores 0, 1, the HSM and the SCR');
 	});
 });

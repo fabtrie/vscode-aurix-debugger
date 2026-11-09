@@ -19,6 +19,7 @@ export function run(): Promise<void> {
 	mocha.addFile(path.join(testsRoot, 'liveWatchEvaluator.test'));
 	mocha.addFile(path.join(testsRoot, 'liveWatchLiveSet.test'));
 	mocha.addFile(path.join(testsRoot, 'breakpointCondition.test'));
+	mocha.addFile(path.join(testsRoot, 'coreArchitecture.test'));
 	mocha.addFile(path.join(testsRoot, 'svdCatalog.test'));
 	mocha.addFile(path.join(testsRoot, 'svdMerge.test'));
 	mocha.addFile(path.join(testsRoot, 'svdPeripherals.test'));

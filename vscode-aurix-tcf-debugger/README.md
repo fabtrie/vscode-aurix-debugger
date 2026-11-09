@@ -92,6 +92,7 @@ Create `.vscode/launch.json`:
 Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the `aurix-debugger` folder and adjusted for the board.
 
 - `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is. The bundled OpenOCD scripts are always searched, after `searchDirs`.
+- The Tcl commands for cfg files, `configCommands`, debugger actions and `monitor` are listed in the [Tcl command reference](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/docs/commands.md). In the Debug Console, `monitor help` lists them, `monitor help <command>` describes one (`monitor help reset_config`) and `monitor help <word>` searches the descriptions (`monitor help srst`).
 - `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port` (default `127.0.0.1:1534`).
 - `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
 - `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list. `verifyFlash` (default true) reads the programmed sectors back.

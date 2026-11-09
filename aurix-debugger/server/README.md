@@ -525,8 +525,7 @@ TriCore 1.8 (TC4x) is rejected.
 
 The commands the cfg scripts use behave as in OpenOCD. Multi-core policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc3xx_ocds.cfg`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
 
-- **Configuration:** `adapter`, `tas-client host`, `transport`, `reset_config`, `ifxdap newtap`, `ocmts create`, `target create/names/current/types`, `<target> configure/cget/curstate/invoke-event/arp_*`, `targets`, `flash bank/banks`, `init`, `tcf_port`, `telnet_port`, `gdb_port`, `tcl_port`, `api_port`, `bindto`. Target types: `tricore`, `cortex_m` (HSM), `gtm_mcs` (`-module` 0..9, `-channel` 0..7, `-ramsize <bytes>`: MCS RAM per module, default 12 KB as on the TC37x; it applies to all channels of the module).
-- **Execution:** `halt`, `resume`, `step`, `reset [run|halt|init]`, `poll`, `wait_halt`, `reg`, `bp`/`rbp`/`wp`/`rwp`, `mdw/mdh/mdb`, `mww/mwh/mwb`, `read_memory`, `write_memory`, `<target> tricore tl1_halt on|off`, `<target> tricore tl1_step on|off`, `<target> tricore irq_mask off|on|step step_over step_out`, `echo`, `sleep`, `version`, `shutdown`, `daq` (read-only DAQ session status).
+Every command, its arguments and options are in the [Tcl command reference](docs/commands.md). The server has the same text built in: `help` lists the commands, `help <command>` describes one (`help reset_config`), and `help <word>` searches the descriptions (`help srst`). In VS Code type them as `monitor help ...` in the Debug Console. The reference is generated from `crates/core/src/help.rs`, and a test fails when a command has no entry there.
 
 ## Multi-core stepping (`tricore tl1_step`)
 

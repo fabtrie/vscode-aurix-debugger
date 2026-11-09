@@ -211,14 +211,25 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
         }
         Ok(cx.with(|c| c.ports.bind.clone()))
     });
-    for noop in ["add_help_text", "add_usage_text", "usage", "gdb_memory_map", "gdb_flash_program", "gdb_breakpoint_override"] {
+    for noop in ["gdb_memory_map", "gdb_flash_program", "gdb_breakpoint_override"] {
         reg(interp, sh, noop, |_, _| ok());
     }
-    reg(interp, sh, "help", |_, _| {
-        Ok("aurix-dbg supports the OpenOCD commands used by AURIX cfg files: adapter, transport, ifxdap, ocmts, \
-            target, targets, flash bank, init, reset, halt, resume, step, reg, bp/rbp, wp/rwp, mdw/mdh/mdb, \
-            mww/mwh/mwb, read_memory, write_memory, poll, sleep, echo, find, script, tricore tl1_halt/tl1_step/irq_mask"
-            .into())
+    // The reference lives in help.rs, which also generates server/docs/commands.md.
+    reg(interp, sh, "help", |cx, a| {
+        let targets: Vec<String> = cx.with(|c| c.targets.iter().map(|t| t.name.clone()).collect());
+        Ok(cx.with(|c| crate::help::help(&a[1..], &c.user_help, &targets)))
+    });
+    reg(interp, sh, "usage", |cx, a| Ok(cx.with(|c| crate::help::usage(&a[1..], &c.user_help))));
+    // add_help_text <command words...> <text>, as in OpenOCD.
+    reg(interp, sh, "add_help_text", |cx, a| {
+        let (name, text) = user_help_args(a)?;
+        cx.with(|c| c.user_help.entry(name).or_default().help = text);
+        ok()
+    });
+    reg(interp, sh, "add_usage_text", |cx, a| {
+        let (name, text) = user_help_args(a)?;
+        cx.with(|c| c.user_help.entry(name).or_default().usage = text);
+        ok()
     });
 
     // execution
@@ -243,6 +254,13 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "tricore", cmd_tricore);
     reg(interp, sh, "cortex_m", cmd_tricore);
     reg(interp, sh, "gtm_mcs", cmd_tricore);
+}
+
+fn user_help_args(a: &[&str]) -> Result<(String, String), String> {
+    if a.len() < 3 {
+        return Err(format!("usage: {} <command> <text>", a[0]));
+    }
+    Ok((a[1..a.len() - 1].join(" "), a[a.len() - 1].trim().to_string()))
 }
 
 fn port_cmd(cx: &Cx, a: &[&str], field: fn(&mut crate::ctx::Ports) -> &mut Option<u16>) -> CmdResult {

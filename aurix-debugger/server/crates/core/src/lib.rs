@@ -14,6 +14,7 @@ pub mod commands;
 pub mod cortex_m;
 pub mod daq;
 pub mod gtm_mcs;
+pub mod help;
 pub mod ctx;
 pub mod error;
 pub mod events;

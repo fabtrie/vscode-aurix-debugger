@@ -98,6 +98,8 @@ pub struct Ctx {
     /// How long the probe may be gone before the frontends end their sessions
     /// (`probe_lost_timeout <ms>`); 0: never, keep reconnecting.
     pub probe_lost_timeout_ms: u64,
+    /// What the cfg scripts said about their commands (`add_help_text`, `add_usage_text`).
+    pub user_help: std::collections::BTreeMap<String, crate::help::UserHelp>,
 }
 
 /// See [`Ctx::probe_lost_timeout_ms`].
@@ -146,6 +148,7 @@ impl Ctx {
             probe_lost_since: None,
             probe_lost_reported: false,
             probe_lost_timeout_ms: DEFAULT_PROBE_LOST_TIMEOUT_MS,
+            user_help: Default::default(),
         }
     }
 

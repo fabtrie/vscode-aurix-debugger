@@ -955,6 +955,29 @@ impl Adapter for BlueBoxAdapter {
                     Err(Error::Usage(NOT_CONNECTED.into()))
                 }
             }
+            // Protocol aid: one service message, sent as is; the reply as hex.
+            // `bluebox raw <path> [hex body]`, e.g. `bluebox raw //3//3/6/ 00`.
+            Some("raw") => {
+                let usage = || Error::Usage("usage: bluebox raw <path> [hex body]".into());
+                let path = args.get(2).ok_or_else(usage)?;
+                let hex: String = args[3..].concat();
+                let body = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| hex.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok()))
+                    .collect::<Option<Vec<u8>>>()
+                    .ok_or_else(usage)?;
+                #[cfg(windows)]
+                {
+                    let msg = bluebox::message::encode(bluebox::message::KIND, path, &body);
+                    let reply = self.probe()?.transact(&msg).map_err(|e| other(format!("bluebox: {e}")))?;
+                    Ok(reply.iter().map(|b| format!("{b:02x}")).collect())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (path, body);
+                    Err(Error::Usage(NOT_CONNECTED.into()))
+                }
+            }
             // The probe's sampler for the core's DAQ points: on (default) or off.
             Some("daq_offload") => {
                 match args.get(2).copied() {

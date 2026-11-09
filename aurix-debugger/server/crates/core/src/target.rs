@@ -5,11 +5,12 @@ use std::collections::BTreeMap;
 use tas::Batch;
 
 use crate::adapter::Io;
-use crate::arch::{ArchInfo, CORTEX_M, GTM_MCS, TRICORE};
+use crate::arch::{ArchInfo, CORTEX_M, GTM_MCS, TRICORE, XC800};
 use crate::cortex_m::CortexM;
 use crate::gtm_mcs::McsChannel;
 use crate::error::Result;
 use crate::tricore::{IrqMask, Tricore};
+use crate::xc800::Xc800;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetState {
@@ -106,11 +107,13 @@ pub struct RunCfg {
     pub irq_mask: IrqMask,
 }
 
-/// A core of a target: TriCore (host cores), Cortex-M (HSM) or a GTM MCS channel.
+/// A core of a target: TriCore (host cores), Cortex-M (HSM), a GTM MCS channel or the XC800
+/// standby controller (SCR).
 pub enum Core {
     Tricore(Tricore),
     CortexM(CortexM),
     Mcs(McsChannel),
+    Xc800(Xc800),
 }
 
 /// Calls the same method on either core type.
@@ -120,6 +123,7 @@ macro_rules! each {
             Core::Tricore($c) => $e,
             Core::CortexM($c) => $e,
             Core::Mcs($c) => $e,
+            Core::Xc800($c) => $e,
         }
     };
 }
@@ -208,23 +212,25 @@ macro_rules! forward {
 }
 
 impl Core {
-    /// Creates a core of a target type (`tricore`, `cortex_m`).
+    /// Creates a core of a target type (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`).
     pub fn for_type(type_name: &str) -> Option<Core> {
         match type_name {
             "tricore" => Some(Core::Tricore(Tricore::new())),
             "cortex_m" => Some(Core::CortexM(CortexM::new())),
             "gtm_mcs" => Some(Core::Mcs(McsChannel::new())),
+            "xc800" => Some(Core::Xc800(Xc800::new())),
             _ => None,
         }
     }
 
-    pub const TYPES: &'static [&'static str] = &["tricore", "cortex_m", "gtm_mcs"];
+    pub const TYPES: &'static [&'static str] = &["tricore", "cortex_m", "gtm_mcs", "xc800"];
 
     pub fn arch(&self) -> &'static ArchInfo {
         match self {
             Core::Tricore(_) => &TRICORE,
             Core::CortexM(_) => &CORTEX_M,
             Core::Mcs(_) => &GTM_MCS,
+            Core::Xc800(_) => &XC800,
         }
     }
 
@@ -260,6 +266,24 @@ impl Core {
         match self {
             Core::Mcs(c) => Some(c),
             _ => None,
+        }
+    }
+
+    pub fn as_xc800(&self) -> Option<&Xc800> {
+        match self {
+            Core::Xc800(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Whether the background poll asks this core for its state itself instead of queuing bus
+    /// reads into the shared batch: the SCR always (its state comes from the probe's SCR
+    /// interface), TriCore cores when the probe does their run control (`rc`).
+    pub fn polls_directly(&self, rc: bool) -> bool {
+        match self {
+            Core::Xc800(_) => true,
+            Core::Tricore(_) => rc,
+            _ => false,
         }
     }
 
@@ -316,16 +340,20 @@ impl Core {
     pub fn examine_interval(&self) -> std::time::Duration {
         match self {
             Core::Mcs(_) => std::time::Duration::from_secs(1),
+            // Reachable only while the application keeps the SCR in an OCDS boot mode.
+            Core::Xc800(_) => std::time::Duration::from_secs(2),
             _ => std::time::Duration::ZERO,
         }
     }
 
     /// Addresses the core accesses through its own path instead of the host address space
-    /// (HSM-private memory, MCS program RAM, the TriCore's local DSPR/PSPR alias).
+    /// (HSM-private memory, MCS program RAM, the TriCore's local DSPR/PSPR alias, the SCR's whole
+    /// virtual address map).
     pub fn owns_address(&self, addr: u32) -> bool {
         match self {
             Core::CortexM(_) => crate::cortex_m::hsm_private(addr),
             Core::Mcs(c) => c.owns_address(addr),
+            Core::Xc800(c) => c.owns_address(addr),
             Core::Tricore(_) => crate::tricore::local_address(addr),
         }
     }
@@ -335,6 +363,7 @@ impl Core {
         match self {
             Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.read_memory(io, addr, len),
             Core::Mcs(c) if c.owns_address(addr) => c.read_memory(io, addr, len),
+            Core::Xc800(c) if c.owns_address(addr) => c.read_memory(io, addr, len),
             Core::Tricore(c) => io.read(crate::tricore::global_address(c.coreid, addr), len),
             _ => io.read(addr, len),
         }
@@ -353,6 +382,7 @@ impl Core {
         match self {
             Core::CortexM(c) if crate::cortex_m::hsm_private(addr) => c.write_memory(io, addr, data),
             Core::Mcs(c) if c.owns_address(addr) => c.write_memory(io, addr, data),
+            Core::Xc800(c) if c.owns_address(addr) => c.write_memory(io, addr, data),
             Core::Tricore(c) => io.write(crate::tricore::global_address(c.coreid, addr), data),
             _ => io.write(addr, data),
         }
@@ -461,7 +491,9 @@ impl Core {
                 // a board whose SBC resets a core still halted shortly after the reset (FS26
                 // INIT_FS, less the application's start-up to its FS26 setup) does not have. The
                 // HSM is examined here: that restores its breakpoints before the cfg releases it.
-                if matches!(core, Core::Mcs(_)) {
+                // The SCR is reset with the chip and reachable again only once the application has
+                // started it in an OCDS boot mode: also left to the background poll.
+                if matches!(core, Core::Mcs(_) | Core::Xc800(_)) {
                     core.set_examined(false);
                     return Ok(Transition::None);
                 }

@@ -76,7 +76,8 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
         let (mut io, e) = c.target_io(t)?;
         // A probe that does its own run control has already enabled debug, and
         // the OEC key write below is one it would refuse: OCDS is its to steer.
-        if io.adapter.run_control().is_none() {
+        // The SCR's debug access does not go through the host OCDS at all.
+        if io.adapter.run_control().is_none() && !matches!(e.core, Core::Xc800(_)) {
             enable_ocds(&mut io)?;
         }
         e.core.examine(&mut io)?;
@@ -185,13 +186,13 @@ pub fn poll_all(cx: &Cx) {
         // access (~5 ms on winIDEA), and all 16 MCS channels took ~220 ms, which
         // kept the core thread busy and delayed every step and pause behind it.
         let rc = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_some());
-        let (mut out, mut failed) = if rc { poll_run_controlled(c) } else { Default::default() };
+        let (mut out, mut failed) = poll_direct(c, rc);
         let turn = c.poll_turn;
         c.poll_turn = c.poll_turn.wrapping_add(1);
         let mut b = Batch::new();
         let mut handles = Vec::new();
         for (i, e) in c.targets.iter().enumerate() {
-            let skip = rc && (matches!(e.core, Core::Tricore(_)) || i % RC_MEMORY_POLL_SHARE != turn % RC_MEMORY_POLL_SHARE);
+            let skip = e.core.polls_directly(rc) || (rc && i % RC_MEMORY_POLL_SHARE != turn % RC_MEMORY_POLL_SHARE);
             if e.core.examined() && e.poll_failures == 0 && !skip {
                 handles.push((i, e.core.poll_queue(&mut b)));
             }
@@ -963,12 +964,14 @@ pub fn state(cx: &Cx, t: usize) -> (TargetState, DebugReason) {
 /// The TriCore part of the run-state poll for a probe that performs run control
 /// itself: there are no debug registers to read, and asking each core for its
 /// status is the whole operation. The other cores stay in [`poll_all`]'s batch.
-fn poll_run_controlled(c: &mut crate::ctx::Ctx) -> (Vec<(usize, Transition)>, Vec<usize>) {
+/// Polls the cores that are asked for their state one by one rather than through the shared
+/// batch ([`Core::polls_directly`]): the SCR, and the TriCore cores on a run-control probe (`rc`).
+fn poll_direct(c: &mut crate::ctx::Ctx, rc: bool) -> (Vec<(usize, Transition)>, Vec<usize>) {
     let mut out = Vec::new();
     let mut failed = Vec::new();
     for i in 0..c.targets.len() {
         let e = &c.targets[i];
-        if !(matches!(e.core, Core::Tricore(_)) && e.core.examined() && e.poll_failures == 0) {
+        if !(e.core.polls_directly(rc) && e.core.examined() && e.poll_failures == 0) {
             continue;
         }
         let (mut io, e) = match c.target_io(i) {

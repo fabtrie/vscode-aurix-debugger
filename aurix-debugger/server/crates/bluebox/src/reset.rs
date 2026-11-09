@@ -48,7 +48,7 @@ impl CoreState {
     }
 }
 
-fn exchange(path: &str, body: &[u8]) -> Exchange {
+pub(crate) fn exchange(path: &str, body: &[u8]) -> Exchange {
     Exchange {
         payload: message::encode(message::KIND, path, body),
         fetch: Fetch::new(0x0e, crate::frame::READ_WINDOW, 0x02),
@@ -58,7 +58,7 @@ fn exchange(path: &str, body: &[u8]) -> Exchange {
     }
 }
 
-fn service_reply(path: &str, r: &[u8]) -> Result<()> {
+pub(crate) fn service_reply(path: &str, r: &[u8]) -> Result<()> {
     if r.len() < 0x1e || !message::is_reply(r) {
         return Err(Error::Protocol(format!("{path}: {}", hex(r, 32))));
     }

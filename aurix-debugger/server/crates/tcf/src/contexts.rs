@@ -43,6 +43,7 @@ pub fn tcf_arch(arch: &ArchInfo) -> &'static str {
     match arch.name {
         "cortex_m" => "arm",
         "gtm_mcs" => "gtm_mcs",
+        "xc800" => "xc800",
         _ => "tricore",
     }
 }

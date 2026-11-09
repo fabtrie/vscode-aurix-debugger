@@ -67,7 +67,7 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
         let arch = find_core(&shared.handle, &ctx).map(|c| c.arch.name);
         let result = match arch {
             Some("cortex_m") => run_arm(&shared, idx, &ctx, mode, &cancel),
-            Some("gtm_mcs") => run_mcs(&shared, idx, mode, &cancel),
+            Some("gtm_mcs") | Some("xc800") => run_mcs(&shared, idx, mode, &cancel),
             _ => run(&shared, idx, &ctx, mode, &cancel),
         };
         let h = shared.handle.clone();
@@ -379,7 +379,7 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
     }
 }
 
-/// GTM MCS channel: every source line is one instruction. Step over and into are one instruction
+/// GTM MCS channel, and the SCR (XC800, no line information yet): every step is one instruction. Step over and into are one instruction
 /// step (the core steps over a CALL for step over); step out runs to the return address of the
 /// caller frame. An instruction waiting for an event (WURM, ARU) completes later: the channel stops
 /// after it on its own, so the step waits for that halt.
@@ -401,7 +401,7 @@ fn run_mcs(shared: &Shared, idx: usize, mode: u64, cancel: &AtomicBool) -> Resul
             return Ok(Stop::Cancelled);
         }
         if Instant::now() > deadline {
-            return Err("step timed out: the MCS channel waits for an event".into());
+            return Err("step timed out: the core did not stop (an MCS channel waiting for an event, or an SCR step over a call that does not return)".into());
         }
         let state = h.call(move |cx| {
             ops::poll_all(cx);

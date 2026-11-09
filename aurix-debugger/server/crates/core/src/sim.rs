@@ -4,6 +4,8 @@
 //! triggers (a resume with an armed trigger halts immediately at it).
 //! Every 32-bit write is recorded in [`SimAdapter::writes`].
 //!
+//! The SCR ([`SimScr`]) is debugged through [`Adapter::scr_debug`], once a test enables it.
+//!
 //! The HSM ([`SimHsm`]) is reached through its debug window: DBGBASE selects
 //! the upper 16 bits of the HSM address, only aligned word access works and
 //! every access fails while HSM debugging is disabled.
@@ -27,6 +29,7 @@ use crate::arch::{OEC, OSTATE};
 use crate::cortex_m::*;
 use crate::error::Result;
 use crate::sim_mcs::SimGtm;
+use crate::sim_scr::SimScr;
 
 const NUM_CORES: usize = 3;
 
@@ -280,6 +283,8 @@ pub struct SimAdapter {
     stm_epoch: Instant,
     pub hsm: SimHsm,
     pub gtm: SimGtm,
+    /// The standby controller (SCR), reached through [`Adapter::scr_debug`].
+    pub scr: SimScr,
     initialized: bool,
     srst: bool,
     /// What [`Adapter::health`] reports: set by tests to drive the core's health events.
@@ -337,6 +342,7 @@ impl SimAdapter {
             device_id: 0x1020_7083,
             hsm: SimHsm::new(),
             gtm: SimGtm::new(),
+            scr: SimScr::new(),
             initialized: false,
             srst: false,
             health: None,
@@ -843,6 +849,11 @@ impl Adapter for SimAdapter {
             self.hsm.debug_enabled = debug_enabled;
             // The GTM is disabled after a reset until the application enables it and loads the MCS programs.
             self.gtm = SimGtm::new();
+            // The SCR is reset with the chip; the application starts it in its OCDS boot mode
+            // again (when it did before), and a debugger has to attach anew.
+            let scr_enabled = self.scr.enabled;
+            self.scr = SimScr::new();
+            self.scr.enabled = scr_enabled;
             if halt_after_reset {
                 self.hsm.mem.insert(FP_CTRL, 1);
                 self.hsm.mem.insert(fp_comp(0), 0x0002_85d0 | 1 << 30 | 1);
@@ -859,6 +870,10 @@ impl Adapter for SimAdapter {
 
     fn health(&self) -> Option<LinkHealth> {
         self.health
+    }
+
+    fn scr_debug(&mut self) -> Option<&mut dyn crate::adapter::ScrDebug> {
+        Some(&mut self.scr)
     }
 
     fn probe_daq(&mut self) -> Option<&mut dyn ProbeDaq> {

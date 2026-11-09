@@ -254,6 +254,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "tricore", cmd_tricore);
     reg(interp, sh, "cortex_m", cmd_tricore);
     reg(interp, sh, "gtm_mcs", cmd_tricore);
+    reg(interp, sh, "xc800", cmd_tricore);
 }
 
 fn user_help_args(a: &[&str]) -> Result<(String, String), String> {
@@ -1465,6 +1466,7 @@ fn cmd_tricore(cx: &Cx, a: &[&str]) -> CmdResult {
                 bps.chain(wps).collect::<Vec<_>>().join("\n")
             }
             Core::Mcs(core) => core.describe_breakpoints().join("\n"),
+            Core::Xc800(core) => core.describe_breakpoints().join("\n"),
         })),
         // Memory as the core sees it (HSM RAM, boot ROM and peripherals through the debug window).
         Some("mdw") => {

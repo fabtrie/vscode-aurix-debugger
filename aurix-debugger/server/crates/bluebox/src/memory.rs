@@ -263,6 +263,59 @@ fn body_with(addr: u32, len: usize, data: Option<&[u8]>, flags: [u8; 3]) -> Vec<
     b
 }
 
+/// The memory of a core the probe reaches through that core's own debug interface instead of the
+/// host bus -- the TC3xx standby controller (SCR, core 3) -- as winIDEA 9.21.417 reads it
+/// (`scr2-417.jsonl`). The same service, with a shorter body:
+///
+/// ```text
+/// 0x00  01                 count
+/// 0x04  01                 (02 for the host bus)
+/// 0x09  memory space       00 code, 01 data (winIDEA's memory areas)
+/// 0x0a  address u64 LE     0x12  length u64 LE
+/// 0x1a  01   0x1b  core    0x23  ff
+/// 0x38  01 = write, 00 = read
+/// 0x48  3 bytes            access flags (winIDEA: 01 01 01, as [`FLAGS_REALTIME`])
+/// 0x4b  N u32 LE           bytes of write data that follow (0 for a read)
+/// 0x4f  data, then 8 x 00, e8 03 00 01, zeros to 134 bytes
+/// ```
+///
+/// The reply has the host-bus format ([`parse_reply`]).
+pub const CORE_BODY_LEN: usize = 134;
+const CORE_DATA: usize = 0x4f;
+
+/// A read of `len` bytes at `addr` in memory space `space` of core `core` (see [`CORE_BODY_LEN`]).
+pub fn core_read_request(core: u8, space: u8, addr: u32, len: usize) -> Vec<u8> {
+    core_request(core, space, addr, len, None)
+}
+
+/// A read of `len` bytes, or a write of `data`, at `addr` in memory space `space` of core `core`
+/// (see [`CORE_BODY_LEN`]; a write sets 0x38 to `01` and carries its data, checked against
+/// winIDEA's SCR writes in `scr3-417.jsonl`).
+pub fn core_request(core: u8, space: u8, addr: u32, len: usize, data: Option<&[u8]>) -> Vec<u8> {
+    let n = data.map_or(0, |d| d.len());
+    if let Some(d) = data {
+        assert_eq!(d.len(), len, "a write's length is its data's");
+    }
+    let mut b = vec![0u8; CORE_BODY_LEN + n];
+    b[0x00] = 0x01;
+    b[0x04] = 0x01;
+    b[0x09] = space;
+    b[0x0a..0x12].copy_from_slice(&(addr as u64).to_le_bytes());
+    b[0x12..0x1a].copy_from_slice(&(len as u64).to_le_bytes());
+    b[0x1a] = 0x01;
+    b[0x1b] = core;
+    b[0x23] = 0xff;
+    b[0x38] = data.is_some() as u8;
+    b[0x48..0x4b].copy_from_slice(&FLAGS_REALTIME);
+    b[0x4b..0x4f].copy_from_slice(&(n as u32).to_le_bytes());
+    if let Some(d) = data {
+        b[CORE_DATA..CORE_DATA + n].copy_from_slice(d);
+    }
+    let t = CORE_DATA + n + 8;
+    b[t..t + 4].copy_from_slice(&[0xe8, 0x03, 0x00, 0x01]);
+    message::encode(message::KIND, SERVICE, &b)
+}
+
 /// A parsed memory reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemReply {
@@ -375,6 +428,21 @@ fn u32le(b: &[u8], o: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scr_read_is_what_winidea_sends() {
+        // winIDEA reading 8 bytes of SCR code at 0x0079 (scr2-417.jsonl, "read area 0 0x79 8").
+        let msg = "230000000001092f2f322f2f2f31342f000000860100000001000000000079000000000000000800000000000000010300000000000000ff000000000000000000000000000000000000000000000000000000000000000000000000010101000000000000000000000000e80300010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        let rsp = "44000000feeffbf7ecfffffffb7f97ff080000003f01000000000000000001010000000000000001000000000800000075d420120537e5d500000000000000000000000000000000280500000000000000000000";
+        let unhex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        let (ours, theirs) = (core_read_request(3, 0, 0x79, 8), unhex(msg));
+        // The captured transfer carries padding after the message.
+        assert_eq!(ours[..], theirs[..ours.len()]);
+        assert!(theirs[ours.len()..].iter().all(|&b| b == 0));
+        let r = parse_reply(&unhex(rsp), 8).unwrap();
+        assert_eq!(r.data, vec![0x75, 0xd4, 0x20, 0x12, 0x05, 0x37, 0xe5, 0xd5]);
+        assert!(r.failed.iter().all(|f| !f), "{r:?}");
+    }
 
     fn unhex(s: &str) -> Vec<u8> {
         s.split_whitespace().map(|x| u8::from_str_radix(x, 16).unwrap()).collect()

@@ -12,6 +12,17 @@
 //! * The TCP connection to the TasServer fails: it is reconnected, session and device included.
 //!
 //! PING costs 6 to 30 ms and `get_targets` about 55 ms, so neither runs while all is well.
+//!
+//! The standby controller (SCR, target type `xc800`) is not debugged here yet:
+//! [`Adapter::scr_debug`] is `None`. Two ways are open, both behind
+//! [`crate::adapter::ScrDebug`] without changes to the core or the frontends:
+//!
+//! * TasServer's own XC800 driver, in a second session with `device_type 0x101EC083` (the
+//!   override applies to a whole session). Earlier tries crashed the TasServer; they ran the DAP
+//!   faster than the 10 MHz the SCR allows in DAP Standard mode, which winIDEA needs too.
+//! * The SCR's boot ROM monitor (TC3xx UM 49.5.2) driven directly with [`TasAdapter::jtag_scan`]:
+//!   JTAG IR `IOINSTR1` (0xC1), the 16-bit hardware commands and the READ/WRITE frames on the
+//!   monitor's virtual addresses, which are [`crate::adapter::scr_space`].
 
 use std::any::Any;
 use std::time::{Duration, Instant};
@@ -111,7 +122,10 @@ impl TasAdapter {
     /// optional IR scan, then a DR scan of `bits` bits with the data in (bit 0 of byte 0 first).
     /// Returns the captured DR data as hex numbers. Normal memory access is not possible while
     /// the scan mode is on; it is switched off at the end of the transaction.
-    fn jtag_scan(&mut self, scans: &[(u32, u32, u32, Vec<u8>)]) -> Result<Vec<String>> {
+    ///
+    /// Each scan is `(ir_width, ir, dr_bits, data)`; `ir_width` 0 keeps the IR. Also the transport
+    /// for a future SCR monitor implementation (see the module docs).
+    pub fn jtag_scan(&mut self, scans: &[(u32, u32, u32, Vec<u8>)]) -> Result<Vec<String>> {
         let mut b = Batch::new();
         b.write_am(AM15_RW_JTAG_SCAN_MODE_ENABLE, &0u32.to_le_bytes(), AM15);
         let mut reads = Vec::new();

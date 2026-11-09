@@ -60,7 +60,7 @@ impl Section {
             Section::Run => "Run control",
             Section::Memory => "Memory and registers",
             Section::Breakpoints => "Breakpoints and watchpoints",
-            Section::Core => "Core-specific (`tricore`, `cortex_m`, `gtm_mcs`)",
+            Section::Core => "Core-specific (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`)",
             Section::Flash => "Flash",
             Section::Server => "Server, ports and logging",
             Section::Script => "Scripting",
@@ -148,11 +148,11 @@ pub static ENTRIES: &[Entry] = &[
         "Every TriCore target needs one (`target create ... -ocmts <name>`)."),
     e!(Targets, "ocmts names", "", "List the declared OCMTS."),
     e!(Targets, "target create", "<name> <type> [<option> ...]", "Create a target (a core) and a command of the same name.",
-        "Types: `tricore`, `cortex_m` (the HSM), `gtm_mcs` (a GTM MCS channel). The options are those of \
+        "Types: `tricore`, `cortex_m` (the HSM), `gtm_mcs` (a GTM MCS channel), `xc800` (the SCR). The options are those of \
          `<target> configure`; a TriCore target needs `-ocmts`. The new target becomes the current one."),
     e!(Targets, "target names", "", "List the targets."),
     e!(Targets, "target current", "", "The current target, which commands without a target prefix act on."),
-    e!(Targets, "target types", "", "List the target types (`tricore cortex_m gtm_mcs`)."),
+    e!(Targets, "target types", "", "List the target types (`tricore cortex_m gtm_mcs xc800`)."),
     e!(Targets, "target count", "", "The number of targets."),
     e!(Targets, "target number", "<n>", "The name of target number `<n>`."),
     e!(Targets, "target smp", "...", "Ignored with a warning: the cfg scripts synchronise the cores (TL1)."),
@@ -242,6 +242,8 @@ pub static ENTRIES: &[Entry] = &[
     e!(Core, "tricore mdw", "<address> [<count>]", "Display words as the core sees them (HSM RAM, boot ROM, local scratchpads)."),
     e!(Core, "cortex_m ...", "triggers | mdw <address> [<count>]", "Same as `tricore`, for the HSM; `triggers` lists FPB and DWT comparators."),
     e!(Core, "gtm_mcs ...", "triggers | mdw <address> [<count>]", "Same as `tricore`, for an MCS channel."),
+    e!(Core, "xc800 ...", "triggers | mdw <address> [<count>]", "Same as `tricore`, for the SCR: `triggers` lists its hardware \
+        breakpoints, `mdw` takes its virtual addresses (code 0x0000-0xFFFF, IRAM 0x20000, SFRs 0x40000+)."),
     // --- flash ---------------------------------------------------------------------------
     e!(Flash, "flash bank", "<name> <driver> <base> <size> <chip_width> <bus_width> <target> [<option> ...]",
         "Declare a flash bank (drivers `tc3x_eflash`, `aurix_eflash`)."),
@@ -302,6 +304,10 @@ pub static ENTRIES: &[Entry] = &[
     e!(Bluebox, "bluebox status", "", "The probe and target the driver connected to."),
     e!(Bluebox, "bluebox health", "", "Ask the probe about the target connection now: supply, reset latch, debug access."),
     e!(Bluebox, "bluebox health_period", "[<ms>]", "How often the background poll asks the probe about the target connection; 0 never. Default 100 ms."),
+    e!(Bluebox, "bluebox debug_mode", "[standard|wide]", "The debug channel mode the attach sets up; set before `init`.",
+        "`wide` (DAP Wide, the default) is what the built-in attaches were captured with. `standard` (DAP Standard) is \
+         the only mode the SCR (`xc800` target) works in; the DAP clock then stays at 10 MHz or below. \
+         `tc3xx_scr_target 1` selects it."),
     e!(Bluebox, "bluebox daq", "", "The probe's sampler and the items it samples."),
     e!(Bluebox, "bluebox daq_offload", "[on|off]", "Let the probe sample live values itself (default `on`), or read every point from the host."),
     e!(Bluebox, "bluebox drop_target", "", "Test aid: reset the target and leave the connection broken, as after a reset the target did itself."),

@@ -124,7 +124,10 @@ use std::time::{Duration, Instant};
 
 use tas::{Batch, BatchOp, OpResult};
 
-use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth, ProbeDaq, ProbeDaqLimits, ProbeDrain, ProbeItem, ProbeSample};
+use crate::adapter::{
+    Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth, ProbeDaq, ProbeDaqLimits, ProbeDrain, ProbeItem, ProbeSample, ScrDebug,
+    ScrReg, ScrRegs, ScrStatus, ScrStop,
+};
 use crate::error::{other, Error, Result};
 
 const NOT_CONNECTED: &str = "bluebox: not connected (init has not run, or failed)";
@@ -207,6 +210,13 @@ pub struct BlueBoxAdapter {
     health_at: Option<Instant>,
     /// `bluebox health_period <ms>`; `None`: [`HEALTH_PERIOD`]. Zero turns the query off.
     health_period: Option<Duration>,
+    /// `bluebox debug_mode`: the debug channel mode the attach is set to; `None`: as captured
+    /// (DAP Wide for the built-in attaches). DAP Standard is what the SCR needs.
+    debug_mode: Option<bluebox::attach::DebugMode>,
+    /// The SCR attached on this connection (see [`ScrDebug`]); a reconnect drops it.
+    scr: Option<bluebox::scr::Session>,
+    /// The SCR's registers from its last status while halted.
+    scr_regs: Option<bluebox::scr::Regs>,
     /// The probe refused the query or answered implausibly on this connection.
     health_off: bool,
     /// `bluebox daq_offload off`: no probe sampler for the core; every point is read by the host.
@@ -341,6 +351,11 @@ impl BlueBoxAdapter {
 
     /// The clock this probe runs for `adapter speed` `hz`, and its divider.
     fn dap_clock(&self, hz: u32) -> (u32, u32) {
+        // DAP Standard: not above what the SCR allows.
+        let hz = match self.debug_mode {
+            Some(bluebox::attach::DebugMode::Standard) => hz.min(bluebox::attach::DAP_STANDARD_MAX_HZ),
+            _ => hz,
+        };
         bluebox::attach::dap_clock_for(self.model.unwrap_or_default(), hz)
     }
 
@@ -777,6 +792,10 @@ impl BlueBoxAdapter {
         // iC5700: the debug FPGA status, then the node scan, whose node count
         // tells whether an active probe sits between BlueBox and target.
         // iC5000: the FPGA upload inside the attach. See `bluebox::Probe::connect_target`.
+        let (script, script_note) = match self.debug_mode {
+            Some(m) => (script.with_debug_mode(m), format!("{script_note}, DAP {}", m.name())),
+            None => (script, script_note),
+        };
         let t0 = std::time::Instant::now();
         let c = probe.connect_target(&script, image.as_deref()).map_err(bb)?;
         for n in &c.notes {
@@ -803,6 +822,9 @@ impl BlueBoxAdapter {
         }
         let script = c.script;
         self.probe = Some(probe);
+        // The attach set the probe up again: the SCR has to be attached anew.
+        self.scr = None;
+        self.scr_regs = None;
         self.script = Some(script);
         if first && settings.connect_under_srst {
             // `reset_config connect_assert_srst`: connect with reset and halt, at the
@@ -935,6 +957,21 @@ impl Adapter for BlueBoxAdapter {
                 }
             }
             // How often the background poll asks the probe about the target connection (0: never).
+            // `bluebox debug_mode [standard|wide]`: the debug channel mode of the attach; takes
+            // effect at the next connect (`init`). The SCR works only in DAP Standard.
+            Some("debug_mode") => {
+                if let Some(v) = args.get(2) {
+                    self.debug_mode = Some(match *v {
+                        "standard" => bluebox::attach::DebugMode::Standard,
+                        "wide" => bluebox::attach::DebugMode::Wide,
+                        _ => return Err(Error::Usage("usage: bluebox debug_mode [standard|wide]".into())),
+                    });
+                    if self.inited {
+                        crate::log_warn!("[bluebox] debug_mode takes effect at the next connect");
+                    }
+                }
+                Ok(self.debug_mode.unwrap_or_default().name().to_string())
+            }
             Some("health_period") => {
                 if let Some(v) = args.get(2) {
                     let ms: u64 = v.parse().map_err(|_| Error::Usage("usage: bluebox health_period <ms>".into()))?;
@@ -1016,7 +1053,9 @@ impl Adapter for BlueBoxAdapter {
                     Err(Error::Usage(NOT_CONNECTED.into()))
                 }
             }
-            _ => Err(Error::Usage("usage: bluebox attach_replay|kernel|winidea|status|health|health_period|drop_target|daq|daq_offload ...".into())),
+            _ => Err(Error::Usage(
+                "usage: bluebox attach_replay|kernel|winidea|status|health|health_period|debug_mode|drop_target|raw|daq|daq_offload ...".into(),
+            )),
         }
     }
 
@@ -1166,6 +1205,10 @@ impl Adapter for BlueBoxAdapter {
     }
 
     /// The probe's sampler, unless `bluebox daq_offload off` or the probe refused it.
+    fn scr_debug(&mut self) -> Option<&mut dyn ScrDebug> {
+        Some(self)
+    }
+
     fn probe_daq(&mut self) -> Option<&mut dyn ProbeDaq> {
         if cfg!(windows) && self.inited && !self.daq_offload_off && !self.daq_refused {
             Some(self)
@@ -1207,6 +1250,183 @@ impl Adapter for BlueBoxAdapter {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+/// The SCR through the probe's services ([`bluebox::scr`]). Needs debug mode DAP Standard
+/// (`bluebox debug_mode standard` before `init`; `tc3xx_scr_target 1` sets it).
+impl BlueBoxAdapter {
+    /// Runs `f` with the probe and the attached SCR's session.
+    #[cfg(windows)]
+    fn with_scr<R>(&mut self, f: impl FnOnce(&mut Probe, &mut bluebox::scr::Session) -> bluebox::Result<R>) -> Result<R> {
+        if !self.inited {
+            return Err(Error::Usage(NOT_CONNECTED.into()));
+        }
+        self.ensure_connected()?;
+        let mut s = self.scr.take().ok_or_else(|| other("bluebox: the SCR is not attached"))?;
+        let r = match self.probe.as_mut() {
+            Some(p) => f(p, &mut s),
+            None => return Err(Error::Usage(NOT_CONNECTED.into())),
+        };
+        self.scr = Some(s);
+        r.map_err(|e| self.scr_error(e))
+    }
+
+    #[cfg(windows)]
+    fn scr_error(&mut self, e: bluebox::Error) -> Error {
+        if matches!(e, bluebox::Error::Usb { .. }) {
+            self.lose_probe(&e, &format!("probe error in an SCR access: {e}"));
+        }
+        other(format!("bluebox: SCR: {e}"))
+    }
+
+    /// The registers to show or change: changed ones not sent yet, else those of the last stop.
+    #[cfg(windows)]
+    fn scr_current_regs(&mut self) -> Result<bluebox::scr::Regs> {
+        if let Some(r) = self.scr.as_ref().and_then(|s| s.pending).or(self.scr_regs) {
+            return Ok(r);
+        }
+        let st = self.with_scr(|p, s| p.scr_status_synced(s))?;
+        if !st.halted {
+            return Err(Error::NotHalted("the SCR".into()));
+        }
+        self.scr_regs = Some(st.regs);
+        Ok(st.regs)
+    }
+}
+
+#[cfg(windows)]
+impl ScrDebug for BlueBoxAdapter {
+    fn attach(&mut self) -> Result<()> {
+        if self.debug_mode != Some(bluebox::attach::DebugMode::Standard) {
+            return Err(other(
+                "bluebox: the SCR is reachable only in debug mode DAP Standard: `bluebox debug_mode standard` before init \
+                 (`set tc3xx_scr_target 1` does it)",
+            ));
+        }
+        if !self.inited {
+            return Err(Error::Usage(NOT_CONNECTED.into()));
+        }
+        self.ensure_connected()?;
+        let r = self.probe()?.scr_attach();
+        let s = r.map_err(|e| self.scr_error(e))?;
+        self.scr = Some(s);
+        self.scr_regs = None;
+        Ok(())
+    }
+
+    fn status(&mut self) -> Result<ScrStatus> {
+        // After an SCR reset (chip reset, or the application restarting it) the probe needs the
+        // monitor link set up again; `scr_status_synced` does that.
+        let st = self.with_scr(|p, s| p.scr_status_synced(s))?;
+        self.scr_regs = st.halted.then_some(st.regs);
+        let pending_pc = self.scr.as_ref().and_then(|s| s.pending).map(|r| r.pc);
+        let reason = match st.reason {
+            bluebox::scr::Stop::Request => ScrStop::Request,
+            bluebox::scr::Stop::Breakpoint(_) => ScrStop::Breakpoint,
+            bluebox::scr::Stop::Other(_) => ScrStop::Other,
+        };
+        Ok(ScrStatus { halted: st.halted, pc: pending_pc.unwrap_or(st.regs.pc), reason })
+    }
+
+    fn halt(&mut self) -> Result<()> {
+        self.scr_regs = None;
+        self.with_scr(|p, _| p.scr_halt())
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        let pc = self.scr_current_regs()?.pc;
+        self.scr_regs = None;
+        self.with_scr(|p, s| p.scr_run(s, pc))
+    }
+
+    fn step(&mut self) -> Result<()> {
+        self.scr_regs = None;
+        self.with_scr(|p, s| p.scr_step(s))
+    }
+
+    fn read_regs(&mut self) -> Result<ScrRegs> {
+        let r = self.scr_current_regs()?;
+        Ok(ScrRegs { acc: r.acc, b: r.b, sp: r.sp, psw: r.psw, dpl: r.dptr as u8, dph: (r.dptr >> 8) as u8, pc: r.pc, r: r.r })
+    }
+
+    /// Kept until the next step or run, which sends the whole register block (as winIDEA does).
+    fn write_reg(&mut self, reg: ScrReg, value: u16) -> Result<()> {
+        let mut r = self.scr_current_regs()?;
+        let v = value as u8;
+        match reg {
+            ScrReg::Acc => r.acc = v,
+            ScrReg::B => r.b = v,
+            ScrReg::Sp => r.sp = v,
+            ScrReg::Psw => r.psw = v,
+            ScrReg::Dpl => r.dptr = (r.dptr & 0xFF00) | v as u16,
+            ScrReg::Dph => r.dptr = (r.dptr & 0x00FF) | (v as u16) << 8,
+            ScrReg::Pc => r.pc = value,
+            ScrReg::R(n) => r.r[n as usize & 7] = v,
+        }
+        self.scr.as_mut().ok_or_else(|| other("bluebox: the SCR is not attached"))?.pending = Some(r);
+        Ok(())
+    }
+
+    fn hw_breakpoint_slots(&self) -> usize {
+        bluebox::scr::BREAKPOINTS
+    }
+
+    fn set_hw_breakpoint(&mut self, slot: usize, addr: u16) -> Result<()> {
+        self.with_scr(|p, s| p.scr_set_breakpoint(s, slot, Some(addr)))
+    }
+
+    fn clear_hw_breakpoint(&mut self, slot: usize) -> Result<()> {
+        self.with_scr(|p, s| p.scr_set_breakpoint(s, slot, None))
+    }
+
+    fn read(&mut self, vaddr: u32, len: usize) -> Result<Vec<u8>> {
+        self.with_scr(|p, _| p.scr_read(vaddr, len))
+    }
+
+    fn write(&mut self, vaddr: u32, data: &[u8]) -> Result<()> {
+        self.with_scr(|p, _| p.scr_write(vaddr, data))
+    }
+}
+
+/// Without the USB driver (not Windows) the SCR is as unreachable as the probe.
+#[cfg(not(windows))]
+impl ScrDebug for BlueBoxAdapter {
+    fn attach(&mut self) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn status(&mut self) -> Result<ScrStatus> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn halt(&mut self) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn resume(&mut self) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn step(&mut self) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn read_regs(&mut self) -> Result<ScrRegs> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn write_reg(&mut self, _reg: ScrReg, _value: u16) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn hw_breakpoint_slots(&self) -> usize {
+        bluebox::scr::BREAKPOINTS
+    }
+    fn set_hw_breakpoint(&mut self, _slot: usize, _addr: u16) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn clear_hw_breakpoint(&mut self, _slot: usize) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn read(&mut self, _vaddr: u32, _len: usize) -> Result<Vec<u8>> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
+    }
+    fn write(&mut self, _vaddr: u32, _data: &[u8]) -> Result<()> {
+        Err(Error::Usage(NOT_CONNECTED.into()))
     }
 }
 

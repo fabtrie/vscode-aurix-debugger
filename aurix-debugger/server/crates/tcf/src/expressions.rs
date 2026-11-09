@@ -677,13 +677,15 @@ pub enum GlobalError {
     Core(String),
 }
 
-/// The core a trailing `@N` or `@hsm` of an expression names (see [`split_core`]).
+/// The core a trailing `@N`, `@hsm` or `@scr` of an expression names (see [`split_core`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreSel {
     /// The TriCore core with core ID `N`: whose core-local RAM the expression means.
     Tricore(u32),
     /// The HSM: its symbols and memory view.
     Hsm,
+    /// The SCR (standby controller): its memory view (its virtual address map).
+    Scr,
 }
 
 impl std::fmt::Display for CoreSel {
@@ -691,6 +693,7 @@ impl std::fmt::Display for CoreSel {
         match self {
             CoreSel::Tricore(n) => write!(f, "@{n}"),
             CoreSel::Hsm => f.write_str("@hsm"),
+            CoreSel::Scr => f.write_str("@scr"),
         }
     }
 }
@@ -704,6 +707,8 @@ pub fn split_core(text: &str) -> (&str, Option<CoreSel>) {
     let (head, tail) = (head.trim_end(), tail.trim());
     let sel = if tail.eq_ignore_ascii_case("hsm") {
         CoreSel::Hsm
+    } else if tail.eq_ignore_ascii_case("scr") {
+        CoreSel::Scr
     } else if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
         // Too many digits for a core ID is still a core that does not exist.
         CoreSel::Tricore(tail.parse().unwrap_or(u32::MAX))
@@ -812,6 +817,7 @@ pub fn evaluate_global(sh: &Shared, ctx: &str, text: &str) -> Result<GlobalValue
             GlobalError::NoTarget(format!("`{text}`: there is no TriCore core {n} (the cores are {})", have.join(", ")))
         })?),
         Some(CoreSel::Hsm) => Some(all.iter().find(|c| c.arch.name == "cortex_m").ok_or_else(|| GlobalError::NoTarget(format!("`{text}`: there is no HSM")))?),
+        Some(CoreSel::Scr) => Some(all.iter().find(|c| c.arch.name == "xc800").ok_or_else(|| GlobalError::NoTarget(format!("`{text}`: there is no SCR target")))?),
     };
     let ctx = match (named, crate::contexts::owning_core(ctx)) {
         (Some(c), Some(t)) if c.id != t => {
@@ -1043,5 +1049,7 @@ mod tests {
         }
         assert_eq!(CoreSel::Tricore(2).to_string(), "@2");
         assert_eq!(CoreSel::Hsm.to_string(), "@hsm");
+        assert_eq!(split_core("0x20008@SCR"), ("0x20008", Some(CoreSel::Scr)));
+        assert_eq!(CoreSel::Scr.to_string(), "@scr");
     }
 }

@@ -2,3 +2,4 @@
 //! sources) and the TCF frontend (disassembly).
 
 pub mod mcs;
+pub mod xc800;

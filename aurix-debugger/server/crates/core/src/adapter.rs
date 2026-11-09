@@ -152,6 +152,118 @@ pub trait ProbeDaq {
     fn generation(&self) -> u64;
 }
 
+/// Why the SCR stopped, as its debug interface reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrStop {
+    /// A halt request (also the start breakpoint the boot ROM sets at 0x0000 in OCDS mode).
+    Request,
+    /// A hardware breakpoint.
+    Breakpoint,
+    /// A single step finished.
+    Step,
+    /// Anything else (e.g. a `TRAP` instruction).
+    Other,
+}
+
+/// Run state of the SCR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrStatus {
+    pub halted: bool,
+    /// The address the SCR continues at; valid while halted.
+    pub pc: u16,
+    pub reason: ScrStop,
+}
+
+/// The SCR's registers as its debug monitor saved them on entry. While the SCR is halted, the
+/// monitor uses ACC, B, SP, PSW, DPTR and register bank 0 itself: reading them as SFRs or IRAM
+/// shows the monitor's values (measured through the BlueBox), so they come from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScrRegs {
+    pub acc: u8,
+    pub b: u8,
+    pub sp: u8,
+    pub psw: u8,
+    pub dpl: u8,
+    pub dph: u8,
+    pub pc: u16,
+    /// R0..R7 of the bank PSW.RS selects.
+    pub r: [u8; 8],
+}
+
+/// One of the [`ScrRegs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrReg {
+    Acc,
+    B,
+    Sp,
+    Psw,
+    Dpl,
+    Dph,
+    Pc,
+    /// R0..R7 of the selected bank.
+    R(u8),
+}
+
+/// Start of each space in the SCR's virtual address map (TC3xx UM 49.5.2.3.2, Table 558), the
+/// addresses [`ScrDebug::read`] and [`ScrDebug::write`] take.
+pub mod scr_space {
+    /// Program memory (XRAM as code), 0x0000-0xFFFF.
+    pub const CODE: u32 = 0x0_0000;
+    /// External data memory (XRAM as data).
+    pub const XDATA: u32 = 0x1_0000;
+    /// Internal RAM, 0x00-0xFF (R0..R7 of bank n at 8n; see [`super::ScrRegs`] while halted).
+    pub const IRAM: u32 = 0x2_0000;
+    /// SFRs: bit 18 set, page in bits 17:15, SFR page address in bits 14:8, RMAP in bit 7,
+    /// SFR address (without its bit 7) in bits 6:0.
+    pub const SFR: u32 = 0x4_0000;
+    /// End of the map.
+    pub const END: u32 = 0x8_0000;
+
+    /// Virtual address of a standard SFR (`addr` 0x80..0xFF, page 0, RMAP 0).
+    pub const fn sfr(addr: u8) -> u32 {
+        SFR | (addr as u32 & 0x7F)
+    }
+}
+
+/// Debugging the TC3xx standby controller (SCR, an XC800/8051 core) through the probe.
+///
+/// The SCR is not reachable over the host bus: its OCDS sits behind its own debug port, which
+/// the SoC DAP reaches once the application started the SCR in an OCDS boot mode (PMSWCR4.SCRCFG
+/// 0x0A/0x0B). How a probe talks to it differs -- the BlueBox has services for it, a TAS
+/// miniWiggler would drive the SCR's JTAG and its boot ROM monitor directly -- so the SCR target
+/// ([`crate::xc800`]) asks the adapter for this interface instead of reading registers itself.
+///
+/// The primitives are the ones the SCR's debug monitor offers (TC3xx UM 49.5.2): halt, exit to
+/// the user program, single step, hardware breakpoints, and reads and writes in its virtual
+/// address map ([`scr_space`]). Splitting into the probe's block sizes is the implementation's
+/// job.
+pub trait ScrDebug {
+    /// Establishes debug access to the SCR (it must run in an OCDS boot mode).
+    fn attach(&mut self) -> Result<()>;
+    /// Gives the SCR back to its program; the default does nothing.
+    fn detach(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn status(&mut self) -> Result<ScrStatus>;
+    fn halt(&mut self) -> Result<()>;
+    /// Continues the user program at the halted PC.
+    fn resume(&mut self) -> Result<()>;
+    /// Executes one instruction; the SCR is halted afterwards.
+    fn step(&mut self) -> Result<()>;
+    /// Registers saved by the monitor; only while halted.
+    fn read_regs(&mut self) -> Result<ScrRegs>;
+    /// Changes a saved register (the PC: where the program continues); only while halted.
+    fn write_reg(&mut self, reg: ScrReg, value: u16) -> Result<()>;
+    /// Number of hardware breakpoints.
+    fn hw_breakpoint_slots(&self) -> usize;
+    fn set_hw_breakpoint(&mut self, slot: usize, addr: u16) -> Result<()>;
+    fn clear_hw_breakpoint(&mut self, slot: usize) -> Result<()>;
+    /// Reads `len` bytes at a virtual address ([`scr_space`]).
+    fn read(&mut self, vaddr: u32, len: usize) -> Result<Vec<u8>>;
+    /// Writes at a virtual address ([`scr_space`]).
+    fn write(&mut self, vaddr: u32, data: &[u8]) -> Result<()>;
+}
+
 pub trait Adapter {
     fn driver_name(&self) -> &'static str;
     /// Driver-specific Tcl command groups, e.g. `tas-client`.
@@ -205,6 +317,13 @@ pub trait Adapter {
     /// `None` (the default, and what the TAS, winIDEA and simulator adapters return) means every
     /// point is read by the host, as it always was.
     fn probe_daq(&mut self) -> Option<&mut dyn ProbeDaq> {
+        None
+    }
+    /// Debug access to the TC3xx standby controller (SCR), see [`ScrDebug`].
+    ///
+    /// `None` (the default) means this adapter cannot debug the SCR; the SCR target then fails
+    /// its examination with a message saying so.
+    fn scr_debug(&mut self) -> Option<&mut dyn ScrDebug> {
         None
     }
     /// The run-state poll period this probe wants when the cfg sets none

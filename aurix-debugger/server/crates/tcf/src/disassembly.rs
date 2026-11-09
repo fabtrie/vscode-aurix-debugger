@@ -37,6 +37,8 @@ pub enum Isa {
     Thumb,
     /// GTM MCS (32-bit instructions, decoded by the `isa` crate).
     Mcs,
+    /// XC800 of the SCR (8051, 1-3 byte instructions, decoded by the `isa` crate).
+    Xc800,
 }
 
 impl Isa {
@@ -44,6 +46,7 @@ impl Isa {
         match crate::contexts::find_core(&sh.handle, ctx) {
             Some(c) if c.arch.name == "cortex_m" => Isa::Thumb,
             Some(c) if c.arch.name == "gtm_mcs" => Isa::Mcs,
+            Some(c) if c.arch.name == "xc800" => Isa::Xc800,
             _ => Isa::TriCore,
         }
     }
@@ -53,6 +56,7 @@ impl Isa {
             Isa::TriCore => "TRICORE",
             Isa::Thumb => "Thumb",
             Isa::Mcs => "MCS",
+            Isa::Xc800 => "XC800",
         }
     }
 
@@ -61,6 +65,7 @@ impl Isa {
         match self {
             Isa::TriCore if b0 & 1 == 1 => 4,
             Isa::Mcs => 4,
+            Isa::Xc800 => isa::xc800::length(b0) as usize,
             Isa::Thumb if aurix_core::unwind_arm::is_thumb32(u16::from_le_bytes([b0, b1])) => 4,
             _ => 2,
         }
@@ -71,7 +76,7 @@ fn capstone(isa: Isa) -> Res<Capstone> {
     match isa {
         Isa::TriCore => Capstone::new().tricore().mode(ArchMode::TriCore162).build(),
         Isa::Thumb => Capstone::new().arm().mode(arm::ArchMode::Thumb).extra_mode([arm::ArchExtraMode::MClass].into_iter()).build(),
-        Isa::Mcs => return Err((ERR_OTHER, "no Capstone disassembler for the MCS".into())),
+        Isa::Mcs | Isa::Xc800 => return Err((ERR_OTHER, format!("no Capstone disassembler for the {}", isa.name()))),
     }
     .map_err(|e| (ERR_OTHER, format!("disassembler: {e}")))
 }
@@ -162,6 +167,18 @@ pub fn disassemble_mcs(code: &[u8], addr: u32, label: &dyn Fn(u32) -> Option<Str
         .collect()
 }
 
+/// Disassembles XC800 (SCR) code at `addr` (an instruction cut off at the end is left out).
+/// Branch targets are shown as `label` names them.
+pub fn disassemble_xc800(code: &[u8], addr: u32, label: &dyn Fn(u32) -> Option<String>) -> Vec<(u32, usize, String)> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while let Some(i) = isa::xc800::decode(&code[off..], addr + off as u32) {
+        out.push((addr + off as u32, i.len as usize, isa::xc800::format(&i, label)));
+        off += i.len as usize;
+    }
+    out
+}
+
 /// Disassembles `code` located at `addr` into (address, length, text).
 /// Undecodable instructions become `.short`/`.word` lines of their length
 /// (TriCore: bit 0 of the first byte set, Thumb: a 32-bit prefix half-word);
@@ -215,7 +232,7 @@ pub fn annotate_target(text: &str, isa: Isa, function_at: impl Fn(u32) -> Option
         // b, bl, blx, b<cond>, cbz, cbnz (not bic).
         Isa::Thumb => (mnemonic.starts_with('b') && !mnemonic.starts_with("bic")) || mnemonic.starts_with("cb"),
         // Targets are already shown as labels.
-        Isa::Mcs => false,
+        Isa::Mcs | Isa::Xc800 => false,
     };
     let Some(pos) = text.rfind("#0x").filter(|_| branch) else {
         return text.to_string();
@@ -261,7 +278,7 @@ pub fn dispatch(sh: &Shared, command: &str, args: &[String]) -> Res<Vec<String>>
             let isa = Isa::for_ctx(sh, &ctx);
             let syms = sh.symbols_for(&ctx);
             let function_at = |addr: u32| syms.as_ref()?.function_at(addr).map(|f| (f.name.clone(), addr - (f.low & !1)));
-            let cs = if isa == Isa::Mcs { None } else { Some(capstone(isa)?) };
+            let cs = if matches!(isa, Isa::Mcs | Isa::Xc800) { None } else { Some(capstone(isa)?) };
             let mut lines: Vec<Value> = Vec::new();
             for piece in &pieces {
                 match piece {
@@ -270,7 +287,11 @@ pub fn dispatch(sh: &Shared, command: &str, args: &[String]) -> Res<Vec<String>>
                             Some(cs) => disassemble_bytes(cs, isa, data, *at),
                             None => {
                                 let label = |a: u32| function_at(a).filter(|(_, off)| *off == 0).map(|(name, _)| name);
-                                disassemble_mcs(data, *at, &label)
+                                if isa == Isa::Xc800 {
+                                    disassemble_xc800(data, *at, &label)
+                                } else {
+                                    disassemble_mcs(data, *at, &label)
+                                }
                             }
                         };
                         lines.extend(decoded.into_iter().map(|(a, n, text)| {

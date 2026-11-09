@@ -1210,3 +1210,118 @@ mod backend_guard {
         assert_eq!(i.eval("llength $tc3xx_cores").unwrap(), "3");
     }
 }
+
+// --- SCR (xc800 target) ---------------------------------------------------------------------------
+
+/// The board cfg with `tc3xx_scr_target 1`.
+fn scr_server() -> Server {
+    aurix_core::log::set_debug_level(1);
+    let s = Server::new();
+    s.cx().with(|c| {
+        c.adapter_override = Some("sim".into());
+        c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
+    });
+    s.interp.eval_global("set tc3xx_scr_target 1").unwrap();
+    s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+    s.interp
+        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
+        .unwrap();
+    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("set sbc_rstb_wired 0").unwrap();
+    s
+}
+
+fn scr_index(s: &Server) -> usize {
+    s.cx().with(|c| c.targets.iter().position(|e| e.name == "tc37x.scr").expect("tc37x.scr exists"))
+}
+
+#[test]
+fn scr_target_waits_for_the_application() {
+    let s = server();
+    assert!(!s.interp.eval("target names").unwrap().contains(".scr"), "off by default");
+
+    let s = scr_server();
+    let i = &s.interp;
+    assert_eq!(i.eval("tc37x.scr cget -type").unwrap(), "xc800");
+    assert_eq!(i.eval("tc37x.scr cget -coreid").unwrap(), "7");
+    i.eval("init").unwrap();
+    // The application has not started the SCR in its OCDS boot mode: not examined, the rest works.
+    assert_eq!(i.eval("tc37x.scr was_examined").unwrap(), "0");
+    assert_eq!(i.eval("tc37x.cpu0 was_examined").unwrap(), "1");
+    with_sim(&s, |sim| sim.scr.enabled = true);
+    i.eval("tc37x.scr arp_examine").unwrap();
+    // Attaching stops it at the boot ROM's start breakpoint; no TL1 or OCDS writes for it.
+    assert_eq!(i.eval("tc37x.scr curstate").unwrap(), "halted");
+    let t = scr_index(&s);
+    assert_eq!(ops::state(&s.cx(), t).1.name(), "debug-request");
+    // Refused at init, then attached.
+    assert_eq!(with_sim(&s, |sim| sim.scr.calls.clone()), vec!["attach", "attach"]);
+}
+
+#[test]
+fn scr_registers_memory_step_and_breakpoints() {
+    let s = scr_server();
+    let i = &s.interp;
+    with_sim(&s, |sim| sim.scr.enabled = true);
+    i.eval("init").unwrap();
+    i.eval("targets tc37x.scr").unwrap();
+    let t = scr_index(&s);
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000000");
+    assert!(i.eval("reg").unwrap().starts_with("===== xc800 registers"));
+    // Code and IRAM through the SCR's virtual address map.
+    assert_eq!(ops::read_memory_as(&s.cx(), t, 0, 3).unwrap(), vec![0x02, 0x00, 0x79]);
+
+    i.eval("step").unwrap();
+    i.eval("step").unwrap();
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x0000007c");
+    assert_eq!(i.eval("reg sp").unwrap(), "sp (/32): 0x00000020");
+    assert_eq!(ops::state(&s.cx(), t).1.name(), "single-step");
+
+    // R7 of bank 0 is IRAM 0x07.
+    i.eval("reg r7 0x41").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.scr.iram[7]), 0x41);
+
+    // A hardware breakpoint in the subroutine.
+    i.eval("bp 0x101 1 hw").unwrap();
+    assert_eq!(i.eval("xc800 triggers").unwrap().lines().next().unwrap(), "HWBP0: on  addr=0x0101");
+    i.eval("resume").unwrap();
+    i.eval("wait_halt 1000").unwrap();
+    assert_eq!(ops::state(&s.cx(), t).1.name(), "breakpoint");
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x00000101");
+    assert_eq!(i.eval("reg r7").unwrap(), "r7 (/32): 0x00000042", "INC R7 ran");
+    i.eval("rbp all").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.scr.bps), [None; 4]);
+
+    // Step over the call at 0x7C: runs to a temporary breakpoint behind it, which goes again.
+    i.eval("reg pc 0x7c").unwrap();
+    assert!(ops::step_as(&s.cx(), t, None, aurix_core::target::RunMode::StepOver).is_err(), "still running");
+    poll_until(&s, "the step over", |s| ops::state(&s.cx(), t).0 == aurix_core::target::TargetState::Halted);
+    assert_eq!(i.eval("reg pc").unwrap(), "pc (/32): 0x0000007f");
+    assert_eq!(ops::state(&s.cx(), t).1.name(), "single-step");
+    assert_eq!(with_sim(&s, |sim| sim.scr.bps), [None; 4]);
+
+    // Halt while running.
+    i.eval("resume").unwrap();
+    assert_eq!(i.eval("tc37x.scr curstate").unwrap(), "running");
+    i.eval("halt 1000").unwrap();
+    assert_eq!(i.eval("tc37x.scr curstate").unwrap(), "halted");
+    assert_eq!(ops::state(&s.cx(), t).1.name(), "debug-request");
+    // The TriCore cores were not stopped with it (the SCR is not on TL1).
+    assert_eq!(i.eval("tc37x.cpu0 curstate").unwrap(), "running");
+}
+
+/// A launch configuration sets `tc3xx_scr_target` in its commands, after the cfg files: the SCR
+/// target is created by init_targets, before the probe connects.
+#[test]
+fn scr_target_set_after_the_cfg_files() {
+    let s = server();
+    let i = &s.interp;
+    assert!(!i.eval("target names").unwrap().contains(".scr"));
+    i.eval_global("set tc3xx_scr_target 1").unwrap();
+    with_sim(&s, |sim| sim.scr.enabled = true);
+    i.eval("init").unwrap();
+    assert!(i.eval("target names").unwrap().contains("tc37x.scr"));
+    assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
+    assert_eq!(i.eval("tc37x.scr was_examined").unwrap(), "1");
+    assert_eq!(i.eval("tc37x.scr curstate").unwrap(), "halted");
+}

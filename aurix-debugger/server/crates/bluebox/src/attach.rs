@@ -217,7 +217,82 @@ pub fn dap_clock(hz: u32) -> (u32, u32) {
     (DAP_BASE_HZ / div, div)
 }
 
+/// The debug channel mode of the workspace the attach was captured with (winIDEA: Hardware | CPU
+/// Options | SoC, `DebugMode`). It lives in three bytes of the attach's settings tables;
+/// [`Script::with_debug_mode`] changes them. Measured: the DAP Standard attach of winIDEA 9.21.417
+/// (`scr2-417.jsonl`) differs from the built-in DAP Wide one in exactly these
+/// bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugMode {
+    /// DAP Wide (`DAP_W`), what the built-in attaches were captured with.
+    #[default]
+    Wide,
+    /// DAP Standard: the only mode the TC3xx standby controller (SCR) works in, at 10 MHz or less
+    /// (winIDEA help, "Debug SCR").
+    Standard,
+}
+
+impl DebugMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            DebugMode::Wide => "wide",
+            DebugMode::Standard => "standard",
+        }
+    }
+}
+
+/// Highest DAP clock in [`DebugMode::Standard`] that the SCR allows.
+pub const DAP_STANDARD_MAX_HZ: u32 = 10_000_000;
+
+/// The SoC settings table of the attach (7378 bytes): body byte 1 is the debug mode, `02` DAP Wide,
+/// `01` DAP Standard.
+pub const SYSTEM_TABLE: &str = "//2///26/";
+const SYSTEM_TABLE_MODE: usize = 1;
+/// In each TriCore core's table (`//3//<n>/6/`): byte 34 the debug mode as above, byte 55 `01` in
+/// DAP Wide and `00` in DAP Standard.
+const CORE_TABLE_MODE: usize = 34;
+const CORE_TABLE_WIDE: usize = 55;
+
+/// Whether `path` is a core settings table, `//3//<n>/6/`.
+fn is_core_table(path: &str) -> bool {
+    matches!(path.split('/').collect::<Vec<_>>().as_slice(), ["", "", "3", "", n, "6", ""] if n.chars().all(|c| c.is_ascii_digit()))
+}
+
 impl Script {
+    /// The same script for another debug mode (see [`DebugMode`]).
+    pub fn with_debug_mode(&self, mode: DebugMode) -> Script {
+        let (code, wide) = match mode {
+            DebugMode::Wide => (2, 1),
+            DebugMode::Standard => (1, 0),
+        };
+        let mut s = self.clone();
+        for x in &mut s.exchanges {
+            let Some((kind, path, body)) = message::decode(&x.payload) else { continue };
+            let mut body = body.to_vec();
+            if path == SYSTEM_TABLE && body.len() > SYSTEM_TABLE_MODE {
+                body[SYSTEM_TABLE_MODE] = code;
+            } else if is_core_table(path) && body.len() > CORE_TABLE_WIDE {
+                body[CORE_TABLE_MODE] = code;
+                body[CORE_TABLE_WIDE] = wide;
+            } else {
+                continue;
+            }
+            x.payload = message::encode(kind, path, &body);
+        }
+        s
+    }
+
+    /// The debug mode its settings table selects; `None` without one.
+    pub fn debug_mode(&self) -> Option<DebugMode> {
+        self.exchanges.iter().find_map(|x| match message::decode(&x.payload) {
+            Some((_, SYSTEM_TABLE, b)) if b.len() > SYSTEM_TABLE_MODE => match b[SYSTEM_TABLE_MODE] {
+                1 => Some(DebugMode::Standard),
+                _ => Some(DebugMode::Wide),
+            },
+            _ => None,
+        })
+    }
+
     /// The same script with every clock message set to `hz`.
     pub fn with_clock(&self, hz: u32) -> Script {
         let mut s = self.clone();
@@ -577,7 +652,8 @@ impl<L: Link> Probe<L> {
                 let mut after = rest.exchanges[at + 1..].to_vec();
                 if setup != script.captured_setup() {
                     // The setup's built-in attach, if this one is the same up to the scan.
-                    let other = setup.script();
+                    // In the debug mode the given script was set to.
+                    let other = setup.script().with_debug_mode(script.debug_mode().unwrap_or_default());
                     let (_, other_rest) = split_at_fpga_status(&other);
                     let same_head = node_scan(&other_rest).is_some_and(|o| {
                         let head = |s: &Script, n: usize| s.exchanges[..n].iter().map(|x| x.payload.clone()).collect::<Vec<_>>();
@@ -636,6 +712,50 @@ mod tests {
         let fast = s.with_clock(30_000_000);
         assert_eq!(fast.clocks(), vec![30_000_000; 2]);
         assert_eq!(fast.exchanges[1], s.exchanges[1], "only the clock messages change");
+    }
+
+    /// The tables of `s`, by path, with their bodies.
+    fn tables(s: &Script) -> Vec<(String, Vec<u8>)> {
+        s.exchanges
+            .iter()
+            .filter_map(|x| message::decode(&x.payload))
+            .filter(|(_, p, _)| *p == SYSTEM_TABLE || is_core_table(p))
+            .map(|(_, p, b)| (p.to_string(), b.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn the_debug_mode_can_be_set() {
+        assert!(is_core_table("//3///6/") && is_core_table("//3//2/6/") && !is_core_table("//3//2/16/") && !is_core_table("//2///6/"));
+        for s in [Script::tc37x(), Script::tc37x_system()] {
+            assert_eq!(s.debug_mode(), Some(DebugMode::Wide));
+            let std = s.with_debug_mode(DebugMode::Standard);
+            assert_eq!(std.debug_mode(), Some(DebugMode::Standard));
+            let (a, b) = (tables(&s), tables(&std));
+            assert!(a.iter().filter(|(p, _)| is_core_table(p)).count() >= 3, "the three TriCore tables");
+            for ((p, x), (_, y)) in a.iter().zip(&b) {
+                let diff: Vec<usize> = (0..x.len()).filter(|&i| x[i] != y[i]).collect();
+                let want = if p == SYSTEM_TABLE { vec![SYSTEM_TABLE_MODE] } else { vec![CORE_TABLE_MODE, CORE_TABLE_WIDE] };
+                assert_eq!(diff, want, "{p}");
+            }
+            let back = std.with_debug_mode(DebugMode::Wide);
+            assert!(back.exchanges.iter().zip(&s.exchanges).all(|(x, y)| x.payload == y.payload), "and back");
+        }
+    }
+
+    /// The patch against winIDEA's own DAP Standard attach, exported from a capture with
+    /// `examples/probe.rs --script <trace> --export` (e.g. `scr2-417.jsonl`, step
+    /// `session begin_attach (primary, DAP Standard)`): `BLUEBOX_DAPSTD_SCRIPT=<file>`.
+    #[test]
+    fn the_debug_mode_patch_matches_winidea() {
+        let Some(path) = std::env::var_os("BLUEBOX_DAPSTD_SCRIPT") else { return };
+        let captured = Script::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let ours = tables(&Script::tc37x().with_debug_mode(DebugMode::Standard));
+        let theirs = tables(&captured);
+        for (p, b) in &ours {
+            let t = theirs.iter().find(|(q, c)| q == p && c.len() == b.len()).unwrap_or_else(|| panic!("{p} not captured"));
+            assert_eq!(&t.1, b, "{p}");
+        }
     }
 
     #[test]

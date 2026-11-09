@@ -44,6 +44,7 @@ pub mod message;
 pub mod probe;
 pub mod replay;
 pub mod reset;
+pub mod scr;
 #[cfg(windows)]
 pub mod usb;
 

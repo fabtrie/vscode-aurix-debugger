@@ -318,6 +318,52 @@ pub static GTM_MCS: ArchInfo = ArchInfo {
     description: "GTM MCS channel and module registers",
 };
 
+// --- XC800 (TC3xx standby controller, SCR) -----------------------------------------------
+
+/// Offset of an SCR register: R0..R7 of the selected bank (IRAM).
+pub const XC800_BANK_REG: u16 = 0x100;
+/// Offset of an SCR register the debug monitor saves (see [`crate::adapter::ScrReg`]).
+pub const XC800_SAVED_REG: u16 = 0x200;
+
+const fn x8(name: &'static str, offset: u16, group: RegGroup, description: &'static str) -> RegDef {
+    RegDef { name, offset, gdb: None, dwarf: None, group, description }
+}
+
+/// SCR registers. The saved ones are numbered in the order of [`crate::adapter::ScrReg`];
+/// `dptr` is DPH:DPL.
+pub static XC800_REGS: &[RegDef] = &[
+    x8("r0", XC800_BANK_REG, RegGroup::General, "Register 0 of the selected bank"),
+    x8("r1", XC800_BANK_REG + 1, RegGroup::General, "Register 1 of the selected bank"),
+    x8("r2", XC800_BANK_REG + 2, RegGroup::General, "Register 2 of the selected bank"),
+    x8("r3", XC800_BANK_REG + 3, RegGroup::General, "Register 3 of the selected bank"),
+    x8("r4", XC800_BANK_REG + 4, RegGroup::General, "Register 4 of the selected bank"),
+    x8("r5", XC800_BANK_REG + 5, RegGroup::General, "Register 5 of the selected bank"),
+    x8("r6", XC800_BANK_REG + 6, RegGroup::General, "Register 6 of the selected bank"),
+    x8("r7", XC800_BANK_REG + 7, RegGroup::General, "Register 7 of the selected bank"),
+    x8("acc", XC800_SAVED_REG, RegGroup::General, "Accumulator"),
+    x8("b", XC800_SAVED_REG + 1, RegGroup::General, "B register"),
+    x8("sp", XC800_SAVED_REG + 2, RegGroup::General, "Stack pointer (IRAM)"),
+    x8("psw", XC800_SAVED_REG + 3, RegGroup::General, "Program status word: CY, AC, F0, RS1:0 (register bank), OV, P"),
+    x8("dpl", XC800_SAVED_REG + 4, RegGroup::System, "Data pointer, low byte"),
+    x8("dph", XC800_SAVED_REG + 5, RegGroup::System, "Data pointer, high byte"),
+    x8("pc", XC800_SAVED_REG + 6, RegGroup::General, "Program counter"),
+    x8("dptr", XC800_SAVED_REG + 7, RegGroup::General, "Data pointer (DPH:DPL)"),
+];
+
+pub const XC800_REG_SP: usize = 10;
+pub const XC800_REG_PSW: usize = 11;
+pub const XC800_REG_PC: usize = 14;
+
+pub static XC800: ArchInfo = ArchInfo {
+    name: "xc800",
+    regs: XC800_REGS,
+    pc: XC800_REG_PC,
+    sp: XC800_REG_SP,
+    ra: XC800_REG_PC,
+    aliases: &[("a", "acc")],
+    description: "XC800 (SCR) registers",
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Version {
     V1_6,

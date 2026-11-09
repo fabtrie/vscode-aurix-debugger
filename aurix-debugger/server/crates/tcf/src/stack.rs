@@ -1,7 +1,7 @@
 //! Call stack of a halted core: registers plus the CSA chain (TriCore) or the
 //! decoded function prologues (Cortex-M, the HSM).
 
-use aurix_core::arch::{CM_REGS, MCS_REG_CTRL, MCS_REG_PC, MCS_REG_R7, REG_PC, REG_PCXI, REG_PSW};
+use aurix_core::arch::{CM_REGS, MCS_REG_CTRL, MCS_REG_PC, MCS_REG_R7, REG_PC, REG_PCXI, REG_PSW, XC800_REG_PC};
 use aurix_core::unwind::{self, Frame};
 use aurix_core::{ops, unwind_arm};
 
@@ -17,6 +17,9 @@ pub fn unwind_core(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
     }
     if core.arch.name == "gtm_mcs" {
         return unwind_mcs(sh, idx);
+    }
+    if core.arch.name == "xc800" {
+        return unwind_xc800(sh, idx);
     }
     sh.handle
         .call(move |cx| {
@@ -40,6 +43,22 @@ pub fn unwind_core(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
                 };
                 Ok(unwind::unwind(top, MAX_FRAMES, &mut read))
             })
+        })
+        .unwrap_or_else(|| Err("server stopped".into()))
+}
+
+/// SCR (XC800): the current instruction only. Without debug information, return addresses on
+/// its stack cannot be told apart from pushed data.
+fn unwind_xc800(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
+    sh.handle
+        .call(move |cx| {
+            let pc = cx
+                .with(|c| -> aurix_core::Result<u32> {
+                    let (mut io, e) = c.target_io(idx)?;
+                    e.core.read_reg(&mut io, XC800_REG_PC)
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(vec![Frame { pc, pcxi: 0, psw: None, regs: [None; 32], arm: false }])
         })
         .unwrap_or_else(|| Err("server stopped".into()))
 }

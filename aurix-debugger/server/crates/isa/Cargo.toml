@@ -1,6 +1,6 @@
 [package]
 name = "isa"
-description = "Instruction set tables for the AURIX auxiliary cores (GTM MCS)"
+description = "Instruction set tables for the AURIX auxiliary cores (GTM MCS, SCR XC800)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

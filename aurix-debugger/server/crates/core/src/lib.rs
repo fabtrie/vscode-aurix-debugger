@@ -24,6 +24,7 @@ pub mod ops;
 pub mod server;
 pub mod sim;
 pub mod sim_mcs;
+pub mod sim_scr;
 pub mod target;
 pub mod tas_adapter;
 #[cfg(feature = "bluebox")]
@@ -39,6 +40,7 @@ pub mod tricore;
 pub mod unwind;
 pub mod unwind_arm;
 pub mod util;
+pub mod xc800;
 
 pub use ctx::{Ctx, Cx, Shared};
 pub use error::{Error, Result};

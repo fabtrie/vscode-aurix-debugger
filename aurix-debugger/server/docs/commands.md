@@ -18,7 +18,7 @@ Notation: `<value>` is a value to fill in, `[...]` is optional, `a|b` is one of 
 - [Run control](#run-control)
 - [Memory and registers](#memory-and-registers)
 - [Breakpoints and watchpoints](#breakpoints-and-watchpoints)
-- [Core-specific (`tricore`, `cortex_m`, `gtm_mcs`)](#core-specific-tricore-cortex_m-gtm_mcs)
+- [Core-specific (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`)](#core-specific-tricore-cortex_m-gtm_mcs-xc800)
 - [Flash](#flash)
 - [Server, ports and logging](#server-ports-and-logging)
 - [Scripting](#scripting)
@@ -234,7 +234,7 @@ target create <name> <type> [<option> ...]
 
 Create a target (a core) and a command of the same name.
 
-Types: `tricore`, `cortex_m` (the HSM), `gtm_mcs` (a GTM MCS channel). The options are those of `<target> configure`; a TriCore target needs `-ocmts`. The new target becomes the current one.
+Types: `tricore`, `cortex_m` (the HSM), `gtm_mcs` (a GTM MCS channel), `xc800` (the SCR). The options are those of `<target> configure`; a TriCore target needs `-ocmts`. The new target becomes the current one.
 
 ### `target names`
 
@@ -258,7 +258,7 @@ The current target, which commands without a target prefix act on.
 target types
 ```
 
-List the target types (`tricore cortex_m gtm_mcs`).
+List the target types (`tricore cortex_m gtm_mcs xc800`).
 
 ### `target count`
 
@@ -641,7 +641,7 @@ rwp all|<address>
 
 Remove a watchpoint, or all of them.
 
-## Core-specific (`tricore`, `cortex_m`, `gtm_mcs`)
+## Core-specific (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`)
 
 ### `tricore tl1_halt`
 
@@ -704,6 +704,14 @@ gtm_mcs ... triggers | mdw <address> [<count>]
 ```
 
 Same as `tricore`, for an MCS channel.
+
+### `xc800 ...`
+
+```
+xc800 ... triggers | mdw <address> [<count>]
+```
+
+Same as `tricore`, for the SCR: `triggers` lists its hardware breakpoints, `mdw` takes its virtual addresses (code 0x0000-0xFFFF, IRAM 0x20000, SFRs 0x40000+).
 
 ## Flash
 
@@ -1064,6 +1072,16 @@ bluebox health_period [<ms>]
 ```
 
 How often the background poll asks the probe about the target connection; 0 never. Default 100 ms.
+
+### `bluebox debug_mode`
+
+```
+bluebox debug_mode [standard|wide]
+```
+
+The debug channel mode the attach sets up; set before `init`.
+
+`wide` (DAP Wide, the default) is what the built-in attaches were captured with. `standard` (DAP Standard) is the only mode the SCR (`xc800` target) works in; the DAP clock then stays at 10 MHz or below. `tc3xx_scr_target 1` selects it.
 
 ### `bluebox daq`
 

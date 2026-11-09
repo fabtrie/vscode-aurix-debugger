@@ -765,7 +765,7 @@
 						"required": [],
 						"properties": {
 							"symbolFiles": {
-								"description": "Symbol files: the application ELF plus e.g. bootmanager, FBL, HSM ELF files and GTM MCS assembler sources. Symbols only: they are never flashed (see flashFiles). Without \"cores\", a file applies to every core of its architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM, a .asm file to the MCS channels); \"cores\" limits it to the named cores (context ID or target name, * and ? as wildcards, e.g. \"tc37x.cpu0\", \"cpu0\" or \"mcs0.*\"). A path ending in \"@N\" or \"@N,M\" names the TriCore cores (core IDs) that run the ELF: its variables in core-local memory (DSPR/PSPR alias 0xD0000000/0xC0000000) are read from the first of them when evaluated on another core. The file still applies to the other cores.",
+								"description": "Symbol files: the application ELF plus e.g. bootmanager, FBL, HSM ELF files, GTM MCS assembler sources and the SCR's SDCC debug file (.cdb). Symbols only: they are never flashed (see flashFiles). Without \"cores\", a file applies to every core of its architecture (TriCore ELF files to the TriCore cores, an ARM ELF to the HSM, a .asm file to the MCS channels, a .cdb file to the SCR, with the .ihx of the same build beside it); \"cores\" limits it to the named cores (context ID or target name, * and ? as wildcards, e.g. \"tc37x.cpu0\", \"cpu0\" or \"mcs0.*\"). A path ending in \"@N\" or \"@N,M\" names the TriCore cores (core IDs) that run the ELF: its variables in core-local memory (DSPR/PSPR alias 0xD0000000/0xC0000000) are read from the first of them when evaluated on another core. The file still applies to the other cores.",
 								"type": "array",
 								"items": {
 									"anyOf": [

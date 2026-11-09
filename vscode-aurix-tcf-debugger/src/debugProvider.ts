@@ -1089,7 +1089,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (args.pathMapper && args.pathMapper.trim() !== '') {
 			return;
 		}
-		const firstElf = AurixTCFDebugSession.getSymbolFiles(args).find(f => !/\.asm$/i.test(f.path));
+		const firstElf = AurixTCFDebugSession.getSymbolFiles(args).find(f => arch.symbolFileMachine(f.path) === undefined);
 		if (!firstElf) {
 			return;
 		}
@@ -1317,8 +1317,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 			const machines = new Map<string, number | undefined>();
 			const machineOf = async (file: string) => {
-				if (/\.asm$/i.test(file)) {
-					return AurixTCFDebugSession.MACHINE_MCS_ASM;
+				const named = arch.symbolFileMachine(file);
+				if (named !== undefined) {
+					return named;
 				}
 				if (!machines.has(file)) {
 					machines.set(file, await AurixTCFDebugSession.readElfMachine(file));

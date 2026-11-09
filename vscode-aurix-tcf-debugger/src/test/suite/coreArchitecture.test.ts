@@ -12,6 +12,7 @@ import {
 	MACHINE_TRICORE,
 	MACHINE_XC800,
 	MCS_RAM_BYTES,
+	symbolFileMachine,
 } from '../../coreArchitecture';
 
 suite('Core architectures', () => {
@@ -32,6 +33,12 @@ suite('Core architectures', () => {
 		assert.strictEqual(isIndependentCore(MACHINE_TRICORE), false);
 		assert.strictEqual(isIndependentCore(MACHINE_ARM), false);
 		assert.strictEqual(isIndependentCore(undefined), false);
+	});
+
+	test('tells MCS sources and SCR debug files by their name', () => {
+		assert.strictEqual(symbolFileMachine('C:/x/MCS0.asm'), MACHINE_MCS_ASM);
+		assert.strictEqual(symbolFileMachine('C:/TriSCR/gen/scr_main.CDB'), MACHINE_XC800);
+		assert.strictEqual(symbolFileMachine('C:/build/app.elf'), undefined);
 	});
 
 	test('knows the disassembly ISA of each machine', () => {

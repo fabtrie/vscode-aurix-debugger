@@ -33,6 +33,21 @@ export function contextMachine(info: { Architecture?: unknown } | undefined): nu
 }
 
 /**
+ * The machine a symbol file is for, when its name tells: a GTM MCS assembler source (`.asm`) or an
+ * SDCC debug file (`.cdb`, the SCR's program). `undefined` for anything else (an ELF: read its
+ * header).
+ */
+export function symbolFileMachine(file: string): number | undefined {
+	if (/\.asm$/i.test(file)) {
+		return MACHINE_MCS_ASM;
+	}
+	if (/\.cdb$/i.test(file)) {
+		return MACHINE_XC800;
+	}
+	return undefined;
+}
+
+/**
  * Whether a core runs on its own, outside the OTGS trigger line TL1 that halts the TriCores and
  * the HSM together: a GTM MCS channel or the SCR. Its stop stops nothing else, and pausing the
  * system leaves it running.

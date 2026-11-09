@@ -123,7 +123,8 @@ The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSY
 - It is not on the trigger line that halts the TriCores and the HSM together: a TriCore breakpoint or the toolbar's pause leaves it running, and an SCR breakpoint stops only the SCR. Pause it from its own thread.
 - Its code addresses are `0x0000`..`0xFFFF`, the SCR's own code space; they overlap TriCore addresses but mean the SCR's code. **Go to Address or Symbol** and instruction breakpoints take the address on the core whose disassembly is shown.
 - `x@scr` in the Watch or Live Watch evaluates `x` on the SCR; `@scr` in a breakpoint condition halts only the SCR.
-- TriCore ELF files are never mapped to the SCR. An SCR program (SDCC output) is no ELF; list it in `symbolFiles` with `"cores": ["scr"]` to use it for the SCR.
+- TriCore ELF files are never mapped to the SCR.
+- Source-level debugging: add the SCR's SDCC debug file to `symbolFiles`, e.g. `".../TriSCR/gen/scr_main.cdb"`, with the `.ihx` of the same build beside it (it gives the functions' ends). A `.cdb` file goes to the SCR. Its sources are looked up next to it and in the `src`, `inc` and `api` folders beside its folder. Then the SCR has source lines, line breakpoints (2 hardware breakpoints), step over, into and out, its global variables by name, and the local variables of the current function (in the Variables view). SDCC records which register a local lives in but not where in the function it is valid: before its first assignment or after its last use the register may hold something else, and locals the compiler removed show as optimized out. The `.cdb` must come from the build that runs on the SCR.
 
 ### Breakpoints on chosen cores
 

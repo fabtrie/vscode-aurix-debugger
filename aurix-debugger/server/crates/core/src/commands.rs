@@ -348,12 +348,61 @@ fn cmd_adapter(cx: &Cx, a: &[&str]) -> CmdResult {
             cx.with(|c| c.adapter_settings.serial = Some(s));
             ok()
         }
+        Some("debug_password") => cmd_debug_password(cx, a),
         Some("srst") | Some("assert") | Some("deassert") | Some("usb") | Some("gpio") => {
             log_warn!("'adapter {}' is not supported by aurix-dbg and was ignored", a[1..].join(" "));
             ok()
         }
-        _ => Err("usage: adapter driver|speed|serial|name|list ...".into()),
+        _ => Err("usage: adapter driver|speed|serial|debug_password|name|list ...".into()),
     }
+}
+
+/// `adapter debug_password [none | -env <variable> | <PW0> .. <PW7>]`
+///
+/// The words are hex (`0x` optional), PW0 first, as `UCB_DBG` and the debugger dialogs show them;
+/// one token of 64 hex digits is taken as well. `-env` reads them from an environment variable, so
+/// a cfg file under version control need not hold the password. The words are never logged, and
+/// reading the setting back only says whether one is set.
+///
+/// A locked device takes the password in the window right after a reset, so the session also needs
+/// `reset_config connect_assert_srst`.
+fn cmd_debug_password(cx: &Cx, a: &[&str]) -> CmdResult {
+    const USAGE: &str = "usage: adapter debug_password [none|-env <variable>|<PW0> .. <PW7>]";
+    let from_env;
+    let words: Vec<&str> = match a.get(2).copied() {
+        None => {
+            let set = cx.with(|c| c.adapter_settings.debug_password.is_some());
+            return Ok(format!("debug password: {}", if set { "set" } else { "not set" }));
+        }
+        Some("none") => {
+            cx.with(|c| c.adapter_settings.debug_password = None);
+            return ok();
+        }
+        Some("-env") => {
+            let var = a.get(3).ok_or(USAGE)?;
+            from_env = std::env::var(var).map_err(|_| format!("adapter debug_password: ${var} is not set"))?;
+            from_env.split([' ', '\t', ',', ';']).filter(|s| !s.is_empty()).collect()
+        }
+        Some(_) => a[2..].to_vec(),
+    };
+    let joined;
+    let words: Vec<&str> = if words.len() == 1 && words[0].trim_start_matches("0x").len() == 64 {
+        joined = words[0].trim_start_matches("0x").to_string();
+        (0..8).map(|i| &joined[i * 8..(i + 1) * 8]).collect()
+    } else {
+        words
+    };
+    if words.len() != 8 {
+        return Err(format!("{USAGE} - {} words given, 8 needed", words.len()));
+    }
+    let mut key = [0u32; 8];
+    for (i, w) in words.iter().enumerate() {
+        let h = w.trim_start_matches("0x").trim_start_matches("0X");
+        key[i] =
+            u32::from_str_radix(h, 16).map_err(|_| format!("adapter debug_password: PW{i} is not a 32-bit hex word"))?;
+    }
+    cx.with(|c| c.adapter_settings.debug_password = Some(key));
+    Ok("debug password: set".into())
 }
 
 /// Driver-specific command groups (e.g. `tas-client host`).

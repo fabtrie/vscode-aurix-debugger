@@ -13,6 +13,10 @@ pub struct AdapterSettings {
     pub serial: Option<String>,
     /// `reset_config connect_assert_srst`: connect with reset and halt.
     pub connect_under_srst: bool,
+    /// `adapter debug_password`: the device's 256-bit debug password (TC3xx `UCB_DBG` PW0..PW7),
+    /// for a device whose debug interface is locked. The start-up software takes it only in the
+    /// window right after a reset, so such a device also needs `connect_under_srst`. Never logged.
+    pub debug_password: Option<[u32; 8]>,
 }
 
 #[derive(Debug, Clone, Default)]

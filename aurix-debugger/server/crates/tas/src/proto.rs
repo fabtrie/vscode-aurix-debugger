@@ -43,9 +43,17 @@ pub const PL1_GET_TARGETS: u8 = 0x86;
 pub const PL1_SESSION_START: u8 = 0xA1;
 pub const PL1_PING: u8 = 0xA2;
 pub const PL1_DEVICE_CONNECT: u8 = 0xA8;
+/// Hands the device unlock key (TC3xx: the 256-bit debug password) to the server, which runs the
+/// key exchange with the device itself.
+pub const PL1_DEVICE_UNLOCK: u8 = 0xAD;
 pub const PL1_PL0_START: u8 = 0xB0;
 pub const PL1_PL0_END: u8 = 0xB1;
 pub const PL1_ERROR: u8 = 0xEE;
+
+/// `PL1_DEVICE_UNLOCK` option field: a key follows. DAS sends 1 with no key.
+pub const DEV_UNLOCK_SET_KEY: u16 = 8;
+/// Bytes of a TC3xx debug password (PW0..PW7).
+pub const DEV_UNLOCK_KEY_LEN: usize = 32;
 
 pub const CLIENT_TYPE_RW: u8 = 1;
 /// Protocol version put into PL0_START by the RW packet handler.

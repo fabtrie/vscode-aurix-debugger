@@ -210,6 +210,28 @@ impl TasClient {
         Ok(con)
     }
 
+    /// Hands the device unlock key to the server, which runs the key exchange with the device
+    /// itself during the next [`Self::device_connect`].
+    ///
+    /// On TC3xx the key is the 256-bit debug password of `UCB_DBG` (PW0..PW7). The device takes it
+    /// only while its start-up software runs, so the key has to be set before a connect that
+    /// resets the device; without it a locked device answers `device_connect` with
+    /// [`Error::DeviceLocked`].
+    ///
+    /// The layout is DAS's, read off `tas_server`'s own traffic: the option field
+    /// ([`DEV_UNLOCK_SET_KEY`]) and the key length in bytes, then the key as little-endian words.
+    /// `CMD_KEY_EXCHANGE` and the key itself never appear on the probe link, so the exchange is
+    /// the server's to do.
+    pub fn device_unlock(&mut self, key: &[u32; 8]) -> Result<()> {
+        let rsp = self.transact(&unlock_pkt(key))?;
+        self.check_pl1(&rsp, PL1_DEVICE_UNLOCK, 4)?;
+        match rsp[7] {
+            ERR_NO_ERROR => Ok(()),
+            PL1_ERR_DEV_LOCKED => Err(Error::DeviceLocked),
+            e => Err(Error::Command { cmd: PL1_DEVICE_UNLOCK, err: e, msg: "unlock key refused".into() }),
+        }
+    }
+
     /// Connects to the device: hot attach, reset, or reset and halt.
     /// Returns the device type (JTAG ID).
     pub fn device_connect(&mut self, mode: ConnectMode) -> Result<u32> {
@@ -373,5 +395,37 @@ pub(crate) fn check_rw(r: &OpResult, op: usize, addr: u64, write: bool) -> Resul
         Ok(())
     } else {
         Err(Error::Rw { op, addr: addr + r.bytes_ok as u64, err: r.err, write })
+    }
+}
+
+/// The `PL1_DEVICE_UNLOCK` packet: see [`TasClient::device_unlock`]. The first byte counts the
+/// payload words after the 4-byte command header, as in every other PL1 request.
+fn unlock_pkt(key: &[u32; 8]) -> Vec<u8> {
+    let mut w = Wr::default();
+    w.u32((4 + 4 + 4 + DEV_UNLOCK_KEY_LEN) as u32);
+    w.u8(((4 + DEV_UNLOCK_KEY_LEN) / 4) as u8).u8(PL1_DEVICE_UNLOCK).u8(0).u8(0);
+    w.u16(DEV_UNLOCK_SET_KEY).u16(DEV_UNLOCK_KEY_LEN as u16);
+    for word in key {
+        w.u32(*word);
+    }
+    w.buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The layout DAS uses, from a capture of `tas_server` unlocking a TC37x whose debug interface
+    /// was locked.
+    #[test]
+    fn unlock_packet_matches_das() {
+        let key = [0x1111_2222, 0x3333_4444, 5, 6, 7, 8, 9, 0xAAAA_BBBB];
+        let p = unlock_pkt(&key);
+        assert_eq!(p.len(), 44);
+        assert_eq!(u32::from_le_bytes(p[..4].try_into().unwrap()), 44);
+        // 09 ad 00 00 08 00 20 00, then PW0..PW7 as little-endian words.
+        assert_eq!(&p[4..12], &[0x09, 0xAD, 0x00, 0x00, 0x08, 0x00, 0x20, 0x00]);
+        assert_eq!(&p[12..16], &0x1111_2222u32.to_le_bytes());
+        assert_eq!(&p[40..44], &0xAAAA_BBBBu32.to_le_bytes());
     }
 }

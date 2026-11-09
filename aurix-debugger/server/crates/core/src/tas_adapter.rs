@@ -193,7 +193,30 @@ impl TasAdapter {
             }
         }
         let mode = if s.connect_under_srst { ConnectMode::ResetAndHalt } else { ConnectMode::HotAttach };
-        let device_id = self.client()?.device_connect(mode)?;
+        // The device takes its debug password only while the start-up software runs, so the key is
+        // handed over before every connect, and only a connect that resets the device can use it.
+        if let Some(key) = s.debug_password {
+            self.client()?.device_unlock(&key)?;
+            log_info!("TAS: debug password handed to the TasServer");
+            if mode == ConnectMode::HotAttach {
+                log_warn!(
+                    "TAS: a debug password is set, but this connect does not reset the device, so a locked \
+                     device stays locked (use 'reset_config connect_assert_srst')"
+                );
+            }
+        }
+        let device_id = self.client()?.device_connect(mode).inspect_err(|e| {
+            if matches!(e, tas::Error::DeviceLocked) {
+                if s.debug_password.is_some() {
+                    log_warn!("TAS: the device refused the debug password");
+                } else {
+                    log_warn!(
+                        "TAS: the device's debug interface is locked; its password can be set with \
+                         'adapter debug_password <PW0> .. <PW7>' (UCB_DBG)"
+                    );
+                }
+            }
+        })?;
         self.device = true;
         log_info!("TAS: {} (device 0x{device_id:08x})", self.identifier);
         if let Some(khz) = s.speed_khz {

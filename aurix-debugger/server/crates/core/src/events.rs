@@ -27,6 +27,9 @@ pub enum Event {
     /// A core register written by a frontend (REST/MCP) the other frontends do not know about.
     RegisterChanged { target: usize, name: String },
     Log { text: String },
+    /// Carries no news: a frontend sends it through the event stream to learn when everything
+    /// emitted before it has been processed (see `tcf::Shared::flush_events`).
+    Marker(u64),
     Shutdown,
 }
 

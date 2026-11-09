@@ -4,6 +4,26 @@
 //! on a plain 8051, is the XC800's `TRAP` (software breakpoint, enabled by EO.TRAP_EN, TC3xx UM
 //! 49.5.2.3.6).
 
+/// DWARF register numbers of the XC800 registers, as debug information and the debugger's frames
+/// number them: R0..R7 (of the selected bank) 0..7, then ACC, B, DPL, DPH.
+pub const DWARF_R0: u16 = 0;
+pub const DWARF_ACC: u16 = 8;
+pub const DWARF_B: u16 = 9;
+pub const DWARF_DPL: u16 = 10;
+pub const DWARF_DPH: u16 = 11;
+
+/// The DWARF number of a register named as SDCC's debug files name them (`r0`..`r7`, `a`, `b`,
+/// `dpl`, `dph`).
+pub fn dwarf_register(name: &str) -> Option<u16> {
+    match name.to_ascii_lowercase().as_str() {
+        "a" | "acc" => Some(DWARF_ACC),
+        "b" => Some(DWARF_B),
+        "dpl" => Some(DWARF_DPL),
+        "dph" => Some(DWARF_DPH),
+        r => r.strip_prefix('r').and_then(|n| n.parse::<u16>().ok()).filter(|&n| n < 8).map(|n| DWARF_R0 + n),
+    }
+}
+
 /// How an instruction continues.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -308,6 +328,16 @@ mod tests {
         assert_eq!(text(&[0xE5, 0xD5], 0), "MOV    A, DPL");
         assert_eq!(text(&[0x60, 0x03], 0x84), "JZ     0x0089");
         assert_eq!(text(&[0x32], 0), "RETI");
+    }
+
+    #[test]
+    fn dwarf_register_numbers() {
+        assert_eq!(dwarf_register("r0"), Some(0));
+        assert_eq!(dwarf_register("R7"), Some(7));
+        assert_eq!(dwarf_register("a"), Some(DWARF_ACC));
+        assert_eq!(dwarf_register("dph"), Some(DWARF_DPH));
+        assert_eq!(dwarf_register("r8"), None);
+        assert_eq!(dwarf_register("sp"), None);
     }
 
     #[test]

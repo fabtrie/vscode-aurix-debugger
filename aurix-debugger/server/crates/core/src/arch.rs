@@ -328,24 +328,28 @@ pub const XC800_SAVED_REG: u16 = 0x200;
 const fn x8(name: &'static str, offset: u16, group: RegGroup, description: &'static str) -> RegDef {
     RegDef { name, offset, gdb: None, dwarf: None, group, description }
 }
+/// With its DWARF number ([`isa::xc800::dwarf_register`]).
+const fn x8d(name: &'static str, offset: u16, dwarf: u16, group: RegGroup, description: &'static str) -> RegDef {
+    RegDef { name, offset, gdb: None, dwarf: Some(dwarf), group, description }
+}
 
 /// SCR registers. The saved ones are numbered in the order of [`crate::adapter::ScrReg`];
 /// `dptr` is DPH:DPL.
 pub static XC800_REGS: &[RegDef] = &[
-    x8("r0", XC800_BANK_REG, RegGroup::General, "Register 0 of the selected bank"),
-    x8("r1", XC800_BANK_REG + 1, RegGroup::General, "Register 1 of the selected bank"),
-    x8("r2", XC800_BANK_REG + 2, RegGroup::General, "Register 2 of the selected bank"),
-    x8("r3", XC800_BANK_REG + 3, RegGroup::General, "Register 3 of the selected bank"),
-    x8("r4", XC800_BANK_REG + 4, RegGroup::General, "Register 4 of the selected bank"),
-    x8("r5", XC800_BANK_REG + 5, RegGroup::General, "Register 5 of the selected bank"),
-    x8("r6", XC800_BANK_REG + 6, RegGroup::General, "Register 6 of the selected bank"),
-    x8("r7", XC800_BANK_REG + 7, RegGroup::General, "Register 7 of the selected bank"),
-    x8("acc", XC800_SAVED_REG, RegGroup::General, "Accumulator"),
-    x8("b", XC800_SAVED_REG + 1, RegGroup::General, "B register"),
+    x8d("r0", XC800_BANK_REG, isa::xc800::DWARF_R0 + 0, RegGroup::General, "Register 0 of the selected bank"),
+    x8d("r1", XC800_BANK_REG + 1, isa::xc800::DWARF_R0 + 1, RegGroup::General, "Register 1 of the selected bank"),
+    x8d("r2", XC800_BANK_REG + 2, isa::xc800::DWARF_R0 + 2, RegGroup::General, "Register 2 of the selected bank"),
+    x8d("r3", XC800_BANK_REG + 3, isa::xc800::DWARF_R0 + 3, RegGroup::General, "Register 3 of the selected bank"),
+    x8d("r4", XC800_BANK_REG + 4, isa::xc800::DWARF_R0 + 4, RegGroup::General, "Register 4 of the selected bank"),
+    x8d("r5", XC800_BANK_REG + 5, isa::xc800::DWARF_R0 + 5, RegGroup::General, "Register 5 of the selected bank"),
+    x8d("r6", XC800_BANK_REG + 6, isa::xc800::DWARF_R0 + 6, RegGroup::General, "Register 6 of the selected bank"),
+    x8d("r7", XC800_BANK_REG + 7, isa::xc800::DWARF_R0 + 7, RegGroup::General, "Register 7 of the selected bank"),
+    x8d("acc", XC800_SAVED_REG, isa::xc800::DWARF_ACC, RegGroup::General, "Accumulator"),
+    x8d("b", XC800_SAVED_REG + 1, isa::xc800::DWARF_B, RegGroup::General, "B register"),
     x8("sp", XC800_SAVED_REG + 2, RegGroup::General, "Stack pointer (IRAM)"),
     x8("psw", XC800_SAVED_REG + 3, RegGroup::General, "Program status word: CY, AC, F0, RS1:0 (register bank), OV, P"),
-    x8("dpl", XC800_SAVED_REG + 4, RegGroup::System, "Data pointer, low byte"),
-    x8("dph", XC800_SAVED_REG + 5, RegGroup::System, "Data pointer, high byte"),
+    x8d("dpl", XC800_SAVED_REG + 4, isa::xc800::DWARF_DPL, RegGroup::System, "Data pointer, low byte"),
+    x8d("dph", XC800_SAVED_REG + 5, isa::xc800::DWARF_DPH, RegGroup::System, "Data pointer, high byte"),
     x8("pc", XC800_SAVED_REG + 6, RegGroup::General, "Program counter"),
     x8("dptr", XC800_SAVED_REG + 7, RegGroup::General, "Data pointer (DPH:DPL)"),
 ];

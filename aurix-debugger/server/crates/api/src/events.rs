@@ -119,6 +119,6 @@ fn convert(handle: &ServerHandle, names: &mut HashMap<usize, String>, ev: Event)
         }
         Event::RegisterChanged { target, name: reg } => ApiEvent::RegisterChanged { target: name(handle, names, target), name: reg },
         Event::Log { text } => ApiEvent::Log { text },
-        Event::Shutdown => return None,
+        Event::Shutdown | Event::Marker(_) => return None,
     })
 }

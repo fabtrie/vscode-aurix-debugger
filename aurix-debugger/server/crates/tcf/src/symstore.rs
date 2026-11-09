@@ -164,12 +164,15 @@ impl SymbolStore {
             }
         }
         // GTM MCS programs have no debug information: the source itself is assembled.
-        let is_asm = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("asm"));
-        let s = Arc::new(if is_asm {
+        let ext = |x: &str| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(x));
+        let s = Arc::new(if ext("asm") {
             let t0 = std::time::Instant::now();
             let mut s = symbols::mcs_asm::assemble(path, &[])?.symbols(path);
             s.load_time = t0.elapsed();
             s
+        } else if ext("cdb") {
+            // SDCC debug file of the standby controller (SCR).
+            symbols::cdb::load(path)?
         } else {
             Symbols::load(path)?
         });

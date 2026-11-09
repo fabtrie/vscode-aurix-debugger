@@ -8,7 +8,7 @@
 
 use crate::scope::Loc;
 use crate::types::{TypeClass, TypeId, TypeInfo};
-use crate::{DieRef, Symbols, PC_REGISTER};
+use crate::{Symbols, PC_REGISTER};
 
 // --- Lexer --------------------------------------------------------------------------------
 
@@ -408,7 +408,7 @@ pub enum Place {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SymbolRef {
-    Local(DieRef),
+    Local(crate::scope::VarRef),
     Global(usize),
     Function(usize),
     /// An object of a type at an address.
@@ -567,7 +567,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 let target = &mut *self.target;
                 let mut mem = |a: u32, n: usize| target.read(a, n).ok();
                 let loc = syms.var_location(*d, pc, &reg, &mut mem)?;
-                let ty = syms.var_type(*d);
+                let ty = syms.local_type(*d);
                 let (place, bytes) = match loc {
                     Loc::Memory(a) => (Place::Memory(a), None),
                     Loc::Register(r) => {
@@ -586,8 +586,7 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             SymbolRef::Global(i) => {
                 let g = syms.globals.get(*i).ok_or("invalid global")?;
-                // Globals without debug information (MCS data labels) are one 32-bit word.
-                let ty = if g.unit == usize::MAX { TypeId::Base(TypeClass::Cardinal, 4) } else { syms.var_type(g.die_ref()) };
+                let ty = syms.global_type(*i);
                 Ok(Value { ty, place: Place::Memory(g.addr), bytes: None, symbol: Some(s.clone()) })
             }
             SymbolRef::Function(i) => {
@@ -610,7 +609,7 @@ impl<'a, T: Target> Eval<'a, T> {
         let pc = self.target.pc();
         if let Some(pc) = pc {
             if let Some(l) = syms.locals_at(pc).into_iter().rev().find(|l| l.name == name) {
-                return self.value_of(&SymbolRef::Local(l.die));
+                return self.value_of(&SymbolRef::Local(l.var));
             }
         }
         let unit = pc.and_then(|pc| syms.function_at(pc)).map(|f| f.unit);

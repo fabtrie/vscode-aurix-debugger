@@ -573,6 +573,11 @@ impl SimAdapter {
             }
             return;
         }
+        // PMSWCR4: SCREN with SCRCFG 0x0A/0x0B (and the bit protection set) starts the SCR in its OCDS
+        // SoC DAP boot mode, as `tc3xx_scr_enable` does on the chip.
+        if addr == 0xF024_80C4 && v & (3 << 24) == (3 << 24) && matches!((v >> 16) & 0xFF, 0x0A | 0x0B) {
+            self.scr.enabled = true;
+        }
         // CBS_TLC: forcing trigger line 1 (TLSP1 = 3) halts the cores it is routed to (CBS_TRCx), as on
         // the chip; a core in boot halt stays there.
         if addr == 0xF000_0490 && v & 0x30 == 0x30 {

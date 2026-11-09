@@ -1,7 +1,7 @@
 //! Call stack of a halted core: registers plus the CSA chain (TriCore) or the
 //! decoded function prologues (Cortex-M, the HSM).
 
-use aurix_core::arch::{CM_REGS, MCS_REG_CTRL, MCS_REG_PC, MCS_REG_R7, REG_PC, REG_PCXI, REG_PSW, XC800_REG_PC};
+use aurix_core::arch::{CM_REGS, MCS_REG_CTRL, MCS_REG_PC, MCS_REG_R7, REG_PC, REG_PCXI, REG_PSW, XC800, XC800_REG_PC};
 use aurix_core::unwind::{self, Frame};
 use aurix_core::{ops, unwind_arm};
 
@@ -47,18 +47,29 @@ pub fn unwind_core(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
         .unwrap_or_else(|| Err("server stopped".into()))
 }
 
-/// SCR (XC800): the current instruction only. Without debug information, return addresses on
-/// its stack cannot be told apart from pushed data.
+/// SCR (XC800): the current instruction only. Without call frame information, return addresses
+/// on its stack cannot be told apart from pushed data. The frame carries the registers that have
+/// a DWARF number (R0..R7, ACC, B, DPL, DPH), which locals in registers are read from.
 fn unwind_xc800(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
     sh.handle
         .call(move |cx| {
-            let pc = cx
-                .with(|c| -> aurix_core::Result<u32> {
+            let with_dwarf: Vec<(usize, u16)> =
+                XC800.regs.iter().enumerate().filter_map(|(i, r)| r.dwarf.map(|d| (i, d))).collect();
+            let mut idxs: Vec<usize> = with_dwarf.iter().map(|&(i, _)| i).collect();
+            idxs.push(XC800_REG_PC);
+            let v = cx
+                .with(|c| -> aurix_core::Result<Vec<u32>> {
                     let (mut io, e) = c.target_io(idx)?;
-                    e.core.read_reg(&mut io, XC800_REG_PC)
+                    e.core.read_regs(&mut io, &idxs)
                 })
                 .map_err(|e| e.to_string())?;
-            Ok(vec![Frame { pc, pcxi: 0, psw: None, regs: [None; 32], arm: false }])
+            let mut regs = [None; 32];
+            for (k, &(_, d)) in with_dwarf.iter().enumerate() {
+                if let Some(r) = regs.get_mut(d as usize) {
+                    *r = Some(v[k]);
+                }
+            }
+            Ok(vec![Frame { pc: v[with_dwarf.len()], pcxi: 0, psw: None, regs, arm: false }])
         })
         .unwrap_or_else(|| Err("server stopped".into()))
 }

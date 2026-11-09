@@ -97,6 +97,9 @@ pub struct Shared {
     pub stacks: Mutex<HashMap<usize, Vec<Frame>>>,
     /// Targets doing a source-level step, with their cancel flag.
     pub stepping: Mutex<HashMap<usize, Arc<AtomicBool>>>,
+    /// The last [`Event::Marker`] the forwarder processed, and the last one sent.
+    pub marker_seen: AtomicU64,
+    pub marker_sent: AtomicU64,
     pub exprs: Mutex<ExprTable>,
     /// The loaded ORTI file with its attributes planned, shared by every frontend. Handed out as
     /// an `Arc` so reading a large object table does not hold the lock while it talks to the core.
@@ -304,6 +307,19 @@ impl Shared {
         self.stepping.lock().unwrap().contains_key(&target)
     }
 
+    /// Waits until the forwarder has processed every core event emitted so far (at most
+    /// `timeout`). The forwarder needs the core thread for each event, so during a step it falls
+    /// behind; a step waits for it before it ends, or the events of its instruction steps would be
+    /// forwarded once it no longer counts as stepping.
+    pub fn flush_events(&self, timeout: std::time::Duration) {
+        let n = self.marker_sent.fetch_add(1, Ordering::SeqCst) + 1;
+        aurix_core::events::emit(aurix_core::Event::Marker(n));
+        let t0 = std::time::Instant::now();
+        while self.marker_seen.load(Ordering::SeqCst) < n && t0.elapsed() < timeout {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     pub fn any_stepping(&self) -> bool {
         !self.stepping.lock().unwrap().is_empty()
     }
@@ -328,6 +344,8 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         symbols: Mutex::new(SymbolStore::default()),
         stacks: Mutex::new(HashMap::new()),
         stepping: Mutex::new(HashMap::new()),
+        marker_seen: AtomicU64::new(0),
+        marker_sent: AtomicU64::new(0),
         exprs: Mutex::new(ExprTable::default()),
         orti: Mutex::new(None),
         profile: Mutex::new(None),

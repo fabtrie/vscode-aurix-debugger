@@ -12,6 +12,9 @@
 //!   following the call. The stack pointer identifies the frame (recursion);
 //!   step out runs to the return address of the unwound caller frame.
 //! - GTM MCS channel: one instruction per line, see [`run_mcs`].
+//! - XC800 (the SCR): a call is recognised by decoding the instruction before stepping it and is
+//!   run over with a temporary hardware breakpoint; step out runs to the function's exit
+//!   instruction (from the SDCC debug information) and steps it. See [`run_xc800`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use aurix_core::arch::{CM_REG_LR, CM_REG_PC, CM_REG_SP, MCS_REG_PC, MCS_REG_R7, REG_A11, REG_PC, REG_PCXI};
+use aurix_core::arch::{CM_REG_LR, CM_REG_PC, CM_REG_SP, MCS_REG_PC, MCS_REG_R7, REG_A11, REG_PC, REG_PCXI, XC800_REG_PC, XC800_REG_SP};
 use aurix_core::target::{BpKind, DebugReason, RunMode, SourceStep, TargetState};
 use aurix_core::unwind::csa_address;
 use aurix_core::unwind_arm::is_thumb32;
@@ -49,6 +52,7 @@ enum Kind {
     TriCore,
     Arm,
     Mcs,
+    Xc800,
 }
 
 enum Stop {
@@ -67,7 +71,8 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
         let arch = find_core(&shared.handle, &ctx).map(|c| c.arch.name);
         let result = match arch {
             Some("cortex_m") => run_arm(&shared, idx, &ctx, mode, &cancel),
-            Some("gtm_mcs") | Some("xc800") => run_mcs(&shared, idx, mode, &cancel),
+            Some("gtm_mcs") => run_mcs(&shared, idx, mode, &cancel),
+            Some("xc800") => run_xc800(&shared, idx, &ctx, mode, &cancel),
             _ => run(&shared, idx, &ctx, mode, &cancel),
         };
         let h = shared.handle.clone();
@@ -78,6 +83,9 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
                 ops::wait_state(cx, idx, TargetState::Halted, 2000)
             });
         }
+        // The forwarder still has the events of the instruction steps queued: let it drop them
+        // while this core counts as stepping, before the one stop below.
+        shared.flush_events(Duration::from_secs(2));
         shared.stepping.lock().unwrap().remove(&idx);
         shared.invalidate_stack(idx);
         let reason = match result {
@@ -105,6 +113,8 @@ fn read_regs(h: &ServerHandle, idx: usize, kind: Kind) -> Result<Regs, String> {
         Kind::TriCore => [REG_PC, REG_A11, REG_PCXI],
         // The MCS has no return address register: the frame is the stack pointer R7.
         Kind::Mcs => [MCS_REG_PC, MCS_REG_PC, MCS_REG_R7],
+        // No return address register either: the frame is the stack pointer.
+        Kind::Xc800 => [XC800_REG_PC, XC800_REG_PC, XC800_REG_SP],
     };
     let v = call(h, move |cx| {
         cx.with(|c| {
@@ -379,7 +389,7 @@ fn run_arm(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBoo
     }
 }
 
-/// GTM MCS channel, and the SCR (XC800, no line information yet): every step is one instruction. Step over and into are one instruction
+/// GTM MCS channel: every source line is one instruction. Step over and into are one instruction
 /// step (the core steps over a CALL for step over); step out runs to the return address of the
 /// caller frame. An instruction waiting for an event (WURM, ARU) completes later: the channel stops
 /// after it on its own, so the step waits for that halt.
@@ -414,12 +424,113 @@ fn run_mcs(shared: &Shared, idx: usize, mode: u64, cancel: &AtomicBool) -> Resul
     }
 }
 
+/// The XC800 instruction at `pc` of core `idx`.
+fn xc800_insn(h: &ServerHandle, idx: usize, pc: u32) -> Result<isa::xc800::Insn, String> {
+    let b = call(h, move |cx| ops::read_memory_as(cx, idx, pc, 3).map_err(|e| e.to_string()))?;
+    isa::xc800::decode(&b, pc).ok_or_else(|| format!("cannot decode the instruction at 0x{pc:04x}"))
+}
+
+/// The SCR (XC800) with SDCC line information. Steps instruction by instruction (always plain
+/// steps: the core's own step over is not used, so each step is complete when it returns) until
+/// the PC reaches the first instruction of another line of the function. A call (decoded before
+/// it is stepped) is run over to the instruction after it with a temporary hardware breakpoint,
+/// or for step into followed into a function with line information. Leaving the function (its
+/// return) continues in the caller until a line starts there.
+///
+/// Step out runs to the function's exit instruction and steps it. Without line information each
+/// step is one instruction.
+fn run_xc800(shared: &Shared, idx: usize, ctx: &str, mode: u64, cancel: &AtomicBool) -> Result<Stop, String> {
+    let h = &shared.handle;
+    let rm = RunMode::Step;
+    let deadline = Instant::now() + STEP_TIMEOUT;
+    let syms = shared.symbols_for(ctx);
+    let mut r = read_regs(h, idx, Kind::Xc800)?;
+    let Some(syms) = syms.filter(|s| s.line_at(r.pc).is_some()) else {
+        step_instruction(h, idx, rm)?;
+        return Ok(Stop::Done);
+    };
+
+    if mode == 5 {
+        let Some(exit) = syms.function_at(r.pc).and_then(|f| f.exit) else {
+            step_instruction(h, idx, rm)?;
+            return Ok(Stop::Done);
+        };
+        if r.pc != exit {
+            match run_to(shared, idx, Kind::Xc800, exit, None, rm, cancel, deadline)? {
+                Stop::Done => {}
+                other => return Ok(other),
+            }
+        }
+        step_instruction(h, idx, rm)?;
+        return Ok(Stop::Done);
+    }
+
+    let Some((mut func, mut line)) = function_and_line(&syms, r.pc) else {
+        step_instruction(h, idx, rm)?;
+        return Ok(Stop::Done);
+    };
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Stop::Cancelled);
+        }
+        if Instant::now() > deadline {
+            return Err("step timed out".into());
+        }
+        let insn = xc800_insn(h, idx, r.pc)?;
+        let next = (r.pc + insn.len) & 0xFFFF;
+        let in_func = |pc: u32| pc >= func.0 && pc < func.1;
+        let new_line = |pc: u32| {
+            in_func(pc) && syms.line_at(pc).is_some_and(|li| li.start == pc && (li.file.as_str(), li.line) != (line.0.as_str(), line.1))
+        };
+
+        if insn.flow == isa::xc800::Flow::Call {
+            let into = mode == 4 && insn.target.is_some_and(|t| syms.line_at(t).is_some());
+            if into {
+                step_instruction(h, idx, rm)?;
+                return Ok(Stop::Done);
+            }
+            match run_to(shared, idx, Kind::Xc800, next, None, rm, cancel, deadline)? {
+                Stop::Done => {
+                    r = read_regs(h, idx, Kind::Xc800)?;
+                    if new_line(r.pc) {
+                        return Ok(Stop::Done);
+                    }
+                    continue;
+                }
+                other => return Ok(other),
+            }
+        }
+
+        step_instruction(h, idx, rm)?;
+        r = read_regs(h, idx, Kind::Xc800)?;
+        if in_func(r.pc) {
+            if new_line(r.pc) {
+                return Ok(Stop::Done);
+            }
+            continue;
+        }
+        // Returned (or jumped) into other code: continue there until a line starts.
+        match function_and_line(&syms, r.pc) {
+            Some((f, l)) => {
+                if syms.line_at(r.pc).is_some_and(|li| li.start == r.pc) {
+                    return Ok(Stop::Done);
+                }
+                func = f;
+                line = l;
+            }
+            None => return Ok(Stop::Done),
+        }
+    }
+}
+
 /// Runs until `addr` is reached in the expected frame (recursion guard: PCXI on TriCore, SP
 /// on Cortex-M).
 #[allow(clippy::too_many_arguments)]
 fn run_to(shared: &Shared, idx: usize, kind: Kind, addr: u32, expect_frame: Option<u32>, rm: RunMode, cancel: &AtomicBool, deadline: Instant) -> Result<Stop, String> {
     let h = &shared.handle;
-    let temp = match call(h, move |cx| ops::add_breakpoint(cx, idx, addr, 4, BpKind::Hard).map_err(|e| e.to_string())) {
+    // The SCR's breakpoints are on one instruction byte; a range would be refused.
+    let len = if kind == Kind::Xc800 { 1 } else { 4 };
+    let temp = match call(h, move |cx| ops::add_breakpoint(cx, idx, addr, len, BpKind::Hard).map_err(|e| e.to_string())) {
         Ok(_) => true,
         Err(e) if e.contains("Duplicate") => false,
         Err(e) => return Err(e),

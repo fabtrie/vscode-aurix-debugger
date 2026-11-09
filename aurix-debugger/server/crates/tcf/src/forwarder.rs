@@ -20,6 +20,10 @@ pub fn start(shared: Arc<Shared>) {
     thread::spawn(move || {
         let mut listed: BTreeMap<String, bool> = cores(&shared.handle).into_iter().filter(|c| c.visible).map(|c| (c.id, c.reachable)).collect();
         for ev in rx {
+            if let Event::Marker(n) = ev {
+                shared.marker_seen.fetch_max(n, std::sync::atomic::Ordering::SeqCst);
+                continue;
+            }
             if !matches!(ev, Event::Shutdown | Event::MemoryChanged { .. } | Event::RegisterChanged { .. }) {
                 sync_listed(&shared, &mut listed);
             }

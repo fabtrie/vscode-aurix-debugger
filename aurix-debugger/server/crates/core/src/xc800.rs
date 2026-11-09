@@ -331,10 +331,9 @@ impl Xc800 {
 
     // --- Breakpoints --------------------------------------------------------------------------
 
-    pub fn add_breakpoint(&mut self, io: &mut Io, addr: u32, len: u32) -> Result<u8> {
-        if len > 3 {
-            return Err(Error::Resource("Breakpoint ranges are not supported on the SCR".into()));
-        }
+    /// A hardware breakpoint on the instruction at `addr`. `len` is not used: the OCDS breaks on an
+    /// instruction's first byte, and frontends pass a length of their own (TCF: 4).
+    pub fn add_breakpoint(&mut self, io: &mut Io, addr: u32, _len: u32) -> Result<u8> {
         let a = u16::try_from(addr).map_err(|_| other(format!("0x{addr:x} is no SCR code address (0..0xFFFF)")))?;
         if self.slots.contains(&Some(a)) {
             return Err(Error::Resource(format!("Breakpoint at 0x{a:x} exists")));

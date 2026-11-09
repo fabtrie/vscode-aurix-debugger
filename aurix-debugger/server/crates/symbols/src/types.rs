@@ -45,6 +45,8 @@ pub enum TypeId {
     Void,
     Base(TypeClass, u8),
     PointerTo(Box<TypeId>),
+    /// An array of `n` elements of a type without a DIE (from SDCC debug tables).
+    ArrayOf(Box<TypeId>, u32),
 }
 
 impl TypeId {
@@ -56,6 +58,7 @@ impl TypeId {
             TypeId::Void => "V".into(),
             TypeId::Base(c, s) => format!("B{}.{}", *c as u8, s),
             TypeId::PointerTo(t) => format!("P{}", t.to_id()),
+            TypeId::ArrayOf(t, n) => format!("Y{n}.{}", t.to_id()),
         }
     }
 
@@ -79,6 +82,10 @@ impl TypeId {
                 Some(TypeId::Base(TypeClass::from_u8(c.parse().ok()?)?, sz.parse().ok()?))
             }
             b'P' => Some(TypeId::PointerTo(Box::new(TypeId::parse(rest)?))),
+            b'Y' => {
+                let (n, t) = rest.split_once('.')?;
+                Some(TypeId::ArrayOf(Box::new(TypeId::parse(t)?), n.parse().ok()?))
+            }
             _ => None,
         }
     }
@@ -185,6 +192,17 @@ impl Symbols {
                 }
             }
             TypeId::ArrayDim(d, n) => self.array_info(*d, *n, depth),
+            TypeId::ArrayOf(inner, n) => {
+                let bi = self.type_info_at(inner, depth + 1);
+                TypeInfo {
+                    name: Some(format!("{}[{n}]", bi.name.unwrap_or_default())),
+                    class: TypeClass::Array,
+                    size: bi.size * n,
+                    base: Some((**inner).clone()),
+                    length: Some(*n),
+                    resolved: t.clone(),
+                }
+            }
             TypeId::Die(d) => self.die_type_info(*d, depth),
         }
     }

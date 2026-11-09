@@ -5,6 +5,7 @@
 //! Windows paths in the line table, CU DIEs without PC ranges, type
 //! references across units), which also covers GCC output.
 
+pub mod cdb;
 pub mod expr;
 pub mod mcs_asm;
 pub mod scope;
@@ -42,6 +43,9 @@ pub struct Function {
     pub die: UnitOffset<usize>,
     pub decl_line: u32,
     pub external: bool,
+    /// Address of the function's exit instruction, where the debug information says (SDCC);
+    /// a step out runs there.
+    pub exit: Option<u32>,
 }
 
 impl Function {
@@ -61,6 +65,9 @@ pub struct Global {
     pub unit: usize,
     pub die: UnitOffset<usize>,
     pub external: bool,
+    /// The type, for a global without a DIE whose debug information gives one (SDCC); see
+    /// [`Symbols::global_type`].
+    pub ty: Option<types::TypeId>,
 }
 
 impl Global {
@@ -114,6 +121,8 @@ pub struct Symbols {
     unit_cache: Vec<OnceLock<Option<gimli::Unit<R>>>>,
     /// .debug_info offset of each unit (ascending).
     unit_offsets: Vec<usize>,
+    /// Locals of a symbol source without DWARF (see [`scope::TableLocal`]).
+    pub table_locals: Vec<scope::TableLocal>,
     pub load_time: Duration,
 }
 
@@ -202,6 +211,7 @@ impl Symbols {
             rows_by_file: HashMap::new(),
             unit_cache: Vec::new(),
             unit_offsets: Vec::new(),
+            table_locals: Vec::new(),
             load_time: Duration::ZERO,
         };
         let mut file_ids: HashMap<String, u32> = HashMap::new();
@@ -252,6 +262,7 @@ impl Symbols {
                             die: entry.offset(),
                             decl_line,
                             external,
+                            exit: None,
                         });
                     }
                     gimli::DW_TAG_variable if depth == 1 => {
@@ -260,7 +271,7 @@ impl Symbols {
                         let Ok(Some(gimli::Operation::Address { address })) = ops.next() else { continue };
                         let Some(vname) = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)) else { continue };
                         let external = matches!(entry.attr_value(gimli::DW_AT_external), Some(AttributeValue::Flag(true)));
-                        syms.globals.push(Global { name: vname, addr: address as u32, unit: unit_idx, die: entry.offset(), external });
+                        syms.globals.push(Global { name: vname, addr: address as u32, unit: unit_idx, die: entry.offset(), external, ty: None });
                     }
                     gimli::DW_TAG_base_type
                     | gimli::DW_TAG_typedef
@@ -388,11 +399,11 @@ impl Symbols {
             units: Vec::new(),
             functions: functions
                 .into_iter()
-                .map(|(name, low, high)| Function { name, low, high, unit: usize::MAX, die: no_die, decl_line: 0, external: true })
+                .map(|(name, low, high)| Function { name, low, high, unit: usize::MAX, die: no_die, decl_line: 0, external: true, exit: None })
                 .collect(),
             globals: globals
                 .into_iter()
-                .map(|(name, addr)| Global { name, addr, unit: usize::MAX, die: no_die, external: true })
+                .map(|(name, addr)| Global { name, addr, unit: usize::MAX, die: no_die, external: true, ty: None })
                 .collect(),
             functions_by_name: HashMap::new(),
             globals_by_name: HashMap::new(),
@@ -407,6 +418,7 @@ impl Symbols {
             rows_by_file: HashMap::new(),
             unit_cache: Vec::new(),
             unit_offsets: Vec::new(),
+            table_locals: Vec::new(),
             load_time: Duration::ZERO,
         };
         syms.functions.sort_by_key(|f| (f.low, f.high));
@@ -496,6 +508,16 @@ impl Symbols {
             AttributeValue::UnitRef(o) => Some(DieRef { unit: from.unit, off: o.0 }),
             AttributeValue::DebugInfoRef(g) => self.die_at_global(g.0),
             _ => None,
+        }
+    }
+
+    /// The type of global `i`: its DIE's; without one, the type its table gave (SDCC), else one
+    /// 32-bit word (MCS data labels).
+    pub fn global_type(&self, i: usize) -> types::TypeId {
+        match self.globals.get(i) {
+            Some(g) if g.unit != usize::MAX => self.var_type(g.die_ref()),
+            Some(g) => g.ty.clone().unwrap_or(types::TypeId::Base(types::TypeClass::Cardinal, 4)),
+            None => types::TypeId::Void,
         }
     }
 

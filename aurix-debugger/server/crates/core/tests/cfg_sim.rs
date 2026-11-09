@@ -1282,7 +1282,7 @@ fn scr_registers_memory_step_and_breakpoints() {
     assert_eq!(with_sim(&s, |sim| sim.scr.iram[7]), 0x41);
 
     // A hardware breakpoint in the subroutine.
-    i.eval("bp 0x101 1 hw").unwrap();
+    i.eval("bp 0x101 4 hw").unwrap();
     assert_eq!(i.eval("xc800 triggers").unwrap().lines().next().unwrap(), "HWBP0: on  addr=0x0101");
     i.eval("resume").unwrap();
     i.eval("wait_halt 1000").unwrap();

@@ -287,6 +287,21 @@ fn die_id(d: DieRef) -> String {
     format!("{}.{:x}", d.unit, d.off)
 }
 
+/// ID of a local within its ELF: a DIE (`<unit>.<offset>`) or a table entry (`t<index>`).
+fn var_id(v: symbols::scope::VarRef) -> String {
+    match v {
+        symbols::scope::VarRef::Die(d) => die_id(d),
+        symbols::scope::VarRef::Table(i) => format!("t{i}"),
+    }
+}
+
+fn parse_var(s: &str) -> Option<symbols::scope::VarRef> {
+    match s.strip_prefix('t') {
+        Some(i) => i.parse().ok().map(symbols::scope::VarRef::Table),
+        None => parse_die(s).map(symbols::scope::VarRef::Die),
+    }
+}
+
 fn parse_die(s: &str) -> Option<DieRef> {
     let (u, o) = s.split_once('.')?;
     Some(DieRef { unit: u.parse().ok()?, off: usize::from_str_radix(o, 16).ok()? })
@@ -300,7 +315,7 @@ fn parse_symbol(id: &str) -> Option<SymbolRef> {
         return n.parse().ok().map(SymbolRef::Function);
     }
     if let Some(rest) = id.strip_prefix("LV:") {
-        return parse_die(rest.split_once('@')?.0).map(SymbolRef::Local);
+        return parse_var(rest.split_once('@')?.0).map(SymbolRef::Local);
     }
     if let Some(rest) = id.strip_prefix("OB:") {
         let (a, t) = rest.split_once(':')?;
@@ -311,7 +326,7 @@ fn parse_symbol(id: &str) -> Option<SymbolRef> {
 
 fn symbol_id(elf: usize, v: &Value, s: &Scope) -> Option<String> {
     let id = match &v.symbol {
-        Some(SymbolRef::Local(d)) => s.frame_id.as_ref().map(|f| format!("LV:{}@{f}", die_id(*d))),
+        Some(SymbolRef::Local(d)) => s.frame_id.as_ref().map(|f| format!("LV:{}@{f}", var_id(*d))),
         Some(SymbolRef::Global(i)) => Some(format!("GV:{i}")),
         Some(SymbolRef::Function(i)) => Some(format!("FN:{i}")),
         Some(SymbolRef::Object(t, a)) => Some(format!("OB:{a:x}:{}", t.to_id())),
@@ -332,8 +347,8 @@ fn type_of_id(syms: &Symbols, id: &str) -> Option<TypeId> {
         return syms.member_info(m).map(|m| m.ty);
     }
     match parse_symbol(id)? {
-        SymbolRef::Local(d) => Some(syms.var_type(d)),
-        SymbolRef::Global(i) => syms.globals.get(i).map(|g| syms.var_type(g.die_ref())),
+        SymbolRef::Local(d) => Some(syms.local_type(d)),
+        SymbolRef::Global(i) => (i < syms.globals.len()).then(|| syms.global_type(i)),
         SymbolRef::Function(i) => syms.functions.get(i).map(|f| TypeId::Die(f.die_ref())),
         SymbolRef::Object(t, _) => Some(t),
     }
@@ -395,7 +410,7 @@ pub fn symbol_context(sh: &Shared, full_id: &str) -> Res<Json> {
         SymbolRef::Global(i) => {
             let g = syms.globals.get(*i).ok_or_else(not_found)?;
             let mut ctx = json!({ "ID": full_id, "OwnerID": owner_of(sh, n, g.addr), "Name": g.name, "Class": 2, "Address": g.addr, "Flags": 0 });
-            type_fields(n, &syms, &syms.var_type(g.die_ref()), &mut ctx);
+            type_fields(n, &syms, &syms.global_type(*i), &mut ctx);
             Ok(ctx)
         }
         SymbolRef::Object(t, a) => {
@@ -407,10 +422,10 @@ pub fn symbol_context(sh: &Shared, full_id: &str) -> Res<Json> {
             let frame = id.split_once('@').map(|x| x.1).unwrap_or_default();
             let scope = scope_for(sh, frame)?;
             let mut ctx = json!({ "ID": full_id, "OwnerID": frame, "Class": 1, "Flags": 0 });
-            if let Some(name) = syms.die_name(*d) {
+            if let Some(name) = syms.local_name(*d) {
                 ctx["Name"] = json!(name);
             }
-            type_fields(n, &syms, &syms.var_type(*d), &mut ctx);
+            type_fields(n, &syms, &syms.local_type(*d), &mut ctx);
             let mut t = target(sh, n, &scope);
             let mut ev = Eval::new(&syms, &mut t);
             // An unavailable location (optimized out) leaves the value out.
@@ -575,7 +590,7 @@ fn children(sh: &Shared, parent: &str) -> Res<Vec<String>> {
         ids.push(table.add(ExprEntry {
             parent: parent.to_string(),
             text: l.name.clone(),
-            symbol: Some(elf_id(n, &format!("LV:{}@{frame}", die_id(l.die)))),
+            symbol: Some(elf_id(n, &format!("LV:{}@{frame}", var_id(l.var)))),
         }));
     }
     Ok(ids)
@@ -1026,7 +1041,8 @@ mod tests {
     fn symbol_ids() {
         assert_eq!(parse_symbol("GV:12"), Some(SymbolRef::Global(12)));
         assert_eq!(parse_symbol("FN:3"), Some(SymbolRef::Function(3)));
-        assert_eq!(parse_symbol("LV:21.3803@S0.D0.C0.F2"), Some(SymbolRef::Local(DieRef { unit: 21, off: 0x3803 })));
+        assert_eq!(parse_symbol("LV:21.3803@S0.D0.C0.F2"), Some(SymbolRef::Local(symbols::scope::VarRef::Die(DieRef { unit: 21, off: 0x3803 }))));
+        assert_eq!(parse_symbol("LV:t4@S0.D0.C7.F0"), Some(SymbolRef::Local(symbols::scope::VarRef::Table(4))));
         assert_eq!(
             parse_symbol("OB:70013954:T0.24d"),
             Some(SymbolRef::Object(TypeId::Die(DieRef { unit: 0, off: 0x24d }), 0x7001_3954))

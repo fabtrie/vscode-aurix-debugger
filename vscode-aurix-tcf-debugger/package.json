@@ -51,6 +51,7 @@
 		"watch": "tsc -watch -p ./",
 		"svd:compress": "node ./scripts/compress-svd.js --delete",
 		"svd:hsm": "node ./scripts/gen-hsm-svd.js",
+		"svd:scr": "node ./scripts/gen-scr-svd.js",
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
 		"test": "node ./out/test/runTest.js",

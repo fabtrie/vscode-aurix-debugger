@@ -125,6 +125,7 @@ The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSY
 - `x@scr` in the Watch or Live Watch evaluates `x` on the SCR; `@scr` in a breakpoint condition halts only the SCR.
 - TriCore ELF files are never mapped to the SCR.
 - Source-level debugging: add the SCR's SDCC debug file to `symbolFiles`, e.g. `".../TriSCR/gen/scr_main.cdb"`, with the `.ihx` of the same build beside it (it gives the functions' ends). A `.cdb` file goes to the SCR. Its sources are looked up next to it and in the `src`, `inc` and `api` folders beside its folder. Then the SCR has source lines, line breakpoints (2 hardware breakpoints), step over, into and out, its global variables by name, and the local variables of the current function (in the Variables view). SDCC records which register a local lives in but not where in the function it is valid: before its first assignment or after its last use the register may hold something else, and locals the compiler removed show as optimized out. The `.cdb` must come from the build that runs on the SCR.
+- The SCR's special function registers are in the Peripheral View as the `SCR_*` peripherals (see below).
 
 ### Breakpoints on chosen cores
 
@@ -193,7 +194,16 @@ For the TC3xx devices the view also shows the HSM, as the `HSM_*` peripherals me
 - Only expand `HSM_PKC_SCM` while `PKC_STATUS.BUSY` is 0.
 - The run-control and breakpoint registers (DHCSR, FPB and DWT comparators, DBGBASE) are read-only here because the debug server owns them.
 
-The SVD file is generated from `scripts/hsm-svd/hsm_tc3xx.json` with `npm run svd:hsm`. That also writes a readable copy, `scripts/hsm-svd/HSM_TC3xx.svd`, which works as a standalone Cortex-M3 SVD for the HSM. The standalone copy also contains `HSM_BRIDGE_HSMSIDE`, the bridge registers only the HSM can access (DBGCTRL, ERRCTRL, ...). This peripheral is not merged into the view.
+For the TC3xx devices the view also shows the SCR's SFRs, as the `SCR_*` peripherals merged in from `bin/svd/SCR_TC3xx.svd.gz` (one per module: `SCR_SCU`, `SCR_PORT`, `SCR_T2CCU`, `SCR_WCAN`, ...):
+
+- They need the SCR target (`set tc3xx_scr_target 1`), and they are read only while the SCR is halted. While it runs they show a read error.
+- Paged SFRs show every page, e.g. `NMICON` (SCU_PAGE page 1) next to `TCINTEXCHG` (page 0). The SCR's debug monitor selects the page for each access and restores the program's page afterwards.
+- The addresses are those of the monitor's virtual address map (TC3xx UM, Table 558): `0x40000 | page << 15 | (page register & 0x7F) << 8 | (SFR & 0x7F)`. They lie in the TriCore's reserved segment 0, so the server sends them to the SCR from any core.
+- The manual's write-only bits (e.g. `STNR` and `OP` of the page registers) are shown read-write; the field description gives the manual's access type in brackets.
+
+The SCR SVD file comes from the user manual (TC3xx UM part 2, chapter 49): `scripts/scr-svd/extract-scr-registers.py` and `extract-scr-fields.py` extract the registers and bit fields from the manual into `scr_registers.json` and `scr_fields.json`, and `npm run svd:scr` (`scripts/gen-scr-svd.js`) writes the SVD file and a readable copy, `scripts/scr-svd/SCR_TC3xx.svd`. `scripts/scr-svd/SCR_REGISTERS.md` lists the registers and what differs from the SCR firmware's own headers.
+
+The HSM SVD file is generated from `scripts/hsm-svd/hsm_tc3xx.json` with `npm run svd:hsm`. That also writes a readable copy, `scripts/hsm-svd/HSM_TC3xx.svd`, which works as a standalone Cortex-M3 SVD for the HSM. The standalone copy also contains `HSM_BRIDGE_HSMSIDE`, the bridge registers only the HSM can access (DBGCTRL, ERRCTRL, ...). This peripheral is not merged into the view.
 
 ![peripheral-view](media/peripheral-view.gif)
 

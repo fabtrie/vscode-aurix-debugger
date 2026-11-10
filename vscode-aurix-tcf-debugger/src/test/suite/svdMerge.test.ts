@@ -60,20 +60,22 @@ suite('SVD merge', () => {
 		assert.throws(() => mergeSvdPeripherals(device.replace('<name>STM</name>', '<name>HSM_BRIDGE</name>'), extra), /HSM_BRIDGE/);
 	});
 
-	test('merges the HSM peripherals into the TC37x SVD', async () => {
+	test('merges the HSM and SCR peripherals into the TC37x SVD', async () => {
 		const entry = await findSvdForDevice(extensionPath, 'TC37x');
 		assert.ok(entry);
-		assert.strictEqual(entry.extraSvd.length, 1);
-		const hsm = entry.extraSvd[0];
-		const out = mergeSvdPeripherals(
-			gunzipSync(fs.readFileSync(entry.absolutePath)).toString('utf8'),
-			gunzipSync(fs.readFileSync(hsm.absolutePath)).toString('utf8'),
-			hsm
-		);
+		assert.deepStrictEqual(entry.extraSvd.map((e) => path.basename(e.absolutePath)), ['HSM_TC3xx.svd.gz', 'SCR_TC3xx.svd.gz']);
+		let out = gunzipSync(fs.readFileSync(entry.absolutePath)).toString('utf8');
+		for (const extra of entry.extraSvd) {
+			out = mergeSvdPeripherals(out, gunzipSync(fs.readFileSync(extra.absolutePath)).toString('utf8'), extra);
+		}
 		const names = peripheralNames(out);
 		assert.ok(!names.includes('HSM'));
 		assert.ok(!names.includes('HSM_BRIDGE_HSMSIDE'));
 		for (const n of ['HSM_BRIDGE', 'HSM_AES', 'HSM_HASH', 'HSM_PKC', 'HSM_PKC_SCM', 'HSM_TRNG', 'HSM_SCB', 'HSM_FPB']) {
+			assert.ok(names.includes(n), n);
+		}
+		// The TriCore-side SCR interface stays; the SCR's own SFRs come as SCR_<module>.
+		for (const n of ['SCR', 'SCR_SCU', 'SCR_PORT', 'SCR_T2CCU', 'SCR_WCAN', 'SCR_INT']) {
 			assert.ok(names.includes(n), n);
 		}
 		assert.strictEqual(new Set(names).size, names.length, 'peripheral names are unique');

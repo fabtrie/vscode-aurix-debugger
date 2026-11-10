@@ -4,6 +4,7 @@ Simple, human-readable release notes for this extension.
 
 ## Unreleased
 - TC3xx standby controller (SCR, XC800): with `set tc3xx_scr_target 1` in `configCommands` the SCR is its own thread with disassembly, registers, stepping and instruction breakpoints. It is not halted with the TriCores. `@scr` picks it in breakpoint conditions, the Watch and the Live Watch.
+- Peripheral View: the SCR's special function registers with their bit fields, paged SFRs included, as the `SCR_*` peripherals of the TC3xx devices (read while the SCR is halted).
 - SCR source-level debugging from its SDCC debug file (`.cdb` in `symbolFiles`): source lines, line breakpoints, step over/into/out, global and local variables.
 - Data breakpoints: Break on Value Change / Read / Access on variables and watch expressions, and at an address. Globals are watched by name on every TriCore core; core-local RAM as the copy of the chosen core.
 - The Live Watch context menu has Break on Value Change / Read / Access too, also while the target runs.

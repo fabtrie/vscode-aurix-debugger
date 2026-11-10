@@ -21,7 +21,9 @@
 //! | `//3//3/17/`, `18`, `16` | `00` | IsDebugAccess, OCDSInitialize, DebugEstablished (attach) |
 //!
 //! Memory goes through `//2///14/` in its core form ([`crate::memory::core_request`]), space `00`
-//! code (XRAM), `01` data (IRAM 0x00-0x7F, SFRs 0x80-0xFF). While the SCR is halted the debug monitor
+//! code (XRAM), `01` data (IRAM 0x00-0x7F, SFRs 0x80-0xFF of the selected pages), `0c` the
+//! monitor's virtual address map (paged SFRs; see [`space_of`]). Only while the SCR is halted:
+//! running, every read answers zeros without an error. While the SCR is halted the debug monitor
 //! uses ACC, B, SP, PSW, DPTR and register bank 0 itself: reading them as data shows its values, so
 //! registers come from the [`Regs`] block only.
 
@@ -38,6 +40,10 @@ pub const BREAKPOINTS: usize = 2;
 /// Memory spaces of [`crate::memory::core_request`].
 pub const SPACE_CODE: u8 = 0;
 pub const SPACE_DATA: u8 = 1;
+/// The debug monitor's virtual address map itself (TC3xx UM Table 558; winIDEA's memory area 12,
+/// which its SCR register file uses): paged and mapped SFRs included, the monitor selects the page
+/// and restores the program's for each access.
+pub const SPACE_VIRTUAL: u8 = 12;
 /// The SCR's XRAM, which holds its program (TC3xx UM 49: 8 KB at code 0x0000).
 pub const XRAM_SIZE: usize = 0x2000;
 /// Largest block per memory request (winIDEA reads 128 bytes at a time).
@@ -245,16 +251,18 @@ pub fn pmswcr4_body(value: u32) -> Vec<u8> {
     b
 }
 
-/// The memory space and 8051 address of an SCR virtual address (TC3xx UM Table 558): code 0x0000-
-/// 0xFFFF and external data 0x10000-0x1FFFF are XRAM (space 0); IRAM 0x20000-0x2007F and standard
-/// SFRs (0x40080-0x400FF: page 0, RMAP 0) are data space (space 1). Upper IRAM (indirect 0x80-0xFF),
-/// paged and mapped SFRs have no address in the probe's spaces.
-pub fn space_of(vaddr: u32) -> Result<(u8, u16)> {
+/// The memory space and address of an SCR virtual address (TC3xx UM Table 558): code 0x0000-
+/// 0xFFFF and external data 0x10000-0x1FFFF are XRAM (space 0), directly addressed IRAM
+/// 0x20000-0x2007F is data space (space 1), as winIDEA reads them. Upper IRAM (indirect 0x80-0xFF)
+/// and the SFRs 0x40000-0x7FFFF -- paged and mapped ones included -- go to the monitor's virtual
+/// address map as they are ([`SPACE_VIRTUAL`]): data space reaches only the SFRs of the pages the
+/// program selected, and the monitor keeps page register writes to itself (measured).
+pub fn space_of(vaddr: u32) -> Result<(u8, u32)> {
     match vaddr {
-        0x0_0000..=0x0_FFFF => Ok((SPACE_CODE, vaddr as u16)),
-        0x1_0000..=0x1_FFFF => Ok((SPACE_CODE, (vaddr - 0x1_0000) as u16)),
-        0x2_0000..=0x2_007F => Ok((SPACE_DATA, (vaddr - 0x2_0000) as u16)),
-        0x4_0000..=0x4_007F => Ok((SPACE_DATA, 0x80 | (vaddr & 0x7F) as u16)),
+        0x0_0000..=0x0_FFFF => Ok((SPACE_CODE, vaddr)),
+        0x1_0000..=0x1_FFFF => Ok((SPACE_CODE, vaddr - 0x1_0000)),
+        0x2_0000..=0x2_007F => Ok((SPACE_DATA, vaddr - 0x2_0000)),
+        0x2_0080..=0x2_00FF | 0x4_0000..=0x7_FFFF => Ok((SPACE_VIRTUAL, vaddr)),
         _ => Err(Error::Protocol(format!("SCR virtual address 0x{vaddr:05x} has no address in the probe's memory spaces"))),
     }
 }
@@ -431,7 +439,7 @@ impl<L: Link> Probe<L> {
             return Err(Error::Protocol(format!("SCR access 0x{vaddr:05x}+{len} crosses a memory space")));
         }
         let r = self.exchange(&crate::probe::Exchange {
-            payload: memory::core_request(CORE, space, addr as u32, len, data),
+            payload: memory::core_request(CORE, space, addr, len, data),
             ..exchange(memory::SERVICE, &[])
         })?;
         memory::parse_reply(&r[0], if data.is_some() { 0 } else { len })
@@ -593,7 +601,9 @@ mod tests {
         assert_eq!(space_of(0x0079).unwrap(), (SPACE_CODE, 0x79));
         assert_eq!(space_of(0x1_1FFF).unwrap(), (SPACE_CODE, 0x1FFF));
         assert_eq!(space_of(0x2_0007).unwrap(), (SPACE_DATA, 0x07));
-        assert_eq!(space_of(0x4_0060).unwrap(), (SPACE_DATA, 0xE0), "ACC");
-        assert!(space_of(0x2_0080).is_err() && space_of(0x4_0100).is_err() && space_of(0x8_0000).is_err());
+        assert_eq!(space_of(0x2_0080).unwrap(), (SPACE_VIRTUAL, 0x2_0080), "upper IRAM");
+        assert_eq!(space_of(0x4_0060).unwrap(), (SPACE_VIRTUAL, 0x4_0060), "ACC");
+        assert_eq!(space_of(0x4_F173).unwrap(), (SPACE_VIRTUAL, 0x4_F173), "NMICON: SCU_PAGE page 1");
+        assert!(space_of(0x2_0100).is_err() && space_of(0x3_0000).is_err() && space_of(0x8_0000).is_err());
     }
 }

@@ -243,7 +243,10 @@ pub static ENTRIES: &[Entry] = &[
     e!(Core, "cortex_m ...", "triggers | mdw <address> [<count>]", "Same as `tricore`, for the HSM; `triggers` lists FPB and DWT comparators."),
     e!(Core, "gtm_mcs ...", "triggers | mdw <address> [<count>]", "Same as `tricore`, for an MCS channel."),
     e!(Core, "xc800 ...", "triggers | mdw <address> [<count>]", "Same as `tricore`, for the SCR: `triggers` lists its hardware \
-        breakpoints, `mdw` takes its virtual addresses (code 0x0000-0xFFFF, IRAM 0x20000, SFRs 0x40000+)."),
+        breakpoints, `mdw` takes its virtual addresses (code 0x0000-0xFFFF, XDATA 0x10000, IRAM 0x20000-0x200FF, SFRs \
+        0x40000-0x7FFFF with the page in bits 17:15 and the page register in bits 14:8, TC3xx UM Table 558).",
+        "Only while the SCR is halted: its debug monitor serves the accesses. The SFR window 0x40000-0x7FFFF also \
+         reaches the SCR from the other cores' TCF contexts (the Peripheral View reads through the TriCore)."),
     // --- flash ---------------------------------------------------------------------------
     e!(Flash, "flash bank", "<name> <driver> <base> <size> <chip_width> <bus_width> <target> [<option> ...]",
         "Declare a flash bank (drivers `tc3x_eflash`, `aurix_eflash`)."),
@@ -312,6 +315,11 @@ pub static ENTRIES: &[Entry] = &[
     e!(Bluebox, "bluebox daq_offload", "[on|off]", "Let the probe sample live values itself (default `on`), or read every point from the host."),
     e!(Bluebox, "bluebox drop_target", "", "Test aid: reset the target and leave the connection broken, as after a reset the target did itself."),
     e!(Bluebox, "bluebox raw", "<path> [<hex body>]", "Protocol aid: send one service message as it is and return the reply as hex."),
+    e!(Bluebox, "bluebox scr_mem", "<space> <address> <length> [<hex data>]", "Protocol aid: read (with data: write) SCR memory in the probe's own terms.",
+        "Memory spaces: 0 code/XDATA, 1 directly addressed data (IRAM 0x00-0x7F, the SFRs of the pages the program \
+         selected), 2 IDATA, 4 XDATA, 12 the monitor's virtual address map (winIDEA's area 12; the SCR target uses it \
+         for upper IRAM and all SFRs). Prints the bytes and how many failed. While the SCR runs, the probe answers \
+         with zeros."),
     // --- compatibility -------------------------------------------------------------------
     e!(Compat, "init_targets", "", "Called by `init`; a cfg may redefine it."),
     e!(Compat, "init_board", "", "Called by `init`; a cfg may redefine it."),

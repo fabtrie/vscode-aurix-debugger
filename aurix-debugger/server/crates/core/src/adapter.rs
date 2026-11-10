@@ -223,6 +223,13 @@ pub mod scr_space {
     pub const fn sfr(addr: u8) -> u32 {
         SFR | (addr as u32 & 0x7F)
     }
+
+    /// Virtual address of the SFR `addr` in page `page` of the module paged by the page register at
+    /// `page_register` (SCU_PAGE 0xF1, IO_PAGE 0x8F, T2CCU_PAGE 0xC7, WCAN_PAGE 0xB8). The monitor
+    /// selects the page for the access and restores the program's afterwards.
+    pub const fn paged_sfr(page_register: u8, page: u8, addr: u8) -> u32 {
+        SFR | (page as u32 & 7) << 15 | (page_register as u32 & 0x7F) << 8 | (addr as u32 & 0x7F)
+    }
 }
 
 /// Debugging the TC3xx standby controller (SCR, an XC800/8051 core) through the probe.
@@ -609,4 +616,20 @@ pub fn check(r: &OpResult, addr: u64, write: bool) -> Result<()> {
 pub trait FlashDownload {
     /// Programs `files` (code only -- symbols stay with our own DWARF reader).
     fn download(&mut self, files: &[crate::image::ImageFile]) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scr_space::*;
+
+    #[test]
+    fn scr_virtual_addresses() {
+        assert_eq!(sfr(0xF1), 0x4_0071, "SCU_PAGE");
+        // TC3xx UM Table 558; the addresses of winIDEA's SCR register file.
+        assert_eq!(paged_sfr(0xF1, 0, 0xF6), 0x4_7176, "TCINTEXCHG");
+        assert_eq!(paged_sfr(0xF1, 1, 0xF3), 0x4_F173, "NMICON");
+        assert_eq!(paged_sfr(0x8F, 1, 0x90), 0x4_8F10, "P00_IOCR0");
+        assert_eq!(paged_sfr(0xC7, 2, 0xC1), 0x5_4741, "T2CCU_CC0L");
+        assert_eq!(paged_sfr(0xB8, 3, 0xB0), 0x5_B830, "WCAN_DATA0_CTRL");
+    }
 }

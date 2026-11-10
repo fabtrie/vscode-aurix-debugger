@@ -537,8 +537,9 @@ impl Channel {
     // --- Memory ----------------------------------------------------------------------
 
     /// The target for a memory access of a core context to addresses the core accesses through
-    /// its own path (HSM-private memory, MCS program RAM). HSM peripherals have no host address, so
-    /// they go to the HSM from every context (the XPeripherals view reads through the TriCore).
+    /// its own path (HSM-private memory, MCS program RAM, SCR memory). HSM peripherals and the SCR's
+    /// SFRs (0x40000-0x7FFFF) have no host address, so they go to the HSM or the SCR from every
+    /// context (the XPeripherals view reads through the TriCore).
     fn own_access(&self, ctx: &str, addr: u32, size: usize) -> Option<usize> {
         let idx = find_core(self.h(), ctx).map(|c| c.idx);
         self.h().call(move |cx| ops::own_access_target(cx, idx, addr, size)).flatten()

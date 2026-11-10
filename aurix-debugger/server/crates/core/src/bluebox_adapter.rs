@@ -1015,6 +1015,35 @@ impl Adapter for BlueBoxAdapter {
                     Err(Error::Usage(NOT_CONNECTED.into()))
                 }
             }
+            // SCR memory in the probe's own terms (memory space byte and address), for exploring
+            // what the probe offers beyond code and data space.
+            Some("scr_mem") => {
+                let usage = || Error::Usage("usage: bluebox scr_mem <space> <address> <length> [hex data to write]".into());
+                let n = |i: usize| args.get(i).and_then(|s| crate::util::parse_u64(s).ok()).ok_or_else(usage);
+                let (space, addr, len) = (n(2)? as u8, n(3)? as u32, n(4)? as usize);
+                let hex: String = args.get(5..).unwrap_or_default().concat();
+                let data = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| hex.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok()))
+                    .collect::<Option<Vec<u8>>>()
+                    .filter(|d| d.is_empty() || d.len() == len)
+                    .ok_or_else(usage)?;
+                #[cfg(windows)]
+                {
+                    let data = (!data.is_empty()).then_some(data.as_slice());
+                    let msg = bluebox::memory::core_request(bluebox::scr::CORE, space, addr, len, data);
+                    let reply = self.probe()?.transact(&msg).map_err(|e| other(format!("bluebox: {e}")))?;
+                    let m = bluebox::memory::parse_reply(&reply, if data.is_some() { 0 } else { len })
+                        .map_err(|e| other(format!("bluebox: {e}")))?;
+                    let failed = m.failed.iter().filter(|&&f| f).count();
+                    Ok(format!("{} (failed {failed})", m.data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (space, addr, len, data);
+                    Err(Error::Usage(NOT_CONNECTED.into()))
+                }
+            }
             // The probe's sampler for the core's DAQ points: on (default) or off.
             Some("daq_offload") => {
                 match args.get(2).copied() {

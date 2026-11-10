@@ -1310,6 +1310,35 @@ fn scr_registers_memory_step_and_breakpoints() {
     assert_eq!(i.eval("tc37x.cpu0 curstate").unwrap(), "running");
 }
 
+/// The SCR's SFRs (virtual addresses 0x40000-0x7FFFF, paged ones included) have no host address
+/// (segment 0 is reserved on the TriCore side): the peripheral view reads them through the TriCore
+/// context, and they go to the SCR.
+#[test]
+fn scr_sfrs_are_read_through_the_scr_from_every_core() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    assert_eq!(ops::own_access_target(&s.cx(), Some(0), 0x4_7176, 1), None, "no SCR target");
+
+    let s = scr_server();
+    with_sim(&s, |sim| sim.scr.enabled = true);
+    s.interp.eval("init").unwrap();
+    let cx = s.cx();
+    let scr = scr_index(&s);
+    // TCINTEXCHG: SCU_PAGE (0xF1) page 0, SFR 0xF6.
+    let tcint = aurix_core::adapter::scr_space::paged_sfr(0xF1, 0, 0xF6);
+    assert_eq!(ops::own_access_target(&cx, Some(0), tcint, 1), Some(scr));
+    assert_eq!(ops::own_access_target(&cx, None, 0x4_0000, 0x80), Some(scr));
+    assert_eq!(ops::own_access_target(&cx, Some(0), 0x7_FFFC, 8), None, "range leaves the window");
+    assert_eq!(ops::own_access_target(&cx, Some(0), 0x3_FFFF, 1), None, "XDATA/IRAM only through the SCR context");
+    assert_eq!(ops::own_access_target(&cx, Some(scr), 0x2_0000, 1), Some(scr));
+    with_sim(&s, |sim| sim.scr.sfr.insert(tcint, 0xB4));
+    assert_eq!(ops::read_memory_partial_as(&cx, scr, tcint - 1, 2).unwrap().data, vec![0, 0xB4]);
+    // Only while halted: the monitor serves the accesses.
+    s.interp.eval("targets tc37x.scr; resume").unwrap();
+    let err = ops::read_memory_as(&cx, scr, tcint, 1).unwrap_err().to_string();
+    assert!(err.contains("running"), "{err}");
+}
+
 /// A launch configuration sets `tc3xx_scr_target` in its commands, after the cfg files: the SCR
 /// target is created by init_targets, before the probe connects.
 #[test]

@@ -107,6 +107,13 @@ impl Xc800 {
         addr < scr_space::END
     }
 
+    /// Whether a host address is the SCR's SFR window: the SFR part of its virtual map
+    /// (0x40000-0x7FFFF) lies in segment 0, reserved on the TriCore side of the TC3xx, so a host
+    /// access there means the SCR's SFRs (the addresses of the SCR SVD's peripherals).
+    pub fn sfr_window(addr: u32) -> bool {
+        (scr_space::SFR..scr_space::END).contains(&addr)
+    }
+
     pub fn invalidate(&mut self) {
         self.regs = None;
     }
@@ -319,11 +326,22 @@ impl Xc800 {
 
     // --- Memory -------------------------------------------------------------------------------
 
+    /// The debug monitor serves memory accesses, so only while the SCR is halted: running, the
+    /// BlueBox answers every read with zeros and no error (measured).
+    fn memory_reachable(&self) -> Result<()> {
+        if self.state == TargetState::Running {
+            return Err(other("the SCR is running: its memory and SFRs are reachable only while it is halted"));
+        }
+        Ok(())
+    }
+
     pub fn read_memory(&mut self, io: &mut Io, addr: u32, len: usize) -> Result<Vec<u8>> {
+        self.memory_reachable()?;
         scr(io)?.read(addr, len)
     }
 
     pub fn write_memory(&mut self, io: &mut Io, addr: u32, data: &[u8]) -> Result<()> {
+        self.memory_reachable()?;
         scr(io)?.write(addr, data)?;
         self.invalidate();
         Ok(())

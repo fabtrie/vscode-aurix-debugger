@@ -206,6 +206,14 @@ impl TasAdapter {
                 log_info!("TAS: operating the device as type 0x{dt:08x}");
             }
         }
+        // The TasServer reopens the access hardware for every new client, so the device connect would
+        // run at its default DAP clock; so the configured `adapter speed` is also applied before it.
+        // The SCR (device type 0x101EC083) allows at most 10 MHz.
+        if let Some(khz) = s.speed_khz {
+            if let Err(e) = self.am15_write(AM15_RW_ACC_HW_FREQUENCY, &(khz.saturating_mul(1000)).to_le_bytes()) {
+                log_warn!("TAS: cannot set the DAP clock before the connect: {e}");
+            }
+        }
         let mode = if s.connect_under_srst { ConnectMode::ResetAndHalt } else { ConnectMode::HotAttach };
         // The device takes its debug password only while the start-up software runs, so the key is
         // handed over before every connect, and only a connect that resets the device can use it.

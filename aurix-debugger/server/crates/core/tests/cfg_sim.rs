@@ -16,12 +16,20 @@ fn tcl_path(p: PathBuf) -> String {
 }
 
 fn server() -> Server {
+    server_with_mcs(true)
+}
+
+/// The board cfgs; with `mcs`, the MCS0 and MCS1 channels as targets (off by default).
+fn server_with_mcs(mcs: bool) -> Server {
     aurix_core::log::set_debug_level(1);
     let s = Server::new();
     s.cx().with(|c| {
         c.adapter_override = Some("sim".into());
         c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
     });
+    if mcs {
+        s.interp.eval_global("set tc3xx_mcs_modules {0 1}").unwrap();
+    }
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
     s.interp
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
@@ -938,6 +946,21 @@ fn ram_word(s: &Server, addr: u32) -> u32 {
 
 fn curstate(s: &Server, t: &str) -> String {
     s.interp.eval(&format!("{t} curstate")).unwrap()
+}
+
+/// MCS channels are targets only when asked for, also from a launch configuration's commands
+/// after the cfg files.
+#[test]
+fn mcs_targets_are_off_by_default_and_can_be_set_after_the_cfg_files() {
+    let s = server_with_mcs(false);
+    let i = &s.interp;
+    assert!(!i.eval("target names").unwrap().contains(".mcs"));
+    i.eval_global("set tc3xx_mcs_modules {1}").unwrap();
+    i.eval("init").unwrap();
+    let names = i.eval("target names").unwrap();
+    assert!(names.contains("tc37x.mcs1.ch0") && names.ends_with("tc37x.mcs1.ch7") && !names.contains(".mcs0"), "{names}");
+    assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
+    assert_eq!(i.eval("llength $tc3xx_mcs_targets").unwrap(), "8");
 }
 
 #[test]

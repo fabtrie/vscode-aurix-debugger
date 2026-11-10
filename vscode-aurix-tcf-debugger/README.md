@@ -104,7 +104,7 @@ Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the 
 
 ### Standby controller (SCR)
 
-The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSYSTEM BlueBox when the device's debug mode is DAP Standard. Turn it on with a `configCommands` entry:
+The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSYSTEM BlueBox when the device's debug mode is DAP Standard. It is off by default; turn it on with a `configCommands` entry:
 
 ```json
 {
@@ -126,6 +126,21 @@ The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSY
 - TriCore ELF files are never mapped to the SCR.
 - Source-level debugging: add the SCR's SDCC debug file to `symbolFiles`, e.g. `".../TriSCR/gen/scr_main.cdb"`, with the `.ihx` of the same build beside it (it gives the functions' ends). A `.cdb` file goes to the SCR. Its sources are looked up next to it and in the `src`, `inc` and `api` folders beside its folder. Then the SCR has source lines, line breakpoints (2 hardware breakpoints), step over, into and out, its global variables by name, and the local variables of the current function (in the Variables view). SDCC records which register a local lives in but not where in the function it is valid: before its first assignment or after its last use the register may hold something else, and locals the compiler removed show as optimized out. The `.cdb` must come from the build that runs on the SCR.
 - The SCR's special function registers are in the Peripheral View as the `SCR_*` peripherals (see below).
+- The application must start the SCR in its OCDS boot mode (PMSWCR4.SCRCFG = 0x0A); until it does, the SCR thread stays unexamined. With the SCR on, the BlueBox runs DAP Standard, which caps the DAP clock at 10 MHz for the whole session.
+
+### GTM MCS channels
+
+The channels of the GTM's MCS modules can be debugged as cores of their own. They are off by default; name the modules your application runs in a `configCommands` entry (or set `tc3xx_mcs_modules` in your board cfg):
+
+```json
+"configCommands": ["set tc3xx_mcs_modules {0 1}"]
+```
+
+- Each module gives eight threads, `tc37x.mcs<m>.ch0` .. `ch7`. A channel shows in the Call Stack once the application has enabled it.
+- A channel halts only itself: TriCore breakpoints and the pause button leave it running, and an MCS breakpoint stops only that channel.
+- Source-level debugging: add the MCS assembler sources (`.asm`) to `symbolFiles`; they go to the MCS channels.
+- Both can be combined: `"configCommands": ["set tc3xx_mcs_modules {0 1}", "set tc3xx_scr_target 1"]`.
+- Every module adds eight targets to the server's poll, so enable only the modules you debug.
 
 ### Breakpoints on chosen cores
 

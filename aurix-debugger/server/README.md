@@ -509,7 +509,7 @@ The server itself holds no board or application settings. The cfg scripts come i
 | OpenOCD target cfg (`target/infineon/tc3?x.cfg`, via the board cfg) | TriCore cores with `-coreid`/`-dbgbase`, PFLASH banks. |
 | [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | Chip mechanics, no board policy: TL1 break/step/continue, STM and peripheral suspend (written only where CLC and ACCEN0 let it land), OCDS enable, HSM and MCS targets, HSM start after a halting reset, a 64-bit STM reset watch, diagnostics. It takes DBGSR (`-dbgbase` + 0x1FD00) and the per-core CBS_TRCx/STMx/WDTCPUx registers (`-coreid`) from the target cfg. |
 | [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Attach modes and reset policy for boards with an NXP FS26 SBC: `passive`, `hot`, `halt`, `reset_halt`, `reset_run`; every reset request (Tcl, VS Code, flashing) goes through its `reset_hook`; every reset followed by the same initialization; a halting reset repeated until it holds (with the debugger reset on the FS26 RSTB: until the FS26 has gone through deep fail-safe, for a lasting halt at the reset vector); the watchdog disarm by the application. |
-| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | The TC37x board with its application: adapter speed, DFLASH banks, MCS modules, the peripheral suspend list, the disarm check (addresses from the application's ELF). |
+| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | The TC37x board with its application: adapter speed, DFLASH banks, the MCS modules (off; `set tc3xx_mcs_modules {0 1}` turns them on), the peripheral suspend list, the disarm check (addresses from the application's ELF). |
 
 Choose the attach mode before `init`, e.g. `"configCommands": ["set sbc_attach_mode halt", "init"]`.
 

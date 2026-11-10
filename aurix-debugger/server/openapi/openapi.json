@@ -3020,7 +3020,7 @@
     },
     "/api/v1/flash/write": {
       "post": {
-        "description": "Program image files into flash (`flash write_images`).\n\nNeeds a preceding halting reset (`reset` with mode `halt`): the flash is protected\notherwise. UCB data in the images is skipped. Only the sectors the images touch are\nerased. Blocks the debug server while it runs.",
+        "description": "Program image files into flash (`flash write_images`).\n\nNeeds a preceding halting reset (`reset` with mode `halt`): the flash is protected\notherwise. UCB data and data outside the flash banks (e.g. linked to RAM) in the images\nare skipped with a warning. Only the sectors the images touch are erased. Blocks the debug\nserver while it runs.",
         "operationId": "flash_write",
         "requestBody": {
           "content": {

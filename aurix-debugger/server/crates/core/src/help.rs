@@ -259,7 +259,7 @@ pub static ENTRIES: &[Entry] = &[
     e!(Flash, "flash write_images", "[erase] [incremental] [unlock] [verify] [-offset <offset>] [-type <type>] <file> ...",
         "Program several images in one go.",
         "The files are merged first (later files win), so a file cannot erase what an earlier one programmed into a \
-         shared sector. `-offset` and `-type` apply to the file that follows them."),
+         shared sector. `-offset` and `-type` apply to the file that follows them. UCB data and data outside the \n         flash banks (e.g. initialized RAM sections in a post-build HEX) are skipped with a warning; an image with no data \n         in any flash bank is an error."),
     e!(Flash, "flash verify_image", "<file> [<offset> [<type>]]", "Same as `verify_image`."),
     e!(Flash, "verify_image", "<file> [<offset> [<type>]]", "Compare an image with the target's memory."),
     e!(Flash, "program", "<file> [preverify] [verify] [reset] [exit] [<offset>]", "Reset, program and optionally verify, reset and exit (OpenOCD's `program`).",

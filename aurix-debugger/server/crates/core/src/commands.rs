@@ -914,7 +914,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             }
             let img = file.load()?;
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
-            Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped, file.path))
+            Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped - stats.unbanked_skipped, file.path))
         }
         Some("write_images") => {
             // Merges the files first (later files win), so a file cannot erase what an earlier
@@ -963,7 +963,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
                 img = merged;
             }
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
-            let mut out = format!("wrote {} bytes from {} files: {stats}", img.size() - stats.ucb_skipped, files.len());
+            let mut out = format!("wrote {} bytes from {} files: {stats}", img.size() - stats.ucb_skipped - stats.unbanked_skipped, files.len());
             if verify {
                 // An incremental write has already compared all unchanged sectors with the image
                 // (including the padding of their pages): only the programmed ones are read back.
@@ -971,7 +971,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
                     let parts = stats.programmed.iter().flat_map(|&s| img.within(s, s as u64 + flash::SECTOR_SIZE as u64).sections);
                     (Image::from_sections(parts.collect()), format!(" of the {} programmed sectors", stats.programmed.len()))
                 } else {
-                    (img.clone(), String::new())
+                    (flash::flash_part(cx, &img), String::new())
                 };
                 let n = flash::verify_image(cx, &check).map_err(e2s)?;
                 out += &format!("\nverified {n} bytes{what}");
@@ -1029,7 +1029,7 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
         let mut needs_flash = true;
         if preverify {
             out.push("**pre-verifying**".to_string());
-            if flash::verify_image(cx, &img).is_ok() {
+            if flash::verify_image(cx, &flash::flash_part(cx, &img)).is_ok() {
                 out.push("**Verified OK - No flashing**".into());
                 needs_flash = false;
             }
@@ -1049,7 +1049,8 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
             // through ordinary memory, so both report the same thing.
             if verify {
                 out.push("** Verify Started **".into());
-                let n = flash::verify_image(cx, &img).map_err(|e| format!("**Verify Failed**: {e}"))?;
+                // Data outside the flash banks is not written (see flash::skip_unbanked).
+                let n = flash::verify_image(cx, &flash::flash_part(cx, &img)).map_err(|e| format!("**Verify Failed**: {e}"))?;
                 out.push(format!("** Verified OK ** ({n} bytes)"));
             }
         }

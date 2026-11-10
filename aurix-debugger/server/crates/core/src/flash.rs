@@ -21,7 +21,7 @@ use crate::image::Image;
 use crate::target::TargetState;
 use crate::{log_info, log_warn, ops, Cx};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FlashBank {
     pub name: String,
     pub driver: String,
@@ -31,12 +31,6 @@ pub struct FlashBank {
     pub bus_width: u32,
     pub target: String,
     pub extra: Vec<String>,
-}
-
-impl FlashBank {
-    fn contains(&self, start: u32, end: u64) -> bool {
-        start >= self.base && end <= self.base as u64 + self.size as u64
-    }
 }
 
 pub const DRIVERS: &[&str] = &["tc3x_eflash", "aurix_eflash"];
@@ -438,6 +432,8 @@ pub struct WriteStats {
     pub bytes: usize,
     /// Bytes of UCB data in the image that were not written.
     pub ucb_skipped: usize,
+    /// Bytes of image data outside the flash banks that were not written (see [`skip_unbanked`]).
+    pub unbanked_skipped: usize,
     pub elapsed: Duration,
     /// Addresses of the sectors that were programmed.
     pub programmed: Vec<u32>,
@@ -457,6 +453,9 @@ impl std::fmt::Display for WriteStats {
         )?;
         if self.ucb_skipped > 0 {
             write!(f, ", {} bytes of UCB data skipped", self.ucb_skipped)?;
+        }
+        if self.unbanked_skipped > 0 {
+            write!(f, ", {} bytes outside the flash banks skipped", self.unbanked_skipped)?;
         }
         Ok(())
     }
@@ -481,6 +480,46 @@ pub fn skip_ucbs(img: &Image, unlock: bool, what: &str) -> Result<(Image, usize)
     Ok((rest, n))
 }
 
+/// The image split at the flash banks: its data inside some bank, and its data outside all of them.
+pub fn split_by_banks(img: &Image, banks: &[FlashBank]) -> (Image, Image) {
+    let range = |b: &FlashBank| (b.base, b.base as u64 + b.size as u64);
+    let inside = banks.iter().flat_map(|b| img.within(range(b).0, range(b).1).sections).collect();
+    let outside = banks.iter().fold(img.clone(), |rest, b| rest.without(range(b).0, range(b).1).0);
+    (Image::from_sections(inside), outside)
+}
+
+/// The image without its data outside the flash banks, and the number of bytes removed.
+/// Post-build files can hold data no flash bank covers, e.g. initialized data linked to RAM
+/// (shared LMU sections): it cannot be flashed, so it is skipped with a warning instead of failing
+/// the whole write. An image with no data in any bank is still an error: that is a missing
+/// offset or flash bank rather than some stray data.
+pub fn skip_unbanked(cx: &Cx, img: &Image, what: &str) -> Result<(Image, usize)> {
+    let banks = cx.with(|c| c.flash_banks.clone());
+    let (inside, outside) = split_by_banks(img, &banks);
+    let Some(first) = outside.sections.first() else { return Ok((inside, 0)) };
+    if inside.sections.is_empty() {
+        return Err(other(format!("no flash bank for image data at 0x{:08x} ({} bytes)", first.addr, first.data.len())));
+    }
+    const SHOWN: usize = 4;
+    let mut spans: Vec<String> = outside.sections.iter().take(SHOWN).map(|s| format!("0x{:08x}..0x{:08x}", s.addr, s.end())).collect();
+    if outside.sections.len() > SHOWN {
+        spans.push(format!("{} more", outside.sections.len() - SHOWN));
+    }
+    let n = outside.size();
+    log_warn!("{what}: skipping {n} bytes outside the flash banks ({})", spans.join(", "));
+    Ok((inside, n))
+}
+
+/// What a flash write programs of the image (its data inside the flash banks), for verifying
+/// it. Unchanged without flash banks (a probe that programs from its own download list).
+pub fn flash_part(cx: &Cx, img: &Image) -> Image {
+    let banks = cx.with(|c| c.flash_banks.clone());
+    if banks.is_empty() {
+        return img.clone();
+    }
+    split_by_banks(img, &banks).0
+}
+
 /// Programs the image into the flash banks (`flash write_image`): erased sectors are
 /// programmed, other touched sectors are erased first (an error without `erase`).
 pub fn write_image(cx: &Cx, img: &Image, erase: bool) -> Result<WriteStats> {
@@ -493,22 +532,14 @@ pub fn write_image(cx: &Cx, img: &Image, erase: bool) -> Result<WriteStats> {
 /// SMU configuration may turn into a reset (seen on the TC377 board). `unlock`: see [`skip_ucbs`].
 pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, unlock: bool) -> Result<WriteStats> {
     let (img, ucb_skipped) = skip_ucbs(img, unlock, "flash write_image")?;
+    // A section may span adjacent banks (merged images, e.g. pfls0 into pfls1): the loop below
+    // writes each bank's part of the image.
+    let (img, unbanked_skipped) = skip_unbanked(cx, &img, "flash write_image")?;
     let img = &img;
     let banks = cx.with(|c| c.flash_banks.clone());
-    // A section may span adjacent banks (merged images, e.g. pfls0 into pfls1): every byte must be
-    // in some bank. The loop below writes each bank's part of the image.
-    for s in &img.sections {
-        let mut a = s.addr as u64;
-        while a < s.end() {
-            match banks.iter().find(|b| b.contains(a as u32, a + 1)) {
-                Some(b) => a = b.base as u64 + b.size as u64,
-                None => return Err(other(format!("no flash bank for image data at 0x{a:08x} (section 0x{:08x}, {} bytes)", s.addr, s.data.len()))),
-            }
-        }
-    }
     halt_all(cx)?;
     let t0 = Instant::now();
-    let mut stats = WriteStats { ucb_skipped, ..Default::default() };
+    let mut stats = WriteStats { ucb_skipped, unbanked_skipped, ..Default::default() };
     for bank in &banks {
         let hi = bank.base as u64 + bank.size as u64;
         if !img.touches(bank.base, hi) {
@@ -639,6 +670,26 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!((runs[0].0, runs[0].1.len()), (0x8012_0400, 64));
         assert_eq!(sector_runs(&pages, 0x8012_4000)[0].1[..4], [2, 2, 2, PAD]);
+    }
+
+    #[test]
+    fn split_by_banks_keeps_what_the_banks_cover() {
+        let bank = |name: &str, base, size| FlashBank { name: name.into(), base, size, ..Default::default() };
+        let banks = [bank("pfls0", 0x8000_0000, 0x30_0000), bank("pfls1", 0x8030_0000, 0x30_0000)];
+        // bm.hex of bmw_sfs-25: Dlog data linked to the non-cached LMU next to PFLASH data, and a
+        // section across the pfls0/pfls1 boundary.
+        let img = Image::from_sections(vec![
+            Section { addr: 0x8000_0000, data: vec![1; 16] },
+            Section { addr: 0x802F_FFF8, data: vec![2; 16] },
+            Section { addr: 0xB004_0000, data: vec![0; 10] },
+            Section { addr: 0xB004_0030, data: vec![0; 0x12c] },
+        ]);
+        let (inside, outside) = split_by_banks(&img, &banks);
+        assert_eq!(inside.sections.iter().map(|s| (s.addr, s.data.len())).collect::<Vec<_>>(), vec![(0x8000_0000, 16), (0x802F_FFF8, 16)]);
+        assert_eq!(outside.sections.iter().map(|s| (s.addr, s.data.len())).collect::<Vec<_>>(), vec![(0xB004_0000, 10), (0xB004_0030, 0x12c)]);
+        // A bank boundary inside a section keeps the bytes on both sides.
+        let (inside, _) = split_by_banks(&img, &banks[..1]);
+        assert_eq!(inside.sections[1].data.len(), 8);
     }
 
     #[test]

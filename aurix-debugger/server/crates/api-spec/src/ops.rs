@@ -102,8 +102,9 @@ api! {
     /// Program image files into flash (`flash write_images`).
     ///
     /// Needs a preceding halting reset (`reset` with mode `halt`): the flash is protected
-    /// otherwise. UCB data in the images is skipped. Only the sectors the images touch are
-    /// erased. Blocks the debug server while it runs.
+    /// otherwise. UCB data and data outside the flash banks (e.g. linked to RAM) in the images
+    /// are skipped with a warning. Only the sectors the images touch are erased. Blocks the debug
+    /// server while it runs.
     op flash_write [flash]: POST "/api/v1/flash/write" (FlashWriteRequest) -> CommandOutput;
 
     /// Compare flash contents with an image file (`verify_image`).

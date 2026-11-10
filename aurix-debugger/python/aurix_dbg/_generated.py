@@ -1044,8 +1044,9 @@ class GeneratedClient:
         """Program image files into flash (`flash write_images`).
 
         Needs a preceding halting reset (`reset` with mode `halt`): the flash is protected
-        otherwise. UCB data in the images is skipped. Only the sectors the images touch are
-        erased. Blocks the debug server while it runs.
+        otherwise. UCB data and data outside the flash banks (e.g. linked to RAM) in the images
+        are skipped with a warning. Only the sectors the images touch are erased. Blocks the debug
+        server while it runs.
 
         Args:
             files: Image files (ELF, Intel HEX, S-records, binary) on the debug server's machine; later files win where they overlap. An entry is a path, or an object with `path`, `offset` and `type` (`elf`, `ihex`, `srec`, `bin`).

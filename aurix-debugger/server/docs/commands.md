@@ -775,7 +775,9 @@ flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-
 
 Program several images in one go.
 
-The files are merged first (later files win), so a file cannot erase what an earlier one programmed into a shared sector. `-offset` and `-type` apply to the file that follows them.
+The files are merged first (later files win), so a file cannot erase what an earlier one programmed into a shared sector. `-offset` and `-type` apply to the file that follows them. UCB data and data outside the 
+         flash banks (e.g. initialized RAM sections in a post-build HEX) are skipped with a warning; an image with no data 
+         in any flash bank is an error.
 
 ### `flash verify_image`
 

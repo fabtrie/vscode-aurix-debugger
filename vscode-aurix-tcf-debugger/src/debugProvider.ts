@@ -2395,8 +2395,23 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 
+	/**
+	 * Where the hub session of this debug session serves TCF, set by the extension before VS Code
+	 * sends `launch`: its port is the session's own, and the extension cannot change the arguments
+	 * VS Code launches with. Wins over `host` and `port` of the launch arguments.
+	 */
+	private endpoint?: { host: string; port: number; hubFlashed?: boolean };
+
+	public connectTo(endpoint: { host: string; port: number; hubFlashed?: boolean }): void {
+		this.endpoint = endpoint;
+	}
+
 	protected override async launchRequestAsync(response: DebugProtocol.LaunchResponse, rawArgs: DebugProtocol.LaunchRequestArguments): Promise<void> {
-		const args = rawArgs as AurixTCFLaunchRequestArguments;
+		let args = rawArgs as AurixTCFLaunchRequestArguments;
+		if (this.endpoint) {
+			const { host, port, hubFlashed } = this.endpoint;
+			args = { ...args, host, port, internal: { ...(args.internal ?? {}), ...(hubFlashed ? { hubFlashed } : {}) } };
+		}
 		this.launchArgs = args;
 		this.launchCore = args.core;
 		this.instructionSteppingEnabled = args.instructionStepping === true;

@@ -689,6 +689,7 @@ impl Hub {
             }
             thread::sleep(Duration::from_millis(50));
         }
+        hlog!("session {id}: closed");
         let ev = {
             let mut st = self.lock();
             let pos = st.sessions.iter().position(|s| s.id == id);

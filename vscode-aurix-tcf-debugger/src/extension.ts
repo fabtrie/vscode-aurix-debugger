@@ -382,8 +382,15 @@ export function activate(context: vscode.ExtensionContext) {
 	// the periodic refresh is off. The adapter's stopped event also covers cores stopping without focus.
 	context.subscriptions.push(
 		vscode.debug.registerDebugAdapterTrackerFactory('aurixdbg', {
-			createDebugAdapterTracker: () => ({
-				onDidSendMessage: (message: { type?: string; event?: string; body?: { allHalted?: unknown } }) => {
+			createDebugAdapterTracker: (session) => ({
+				// A debug session whose launch failed never reaches onDidTerminateDebugSession: its hub
+				// session (and the probe it holds) would stay open. hubSessionEnded runs once per session.
+				onWillStopSession: () => void hubSessionEnded(session),
+				onExit: () => void hubSessionEnded(session),
+				onDidSendMessage: (message: { type?: string; event?: string; command?: string; success?: boolean; body?: { allHalted?: unknown } }) => {
+					if (message?.type === 'response' && message.command === 'launch' && message.success === false) {
+						void hubSessionEnded(session);
+					}
 					if (message?.type === 'event' && message.event === 'stopped') {
 						// Paused live views still update on a halt, the way the Watch view does.
 						notifyLiveUpdateBreak();
@@ -673,8 +680,9 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 		startingAurixSessions++;
 		try {
 		const config = session.configuration;
+		let endpoint: HubEndpoint;
 		try {
-			await prepareHubSession(session, config);
+			endpoint = await prepareHubSession(session, config);
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
 			agentOutput?.appendLine(message);
@@ -689,9 +697,11 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
 
 		const enablePathMapper = vscode.workspace.isTrusted && pathMapperConfig === true;
 		
-		return new vscode.DebugAdapterInlineImplementation(
-			new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes(), new VsCodeBreakpointUi(), sourceMappingStore())
-		);
+		const adapter = new AurixTCFDebugSession(enablePathMapper, getDisassemblyOpcodeBytes(), new VsCodeBreakpointUi(), sourceMappingStore());
+		// Changes to session.configuration do not reach the launch request: the adapter gets the
+		// hub session's TCF endpoint directly.
+		adapter.connectTo(endpoint);
+		return new vscode.DebugAdapterInlineImplementation(adapter);
 		} finally {
 			startingAurixSessions = Math.max(0, startingAurixSessions - 1);
 		}
@@ -1052,11 +1062,14 @@ function describeLaunch(l: hub.LaunchStatus | undefined): string {
 	return l.steps.map((s) => `${s.ok ? '✓' : '✗'} ${s.step} (${s.ms} ms)${s.detail ? `: ${s.detail.split('\n').slice(-6).join('\n    ')}` : ''}`).join('\n');
 }
 
+/** Where the debug adapter reaches the TCF server of its hub session. */
+type HubEndpoint = { host: string; port: number; hubFlashed?: boolean };
+
 /**
- * Opens (or attaches to) the hub session of a debug session and points the debug adapter at its
- * TCF server: directly on this machine, through a local relay to a hub on another one.
+ * Opens (or attaches to) the hub session of a debug session and returns where the debug adapter
+ * reaches its TCF server: directly on this machine, through a local relay to a hub on another one.
  */
-async function prepareHubSession(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<void> {
+async function prepareHubSession(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<HubEndpoint> {
 	const { url, token } = hubTarget(config);
 	const client = new hub.HubClient({ url, token, clientId: `vscode:${session.id}` });
 	const log = (l: string) => agentOutput?.appendLine(l);
@@ -1154,10 +1167,6 @@ async function prepareHubSession(session: vscode.DebugSession, config: vscode.De
 			}
 			throw new Error(`The launch failed (${lifetimeOnError}): ${info.launch.error ?? ''}\n${describeLaunch(info.launch)}`);
 		}
-		if (config.enableFlashing === true) {
-			// The hub flashed and reset: the debug adapter must not flash again.
-			config.internal = { ...(config.internal ?? {}), hubFlashed: true };
-		}
 	}
 	if (!info?.tcf_port) {
 		throw new Error(`Session ${info?.name ?? ''} has no TCF port`);
@@ -1169,15 +1178,14 @@ async function prepareHubSession(session: vscode.DebugSession, config: vscode.De
 		opened,
 		lifetime: config.sessionLifetime === 'keep' ? 'keep' : 'close',
 	};
-	if (client.local) {
-		config.host = '127.0.0.1';
-		config.port = info.tcf_port;
-	} else {
+	let port = info.tcf_port;
+	if (!client.local) {
 		binding.relay = await hub.startTcfRelay(client, info.session, log);
-		config.host = '127.0.0.1';
-		config.port = binding.relay.port;
+		port = binding.relay.port;
 	}
 	hubBindings.set(session.id, binding);
+	// The hub flashed and reset when it opened the session: the debug adapter must not flash again.
+	return { host: '127.0.0.1', port, hubFlashed: opened && config.enableFlashing === true };
 }
 
 /** A debug session ended: close the relay, and the hub session if the extension opened it. */

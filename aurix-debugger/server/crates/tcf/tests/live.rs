@@ -36,6 +36,7 @@ fn server(sampler: bool) -> ServerHandle {
             c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
         });
         s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+        s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
         s.interp
             .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
             .unwrap();

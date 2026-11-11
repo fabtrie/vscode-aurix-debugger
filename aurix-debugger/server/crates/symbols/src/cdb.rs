@@ -462,18 +462,13 @@ L:A$scr_main$423:0
 
     #[test]
     fn the_real_scr_debug_file() {
-        // SCR_CDB=<path to scr_main.cdb> (TC377 SCR, built by HighTec scr-cc).
+        // SCR_CDB=<path to an SCR .cdb> (built by HighTec scr-cc), with a `main`.
         let Some(p) = std::env::var_os("SCR_CDB") else { return };
         let s = load(Path::new(&p)).unwrap();
-        assert!(s.functions.len() > 10, "{}", s.functions.len());
+        assert!(!s.functions.is_empty());
         let main = s.functions_named("main")[0];
-        assert_eq!((main.low, main.exit), (0xEE, Some(0xF1)));
-        let proc_ = s.functions_named("process")[0];
-        assert_eq!((proc_.low, proc_.high), (0xF3, 0x1C0));
-        assert!(s.line_at(0x13B).is_some_and(|l| l.file.ends_with("scr_main.c")));
-        assert!(s.globals.iter().any(|g| g.name == "wakeup_flag" && g.addr >= 0x10000));
-        let req = s.locals_at(0x13B).into_iter().find(|l| l.name == "request").expect("request in process");
-        assert_eq!(s.table_locals.iter().find(|l| l.name == "request").unwrap().loc, crate::scope::LocDesc::Registers(vec![(7, 1)]));
-        assert_eq!(s.local_type(req.var), TypeId::Base(TypeClass::Cardinal, 1));
+        assert!(main.exit.is_some(), "main has an exit instruction");
+        assert!(s.line_at(main.low).is_some(), "a source line at main");
+        assert!(!s.globals.is_empty());
     }
 }

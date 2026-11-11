@@ -89,7 +89,7 @@ Create `.vscode/launch.json`:
 }
 ```
 
-Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the `aurix-debugger` folder and adjusted for the board.
+Here `debug/` holds `tc3xx_ocds.cfg`, `fs26_sbc.cfg` and `tc37x_ocds_init.cfg`, copied from the `aurix-debugger` folder; `tc37x_ocds_init.cfg` is an example, adjust it for the board and application.
 
 - `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is. The bundled OpenOCD scripts are always searched, after `searchDirs`.
 - The Tcl commands for cfg files, `configCommands`, debugger actions and `monitor` are listed in the [Tcl command reference](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/docs/commands.md). In the Debug Console, `monitor help` lists them, `monitor help <command>` describes one (`monitor help reset_config`) and `monitor help <word>` searches the descriptions (`monitor help srst`).

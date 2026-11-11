@@ -55,6 +55,28 @@ pub const APP_MARKER: u32 = 0x7000_F000;
 pub const APP_DRIVER_STATE: u32 = 0x6000_F000;
 pub const APP_MARKER_DEBUGGER: u32 = 0xDEB0_0001;
 
+/// The simulated board's settings for the example board cfg (`tc37x_ocds_init.cfg`), as a board's
+/// own cfg would set them before loading it: the peripheral suspend list ([`SIM_PERIPHS`] without
+/// the STMs, which `tc3xx_setup` adds) and the disarm check on [`APP_DRIVER_STATE`] and
+/// [`APP_MARKER`].
+pub const SIM_BOARD_SETTINGS: &str = "
+set tc3xx_periph {
+    {SMU      0xF0036FE8 0xF0036800 0xF0036FFC 2 reset}
+    {GPT120   0xF00018E8 0xF0001800 0xF00018FC 1 app}
+    {QSPI2    0xF0001EE8 0xF0001E00 0xF0001EFC 2 app}
+    {QSPI4    0xF00020E8 0xF0002000 0xF00020FC 2 app}
+    {EVADC    0xF0020028 0xF0020000 0xF002003C 2 app}
+    {CONVCTRL 0xF0025028 0xF0025000 0xF002503C 2 app}
+    {GTM      0xF019FD38 0xF019FD00 0xF019FD10 0 app}
+    {CAN0     0xF02080E8 0xF0208000 0xF02080FC 2 app}
+    {CAN1     0xF02180E8 0xF0218000 0xF02180FC 2 app}
+}
+set sbc_disarm_check {
+    {0x6000F000 0x000000FF != 0}
+    {0x7000F000 0xFFFFFFFF == 0xDEB00001}
+}
+";
+
 const STM0_TIM0: u32 = 0xF000_1010;
 const STM0_CAP: u32 = 0xF000_102C;
 

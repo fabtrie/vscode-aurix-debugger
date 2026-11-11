@@ -31,6 +31,7 @@ fn server_with_mcs(mcs: bool) -> Server {
         s.interp.eval_global("set tc3xx_mcs_modules {0 1}").unwrap();
     }
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+    s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
     s.interp
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
@@ -1181,6 +1182,7 @@ mod backend_guard {
             c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
         });
         s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+        s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
         s.interp
             .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
             .unwrap();
@@ -1251,6 +1253,7 @@ fn scr_server() -> Server {
     });
     s.interp.eval_global("set tc3xx_scr_target 1").unwrap();
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+    s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
     s.interp
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();

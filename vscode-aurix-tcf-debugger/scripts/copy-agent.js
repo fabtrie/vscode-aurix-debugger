@@ -1,5 +1,5 @@
 // Copies aurix-hub.exe, aurix-dbg.exe and OpenOCD's Tcl scripts into bin/ so they are packaged
-// with the extension. The extension installs them from there to %LOCALAPPDATA%urix-dbg
+// with the extension. The extension installs them from there to %LOCALAPPDATA%\aurix-dbg
 // (aurix-hub install).
 //
 // aurix-dbg.exe, first match wins:

@@ -11,7 +11,6 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { AurixTCFDebugSession, DisassemblyOpcodeBytes, isDisassemblyOpcodeBytes } from './debugProvider';
-import { ChildProcess, execFile, spawn } from 'child_process';
 import { pipeline } from 'stream/promises';
 import { createGunzip, gunzipSync } from 'zlib';
 import { LiveWatchCommandArgument } from './liveWatchView';
@@ -37,17 +36,12 @@ import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 import { CoreRef, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
 import { SourceMappingStore, SourcePrefixMapping } from './sourceFileMap';
 import { probeLostReason, targetHealthStatus } from './targetHealth';
+import * as hub from './hub';
 
-let tcfAgentProcess: ChildProcess | undefined;
 let extensionContext: vscode.ExtensionContext;
 let agentOutput: vscode.OutputChannel | undefined;
 let activeAurixSessions = 0;
 let startingAurixSessions = 0;
-let pendingStopTimer: NodeJS.Timeout | undefined;
-let pendingStopToken = 0;
-let lastAgentHost: string | undefined;
-let lastAgentPort: number | undefined;
-let lastAgentPath: string | undefined;
 let enforcingMemoryInspectorSettings = false;
 const memoryInspectorExtensionId = 'eclipse-cdt.memory-inspector';
 const openedDisassemblySessions = new Set<string>();
@@ -537,12 +531,6 @@ export function activate(context: vscode.ExtensionContext) {
 			if (session.type === 'aurixdbg') {
 				activeAurixSessions++;
 				aurixDebugSessions.add(session);
-				if (pendingStopTimer) {
-					clearTimeout(pendingStopTimer);
-					pendingStopTimer = undefined;
-					pendingStopToken++;
-					agentOutput?.appendLine('Cancelled pending agent shutdown (new session started).');
-				}
 				void ensureMemoryInspectorSettings();
 				void syncInstructionSteppingOnSessionStart(session);
 				void syncLiveWatchOnSessionStart(session);
@@ -660,34 +648,21 @@ export function activate(context: vscode.ExtensionContext) {
 				setLiveUpdateSessionActive(false);
 				void debugLayout?.sessionsEnded();
 			}
-			// Use a short, cancelable delay so VS Code Restart (terminate + immediate start)
-			// can reuse the same agent without kill+start churn.
-			if (activeAurixSessions === 0) {
-				if (pendingStopTimer) {
-					clearTimeout(pendingStopTimer);
-				}
-				const stopToken = ++pendingStopToken;
-				agentOutput?.appendLine('Scheduling agent shutdown in 1s (cancelled if a new session starts).');
-				pendingStopTimer = setTimeout(() => {
-					pendingStopTimer = undefined;
-					if (
-						stopToken === pendingStopToken &&
-						activeAurixSessions === 0 &&
-						startingAurixSessions === 0
-					) {
-						void stopTCFAgent('debug session terminated');
-					}
-				}, 1000);
-			}
+			// The hub session: closed if this debug session opened it (sessionLifetime "close").
+			void hubSessionEnded(session);
 		})
 	);
 
-	// Handle agent lifecycle
 	context.subscriptions.push({
 		dispose: () => {
-			void stopTCFAgent('extension disposed');
+			stopHubEvents?.();
+			for (const b of hubBindings.values()) {
+				b.relay?.close();
+			}
 		}
 	});
+	registerHubCommands(context);
+	void installHubOnActivation().finally(() => followHubEvents());
 
 	void vscode.window.showInformationMessage('AURIX debugger extension is enabled.');
 }
@@ -696,19 +671,16 @@ export class AurixTCFDebugAdapterFactory implements vscode.DebugAdapterDescripto
     // Create the debug adapter descriptor for a debug session
 	async createDebugAdapterDescriptor(session: vscode.DebugSession): Promise<vscode.ProviderResult<vscode.DebugAdapterDescriptor>> {
 		startingAurixSessions++;
-		// VS Code Restart can create a new session/adapter before firing onDidStartDebugSession.
-		// Cancel any pending shutdown early so we don't kill the agent mid-start.
-		if (pendingStopTimer) {
-			clearTimeout(pendingStopTimer);
-			pendingStopTimer = undefined;
-			pendingStopToken++;
-			agentOutput?.appendLine('Cancelled pending agent shutdown (session is starting).');
-		}
 		try {
 		const config = session.configuration;
-
-		if (config.autoStartAgent ?? vscode.workspace.getConfiguration('aurix-debugger').get<boolean>('autoStartAgent', false)) {
-			await startAurixDbg(session, config);
+		try {
+			await prepareHubSession(session, config);
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			agentOutput?.appendLine(message);
+			agentOutput?.show(true);
+			void vscode.window.showErrorMessage(`AURIX: ${message.split('\n')[0]}`);
+			throw e;
 		}
 
 		// Enable path mapper based on workspace trust and configuration
@@ -823,40 +795,6 @@ function resolveConfigPath(session: vscode.DebugSession, p: unknown): string | u
 }
 
 
-function splitCommandLine(text: string): string[] {
-	// Simple quote-aware split for Additional Agent Options.
-	// Supports: foo bar "quoted arg" 'single quoted'.
-	const out: string[] = [];
-	let cur = '';
-	let quote: '"' | "'" | undefined;
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		if (quote) {
-			if (ch === quote) {
-				quote = undefined;
-				continue;
-			}
-			cur += ch;
-			continue;
-		}
-		if (ch === '"' || ch === "'") {
-			quote = ch as any;
-			continue;
-		}
-		if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
-			if (cur.trim() !== '') {
-				out.push(cur);
-				cur = '';
-			}
-			continue;
-		}
-		cur += ch;
-	}
-	if (cur.trim() !== '') {
-		out.push(cur);
-	}
-	return out;
-}
 
 function getSvdCacheRoot(): string {
 	const fromGlobalStorage = extensionContext?.globalStorageUri?.fsPath;
@@ -974,7 +912,6 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 				request: 'launch',
 				name: 'Debug Aurix Program',
 				workspace: '${workspaceFolder}',
-				autoStartAgent: true,
 				searchDirs: ['${workspaceFolder}/tcl'],
 				configFiles: ['board/infineon/kit_a2g_tc377tx_3v3_trb.cfg'],
 				device: 'TC37x',
@@ -1066,359 +1003,377 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 	}
 }
 
+// --- aurix-hub: sessions, relay, commands --------------------------------------------------------
+
+/** What the extension did with the hub for one debug session. */
+interface HubBinding {
+	client: hub.HubClient;
+	session: string;
+	name: string;
+	/** The extension opened the session (else it attached to one). */
+	opened: boolean;
+	lifetime: 'close' | 'keep';
+	relay?: hub.TcfRelay;
+}
+
+const hubBindings = new Map<string, HubBinding>();
+let stopHubEvents: (() => void) | undefined;
+
+function hubSetting<T>(key: string, fallback: T): T {
+	return vscode.workspace.getConfiguration('aurix-debugger').get<T>(key, fallback);
+}
+
+/** The hub URL and token of a launch configuration (or the settings). */
+function hubTarget(config?: vscode.DebugConfiguration): { url: string; token?: string } {
+	const url = String(config?.hub || hubSetting<string>('hub.url', hub.DEFAULT_HUB_URL) || hub.DEFAULT_HUB_URL).replace(/\/+$/, '');
+	const token = (config?.hubToken as string | undefined) || hubSetting<string>('hub.token', '') || process.env.AURIX_HUB_TOKEN || undefined;
+	return { url, token };
+}
+
+function asStringList(v: unknown): string[] {
+	if (Array.isArray(v)) {
+		return v.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+	}
+	return typeof v === 'string' && v.trim() !== '' ? [v] : [];
+}
+
+/** A local file for a hub on another machine: uploaded, replaced by its `file:` ID. */
+async function hubPath(client: hub.HubClient, p: string): Promise<string> {
+	if (client.local || !fs.existsSync(p)) {
+		return p;
+	}
+	return client.upload(p);
+}
+
+function describeLaunch(l: hub.LaunchStatus | undefined): string {
+	if (!l) {
+		return '';
+	}
+	return l.steps.map((s) => `${s.ok ? '✓' : '✗'} ${s.step} (${s.ms} ms)${s.detail ? `: ${s.detail.split('\n').slice(-6).join('\n    ')}` : ''}`).join('\n');
+}
+
 /**
- * Starts aurix-dbg (OpenOCD-compatible debug server over Infineon TAS) with
- * OpenOCD-style arguments built from the launch configuration:
- * -s <searchDirs> -f <configFiles> -c <configCommands>.
- * Uses the aurix-dbg.exe bundled with the extension unless "agentPath" overrides it.
+ * Opens (or attaches to) the hub session of a debug session and points the debug adapter at its
+ * TCF server: directly on this machine, through a local relay to a hub on another one.
  */
-async function startAurixDbg(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<void> {
-	const agentPath = resolveConfigPath(session, config.agentPath || vscode.workspace.getConfiguration('aurix-debugger').get('agentPath'))
-		?? path.join(extensionContext.extensionPath, 'bin', 'aurix-dbg.exe');
-	if (!fs.existsSync(agentPath)) {
-		void vscode.window.showErrorMessage(`aurix-dbg not found: ${agentPath}`);
-		throw new Error(`aurix-dbg not found: ${agentPath}`);
+async function prepareHubSession(session: vscode.DebugSession, config: vscode.DebugConfiguration): Promise<void> {
+	const { url, token } = hubTarget(config);
+	const client = new hub.HubClient({ url, token, clientId: `vscode:${session.id}` });
+	const log = (l: string) => agentOutput?.appendLine(l);
+	if (client.local) {
+		await hub.ensureLocalHub(client, extensionContext.extensionPath, log);
+	} else if (!(await client.health())) {
+		throw new Error(`aurix-hub at ${url} does not answer`);
 	}
-	const host = String(config.host || '127.0.0.1');
-	const port = Number(config.port || 1534);
-	const asList = (v: unknown): string[] => {
-		if (Array.isArray(v)) {
-			return v.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+
+	let info: hub.SessionInfo | undefined;
+	let opened = false;
+	if (typeof config.session === 'string' && config.session.trim() !== '') {
+		info = await client.findSession(config.session.trim());
+		if (!info || info.state === 'exited') {
+			throw new Error(`No open session "${config.session}" on ${url} (see AURIX: Show Debugger Hub Status)`);
 		}
-		return typeof v === 'string' && v.trim() !== '' ? [v] : [];
-	};
-
-	const args: string[] = [];
-	// OpenOCD's scripts bundled with the extension, so "board/infineon/..." works without
-	// configuration. Passed first: aurix-dbg searches the last -s folder first, so the
-	// user's searchDirs take precedence.
-	const bundledTcl = path.join(extensionContext.extensionPath, 'bin', 'openocd', 'tcl');
-	if (fs.existsSync(bundledTcl)) {
-		args.push('-s', bundledTcl);
-	}
-	for (const dir of asList(config.searchDirs)) {
-		args.push('-s', resolveConfigPath(session, dir) ?? dir);
-	}
-	for (const file of asList(config.configFiles)) {
-		// Names like "board/infineon/x.cfg" are looked up in the search dirs by aurix-dbg;
-		// only pass a resolved path when the file exists relative to the workspace.
-		const resolved = resolveConfigPath(session, file);
-		args.push('-f', resolved && fs.existsSync(resolved) ? resolved : file);
-	}
-	for (const cmd of asList(config.configCommands)) {
-		args.push('-c', cmd);
-	}
-	args.push('-c', `bindto ${host === 'localhost' ? '127.0.0.1' : host}`, '-c', `tcf_port ${port}`);
-	if (typeof config.additionalAgentOptions === 'string') {
-		args.push(...splitCommandLine(config.additionalAgentOptions));
-	}
-	if (Array.isArray(config.agentArgs)) {
-		args.push(...asList(config.agentArgs));
-	}
-
-	let reused = false;
-	if (tcfAgentProcess && tcfAgentProcess.exitCode === null) {
-		agentOutput?.appendLine('Reusing already running aurix-dbg for new session.');
-		try {
-			await waitForTcpPort(host, port, 15_000);
-			reused = true;
-		} catch (e) {
-			agentOutput?.appendLine(`Running aurix-dbg is not reachable (${e instanceof Error ? e.message : String(e)}); restarting it.`);
-		}
-	}
-	if (!reused) {
-		await startTCFAgent(agentPath, args, host, port);
-	}
-}
-
-async function startTCFAgent(agentPath: string, args: string[], host: string, port: number): Promise<void> {
-	// Stop existing agent if running (should be rare now; we prefer reusing it)
-	await stopTCFAgent('restart requested');
-
-	lastAgentHost = host;
-	lastAgentPort = port;
-	lastAgentPath = agentPath;
-
-	agentOutput?.show(true);
-	agentOutput?.appendLine(`Starting aurix-dbg: ${agentPath}`);
-	// Quoted, so the line can be pasted into a shell as-is. Unquoted, a single
-	// argument like "bindto 127.0.0.1" looks like two and the agent rejects it with
-	// "unknown option: 127.0.0.1" - spawn() itself passes it as one argument.
-	agentOutput?.appendLine(`Agent command line: ${[agentPath, ...args].map(quoteCommandLineArg).join(' ')}`);
-
-	const proc = spawn(agentPath, args, {
-		cwd: path.dirname(agentPath),
-		stdio: ['ignore', 'pipe', 'pipe'],
-		windowsHide: true,
-	});
-	tcfAgentProcess = proc;
-
-	// The agent says on stdout/stderr why it refused to start (bad option, cfg script
-	// error, probe busy). That goes to the output channel, but a failing launch pulls
-	// the panel over to the Debug Console, so keep the tail and put it into the thrown
-	// error as well - that is what the user actually gets shown.
-	const recentOutput: string[] = [];
-	const record = (line: string) => {
-		agentOutput?.appendLine(line);
-		recentOutput.push(line);
-		if (recentOutput.length > 200) {
-			recentOutput.shift();
-		}
-	};
-	// Chunks are not lines: split them so partial lines are not logged as whole ones.
-	const pump = (stream: NodeJS.ReadableStream | null) => {
-		let pending = '';
-		stream?.on('data', (data) => {
-			pending += String(data);
-			const lines = pending.split(/\r?\n/);
-			pending = lines.pop() ?? '';
-			for (const line of lines) {
-				record(line);
+		log(`Attaching to session ${info.name} (${info.session})`);
+		if (info.state === 'starting') {
+			const st = await client.waitSession(info.session, 600);
+			if (st.phase === 'failed') {
+				throw new Error(`Session ${info.name} failed to start: ${st.error ?? ''}`);
 			}
-		});
-		stream?.on('end', () => {
-			if (pending !== '') {
-				record(pending);
-				pending = '';
-			}
-		});
-	};
-	pump(proc.stdout);
-	pump(proc.stderr);
-
-	// A failed spawn (e.g. ENOENT) emits 'error' but never sets exitCode, so without this
-	// waitForTcpPort would poll until its timeout and hide the real cause.
-	const spawnFailed = new Promise<never>((_, reject) => {
-		proc.once('error', (err) => {
-			if (tcfAgentProcess === proc) {
-				tcfAgentProcess = undefined;
-			}
-			reject(new Error(`Failed to start aurix-dbg '${agentPath}': ${err.message}`));
-		});
-	});
-	spawnFailed.catch(() => { /* surfaced via Promise.race below */ });
-
-	// 'close', not 'exit': 'exit' can fire before the last stdout/stderr chunks have been
-	// delivered, and those chunks are the failure reason.
-	const closed = new Promise<number | null>((resolve) => proc.once('close', (code) => resolve(code)));
-	const exitedEarly = closed.then((code): never => {
-		throw new Error(`aurix-dbg exited with code ${code} before listening on ${host}:${port}`);
-	});
-	exitedEarly.catch(() => { /* surfaced via Promise.race below */ });
-
-	proc.on('exit', (code, signal) => {
-		agentOutput?.appendLine(`aurix-dbg exited with code ${code}${signal ? ` (signal ${signal})` : ''}`);
-		if (tcfAgentProcess === proc) {
-			tcfAgentProcess = undefined;
+			info = (await client.findSession(info.session)) ?? info;
 		}
-	});
-
-	proc.on('error', (err) => {
-		agentOutput?.appendLine(`Failed to start aurix-dbg: ${err.message}`);
-	});
-
-	// Avoid a race where the debug adapter tries to connect before the agent has
-	// started listening on the requested TCP port.
-	agentOutput?.appendLine(`Waiting for aurix-dbg to listen on ${host}:${port}...`);
-	try {
-		await Promise.race([waitForTcpPort(host, port, 15_000), spawnFailed, exitedEarly]);
-	} catch (e) {
-		// If the process is already gone, let its streams drain so the reported tail is
-		// complete (waitForTcpPort can reject on 'exit', i.e. before 'close').
-		if (proc.exitCode !== null || proc.signalCode !== null) {
-			await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 500))]);
+	} else {
+		const configFiles: string[] = [];
+		for (const f of asStringList(config.configFiles)) {
+			// Names like "board/infineon/x.cfg" are looked up in the search directories; only a
+			// file that exists relative to the workspace is passed as a path.
+			const resolved = resolveConfigPath(session, f);
+			configFiles.push(resolved && fs.existsSync(resolved) ? await hubPath(client, resolved) : f);
 		}
-		const message = `${e instanceof Error ? e.message : String(e)}${formatAgentOutputTail(recentOutput)}`;
-		agentOutput?.appendLine(`aurix-dbg did not start listening: ${message}`);
+		const searchDirs = asStringList(config.searchDirs).map((d) => resolveConfigPath(session, d) ?? d);
+		const launch: Record<string, unknown> = {};
+		const flashFiles = (Array.isArray(config.flashFiles) ? config.flashFiles : [])
+			.map((f: any) => (typeof f === 'string' ? { path: f } : f))
+			.filter((f: any) => f && typeof f.path === 'string' && f.path.trim() !== '');
+		if (config.enableFlashing === true) {
+			if (flashFiles.length === 0) {
+				throw new Error('"enableFlashing" is set, but the launch configuration has no "flashFiles"');
+			}
+			const files = [];
+			for (const f of flashFiles) {
+				const p = await hubPath(client, resolveConfigPath(session, f.path) ?? f.path);
+				files.push(f.offset !== undefined || f.type ? { path: p, offset: f.offset, type: f.type } : p);
+			}
+			launch.flash = { files, verify: config.verifyFlash !== false };
+			launch.reset = { halt: config.resetSuspend === true, type: typeof config.resetType === 'string' ? config.resetType : undefined };
+		}
+		if (typeof config.runTo === 'string' && config.runTo.trim() !== '') {
+			launch.run_to = config.runTo.trim();
+		}
+		const req: Record<string, unknown> = {
+			name: typeof config.sessionName === 'string' && config.sessionName ? config.sessionName : config.name,
+			wait_s: 3600,
+		};
+		if (typeof config.profile === 'string' && config.profile.trim() !== '') {
+			req.profile = config.profile.trim();
+		}
+		if (configFiles.length || asStringList(config.configCommands).length || searchDirs.length || config.adapter || config.probe) {
+			req.connect = {
+				config_files: configFiles,
+				commands: asStringList(config.configCommands),
+				search_dirs: searchDirs,
+				adapter: typeof config.adapter === 'string' && config.adapter ? config.adapter : undefined,
+				probe: typeof config.probe === 'string' && config.probe ? config.probe : undefined,
+			};
+		}
+		if (!req.profile && !req.connect) {
+			throw new Error('The launch configuration names no board: set "profile" (a hub profile), "configFiles", or "session" to attach to an open session');
+		}
+		if (Object.keys(launch).length) {
+			req.launch = launch;
+		}
 		agentOutput?.show(true);
-		// Don't leave a hung agent behind: it keeps the probe locked and later launches would reuse it.
-		await stopTCFAgent('startup failed');
-		throw new Error(message);
-	}
-	agentOutput?.appendLine(`aurix-dbg is listening on ${host}:${port}`);
-}
-
-/** Quotes an argument for display, so a logged command line can be pasted into a shell. */
-function quoteCommandLineArg(arg: string): string {
-	return /[\s"]/.test(arg) ? `"${arg.replace(/(\\*)"/g, '$1$1\\"')}"` : arg;
-}
-
-/** The last non-empty lines the agent printed, for appending to a startup error. */
-function formatAgentOutputTail(lines: string[], max = 15): string {
-	const tail = lines.map((l) => l.trimEnd()).filter((l) => l.trim() !== '').slice(-max);
-	return tail.length === 0 ? '' : `\n\nAgent output:\n${tail.join('\n')}`;
-}
-
-async function stopTCFAgent(reason: string): Promise<void> {
-	// Stop the TCF agent process if running
-	if (!tcfAgentProcess) {
-		return;
-	}
-
-	const proc = tcfAgentProcess;
-	const pid = proc.pid;
-	tcfAgentProcess = undefined;
-
-	if (!pid) {
+		log(`Opening a session on ${url}: ${JSON.stringify(req)}`);
 		try {
-			proc.kill();
-		} catch {
-			// ignore
+			info = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'AURIX: opening the debug session…' },
+				() => client.openSession(req),
+			);
+		} catch (e) {
+			const body = e instanceof hub.HubError ? e.body : undefined;
+			throw new Error(`Opening the session failed: ${e instanceof Error ? e.message : String(e)}${body?.status ? ` (${body.status})` : ''}`);
 		}
+		opened = true;
+		log(`Session ${info.name} (${info.session}) is ${info.state}, launch ${info.launch.phase}\n${describeLaunch(info.launch)}`);
+		if (info.launch.phase === 'starting') {
+			info.launch = await client.waitSession(info.session, 3600);
+		}
+		if (info.launch.phase === 'failed') {
+			const lifetimeOnError = config.sessionLifetime === 'keep' ? 'kept open' : 'closed';
+			if (config.sessionLifetime !== 'keep') {
+				void client.closeSession(info.session).catch(() => undefined);
+			}
+			throw new Error(`The launch failed (${lifetimeOnError}): ${info.launch.error ?? ''}\n${describeLaunch(info.launch)}`);
+		}
+		if (config.enableFlashing === true) {
+			// The hub flashed and reset: the debug adapter must not flash again.
+			config.internal = { ...(config.internal ?? {}), hubFlashed: true };
+		}
+	}
+	if (!info?.tcf_port) {
+		throw new Error(`Session ${info?.name ?? ''} has no TCF port`);
+	}
+	const binding: HubBinding = {
+		client,
+		session: info.session,
+		name: info.name,
+		opened,
+		lifetime: config.sessionLifetime === 'keep' ? 'keep' : 'close',
+	};
+	if (client.local) {
+		config.host = '127.0.0.1';
+		config.port = info.tcf_port;
+	} else {
+		binding.relay = await hub.startTcfRelay(client, info.session, log);
+		config.host = '127.0.0.1';
+		config.port = binding.relay.port;
+	}
+	hubBindings.set(session.id, binding);
+}
+
+/** A debug session ended: close the relay, and the hub session if the extension opened it. */
+async function hubSessionEnded(session: vscode.DebugSession): Promise<void> {
+	const b = hubBindings.get(session.id);
+	if (!b) {
 		return;
 	}
-
-	agentOutput?.appendLine(`Stopping aurix-dbg (pid ${pid}) - ${reason}`);
-
+	hubBindings.delete(session.id);
+	b.relay?.close();
 	try {
-		if (process.platform === 'win32') {
-			// Kill the whole process tree, including helper processes the agent may have spawned.
-			await new Promise<void>((resolve, reject) => {
-				execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (err, stdout, stderr) => {
-					if (stdout) {
-						agentOutput?.appendLine(String(stdout).trimEnd());
-					}
-					if (stderr) {
-						agentOutput?.appendLine(String(stderr).trimEnd());
-					}
-					if (err) {
-						reject(err);
-						return;
-					}
-					resolve();
-				});
-			});
+		if (b.opened && b.lifetime === 'close') {
+			agentOutput?.appendLine(`Closing session ${b.name} (${b.session})`);
+			await b.client.closeSession(b.session);
 		} else {
-			// Best-effort on non-Windows.
-			proc.kill();
+			await b.client.endClient(b.session);
 		}
 	} catch (e) {
-		// Fall back to a plain kill.
-		try {
-			proc.kill();
-		} catch {
-			// ignore
-		}
-		agentOutput?.appendLine(`Failed to stop aurix-dbg cleanly: ${String(e)}`);
+		agentOutput?.appendLine(`Ending session ${b.name}: ${e instanceof Error ? e.message : String(e)}`);
 	}
+}
 
-	// Give the OS a moment to release the port.
-	await new Promise(resolve => setTimeout(resolve, 300));
-	if (lastAgentHost && typeof lastAgentPort === 'number') {
-		try {
-			await waitForTcpPortClosed(lastAgentHost, lastAgentPort, 10_000);
-		} catch {
-			// Some agents detach/spawn a helper that keeps listening after the parent PID is killed.
-			// Keep this simple: if the port is still open, force-kill the agent image name.
+/** Copies the bundled hub to the fixed per-user location when it is newer (on activation). */
+async function installHubOnActivation(): Promise<void> {
+	if (process.platform !== 'win32' || hubSetting<string>('hub.install', 'auto') !== 'auto') {
+		return;
+	}
+	const exe = hub.bundledHubExe(extensionContext.extensionPath);
+	if (!fs.existsSync(exe)) {
+		return;
+	}
+	const r = await hub.runHub(exe, ['install', '--extension', extensionContext.extensionPath]);
+	if (r.out) {
+		agentOutput?.appendLine(`aurix-hub install: ${r.out}`);
+	}
+	if (r.code !== 0) {
+		agentOutput?.appendLine(`aurix-hub install failed (code ${r.code})`);
+	}
+}
+
+/** Offers to attach VS Code to sessions that other clients (Claude, scripts) open. */
+function followHubEvents(): void {
+	stopHubEvents?.();
+	stopHubEvents = undefined;
+	if (!hubSetting<boolean>('hub.offerAttach', true)) {
+		return;
+	}
+	const { url, token } = hubTarget();
+	const client = new hub.HubClient({ url, token, clientId: 'vscode:events' });
+	stopHubEvents = client.followEvents((ev) => {
+		if (ev?.type !== 'session_launched' || ev.phase !== 'ready') {
+			return;
+		}
+		void (async () => {
+			const info = await client.findSession(ev.session).catch(() => undefined);
+			if (!info || String(info.opened_by ?? '').startsWith('vscode:')) {
+				return;
+			}
+			if ([...hubBindings.values()].some((b) => b.session === info.session)) {
+				return;
+			}
+			const pick = await vscode.window.showInformationMessage(
+				`AURIX: session "${info.name}" (${info.targets.join(', ')}) was opened by ${info.opened_by ?? 'another client'}. Attach the debugger?`,
+				'Attach',
+			);
+			if (pick === 'Attach') {
+				await attachToHubSession(info);
+			}
+		})();
+	});
+}
+
+async function attachToHubSession(info: hub.SessionInfo): Promise<void> {
+	const folder = vscode.workspace.workspaceFolders?.[0];
+	await vscode.debug.startDebugging(folder, {
+		type: 'aurixdbg',
+		request: 'launch',
+		name: `AURIX: ${info.name}`,
+		session: info.session,
+		sessionLifetime: 'keep',
+	});
+}
+
+function registerHubCommands(context: vscode.ExtensionContext): void {
+	const bundled = () => hub.bundledHubExe(context.extensionPath);
+	const report = (title: string, r: { code: number; out: string }) => {
+		agentOutput?.appendLine(`${title}:\n${r.out}`);
+		if (r.code === 0) {
+			void vscode.window.showInformationMessage(`${title}: ${r.out.split('\n').filter((l) => l.trim()).slice(-1)[0] ?? 'done'}`);
+		} else {
+			agentOutput?.show(true);
+			void vscode.window.showErrorMessage(`${title} failed: ${r.out}`);
+		}
+	};
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aurix-debugger.hubInstallAutostart', async () => {
+			report('Start debugger hub at logon', await hub.runHub(bundled(), ['install', '--autostart', '--extension', context.extensionPath]));
+		}),
+		vscode.commands.registerCommand('aurix-debugger.hubRemoveAutostart', async () => {
+			report("Don't start debugger hub at logon", await hub.runHub(hub.hubExe(context.extensionPath), ['uninstall', '--autostart-only']));
+		}),
+		vscode.commands.registerCommand('aurix-debugger.hubStatus', async () => {
+			const { url, token } = hubTarget();
+			const client = new hub.HubClient({ url, token, clientId: 'vscode:status' });
+			const lines: string[] = [`Hub: ${url}`];
+			const h = await client.health();
+			if (!h) {
+				lines.push('  not running');
+			} else {
+				const info = await client.request('GET', '/api/v1/hub', undefined, 10_000).catch(() => undefined);
+				lines.push(`  aurix-hub ${h.version}, pid ${h.pid}, ${info?.autostart ? 'starts at logon' : 'not started at logon'}${info?.update_pending ? ', update pending' : ''}`);
+				lines.push(`  log: ${info?.log_file ?? ''}`);
+				for (const s of await client.listSessions().catch(() => [])) {
+					lines.push(`  session ${s.name} (${s.session}): ${s.state}, launch ${s.launch.phase}, targets ${s.targets.join(', ')}${s.control ? `, control: ${s.control}` : ''}${s.opened_by ? `, opened by ${s.opened_by}` : ''}`);
+				}
+			}
 			if (process.platform === 'win32') {
-				// If a new session already started (Restart), do NOT do the image-name kill,
-				// otherwise we might kill the new agent we just launched/reused.
-				if (activeAurixSessions > 0 || startingAurixSessions > 0) {
-					agentOutput?.appendLine('Port still open, but a session is active/starting; skipping taskkill by image name.');
-					return;
-				}
-				const image = path.basename(lastAgentPath ?? 'aurix-dbg.exe');
-				agentOutput?.appendLine(`Port still open after taskkill by PID; forcing taskkill by image name ${image}`);
-				try {
-					await new Promise<void>((resolve, reject) => {
-						execFile('taskkill', ['/IM', image, '/T', '/F'], { windowsHide: true }, (err, stdout, stderr) => {
-							if (stdout) {
-								agentOutput?.appendLine(String(stdout).trimEnd());
-							}
-							if (stderr) {
-								agentOutput?.appendLine(String(stderr).trimEnd());
-							}
-							if (err) {
-								reject(err);
-								return;
-							}
-							resolve();
-						});
-					});
-				} catch (e) {
-					agentOutput?.appendLine(`Failed to taskkill ${image} by image name: ${String(e)}`);
-				}
+				const st = await hub.runHub(hub.hubExe(context.extensionPath), ['status'], 20_000);
+				lines.push(`Installation:\n${st.out}`);
 			}
-		}
-	}
-}
-
-function waitForTcpPortClosed(host: string, port: number, timeoutMs: number): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	return new Promise((resolve, reject) => {
-		const tryOnce = () => {
-			const socket = new net.Socket();
-			socket.setTimeout(500);
-			socket.once('connect', () => {
-				socket.destroy();
-				retryOrFail();
-			});
-			socket.once('timeout', () => {
-				socket.destroy();
-				// timeout means no clean refusal; keep trying until deadline
-				retryOrFail();
-			});
-			socket.once('error', () => {
-				socket.destroy();
-				// ECONNREFUSED/ENOTFOUND => port not listening
-				resolve();
-			});
-
-			const retryOrFail = () => {
-				if (Date.now() >= deadline) {
-					reject(new Error(`Timed out waiting for ${host}:${port} to close`));
-					return;
-				}
-				setTimeout(tryOnce, 150);
-			};
-
-			socket.connect(port, host);
-		};
-		tryOnce();
-	});
-}
-
-function waitForTcpPort(host: string, port: number, timeoutMs: number): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	return new Promise((resolve, reject) => {
-		const tryOnce = () => {
-			// If the agent already exited, don't keep polling.
-			if (!tcfAgentProcess) {
-				reject(new Error('aurix-dbg is not running'));
+			agentOutput?.appendLine(lines.join('\n'));
+			agentOutput?.show(true);
+		}),
+		vscode.commands.registerCommand('aurix-debugger.hubRestart', async () => {
+			const ok = await vscode.window.showWarningMessage('Restart the debugger hub now? Its open sessions are closed.', { modal: true }, 'Restart');
+			if (ok !== 'Restart') {
 				return;
 			}
-			if (tcfAgentProcess.exitCode !== null) {
-				reject(new Error(`aurix-dbg exited early (code ${tcfAgentProcess.exitCode})`));
+			const exe = hub.hubExe(context.extensionPath);
+			const stop = await hub.runHub(exe, ['stop', '--now']);
+			agentOutput?.appendLine(stop.out);
+			const { url, token } = hubTarget();
+			try {
+				await hub.ensureLocalHub(new hub.HubClient({ url, token, clientId: 'vscode:restart' }), context.extensionPath, (l) => agentOutput?.appendLine(l));
+				void vscode.window.showInformationMessage('The debugger hub was restarted.');
+			} catch (e) {
+				void vscode.window.showErrorMessage(`Restarting the debugger hub failed: ${e instanceof Error ? e.message : String(e)}`);
+			}
+			followHubEvents();
+		}),
+		vscode.commands.registerCommand('aurix-debugger.hubAttach', async () => {
+			const { url, token } = hubTarget();
+			const client = new hub.HubClient({ url, token, clientId: 'vscode:attach' });
+			const sessions = (await client.listSessions().catch(() => [])).filter((s) => s.state !== 'exited');
+			if (sessions.length === 0) {
+				void vscode.window.showInformationMessage(`No session is open on ${url}.`);
 				return;
 			}
-			const socket = new net.Socket();
-			socket.setTimeout(500);
-			socket.once('connect', () => {
-				socket.destroy();
-				resolve();
-			});
-			socket.once('timeout', () => {
-				socket.destroy();
-				retryOrFail();
-			});
-			socket.once('error', () => {
-				socket.destroy();
-				retryOrFail();
-			});
-
-			const retryOrFail = () => {
-				if (Date.now() >= deadline) {
-					reject(new Error(`Timed out waiting for ${host}:${port}`));
-					return;
-				}
-				setTimeout(tryOnce, 150);
-			};
-
-			socket.connect(port, host);
-		};
-
-		tryOnce();
-	});
+			const pick = await vscode.window.showQuickPick(
+				sessions.map((s) => ({ label: s.name, description: s.session, detail: `${s.targets.join(', ')}${s.opened_by ? ` - opened by ${s.opened_by}` : ''}`, s })),
+				{ title: 'Attach the debugger to a hub session' },
+			);
+			if (pick) {
+				await attachToHubSession(pick.s);
+			}
+		}),
+		vscode.commands.registerCommand('aurix-debugger.hubAddMcpConfig', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showErrorMessage('Open a folder first: the MCP configuration goes into its .mcp.json.');
+				return;
+			}
+			const { url } = hubTarget();
+			const choice = await vscode.window.showQuickPick(
+				[
+					{ label: 'stdio', description: 'Claude starts the hub when needed (aurix-hub stdio)', value: 'stdio' },
+					{ label: 'http', description: `${url}/mcp (the hub runs at logon or already)`, value: 'http' },
+				],
+				{ title: 'How should Claude reach the debugger hub?' },
+			);
+			if (!choice) {
+				return;
+			}
+			const file = path.join(folder.uri.fsPath, '.mcp.json');
+			let doc: any = {};
+			try {
+				doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+			} catch {
+				doc = {};
+			}
+			doc.mcpServers = doc.mcpServers ?? {};
+			doc.mcpServers['aurix-debugger'] = choice.value === 'http'
+				? { type: 'http', url: `${url}/mcp` }
+				: { command: hub.installedHubExe(), args: ['stdio'] };
+			const ok = await vscode.window.showInformationMessage(`Write the "aurix-debugger" MCP server (${choice.label}) into ${file}?`, { modal: true }, 'Write');
+			if (ok === 'Write') {
+				fs.writeFileSync(file, JSON.stringify(doc, null, '\t') + '\n');
+				void vscode.window.showTextDocument(vscode.Uri.file(file));
+			}
+		}),
+		vscode.workspace.onDidChangeConfiguration((e) => {
+			if (e.affectsConfiguration('aurix-debugger.hub')) {
+				followHubEvents();
+			}
+		}),
+	);
 }
 
 async function ensureMemoryInspectorSettings(): Promise<void> {
@@ -2022,7 +1977,12 @@ function normalizePathForCompare(p: string): string {
 
 
 export function deactivate() {
-	void stopTCFAgent('extension deactivate');
+	// The hub and its sessions outlive VS Code; only the relays end here. Sessions this window
+	// opened with sessionLifetime "close" end with their debug sessions.
+	stopHubEvents?.();
+	for (const b of hubBindings.values()) {
+		b.relay?.close();
+	}
 	agentOutput?.dispose();
 	agentOutput = undefined;
 }

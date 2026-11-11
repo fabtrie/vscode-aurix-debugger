@@ -338,10 +338,10 @@ pub struct AddBreakpointRequest {
     /// Code address.
     #[serde(default)]
     pub address: Option<Addr>,
-    /// Function name; needs the symbols loaded by a VS Code debug session.
+    /// Function name; needs loaded symbols (`load_symbols`, `launch` or a VS Code debug session).
     #[serde(default)]
     pub symbol: Option<String>,
-    /// Source file (with `line`); needs the symbols loaded by a VS Code debug session.
+    /// Source file (with `line`); needs loaded symbols.
     #[serde(default)]
     pub file: Option<String>,
     /// Source line in `file`.
@@ -399,6 +399,9 @@ pub struct BreakpointInfo {
     /// Breakpoint ID.
     pub id: String,
     pub owner: BreakpointOwner,
+    /// The API client that set it (`X-Aurix-Client`, e.g. `mcp:<id>`), for owner `api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
     pub enabled: bool,
     /// Requested code address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,6 +508,9 @@ pub struct WatchpointInfo {
     /// Watchpoint ID.
     pub id: String,
     pub owner: BreakpointOwner,
+    /// The API client that set it (`X-Aurix-Client`, e.g. `mcp:<id>`), for owner `api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
     pub enabled: bool,
     /// Requested data address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -935,6 +941,17 @@ pub struct ServerInfo {
     /// the polling period while the server is responsive and grows while one long operation
     /// (flashing, a reset, a Tcl script) holds the core; the other operations wait for it.
     pub core_lag_ms: u64,
+    /// The hub's session ID of this worker, when a hub started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The worker's log file, when it writes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_file: Option<String>,
+    /// Where the launch steps are (`idle` before the first `launch`).
+    pub launch: LaunchPhase,
+    /// The client holding the control lease, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<String>,
 }
 
 // --- Variables -------------------------------------------------------------------------------
@@ -1146,4 +1163,505 @@ pub struct WriteVariableRequest {
     /// symbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.
     #[serde(default)]
     pub target: Option<String>,
+}
+
+// --- Clients and the control lease ----------------------------------------------------------
+
+/// An API client, by the name it sends as `X-Aurix-Client`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClientRef {
+    /// Client name (e.g. `mcp:3f2a...` for an MCP session of the hub, or a Python client's ID).
+    pub client: String,
+}
+
+/// What ending a client removed.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EndClientResult {
+    /// IDs of the breakpoints and watchpoints that were removed.
+    pub removed: Vec<String>,
+    /// The client held the control lease, which is now free.
+    pub released_control: bool,
+}
+
+/// Control lease arguments.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRequest {
+    /// Seconds until the lease expires unless it is taken again; default 600. Taking it again
+    /// as its holder renews it.
+    #[serde(default)]
+    pub ttl_s: Option<u32>,
+}
+
+/// The control lease of a session.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ControlInfo {
+    /// The client holding it; none: nobody, every client may control the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    /// Seconds it has been held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_s: Option<u64>,
+    /// Seconds until it expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_s: Option<u64>,
+}
+
+// --- Launch ------------------------------------------------------------------------------------
+
+/// A symbol file of a launch.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LaunchSymbolFile {
+    /// Path on the debug server's machine (a `file:` ID of an uploaded file works as well). A
+    /// trailing `@N` or `@N,M` names the TriCore cores that run it (see `load_symbols`).
+    Path(String),
+    /// A path limited to some cores.
+    Placed(PlacedSymbolFile),
+}
+
+/// A symbol file limited to some cores.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlacedSymbolFile {
+    pub path: String,
+    /// Cores (target names, core IDs, `*` and `?` as wildcards, e.g. `tc37x.cpu0`, `cpu0`,
+    /// `mcs0.*`) the file applies to; default: every core of its architecture.
+    #[serde(default)]
+    pub cores: Option<Vec<String>>,
+}
+
+impl LaunchSymbolFile {
+    pub fn path(&self) -> &str {
+        match self {
+            LaunchSymbolFile::Path(p) => p,
+            LaunchSymbolFile::Placed(p) => &p.path,
+        }
+    }
+    pub fn cores(&self) -> Option<&[String]> {
+        match self {
+            LaunchSymbolFile::Path(_) => None,
+            LaunchSymbolFile::Placed(p) => p.cores.as_deref(),
+        }
+    }
+}
+
+/// Images to flash at launch.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchFlash {
+    /// Image files, merged into one image (later files win where they overlap), as for
+    /// `flash_write`.
+    pub files: Vec<FlashFile>,
+    /// Read the programmed sectors back and compare; default true.
+    #[serde(default)]
+    pub verify: Option<bool>,
+    /// Skip sectors that already hold the image; default true.
+    #[serde(default)]
+    pub incremental: Option<bool>,
+}
+
+/// How to reset at launch.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LaunchReset {
+    /// `none`: no reset.
+    Keyword(LaunchResetKeyword),
+    /// A reset.
+    Reset(LaunchResetSpec),
+}
+
+/// `none`: do not reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchResetKeyword {
+    None,
+}
+
+/// A reset at launch.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchResetSpec {
+    /// Reset type; `reset` (through the debug adapter) is the only one.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Halt at the reset vector instead of running (VS Code's `resetSuspend`).
+    #[serde(default)]
+    pub halt: bool,
+}
+
+/// A breakpoint set at launch, before the target runs.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchBreakpoint {
+    /// A function, `file:line` or address (`0x...`).
+    pub location: String,
+    #[serde(default)]
+    pub condition: Option<String>,
+}
+
+/// The launch steps of a session: what a VS Code launch configuration does.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchRequest {
+    /// Symbol files (VS Code `symbolFiles`). Each core gets the files of its architecture
+    /// (TriCore ELF files the TriCore cores, an ARM ELF the HSM, `.asm` the MCS channels, `.cdb`
+    /// the SCR) unless `cores` says otherwise.
+    #[serde(default)]
+    pub symbols: Option<Vec<LaunchSymbolFile>>,
+    /// ORTI file (VS Code `ortiFile`), loaded after the symbols.
+    #[serde(default)]
+    pub orti: Option<String>,
+    /// Images to program (VS Code `flashFiles` with `enableFlashing`).
+    #[serde(default)]
+    pub flash: Option<LaunchFlash>,
+    /// Reset after the flash step; default: a running reset when flashing, none otherwise.
+    #[serde(default)]
+    pub reset: Option<LaunchReset>,
+    /// Breakpoints, set before the target runs and owned by the calling client.
+    #[serde(default)]
+    pub breakpoints: Option<Vec<LaunchBreakpoint>>,
+    /// Run to this location (a function, `file:line` or address) with a temporary breakpoint:
+    /// the target is reset halted, runs and the call waits until it halts there.
+    #[serde(default)]
+    pub run_to: Option<String>,
+    /// Halt all cores after the steps (VS Code `stopOnEntry`).
+    #[serde(default)]
+    pub stop_on_entry: bool,
+    /// Seconds `run_to` waits for the breakpoint; default 30.
+    #[serde(default)]
+    pub timeout_s: Option<u32>,
+    /// Seconds the call waits for the steps; default 60. When they take longer it returns with
+    /// phase `starting`; `wait_session` waits for the rest.
+    #[serde(default)]
+    pub wait_s: Option<u32>,
+}
+
+/// Running the last launch again.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelaunchRequest {
+    /// Leave the flash step out (only reset, breakpoints, `run_to`).
+    #[serde(default)]
+    pub skip_flash: bool,
+    /// Seconds the call waits; see `launch`.
+    #[serde(default)]
+    pub wait_s: Option<u32>,
+}
+
+/// Waiting for the launch steps.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WaitSessionRequest {
+    /// Seconds to wait at most; default 60, 0 returns the status at once.
+    #[serde(default)]
+    pub timeout_s: Option<u32>,
+}
+
+/// Where the launch steps of a session are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchPhase {
+    /// No launch has run.
+    Idle,
+    /// The steps are running.
+    Starting,
+    /// All steps succeeded.
+    Ready,
+    /// A step failed (see `error`).
+    Failed,
+}
+
+/// One launch step and how it went.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LaunchStep {
+    /// `connect`, `symbols`, `orti`, `flash`, `reset`, `breakpoints`, `run_to` or
+    /// `stop_on_entry`.
+    pub step: String,
+    pub ok: bool,
+    /// Milliseconds it took.
+    pub ms: u64,
+    /// What it did (e.g. the flash output, the files loaded) or why it failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// The state of a session's launch.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LaunchStatus {
+    pub phase: LaunchPhase,
+    /// The steps done so far.
+    pub steps: Vec<LaunchStep>,
+    /// The targets after the steps (when `ready` or `failed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<TargetInfo>,
+    /// Why the launch failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl LaunchStatus {
+    pub fn idle() -> LaunchStatus {
+        LaunchStatus { phase: LaunchPhase::Idle, steps: Vec::new(), targets: Vec::new(), error: None }
+    }
+}
+
+// --- Hub ---------------------------------------------------------------------------------------
+
+/// How a worker connects to its board: the OpenOCD-style command line.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectSpec {
+    /// Configuration scripts (`-f`), searched in `search_dirs` and the bundled OpenOCD scripts.
+    #[serde(default)]
+    pub config_files: Vec<String>,
+    /// Tcl commands (`-c`), run after the scripts.
+    #[serde(default)]
+    pub commands: Vec<String>,
+    /// Script search directories (`-s`).
+    #[serde(default)]
+    pub search_dirs: Vec<String>,
+    /// Adapter driver (`tas_client`, `winidea`, `bluebox`, `sim`); default: what the scripts
+    /// select.
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// Probe serial number, to refuse a second session on the same probe.
+    #[serde(default)]
+    pub probe: Option<String>,
+}
+
+/// Opening a session.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSessionRequest {
+    /// Profile on the hub machine (`list_profiles`): connection and launch defaults that the
+    /// other arguments override.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// How to connect; overrides the profile's.
+    #[serde(default)]
+    pub connect: Option<ConnectSpec>,
+    /// Session name; default: the profile name or `session-<n>`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The launch steps; each field set here overrides the profile's.
+    #[serde(default)]
+    pub launch: Option<LaunchRequest>,
+    /// Take the control lease for the calling client before the first step.
+    #[serde(default)]
+    pub acquire_control: bool,
+    /// Close the session when a step fails, instead of leaving it open to inspect.
+    #[serde(default)]
+    pub close_on_error: bool,
+    /// Seconds to wait for the worker and the launch steps; default 60. Longer starts return
+    /// with phase `starting`, `wait_session` waits for the rest.
+    #[serde(default)]
+    pub wait_s: Option<u32>,
+}
+
+/// A session by ID or name.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRef {
+    /// Session ID or name.
+    pub session: String,
+}
+
+/// Reading a session's log.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLogRequest {
+    /// Session ID or name.
+    pub session: String,
+    /// Lines from the end; default 200.
+    #[serde(default)]
+    pub lines: Option<u32>,
+}
+
+/// The end of a session's log.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SessionLog {
+    pub session: String,
+    pub file: String,
+    pub text: String,
+}
+
+/// The state of a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    /// The worker is starting (running `init`).
+    Starting,
+    /// The worker is connected; see `launch` for the launch steps.
+    Running,
+    /// The worker exited or stopped answering.
+    Exited,
+}
+
+/// A session: one board connection held by one worker process.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SessionInfo {
+    /// Session ID.
+    pub session: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub state: SessionState,
+    /// Process ID of the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// The client that opened it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    /// Targets of the board.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// TCF port of the worker on the hub machine's loopback (VS Code connects there, or through
+    /// `/api/v1/sessions/{session}/tcf` from another machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcf_port: Option<u16>,
+    /// Port of the worker's Tcl console on the hub machine's loopback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telnet_port: Option<u16>,
+    /// Base URL of the session's operations on the hub.
+    pub base_url: String,
+    /// The client holding the control lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<String>,
+    /// The launch steps.
+    pub launch: LaunchStatus,
+    /// The worker's log file.
+    pub log_file: String,
+    /// Seconds since it was opened.
+    pub age_s: u64,
+    /// Why the worker ended, when `exited`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The open sessions.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SessionList {
+    pub sessions: Vec<SessionInfo>,
+}
+
+/// A session setup stored on the hub machine.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileInfo {
+    pub name: String,
+    /// The profile file.
+    pub file: String,
+    pub connect: ConnectSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchRequest>,
+    /// Why the file could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The profiles of the hub machine.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ProfileList {
+    /// The directory they are read from.
+    pub dir: String,
+    pub profiles: Vec<ProfileInfo>,
+}
+
+/// What is serving: the hub.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HubInfo {
+    /// Always `aurix-hub`.
+    pub server: String,
+    pub version: String,
+    pub api_version: u32,
+    pub pid: u32,
+    /// The hub executable; hub and workers come from the same directory.
+    pub exe: String,
+    pub port: u16,
+    /// The address it listens on.
+    pub bind: String,
+    /// Clients from other machines need the token.
+    pub token_required: bool,
+    pub sessions: u32,
+    /// MCP sessions of clients.
+    pub mcp_clients: u32,
+    /// A newer installation is waiting: the hub restarts from it once no session is open.
+    pub update_pending: bool,
+    /// The hub is registered to start at logon.
+    pub autostart: bool,
+    pub log_file: String,
+}
+
+/// Events of the hub (`/api/v1/events`); a session's own events are at
+/// `/api/v1/sessions/{session}/events`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HubEvent {
+    /// A session was opened.
+    SessionOpened {
+        session: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opened_by: Option<String>,
+    },
+    /// A session's worker is connected.
+    SessionRunning { session: String, name: String },
+    /// A session's launch steps finished.
+    SessionLaunched {
+        session: String,
+        name: String,
+        phase: LaunchPhase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// A session was closed or its worker ended.
+    SessionClosed {
+        session: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The client did not keep up: this many events were dropped.
+    Lagged { missed: u64 },
+}
+
+/// A worker registering with the hub (not an API operation: loopback only).
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WorkerRegistration {
+    pub session: String,
+    pub pid: u32,
+    /// The worker executable, compared with the hub's own directory: a worker of another
+    /// installation is refused.
+    pub exe: String,
+    pub version: String,
+    pub api_port: u16,
+    #[serde(default)]
+    pub tcf_port: Option<u16>,
+    #[serde(default)]
+    pub telnet_port: Option<u16>,
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub log_file: Option<String>,
+}
+
+/// The hub's answer to a registration.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RegistrationReply {
+    pub ok: bool,
+    /// Process ID of the hub.
+    pub hub_pid: u32,
+    /// ID of this run of the hub, as `/health` reports it: a change means the hub was started
+    /// again and the worker registers again.
+    pub instance: String,
+    /// Why it was refused; the worker shuts down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

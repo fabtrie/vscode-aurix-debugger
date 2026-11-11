@@ -8,7 +8,7 @@ use schemars::Schema;
 use serde_json::{Map, Value};
 
 use super::openapi::openapi;
-use crate::{API_DOC, MAX_TRANSFER, OPS};
+use crate::{all_ops, Scope, API_DOC, MAX_TRANSFER};
 
 const SCHEMAS: &str = "#/components/schemas/";
 const KEYWORDS: &[&str] = &[
@@ -167,7 +167,7 @@ pub fn python() -> String {
 
     // Response (and other object) types as dataclasses; the request types become method
     // arguments instead.
-    let requests: Vec<String> = OPS.iter().filter_map(|op| g.def(&ref_schema(op.request)).map(|(n, _)| n.to_string())).collect();
+    let requests: Vec<String> = all_ops().filter_map(|op| g.def(&ref_schema(op.request)).map(|(n, _)| n.to_string())).collect();
     for (name, def) in &defs {
         if !is_class(def) || requests.contains(name) {
             continue;
@@ -199,10 +199,12 @@ pub fn python() -> String {
 
     // The client methods.
     writeln!(w, "\n\nclass GeneratedClient:").unwrap();
-    writeln!(w, "    \"\"\"The API operations; a subclass provides the transport (`_call`).\"\"\"\n").unwrap();
+    writeln!(w, "    \"\"\"The API operations; a subclass provides the transport (`_call`) and the session the\n    session operations go to (`_session_path`).\"\"\"\n").unwrap();
     writeln!(w, "    def _call(self, method: str, path: str, query: dict[str, Any] | None, body: dict[str, Any] | None) -> Any:").unwrap();
     writeln!(w, "        raise NotImplementedError").unwrap();
-    for op in OPS {
+    writeln!(w, "\n    def _session_path(self) -> str:").unwrap();
+    writeln!(w, "        raise NotImplementedError").unwrap();
+    for op in all_ops() {
         let req = ref_schema(op.request);
         let resp = ref_schema(op.response);
         let def = g.def(&req).map(|(_, d)| d.clone()).unwrap_or(req);
@@ -236,9 +238,13 @@ pub fn python() -> String {
             }
         }
         writeln!(w, "        \"\"\"{}\n        \"\"\"", doc(&docstr, "        ").trim_start()).unwrap();
-        let mut path = if pp.is_empty() { format!("{:?}", op.path) } else { format!("f{:?}", op.path) };
+        let route = if op.scope == Scope::Session { op.sub_path() } else { op.path };
+        let mut path = if pp.is_empty() { format!("{route:?}") } else { format!("f{route:?}") };
         for p in &pp {
             path = path.replace(&format!("{{{p}}}"), &format!("{{quote(str({}), safe='')}}", ident(p)));
+        }
+        if op.scope == Scope::Session {
+            path = format!("self._session_path() + {path}");
         }
         let rest: Vec<&(&String, &Value)> = args.iter().filter(|(a, _)| !pp.contains(&a.as_str())).collect();
         let dict = format!("_args({{{}}})", rest.iter().map(|(a, _)| format!("{a:?}: {}", ident(a))).collect::<Vec<_>>().join(", "));

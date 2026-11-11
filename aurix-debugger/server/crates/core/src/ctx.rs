@@ -135,7 +135,7 @@ impl Ctx {
             daq: daq::Registry::default(),
             daq_gap: daq::DEFAULT_COALESCE_GAP,
             daq_merge: true,
-            ports: Ports { bind: "127.0.0.1".into(), telnet: Some(4444), tcf: Some(1534), gdb: None, tcl: None, api: Some(8080) },
+            ports: Ports { bind: "127.0.0.1".into(), telnet: Some(0), tcf: Some(0), gdb: None, tcl: None, api: Some(0) },
             next_bp_id: 1,
             initialized: false,
             noinit: false,

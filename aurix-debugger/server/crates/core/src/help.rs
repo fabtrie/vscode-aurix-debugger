@@ -266,11 +266,11 @@ pub static ENTRIES: &[Entry] = &[
         "Runs `init` first if needed, resets with `reset init`, and skips programming when `preverify` finds the image already there."),
     e!(Flash, "aurix_eflash fallback", "<bank> [on|off]", "Accepted: the command sequences (OpenOCD's fallback mode) are always used."),
     // --- server --------------------------------------------------------------------------
-    e!(Server, "tcf_port", "[<port>|disabled]", "TCP port of the TCF server (the VS Code extension); default 1534."),
-    e!(Server, "telnet_port", "[<port>|disabled]", "TCP port of the Tcl console; default 4444."),
+    e!(Server, "tcf_port", "[<port>|disabled]", "TCP port of the TCF server (the VS Code extension); default 0: a free port, which the log and the hub report."),
+    e!(Server, "telnet_port", "[<port>|disabled]", "TCP port of the Tcl console; default 0: a free port, which the log and the hub report."),
     e!(Server, "gdb_port", "[<port>|disabled]", "TCP port of the GDB server; disabled by default."),
     e!(Server, "tcl_port", "[<port>|disabled]", "TCP port of OpenOCD's Tcl RPC server; disabled by default."),
-    e!(Server, "api_port", "[<port>|disabled]", "TCP port of the REST, MCP and WebSocket API; default 8080."),
+    e!(Server, "api_port", "[<port>|disabled]", "TCP port of the worker's REST and WebSocket API (the hub forwards to it); default 0: a free port."),
     e!(Server, "bindto", "[<address>]", "The address the servers listen on; default 127.0.0.1."),
     e!(Server, "debug_level", "[0..4]", "Set the log level: 0 errors, 1 warnings, 2 info (default), 3 debug."),
     e!(Server, "log_output", "<file>", "Also write the log to a file."),
@@ -449,7 +449,7 @@ pub fn markdown() -> String {
     let mut out = String::from(
         "# Tcl command reference\n\n\
          <!-- Generated from crates/core/src/help.rs by `UPDATE_DOCS=1 cargo test -p aurix-core reference`. Do not edit. -->\n\n\
-         The commands aurix-dbg understands in cfg scripts, on the Tcl console (`telnet localhost 4444`), as `monitor` \
+         The commands aurix-dbg understands in cfg scripts, on the Tcl console (`aurix-hub tcl`, or telnet to the port `list_sessions` reports), as `monitor` \
          commands in the VS Code Debug Console or GDB, in `configCommands` and in debugger actions. They follow OpenOCD \
          where OpenOCD has the same command.\n\n\
          The same text is available at runtime: `help` lists the commands, `help <command>` describes one and its \

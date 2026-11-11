@@ -2,7 +2,7 @@
 
 <!-- Generated from crates/core/src/help.rs by `UPDATE_DOCS=1 cargo test -p aurix-core reference`. Do not edit. -->
 
-The commands aurix-dbg understands in cfg scripts, on the Tcl console (`telnet localhost 4444`), as `monitor` commands in the VS Code Debug Console or GDB, in `configCommands` and in debugger actions. They follow OpenOCD where OpenOCD has the same command.
+The commands aurix-dbg understands in cfg scripts, on the Tcl console (`aurix-hub tcl`, or telnet to the port `list_sessions` reports), as `monitor` commands in the VS Code Debug Console or GDB, in `configCommands` and in debugger actions. They follow OpenOCD where OpenOCD has the same command.
 
 The same text is available at runtime: `help` lists the commands, `help <command>` describes one and its subcommands, and `help <word>` searches the descriptions (`monitor help srst`). `usage <command>` shows only the arguments. Procs of cfg scripts appear there too when the script documents them with `add_help_text` and `add_usage_text`.
 
@@ -821,7 +821,7 @@ Accepted: the command sequences (OpenOCD's fallback mode) are always used.
 tcf_port [<port>|disabled]
 ```
 
-TCP port of the TCF server (the VS Code extension); default 1534.
+TCP port of the TCF server (the VS Code extension); default 0: a free port, which the log and the hub report.
 
 ### `telnet_port`
 
@@ -829,7 +829,7 @@ TCP port of the TCF server (the VS Code extension); default 1534.
 telnet_port [<port>|disabled]
 ```
 
-TCP port of the Tcl console; default 4444.
+TCP port of the Tcl console; default 0: a free port, which the log and the hub report.
 
 ### `gdb_port`
 
@@ -853,7 +853,7 @@ TCP port of OpenOCD's Tcl RPC server; disabled by default.
 api_port [<port>|disabled]
 ```
 
-TCP port of the REST, MCP and WebSocket API; default 8080.
+TCP port of the worker's REST and WebSocket API (the hub forwards to it); default 0: a free port.
 
 ### `bindto`
 

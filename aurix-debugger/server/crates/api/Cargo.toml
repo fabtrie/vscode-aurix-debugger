@@ -1,6 +1,6 @@
 [package]
 name = "api"
-description = "REST, MCP and Swagger frontend for the aurix-dbg core"
+description = "REST frontend of an aurix-dbg worker (the hub serves MCP and Swagger)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,7 +17,6 @@ serde_json.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
 futures-util = { version = "0.3", default-features = false }
-swagger-ui-dist = "5"
 
 [build-dependencies]
 api-spec.workspace = true

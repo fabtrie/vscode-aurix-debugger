@@ -132,19 +132,7 @@ suite('AURIX debug stress', () => {
 		assert.ok(ext, 'AURIX debugger extension not found in test host');
 		await ext.activate();
 
-		if (!config.autoStartAgent) {
-			config.autoStartAgent = true;
-		}
-		// If auto-start is disabled, require an already-running agent to avoid a blocked dialog.
-		if (!config.autoStartAgent) {
-			const host = String((config as any).host ?? '127.0.0.1');
-			const port = Number((config as any).port ?? 1534);
-			const ok = await canConnectTcp(host, port, 300);
-			if (!ok) {
-				this.skip();
-				return;
-			}
-		}
+		// The extension opens the session through the hub (aurix-hub), which it starts when needed.
 
 		for (let i = 0; i < runs; i++) {
 			const started = await vscode.debug.startDebugging(folder, config);

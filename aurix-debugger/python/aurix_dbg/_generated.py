@@ -1,9 +1,11 @@
 # Generated from the aurix-dbg API definition (server/crates/api-spec) by `cargo build`. Do not edit.
 """Generated part of the aurix-dbg client: response types and API methods.
 
-Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
+Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
 
-The API shares its session with the other frontends: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream.
+A session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.
+
+Every client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).
 
 Targets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.
 """
@@ -40,6 +42,12 @@ ErrorCode = Literal["bad_request", "not_found", "not_halted", "not_examined", "b
 ImageType = Literal["elf", "ihex", "srec", "bin"]
 """Image file type."""
 
+LaunchPhase = Literal["idle", "starting", "ready", "failed"]
+"""Where the launch steps of a session are."""
+
+LaunchResetKeyword = Literal["none"]
+"""`none`: do not reset."""
+
 RegisterGroup = Literal["core", "debug"]
 """Register group."""
 
@@ -48,6 +56,9 @@ ResetMode = Literal["run", "halt", "init"]
 
 RunState = Literal["unknown", "running", "halted", "debug_running", "reset"]
 """Run state of a target."""
+
+SessionState = Literal["starting", "running", "exited"]
+"""The state of a session."""
 
 VariableClass = Literal["float", "array", "struct", "union", "function", "uint", "int", "bool", "enum", "pointer", "unknown"]
 """What a variable holds, from its type with typedefs and qualifiers stripped."""
@@ -90,6 +101,8 @@ class BreakpointInfo:
     owner: BreakpointOwner
     address: int | None = None
     """Requested code address."""
+    client: str | None = None
+    """The API client that set it (`X-Aurix-Client`, e.g. `mcp:<id>`), for owner `api`."""
     condition: str | None = None
     error: str | None = None
     """Why it is not planted (e.g. symbols not loaded yet: it is planted once they are)."""
@@ -109,6 +122,7 @@ class BreakpointInfo:
             instances=_list(BreakpointInstance, d.get("instances")),
             owner=d.get("owner"),
             address=d.get("address"),
+            client=d.get("client"),
             condition=d.get("condition"),
             error=d.get("error"),
             file=d.get("file"),
@@ -170,6 +184,70 @@ class CommandOutput:
 
 
 @dataclass
+class ConnectSpec:
+    """How a worker connects to its board: the OpenOCD-style command line."""
+
+    adapter: str | None = None
+    """Adapter driver (`tas_client`, `winidea`, `bluebox`, `sim`); default: what the scripts
+    select."""
+    commands: list[str] | None = None
+    """Tcl commands (`-c`), run after the scripts."""
+    config_files: list[str] | None = None
+    """Configuration scripts (`-f`), searched in `search_dirs` and the bundled OpenOCD scripts."""
+    probe: str | None = None
+    """Probe serial number, to refuse a second session on the same probe."""
+    search_dirs: list[str] | None = None
+    """Script search directories (`-s`)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ConnectSpec:
+        return cls(
+            adapter=d.get("adapter"),
+            commands=d.get("commands"),
+            config_files=d.get("config_files"),
+            probe=d.get("probe"),
+            search_dirs=d.get("search_dirs"),
+        )
+
+
+@dataclass
+class ControlInfo:
+    """The control lease of a session."""
+
+    expires_in_s: int | None = None
+    """Seconds until it expires."""
+    held_s: int | None = None
+    """Seconds it has been held."""
+    holder: str | None = None
+    """The client holding it; none: nobody, every client may control the target."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ControlInfo:
+        return cls(
+            expires_in_s=d.get("expires_in_s"),
+            held_s=d.get("held_s"),
+            holder=d.get("holder"),
+        )
+
+
+@dataclass
+class EndClientResult:
+    """What ending a client removed."""
+
+    released_control: bool
+    """The client held the control lease, which is now free."""
+    removed: list[str]
+    """IDs of the breakpoints and watchpoints that were removed."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EndClientResult:
+        return cls(
+            released_control=d.get("released_control"),
+            removed=d.get("removed"),
+        )
+
+
+@dataclass
 class GlobalList:
     """One page of the globals that match a query, sorted by name."""
 
@@ -185,6 +263,50 @@ class GlobalList:
             items=_list(VariableInfo, d.get("items")),
             offset=d.get("offset"),
             total=d.get("total"),
+        )
+
+
+@dataclass
+class HubInfo:
+    """What is serving: the hub."""
+
+    api_version: int
+    autostart: bool
+    """The hub is registered to start at logon."""
+    bind: str
+    """The address it listens on."""
+    exe: str
+    """The hub executable; hub and workers come from the same directory."""
+    log_file: str
+    mcp_clients: int
+    """MCP sessions of clients."""
+    pid: int
+    port: int
+    server: str
+    """Always `aurix-hub`."""
+    sessions: int
+    token_required: bool
+    """Clients from other machines need the token."""
+    update_pending: bool
+    """A newer installation is waiting: the hub restarts from it once no session is open."""
+    version: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> HubInfo:
+        return cls(
+            api_version=d.get("api_version"),
+            autostart=d.get("autostart"),
+            bind=d.get("bind"),
+            exe=d.get("exe"),
+            log_file=d.get("log_file"),
+            mcp_clients=d.get("mcp_clients"),
+            pid=d.get("pid"),
+            port=d.get("port"),
+            server=d.get("server"),
+            sessions=d.get("sessions"),
+            token_required=d.get("token_required"),
+            update_pending=d.get("update_pending"),
+            version=d.get("version"),
         )
 
 
@@ -227,6 +349,105 @@ class InfoTarget:
             examined=d.get("examined"),
             name=d.get("name"),
             reachable=d.get("reachable"),
+        )
+
+
+@dataclass
+class LaunchBreakpoint:
+    """A breakpoint set at launch, before the target runs."""
+
+    location: str
+    """A function, `file:line` or address (`0x...`)."""
+    condition: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LaunchBreakpoint:
+        return cls(
+            location=d.get("location"),
+            condition=d.get("condition"),
+        )
+
+
+@dataclass
+class LaunchFlash:
+    """Images to flash at launch."""
+
+    files: list[str | dict[str, Any]]
+    """Image files, merged into one image (later files win where they overlap), as for
+    `flash_write`."""
+    incremental: bool | None = None
+    """Skip sectors that already hold the image; default true."""
+    verify: bool | None = None
+    """Read the programmed sectors back and compare; default true."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LaunchFlash:
+        return cls(
+            files=d.get("files"),
+            incremental=d.get("incremental"),
+            verify=d.get("verify"),
+        )
+
+
+@dataclass
+class LaunchResetSpec:
+    """A reset at launch."""
+
+    halt: bool | None = None
+    """Halt at the reset vector instead of running (VS Code's `resetSuspend`)."""
+    type: str | None = None
+    """Reset type; `reset` (through the debug adapter) is the only one."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LaunchResetSpec:
+        return cls(
+            halt=d.get("halt"),
+            type=d.get("type"),
+        )
+
+
+@dataclass
+class LaunchStatus:
+    """The state of a session's launch."""
+
+    phase: LaunchPhase
+    steps: list[LaunchStep]
+    """The steps done so far."""
+    error: str | None = None
+    """Why the launch failed."""
+    targets: list[TargetInfo] | None = None
+    """The targets after the steps (when `ready` or `failed`)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LaunchStatus:
+        return cls(
+            phase=d.get("phase"),
+            steps=_list(LaunchStep, d.get("steps")),
+            error=d.get("error"),
+            targets=_list(TargetInfo, d.get("targets")),
+        )
+
+
+@dataclass
+class LaunchStep:
+    """One launch step and how it went."""
+
+    ms: int
+    """Milliseconds it took."""
+    ok: bool
+    step: str
+    """`connect`, `symbols`, `orti`, `flash`, `reset`, `breakpoints`, `run_to` or
+    `stop_on_entry`."""
+    detail: str | None = None
+    """What it did (e.g. the flash output, the files loaded) or why it failed."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LaunchStep:
+        return cls(
+            ms=d.get("ms"),
+            ok=d.get("ok"),
+            step=d.get("step"),
+            detail=d.get("detail"),
         )
 
 
@@ -459,6 +680,62 @@ class OsTypeInfo:
 
 
 @dataclass
+class PlacedSymbolFile:
+    """A symbol file limited to some cores."""
+
+    path: str
+    cores: list[str] | None = None
+    """Cores (target names, core IDs, `*` and `?` as wildcards, e.g. `tc37x.cpu0`, `cpu0`,
+    `mcs0.*`) the file applies to; default: every core of its architecture."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PlacedSymbolFile:
+        return cls(
+            path=d.get("path"),
+            cores=d.get("cores"),
+        )
+
+
+@dataclass
+class ProfileInfo:
+    """A session setup stored on the hub machine."""
+
+    connect: ConnectSpec
+    file: str
+    """The profile file."""
+    name: str
+    error: str | None = None
+    """Why the file could not be read."""
+    launch: LaunchRequest | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ProfileInfo:
+        return cls(
+            connect=_obj(ConnectSpec, d.get("connect")),
+            file=d.get("file"),
+            name=d.get("name"),
+            error=d.get("error"),
+            launch=_obj(LaunchRequest, d.get("launch")),
+        )
+
+
+@dataclass
+class ProfileList:
+    """The profiles of the hub machine."""
+
+    dir: str
+    """The directory they are read from."""
+    profiles: list[ProfileInfo]
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ProfileList:
+        return cls(
+            dir=d.get("dir"),
+            profiles=_list(ProfileInfo, d.get("profiles")),
+        )
+
+
+@dataclass
 class RegisterList:
     """Register values of a target."""
 
@@ -509,6 +786,8 @@ class ServerInfo:
     (flashing, a reset, a Tcl script) holds the core; the other operations wait for it."""
     examined: bool
     """At least one target is examined."""
+    launch: LaunchPhase
+    """Where the launch steps are (`idle` before the first `launch`)."""
     pid: int
     """Process ID of the server."""
     server: str
@@ -522,6 +801,12 @@ class ServerInfo:
     """Version of the server."""
     adapter: str | None = None
     """The adapter driver in use (`tas_client`, `sim`, `winidea`), once one is configured."""
+    control: str | None = None
+    """The client holding the control lease, if any."""
+    log_file: str | None = None
+    """The worker's log file, when it writes one."""
+    session: str | None = None
+    """The hub's session ID of this worker, when a hub started it."""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ServerInfo:
@@ -530,6 +815,7 @@ class ServerInfo:
             connected=d.get("connected"),
             core_lag_ms=d.get("core_lag_ms"),
             examined=d.get("examined"),
+            launch=d.get("launch"),
             pid=d.get("pid"),
             server=d.get("server"),
             symbol_files=_list(InfoSymbolFile, d.get("symbol_files")),
@@ -537,6 +823,97 @@ class ServerInfo:
             targets=_list(InfoTarget, d.get("targets")),
             version=d.get("version"),
             adapter=d.get("adapter"),
+            control=d.get("control"),
+            log_file=d.get("log_file"),
+            session=d.get("session"),
+        )
+
+
+@dataclass
+class SessionInfo:
+    """A session: one board connection held by one worker process."""
+
+    age_s: int
+    """Seconds since it was opened."""
+    base_url: str
+    """Base URL of the session's operations on the hub."""
+    launch: LaunchStatus
+    """The launch steps."""
+    log_file: str
+    """The worker's log file."""
+    name: str
+    session: str
+    """Session ID."""
+    state: SessionState
+    adapter: str | None = None
+    control: str | None = None
+    """The client holding the control lease."""
+    error: str | None = None
+    """Why the worker ended, when `exited`."""
+    opened_by: str | None = None
+    """The client that opened it."""
+    pid: int | None = None
+    """Process ID of the worker."""
+    probe: str | None = None
+    profile: str | None = None
+    targets: list[str] | None = None
+    """Targets of the board."""
+    tcf_port: int | None = None
+    """TCF port of the worker on the hub machine's loopback (VS Code connects there, or through
+    `/api/v1/sessions/{session}/tcf` from another machine)."""
+    telnet_port: int | None = None
+    """Port of the worker's Tcl console on the hub machine's loopback."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SessionInfo:
+        return cls(
+            age_s=d.get("age_s"),
+            base_url=d.get("base_url"),
+            launch=_obj(LaunchStatus, d.get("launch")),
+            log_file=d.get("log_file"),
+            name=d.get("name"),
+            session=d.get("session"),
+            state=d.get("state"),
+            adapter=d.get("adapter"),
+            control=d.get("control"),
+            error=d.get("error"),
+            opened_by=d.get("opened_by"),
+            pid=d.get("pid"),
+            probe=d.get("probe"),
+            profile=d.get("profile"),
+            targets=d.get("targets"),
+            tcf_port=d.get("tcf_port"),
+            telnet_port=d.get("telnet_port"),
+        )
+
+
+@dataclass
+class SessionList:
+    """The open sessions."""
+
+    sessions: list[SessionInfo]
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SessionList:
+        return cls(
+            sessions=_list(SessionInfo, d.get("sessions")),
+        )
+
+
+@dataclass
+class SessionLog:
+    """The end of a session's log."""
+
+    file: str
+    session: str
+    text: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SessionLog:
+        return cls(
+            file=d.get("file"),
+            session=d.get("session"),
+            text=d.get("text"),
         )
 
 
@@ -776,6 +1153,8 @@ class WatchpointInfo:
     owner: BreakpointOwner
     address: int | None = None
     """Requested data address."""
+    client: str | None = None
+    """The API client that set it (`X-Aurix-Client`, e.g. `mcp:<id>`), for owner `api`."""
     condition: str | None = None
     error: str | None = None
     """Why it is not planted (e.g. symbols not loaded yet: it is planted once they are)."""
@@ -792,6 +1171,7 @@ class WatchpointInfo:
             instances=_list(WatchpointInstance, d.get("instances")),
             owner=d.get("owner"),
             address=d.get("address"),
+            client=d.get("client"),
             condition=d.get("condition"),
             error=d.get("error"),
             expression=d.get("expression"),
@@ -834,10 +1214,73 @@ class WatchpointList:
 
 
 class GeneratedClient:
-    """The API operations; a subclass provides the transport (`_call`)."""
+    """The API operations; a subclass provides the transport (`_call`) and the session the
+    session operations go to (`_session_path`)."""
 
     def _call(self, method: str, path: str, query: dict[str, Any] | None, body: dict[str, Any] | None) -> Any:
         raise NotImplementedError
+
+    def _session_path(self) -> str:
+        raise NotImplementedError
+
+    def hub_info(self) -> HubInfo:
+        """What is serving: the hub, its version, address, sessions and whether an update waits.
+
+        Always answers at once.
+        """
+        return HubInfo.from_dict(self._call("GET", "/api/v1/hub", None, None))
+
+    def list_sessions(self) -> SessionList:
+        """List the open sessions: one per board, each with its targets, ports, launch state and
+        control lease holder.
+        """
+        return SessionList.from_dict(self._call("GET", "/api/v1/sessions", None, None))
+
+    def open_session(self, *, acquire_control: bool | None = None, close_on_error: bool | None = None, connect: ConnectSpec | None = None, launch: LaunchRequest | None = None, name: str | None = None, profile: str | None = None, wait_s: int | None = None) -> SessionInfo:
+        """Open a session: start a worker for a board, connect, and run the launch steps.
+
+        Give a `profile` (see `list_profiles`), or `connect` with the configuration scripts, or
+        both: the arguments override the profile. Without `launch` (and without a `[launch]` part
+        in the profile) the session only connects. Opening a session connects to the hardware and
+        may reset the target.
+
+        Returns once the steps are done or after `wait_s` seconds with phase `starting`;
+        `wait_session` waits for the rest. A failed step leaves the session open to inspect,
+        unless `close_on_error`.
+
+        Args:
+            acquire_control: Take the control lease for the calling client before the first step.
+            close_on_error: Close the session when a step fails, instead of leaving it open to inspect.
+            connect: How to connect; overrides the profile's.
+            launch: The launch steps; each field set here overrides the profile's.
+            name: Session name; default: the profile name or `session-<n>`.
+            profile: Profile on the hub machine (`list_profiles`): connection and launch defaults that the other arguments override.
+            wait_s: Seconds to wait for the worker and the launch steps; default 60. Longer starts return with phase `starting`, `wait_session` waits for the rest.
+        """
+        return SessionInfo.from_dict(self._call("POST", "/api/v1/sessions", None, _args({"acquire_control": acquire_control, "close_on_error": close_on_error, "connect": connect, "launch": launch, "name": name, "profile": profile, "wait_s": wait_s})))
+
+    def close_session(self, session: str) -> SessionList:
+        """Close a session: the worker disconnects from the board and ends. Connected VS Code
+        sessions see the disconnect.
+
+        Args:
+            session: Session ID or name.
+        """
+        return SessionList.from_dict(self._call("DELETE", f"/api/v1/sessions/{quote(str(session), safe='')}", None, None))
+
+    def session_log(self, session: str, *, lines: int | None = None) -> SessionLog:
+        """The end of a session's log (the worker's console output), e.g. to see why `init` failed.
+
+        Args:
+            session: Session ID or name.
+            lines: Lines from the end; default 200.
+        """
+        return SessionLog.from_dict(self._call("GET", f"/api/v1/sessions/{quote(str(session), safe='')}/log", _args({"lines": lines}), None))
+
+    def list_profiles(self) -> ProfileList:
+        """List the session profiles stored on the hub machine.
+        """
+        return ProfileList.from_dict(self._call("GET", "/api/v1/profiles", None, None))
 
     def info(self) -> ServerInfo:
         """What is serving: server version and API revision, process, probe connection, targets and
@@ -847,12 +1290,12 @@ class GeneratedClient:
         a core busy flashing: it reads what the core publishes and never queues a job on it. That
         makes it the liveness probe; `core_lag_ms` says whether other operations would wait.
         """
-        return ServerInfo.from_dict(self._call("GET", "/api/v1/info", None, None))
+        return ServerInfo.from_dict(self._call("GET", self._session_path() + "/info", None, None))
 
     def targets(self) -> TargetList:
         """List the targets (cores) with their run state.
         """
-        return TargetList.from_dict(self._call("GET", "/api/v1/targets", None, None))
+        return TargetList.from_dict(self._call("GET", self._session_path() + "/targets", None, None))
 
     def state(self, target: str) -> TargetInfo:
         """Get the run state of a target (and its PC when halted).
@@ -860,7 +1303,7 @@ class GeneratedClient:
         Args:
             target: Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.
         """
-        return TargetInfo.from_dict(self._call("GET", f"/api/v1/targets/{quote(str(target), safe='')}", None, None))
+        return TargetInfo.from_dict(self._call("GET", self._session_path() + f"/targets/{quote(str(target), safe='')}", None, None))
 
     def halt(self, target: str) -> TargetInfo:
         """Halt a target. Returns once it is halted (up to one second).
@@ -871,7 +1314,7 @@ class GeneratedClient:
         Args:
             target: Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.
         """
-        return TargetInfo.from_dict(self._call("POST", f"/api/v1/targets/{quote(str(target), safe='')}/halt", None, None))
+        return TargetInfo.from_dict(self._call("POST", self._session_path() + f"/targets/{quote(str(target), safe='')}/halt", None, None))
 
     def resume(self, target: str, *, address: int | str | None = None) -> TargetInfo:
         """Resume a halted target, optionally at another address.
@@ -882,7 +1325,7 @@ class GeneratedClient:
             target: Target name or index.
             address: Continue at this address instead of the current PC.
         """
-        return TargetInfo.from_dict(self._call("POST", f"/api/v1/targets/{quote(str(target), safe='')}/resume", None, _args({"address": address})))
+        return TargetInfo.from_dict(self._call("POST", self._session_path() + f"/targets/{quote(str(target), safe='')}/resume", None, _args({"address": address})))
 
     def step(self, target: str) -> TargetInfo:
         """Execute one instruction on a halted target.
@@ -892,7 +1335,7 @@ class GeneratedClient:
         Args:
             target: Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.
         """
-        return TargetInfo.from_dict(self._call("POST", f"/api/v1/targets/{quote(str(target), safe='')}/step", None, None))
+        return TargetInfo.from_dict(self._call("POST", self._session_path() + f"/targets/{quote(str(target), safe='')}/step", None, None))
 
     def wait_state(self, target: str, *, state: WaitFor | None = None, timeout_ms: int | None = None) -> TargetInfo:
         """Wait until a target is halted (or running), e.g. after `resume` until a breakpoint hits.
@@ -905,7 +1348,7 @@ class GeneratedClient:
             state: State to wait for (default `halted`).
             timeout_ms: Maximum wait in milliseconds (default 5000, at most 600000).
         """
-        return TargetInfo.from_dict(self._call("GET", f"/api/v1/targets/{quote(str(target), safe='')}/wait", _args({"state": state, "timeout_ms": timeout_ms}), None))
+        return TargetInfo.from_dict(self._call("GET", self._session_path() + f"/targets/{quote(str(target), safe='')}/wait", _args({"state": state, "timeout_ms": timeout_ms}), None))
 
     def reset(self, *, mode: ResetMode | None = None) -> TargetList:
         """Reset the device through the debug adapter and run the reset handlers of the
@@ -917,7 +1360,7 @@ class GeneratedClient:
         Args:
             mode: Reset mode (default `halt`).
         """
-        return TargetList.from_dict(self._call("POST", "/api/v1/reset", None, _args({"mode": mode})))
+        return TargetList.from_dict(self._call("POST", self._session_path() + "/reset", None, _args({"mode": mode})))
 
     def read_registers(self, target: str, *, group: RegisterGroup | None = None) -> RegisterList:
         """Read the registers of a target (the core registers need a halted target).
@@ -926,7 +1369,7 @@ class GeneratedClient:
             target: Target name or index.
             group: Only this group (default `core`).
         """
-        return RegisterList.from_dict(self._call("GET", f"/api/v1/targets/{quote(str(target), safe='')}/registers", _args({"group": group}), None))
+        return RegisterList.from_dict(self._call("GET", self._session_path() + f"/targets/{quote(str(target), safe='')}/registers", _args({"group": group}), None))
 
     def read_register(self, target: str, name: str) -> RegisterValue:
         """Read one register.
@@ -935,7 +1378,7 @@ class GeneratedClient:
             target: Target name or index.
             name: Register name (e.g. `pc`, `d4`, `a10`, `psw`; aliases like `sp` work).
         """
-        return RegisterValue.from_dict(self._call("GET", f"/api/v1/targets/{quote(str(target), safe='')}/registers/{quote(str(name), safe='')}", None, None))
+        return RegisterValue.from_dict(self._call("GET", self._session_path() + f"/targets/{quote(str(target), safe='')}/registers/{quote(str(name), safe='')}", None, None))
 
     def write_register(self, target: str, name: str, *, value: int | str) -> RegisterValue:
         """Write one register. Core registers need a halted target.
@@ -947,7 +1390,7 @@ class GeneratedClient:
             name: Register name.
             value: New value.
         """
-        return RegisterValue.from_dict(self._call("PUT", f"/api/v1/targets/{quote(str(target), safe='')}/registers/{quote(str(name), safe='')}", None, _args({"value": value})))
+        return RegisterValue.from_dict(self._call("PUT", self._session_path() + f"/targets/{quote(str(target), safe='')}/registers/{quote(str(name), safe='')}", None, _args({"value": value})))
 
     def read_memory(self, *, address: int | str, length: int, target: str | None = None) -> MemoryData:
         """Read memory (at most 65536 bytes per call).
@@ -961,7 +1404,7 @@ class GeneratedClient:
             length: Number of bytes (at most 65536).
             target: Read as this core sees memory (HSM-private memory, MCS program RAM); default: the system bus.
         """
-        return MemoryData.from_dict(self._call("GET", "/api/v1/memory", _args({"address": address, "length": length, "target": target}), None))
+        return MemoryData.from_dict(self._call("GET", self._session_path() + "/memory", _args({"address": address, "length": length, "target": target}), None))
 
     def write_memory(self, *, address: int | str, data: str, target: str | None = None) -> MemoryWritten:
         """Write memory (at most 65536 bytes per call). PFLASH is written with `flash_write`.
@@ -973,12 +1416,12 @@ class GeneratedClient:
             data: The bytes as hex string (at most 65536 bytes).
             target: Write as this core sees memory (HSM-private memory, MCS program RAM); default: the system bus.
         """
-        return MemoryWritten.from_dict(self._call("PUT", "/api/v1/memory", None, _args({"address": address, "data": data, "target": target})))
+        return MemoryWritten.from_dict(self._call("PUT", self._session_path() + "/memory", None, _args({"address": address, "data": data, "target": target})))
 
     def list_breakpoints(self) -> BreakpointList:
         """List the breakpoints of all clients (this API and VS Code).
         """
-        return BreakpointList.from_dict(self._call("GET", "/api/v1/breakpoints", None, None))
+        return BreakpointList.from_dict(self._call("GET", self._session_path() + "/breakpoints", None, None))
 
     def add_breakpoint(self, *, address: int | str | None = None, condition: str | None = None, file: str | None = None, line: int | None = None, symbol: str | None = None, targets: list[str] | None = None) -> BreakpointInfo:
         """Set a hardware breakpoint at an address, function or source line.
@@ -990,12 +1433,12 @@ class GeneratedClient:
         Args:
             address: Code address.
             condition: C expression evaluated on the halted core (in its top stack frame): a hit only halts when it is not zero, e.g. `count > 100`. Otherwise the core is resumed at once.
-            file: Source file (with `line`); needs the symbols loaded by a VS Code debug session.
+            file: Source file (with `line`); needs loaded symbols.
             line: Source line in `file`.
-            symbol: Function name; needs the symbols loaded by a VS Code debug session.
+            symbol: Function name; needs loaded symbols (`load_symbols`, `launch` or a VS Code debug session).
             targets: Targets (names or indices) to break on; default: all examined targets.
         """
-        return BreakpointInfo.from_dict(self._call("POST", "/api/v1/breakpoints", None, _args({"address": address, "condition": condition, "file": file, "line": line, "symbol": symbol, "targets": targets})))
+        return BreakpointInfo.from_dict(self._call("POST", self._session_path() + "/breakpoints", None, _args({"address": address, "condition": condition, "file": file, "line": line, "symbol": symbol, "targets": targets})))
 
     def remove_breakpoint(self, id: str) -> BreakpointList:
         """Remove a breakpoint (also one set in VS Code). Returns the remaining breakpoints.
@@ -1003,13 +1446,13 @@ class GeneratedClient:
         Args:
             id: Breakpoint ID.
         """
-        return BreakpointList.from_dict(self._call("DELETE", f"/api/v1/breakpoints/{quote(str(id), safe='')}", None, None))
+        return BreakpointList.from_dict(self._call("DELETE", self._session_path() + f"/breakpoints/{quote(str(id), safe='')}", None, None))
 
     def list_watchpoints(self) -> WatchpointList:
         """List the watchpoints (data breakpoints) of all clients: the API's, VS Code's and those of
         the Tcl console.
         """
-        return WatchpointList.from_dict(self._call("GET", "/api/v1/watchpoints", None, None))
+        return WatchpointList.from_dict(self._call("GET", self._session_path() + "/watchpoints", None, None))
 
     def add_watchpoint(self, *, access: WatchAccess | None = None, address: int | str | None = None, condition: str | None = None, expression: str | None = None, length: int | None = None, target: str | None = None) -> WatchpointInfo:
         """Set a watchpoint on an address or a variable (`expression`): the target halts after an
@@ -1027,7 +1470,7 @@ class GeneratedClient:
             length: Watched bytes; default: the size of the expression's type, or 4 for an address.
             target: Target name or index; default: every TriCore core.
         """
-        return WatchpointInfo.from_dict(self._call("POST", "/api/v1/watchpoints", None, _args({"access": access, "address": address, "condition": condition, "expression": expression, "length": length, "target": target})))
+        return WatchpointInfo.from_dict(self._call("POST", self._session_path() + "/watchpoints", None, _args({"access": access, "address": address, "condition": condition, "expression": expression, "length": length, "target": target})))
 
     def remove_watchpoint(self, *, address: int | str | None = None, id: str | None = None, target: str | None = None) -> WatchpointList:
         """Remove a watchpoint (also one set in VS Code or the Tcl console). Returns the remaining
@@ -1038,7 +1481,7 @@ class GeneratedClient:
             id: Watchpoint ID.
             target: Target name or index (with `address`).
         """
-        return WatchpointList.from_dict(self._call("DELETE", "/api/v1/watchpoints", _args({"address": address, "id": id, "target": target}), None))
+        return WatchpointList.from_dict(self._call("DELETE", self._session_path() + "/watchpoints", _args({"address": address, "id": id, "target": target}), None))
 
     def flash_write(self, *, files: list[str | dict[str, Any]], erase: bool | None = None, incremental: bool | None = None, verify: bool | None = None) -> CommandOutput:
         """Program image files into flash (`flash write_images`).
@@ -1054,7 +1497,7 @@ class GeneratedClient:
             incremental: Skip sectors that already hold the image data.
             verify: Read back and compare after programming.
         """
-        return CommandOutput.from_dict(self._call("POST", "/api/v1/flash/write", None, _args({"files": files, "erase": erase, "incremental": incremental, "verify": verify})))
+        return CommandOutput.from_dict(self._call("POST", self._session_path() + "/flash/write", None, _args({"files": files, "erase": erase, "incremental": incremental, "verify": verify})))
 
     def flash_verify(self, *, file: str) -> CommandOutput:
         """Compare flash contents with an image file (`verify_image`).
@@ -1062,7 +1505,7 @@ class GeneratedClient:
         Args:
             file: Image file on the debug server's machine.
         """
-        return CommandOutput.from_dict(self._call("POST", "/api/v1/flash/verify", None, _args({"file": file})))
+        return CommandOutput.from_dict(self._call("POST", self._session_path() + "/flash/verify", None, _args({"file": file})))
 
     def load_symbols(self, *, files: list[str], targets: list[str] | None = None) -> SymbolsInfo:
         """Load symbol files (ELF) for the targets, as a VS Code debug session does.
@@ -1078,12 +1521,12 @@ class GeneratedClient:
             files: Files on the machine the debug server runs on. The first is the primary ELF; the others add symbols (bootmanager, FBL, ...).  A file may end in `@N` or `@N,M` (TriCore core IDs), as in VS Code's `symbolFiles`: the cores that run it, whose core-local RAM (`0xD000_0000` / `0xC000_0000` alias) holds its variables linked there. Assigned to exactly one core, such a variable reads by its plain name; otherwise it needs its core, `CRASH_state@2`. A file without the suffix is assigned to no core, also when VS Code had assigned it.
             targets: Targets (names or indices) to load them for; default: all cores.
         """
-        return SymbolsInfo.from_dict(self._call("POST", "/api/v1/symbols", None, _args({"files": files, "targets": targets})))
+        return SymbolsInfo.from_dict(self._call("POST", self._session_path() + "/symbols", None, _args({"files": files, "targets": targets})))
 
     def symbols(self) -> SymbolsInfo:
         """The symbol files loaded per target (by this API or by a VS Code debug session).
         """
-        return SymbolsInfo.from_dict(self._call("GET", "/api/v1/symbols", None, None))
+        return SymbolsInfo.from_dict(self._call("GET", self._session_path() + "/symbols", None, None))
 
     def list_globals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None, target: str | None = None) -> GlobalList:
         """List the global and static variables of the loaded symbols, filtered by a name pattern, one
@@ -1101,7 +1544,7 @@ class GeneratedClient:
             query: Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one character. `*speed*` finds every name containing `speed`. Default: all globals.
             target: Symbols of this target (name or index); default: the first core that has symbols.
         """
-        return GlobalList.from_dict(self._call("GET", "/api/v1/globals", _args({"limit": limit, "offset": offset, "query": query, "target": target}), None))
+        return GlobalList.from_dict(self._call("GET", self._session_path() + "/globals", _args({"limit": limit, "offset": offset, "query": query, "target": target}), None))
 
     def symbol_children(self, *, expression: str, limit: int | None = None, offset: int | None = None, target: str | None = None) -> SymbolChildren:
         """List the members of a struct or union, or the elements of an array, that an expression
@@ -1117,7 +1560,7 @@ class GeneratedClient:
             offset: Skip this many children (default 0).
             target: Symbols of this target (name or index); default: the first core that has symbols, or the core of an `@N`.
         """
-        return SymbolChildren.from_dict(self._call("GET", "/api/v1/expressions/children", _args({"expression": expression, "limit": limit, "offset": offset, "target": target}), None))
+        return SymbolChildren.from_dict(self._call("GET", self._session_path() + "/expressions/children", _args({"expression": expression, "limit": limit, "offset": offset, "target": target}), None))
 
     def evaluate(self, *, expression: str, target: str | None = None) -> VariableValue:
         """Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
@@ -1135,7 +1578,7 @@ class GeneratedClient:
             expression: C expression: a global or static variable, a member or element of one (`g_motor.speed`, `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.  A trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression means, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for the HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned to exactly one core, and allowed (selecting that core's symbols) anywhere else.
             target: Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program RAM); default: the first core that has symbols, or the core of an `@N`. It does not choose the core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.
         """
-        return VariableValue.from_dict(self._call("GET", "/api/v1/expressions", _args({"expression": expression, "target": target}), None))
+        return VariableValue.from_dict(self._call("GET", self._session_path() + "/expressions", _args({"expression": expression, "target": target}), None))
 
     def write_variable(self, *, expression: str, value: float | bool | str, target: str | None = None) -> VariableValue:
         """Write a variable by its expression and read it back.
@@ -1149,7 +1592,7 @@ class GeneratedClient:
             value: The new value: a number; `true` / `false`; for an enum, an enumerator name; for an integer, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values exact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or array takes its bytes as a hex string of exactly its size.
             target: Use this target's symbols and write memory as it sees it; default: the first core that has symbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.
         """
-        return VariableValue.from_dict(self._call("PUT", "/api/v1/expressions", None, _args({"expression": expression, "value": value, "target": target})))
+        return VariableValue.from_dict(self._call("PUT", self._session_path() + "/expressions", None, _args({"expression": expression, "value": value, "target": target})))
 
     def load_orti(self, *, file: str, target: str | None = None) -> OsInfo:
         """Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.
@@ -1163,7 +1606,7 @@ class GeneratedClient:
             file: Path to the `.ORT` / `.orti` file the OS generator wrote beside the ELF.
             target: Target whose symbols resolve the attribute expressions, and whose memory view is read. Default: the first core that has symbols.
         """
-        return OsInfo.from_dict(self._call("POST", "/api/v1/os/orti", None, _args({"file": file, "target": target})))
+        return OsInfo.from_dict(self._call("POST", self._session_path() + "/os/orti", None, _args({"file": file, "target": target})))
 
     def os(self) -> OsInfo:
         """The loaded ORTI file: its object types, their attributes and how many cores it describes.
@@ -1171,7 +1614,7 @@ class GeneratedClient:
         Object types are whatever the file declared. A MICROSAR file adds `vs_ISR`, `vs_SPINLOCK`,
         `vs_EVENT` and `vs_OS_CONFIG` to the standard OSEK ones.
         """
-        return OsInfo.from_dict(self._call("GET", "/api/v1/os", None, None))
+        return OsInfo.from_dict(self._call("GET", self._session_path() + "/os", None, None))
 
     def os_objects(self, kind: str, *, live_only: bool | None = None, name: str | None = None) -> OsObjectList:
         """Read the objects of one ORTI type with their current attribute values.
@@ -1184,7 +1627,7 @@ class GeneratedClient:
             live_only: Skip attributes that cannot change, for a cheaper refresh. Default: false.
             name: Only this object, by name.
         """
-        return OsObjectList.from_dict(self._call("GET", f"/api/v1/os/objects/{quote(str(kind), safe='')}", _args({"live_only": live_only, "name": name}), None))
+        return OsObjectList.from_dict(self._call("GET", self._session_path() + f"/os/objects/{quote(str(kind), safe='')}", _args({"live_only": live_only, "name": name}), None))
 
     def os_stacks(self, *, names: list[str] | None = None) -> OsStackList:
         """Measure stack coverage: how much of each OS stack has ever been used.
@@ -1199,7 +1642,7 @@ class GeneratedClient:
         Args:
             names: Measure only these stacks, by name. Default: every stack the ORTI file describes.
         """
-        return OsStackList.from_dict(self._call("GET", "/api/v1/os/stacks", _args({"names": names}), None))
+        return OsStackList.from_dict(self._call("GET", self._session_path() + "/os/stacks", _args({"names": names}), None))
 
     def tcl(self, *, command: str) -> CommandOutput:
         """Run a command of the OpenOCD-compatible Tcl console (like the telnet console).
@@ -1207,4 +1650,74 @@ class GeneratedClient:
         Args:
             command: Command line, as typed in the telnet console (e.g. `mdw 0x70000000 4`).
         """
-        return CommandOutput.from_dict(self._call("POST", "/api/v1/tcl", None, _args({"command": command})))
+        return CommandOutput.from_dict(self._call("POST", self._session_path() + "/tcl", None, _args({"command": command})))
+
+    def launch(self, *, breakpoints: list[LaunchBreakpoint] | None = None, flash: LaunchFlash | None = None, orti: str | None = None, reset: LaunchResetKeyword | LaunchResetSpec | None = None, run_to: str | None = None, stop_on_entry: bool | None = None, symbols: list[str | PlacedSymbolFile] | None = None, timeout_s: int | None = None, wait_s: int | None = None) -> LaunchStatus:
+        """Run the launch steps on this session: what a VS Code launch configuration does.
+
+        In this order, each only when asked for: load the symbols, load the ORTI file, program
+        the flash (after a halting reset, as the flash needs it), reset, set the breakpoints, run
+        to `run_to`, halt all cores (`stop_on_entry`). The steps stop at the first failure, which
+        leaves the session open to inspect.
+
+        Returns once the steps are done or after `wait_s` seconds with phase `starting`;
+        `wait_session` waits for the rest. The session keeps the arguments for `relaunch`.
+
+        Args:
+            breakpoints: Breakpoints, set before the target runs and owned by the calling client.
+            flash: Images to program (VS Code `flashFiles` with `enableFlashing`).
+            orti: ORTI file (VS Code `ortiFile`), loaded after the symbols.
+            reset: Reset after the flash step; default: a running reset when flashing, none otherwise.
+            run_to: Run to this location (a function, `file:line` or address) with a temporary breakpoint: the target is reset halted, runs and the call waits until it halts there.
+            stop_on_entry: Halt all cores after the steps (VS Code `stopOnEntry`).
+            symbols: Symbol files (VS Code `symbolFiles`). Each core gets the files of its architecture (TriCore ELF files the TriCore cores, an ARM ELF the HSM, `.asm` the MCS channels, `.cdb` the SCR) unless `cores` says otherwise.
+            timeout_s: Seconds `run_to` waits for the breakpoint; default 30.
+            wait_s: Seconds the call waits for the steps; default 60. When they take longer it returns with phase `starting`; `wait_session` waits for the rest.
+        """
+        return LaunchStatus.from_dict(self._call("POST", self._session_path() + "/launch", None, _args({"breakpoints": breakpoints, "flash": flash, "orti": orti, "reset": reset, "run_to": run_to, "stop_on_entry": stop_on_entry, "symbols": symbols, "timeout_s": timeout_s, "wait_s": wait_s})))
+
+    def relaunch(self, *, skip_flash: bool | None = None, wait_s: int | None = None) -> LaunchStatus:
+        """Run the last launch again, e.g. after a rebuild: flash (incremental), reset, breakpoints,
+        `run_to`.
+
+        Args:
+            skip_flash: Leave the flash step out (only reset, breakpoints, `run_to`).
+            wait_s: Seconds the call waits; see `launch`.
+        """
+        return LaunchStatus.from_dict(self._call("POST", self._session_path() + "/relaunch", None, _args({"skip_flash": skip_flash, "wait_s": wait_s})))
+
+    def wait_session(self, *, timeout_s: int | None = None) -> LaunchStatus:
+        """Wait until the launch steps are done and return how they went.
+
+        Args:
+            timeout_s: Seconds to wait at most; default 60, 0 returns the status at once.
+        """
+        return LaunchStatus.from_dict(self._call("GET", self._session_path() + "/launch", _args({"timeout_s": timeout_s}), None))
+
+    def acquire_control(self, *, ttl_s: int | None = None) -> ControlInfo:
+        """Take the control lease of the session for the calling client.
+
+        While another client holds it, run control (halt, resume, step, reset), register, memory
+        and variable writes, flashing, launches and Tcl commands fail with `busy`; reading never
+        waits for it. Nobody holds it unless a client takes it. It expires after `ttl_s` unless
+        taken again, and is released when its client ends.
+
+        Args:
+            ttl_s: Seconds until the lease expires unless it is taken again; default 600. Taking it again as its holder renews it.
+        """
+        return ControlInfo.from_dict(self._call("POST", self._session_path() + "/control", None, _args({"ttl_s": ttl_s})))
+
+    def release_control(self) -> ControlInfo:
+        """Release the control lease (only its holder can).
+        """
+        return ControlInfo.from_dict(self._call("DELETE", self._session_path() + "/control", None, None))
+
+    def end_client(self, *, client: str) -> EndClientResult:
+        """End an API client: remove its breakpoints and watchpoints and release its lease.
+
+        The hub calls it when an MCP session ends; a script can call it for itself when done.
+
+        Args:
+            client: Client name (e.g. `mcp:3f2a...` for an MCP session of the hub, or a Python client's ID).
+        """
+        return EndClientResult.from_dict(self._call("POST", self._session_path() + "/clients/end", None, _args({"client": client})))

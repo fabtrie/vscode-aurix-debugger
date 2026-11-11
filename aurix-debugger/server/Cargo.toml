@@ -8,6 +8,7 @@ members = [
     "crates/aurix-dbg",
     "crates/bluebox",
     "crates/core",
+    "crates/hub",
     "crates/isa",
     "crates/jim",
     "crates/jimtcl",
@@ -35,6 +36,7 @@ orti = { path = "crates/orti" }
 isa = { path = "crates/isa" }
 api-spec = { path = "crates/api-spec" }
 api = { path = "crates/api" }
+hub = { path = "crates/hub" }
 winidea-sdk = { path = "crates/winidea-sdk" }
 bluebox = { path = "crates/bluebox" }
 serde_json = "1"

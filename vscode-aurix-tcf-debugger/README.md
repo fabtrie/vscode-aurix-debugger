@@ -4,7 +4,7 @@
 
 VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3) and the GTM MCS channels.
 
-The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts. Its source is in the [`aurix-debugger`](https://github.com/fabtrie/vscode-aurix-debugger/tree/main/aurix-debugger) folder of this repository. `aurix-dbg.exe` is bundled with the extension; the setting `aurix-debugger.agentPath` or the launch attribute `agentPath` point to a different build.
+The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts, behind `aurix-hub`, the always-on front door that serves VS Code, Claude (MCP) and scripts (REST, Python) and opens one `aurix-dbg` session per board. Their source is in the [`aurix-debugger`](https://github.com/fabtrie/vscode-aurix-debugger/tree/main/aurix-debugger) folder of this repository; both are bundled with the extension, which installs them to `%LOCALAPPDATA%\aurix-dbg` and starts the hub when needed (see [Debugger hub](#debugger-hub)).
 
 ## Features
 
@@ -35,12 +35,13 @@ The extension uses `aurix-dbg`, a debug server that reaches the target through I
 
 ## Bundled files (`bin/`)
 
-- `aurix-dbg.exe` — the debug server
+- `aurix-hub.exe` — the debugger hub (MCP, REST, sessions)
+- `aurix-dbg.exe` — the debug server of one board, started by the hub
 - `THIRD_PARTY_LICENSES.txt` — the license texts of the third-party code in `aurix-dbg.exe`
 - `openocd/` — OpenOCD's Tcl scripts, passed to the server as a search directory
 - `svd/` — SVD files for the Peripheral view
 
-`aurix-dbg.exe`, `THIRD_PARTY_LICENSES.txt` and `openocd/` are not in the repository: `npm run copy-agent` (also run when packaging) copies them from the `aurix-debugger` build and generates the license file.
+`aurix-hub.exe`, `aurix-dbg.exe`, `THIRD_PARTY_LICENSES.txt` and `openocd/` are not in the repository: `npm run copy-agent` (also run when packaging) copies them from the `aurix-debugger` build and generates the license file.
 
 ## Build
 
@@ -77,7 +78,6 @@ Create `.vscode/launch.json`:
       "type": "aurixdbg",
       "request": "launch",
       "name": "AURIX Debug",
-      "autoStartAgent": true,
       "searchDirs": ["${workspaceFolder}/debug"],
       "configFiles": ["board/infineon/kit_a2g_tc375_lite.cfg", "tc37x_ocds_init.cfg"],
       "symbolFiles": ["${workspaceFolder}/build/app.elf"],
@@ -91,16 +91,30 @@ Create `.vscode/launch.json`:
 
 Here `debug/` holds `tc3xx_ocds.cfg`, `fs26_sbc.cfg` and `tc37x_ocds_init.cfg`, copied from the `aurix-debugger` folder; `tc37x_ocds_init.cfg` is an example, adjust it for the board and application.
 
-- `searchDirs`, `configFiles`, `configCommands` are passed to aurix-dbg as `-s`, `-f`, `-c`; `additionalAgentOptions` is appended as-is. The bundled OpenOCD scripts are always searched, after `searchDirs`.
+- The extension asks the debugger hub to open a session for the board and connects to it. `searchDirs`, `configFiles`, `configCommands` (and `adapter`, `probe`) are passed to the session's aurix-dbg as `-s`, `-f`, `-c`. The bundled OpenOCD scripts are always searched, after `searchDirs`. Instead, `profile` names a session profile stored with the hub (`%APPDATA%\aurix-dbg\profiles\<name>.toml`), which the attributes override.
+- `session` attaches to a session that is already open, e.g. one Claude opened, instead of opening one: no flashing, no reset. *AURIX: Attach to Hub Session* picks one from a list, and the extension offers to attach when another client opens one (setting `aurix-debugger.hub.offerAttach`).
+- `sessionLifetime`: `close` (default) closes the session when debugging ends, if this debug session opened it; `keep` leaves it open (e.g. for Claude to go on).
+- `runTo` runs to a function, `file:line` or address after connecting: the hub resets into the software with a temporary breakpoint there.
+- `hub` and `hubToken` select another debugger hub, e.g. on the PC the board is connected to (default: the setting `aurix-debugger.hub.url`, `http://127.0.0.1:3001`). `configFiles` and `flashFiles` that exist locally are uploaded to it, and the debugger's connection goes through the hub.
 - The Tcl commands for cfg files, `configCommands`, debugger actions and `monitor` are listed in the [Tcl command reference](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/docs/commands.md). In the Debug Console, `monitor help` lists them, `monitor help <command>` describes one (`monitor help reset_config`) and `monitor help <word>` searches the descriptions (`monitor help srst`).
-- `autoStartAgent` starts the bundled `aurix-dbg.exe` (or `agentPath`); without it, the extension connects to an aurix-dbg already listening on `host:port` (default `127.0.0.1:1534`).
 - `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
-- `enableFlashing` programs `flashFiles` before the session; the Flash Target toolbar button uses the same list. `verifyFlash` (default true) reads the programmed sectors back.
+- `enableFlashing` has the hub program `flashFiles` when it opens the session; the Flash Target toolbar button uses the same list. `verifyFlash` (default true) reads the programmed sectors back.
 - `flashFiles` takes ELF, Intel HEX, S-record (`.srec`, `.s19`, `.s28`, `.s37`, `.mot`) and binary files, merged into one image (later files win). An entry is a path, or an object with `path`, `offset` and `type` (`elf`, `ihex`, `srec`, `bin`; detected by default). `offset` is added to the file's addresses: a binary file has none of its own and is placed at its `offset`, e.g. `{ "path": "${workspaceFolder}/build/cal.bin", "offset": "0x80300000" }`.
 - After flashing and with the Reset button, the target is reset with `resetType` (default `reset`). With `resetSuspend: true` it halts at the reset vector; otherwise it runs, and the toolbar buttons pause all cores afterwards.
 - `ortiFile` enables the AUTOSAR OS view and task names in the Call Stack.
 - `sourceFileMap` maps path prefixes in the debug information onto local folders, and `sourceSearchPaths` lists folders searched for sources that are not found, e.g. when a compiler cache supplied objects built in another checkout.
 - `device` selects the SVD file bundled with the extension for the Peripheral view: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
+
+### Debugger hub
+
+`aurix-hub` runs once per machine on port 3001 and holds the debug sessions, one per board. VS Code, Claude and scripts all use it, so a session can be opened by one and used by the others: breakpoints and halts show up everywhere, and each client's own breakpoints go when it ends.
+
+- The extension keeps the installed hub (`%LOCALAPPDATA%\aurix-dbg\current`) up to date when it starts (setting `aurix-debugger.hub.install`) and starts the hub for a debug session when it is not running.
+- *AURIX: Start Debugger Hub at Logon* registers the hub to start when you log on (no admin rights), *AURIX: Don't Start Debugger Hub at Logon* removes that. *AURIX: Show Debugger Hub Status* lists the sessions and the installation; *AURIX: Restart Debugger Hub Now* applies an update at once.
+- *AURIX: Add Debugger MCP Server to Claude Config* writes the workspace `.mcp.json` so that Claude Code can open sessions, flash, set breakpoints and read variables: through `aurix-hub stdio` (Claude starts the hub when needed) or `http://127.0.0.1:3001/mcp`.
+- A hub on another machine (the PC with the probes): run `aurix-hub install --autostart --remote` there (it creates a token in `%APPDATA%\aurix-dbg\hub.toml`), and set `aurix-debugger.hub.url` and `aurix-debugger.hub.token` here. With VS Code Remote-SSH the extension runs on that PC and does this there.
+
+Details: the [server README](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/README.md#run).
 
 ### Standby controller (SCR)
 
@@ -111,7 +125,6 @@ The TC3xx standby controller, an XC800 (8051) core, can be debugged over the min
   "type": "aurixdbg",
   "request": "launch",
   "name": "AURIX Debug with SCR",
-  "autoStartAgent": true,
   "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
   "configCommands": ["set tc3xx_scr_target 1"],
   "symbolFiles": ["${workspaceFolder}/build/app.elf"],

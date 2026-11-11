@@ -1,4 +1,4 @@
-"""Periodic sampling (DAQ) over the server's WebSocket at ``/api/v1/daq``.
+"""Periodic sampling (DAQ) over a session's WebSocket at ``/api/v1/sessions/{session}/daq``.
 
 Sampling runs only while the socket is open. Closing the stream - or crashing - stops it, so a
 script can never leave the debug probe busy.
@@ -122,7 +122,8 @@ class DaqStream:
     """
 
     def __init__(self, url: str, points: Sequence[PointSpec], rate_hz: Optional[float],
-                 mode: str, queue: Optional[int], timeout: Optional[float]):
+                 mode: str, queue: Optional[int], timeout: Optional[float],
+                 headers: Optional[List[str]] = None):
         # Set before connecting: __del__ may run if the handshake raises.
         self._closed = True
         self._ws = None  # type: Any
@@ -144,7 +145,7 @@ class DaqStream:
         self._pending_dropped = 0
         self._pending_missed = 0
         # A non-browser client sends no Origin; the server only rejects foreign ones.
-        self._ws = websocket.create_connection(url, timeout=timeout, suppress_origin=True)
+        self._ws = websocket.create_connection(url, timeout=timeout, suppress_origin=True, header=headers or [])
         self._closed = False
         req = {"op": "subscribe", "points": [_spec(p, rate_hz, mode) for p in points]}
         if queue is not None:

@@ -1,36 +1,46 @@
-//! HTTP routes: one REST route per operation of the API definition, the OpenAPI document,
-//! Swagger UI, the event stream and the MCP endpoint.
+//! HTTP routes of a worker: one REST route per session operation of the API definition, a
+//! generic `/api/v1/ops/{op}` route (the hub's MCP front door calls it), the event stream and the
+//! DAQ WebSocket. MCP, the OpenAPI document and Swagger UI are the hub's.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Query, Request};
+use axum::extract::{Path, Query, Request};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, MethodFilter, MethodRouter};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post, MethodFilter, MethodRouter};
 use axum::{Json, Router};
 use futures_util::Stream;
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
 
 use api_spec::types::ApiEvent;
-use api_spec::{ApiError, Method, OpMeta, OPS};
+use api_spec::{ApiError, Method, OpMeta, CLIENT_HEADER, OPS};
 
+use crate::client;
 use crate::core_impl::CoreApi;
 use crate::events::Hub;
-use crate::mcp::Mcp;
 
-const OPENAPI: &str = include_str!(concat!(env!("OUT_DIR"), "/openapi.json"));
-
-/// Runs an operation off the async runtime (the core call blocks).
-pub async fn run(api: Arc<CoreApi>, op: &'static str, args: Value) -> Result<Value, ApiError> {
-    tokio::task::spawn_blocking(move || api_spec::dispatch(&*api, op, args))
+/// Runs an operation off the async runtime (the core call blocks), as `client`.
+pub async fn run(api: Arc<CoreApi>, op: &'static str, args: Value, client: Option<String>) -> Result<Value, ApiError> {
+    tokio::task::spawn_blocking(move || client::with_client(client, || api_spec::dispatch(&*api, op, args)))
         .await
         .unwrap_or_else(|e| Err(ApiError::failed(format!("{op} failed: {e}"))))
+}
+
+/// The calling client (`X-Aurix-Client`).
+fn caller(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    match headers.get(CLIENT_HEADER) {
+        None => Ok(None),
+        Some(v) => match v.to_str() {
+            Ok(name) if client::valid(name) => Ok(Some(name.to_string())),
+            _ => Err(ApiError::bad_request(format!("`{CLIENT_HEADER}` must be printable ASCII without spaces, at most 128 bytes"))),
+        },
+    }
 }
 
 pub fn error_response(e: ApiError) -> Response {
@@ -113,7 +123,11 @@ fn path_values(template: &str, path: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-async fn rest(api: Arc<CoreApi>, op: &'static OpMeta, kinds: Arc<HashMap<String, Kind>>, uri: Uri, query: Vec<(String, String)>, body: Bytes) -> Response {
+async fn rest(api: Arc<CoreApi>, op: &'static OpMeta, kinds: Arc<HashMap<String, Kind>>, uri: Uri, headers: HeaderMap, query: Vec<(String, String)>, body: Bytes) -> Response {
+    let client = match caller(&headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
     let mut args = Map::new();
     if !body.is_empty() {
         match serde_json::from_slice::<Value>(&body) {
@@ -143,7 +157,31 @@ async fn rest(api: Arc<CoreApi>, op: &'static OpMeta, kinds: Arc<HashMap<String,
         let value = coerce(kinds.get(&k).unwrap_or(&Kind::Str), v);
         args.insert(k, value);
     }
-    match run(api, op.name, Value::Object(args)).await {
+    match run(api, op.name, Value::Object(args), client).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `POST /api/v1/ops/{op}` with the arguments as JSON object: any operation by name.
+async fn by_name(api: Arc<CoreApi>, name: String, headers: HeaderMap, body: Bytes) -> Response {
+    let client = match caller(&headers) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    let Some(op) = OPS.iter().find(|o| o.name == name) else {
+        return error_response(ApiError::not_found(format!("unknown operation '{name}'")));
+    };
+    let args = if body.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice::<Value>(&body) {
+            Ok(v @ (Value::Object(_) | Value::Null)) => v,
+            Ok(_) => return error_response(ApiError::bad_request("the request body must be a JSON object")),
+            Err(e) => return error_response(ApiError::bad_request(format!("request body: {e}"))),
+        }
+    };
+    match run(api, op.name, args, client).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => error_response(e),
     }
@@ -164,8 +202,8 @@ async fn events(hub: Arc<Hub>) -> Sse<impl Stream<Item = Result<SseEvent, Infall
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// Browsers send `Origin`: only pages served from this machine (e.g. Swagger UI) may call the
-/// API, so a web page cannot drive the debugger (DNS rebinding, cross-site requests).
+/// Browsers send `Origin`: only pages served from this machine (e.g. the hub's Swagger UI) may
+/// call the API, so a web page cannot drive the debugger (DNS rebinding, cross-site requests).
 async fn check_origin(req: Request, next: Next) -> Response {
     if let Some(origin) = req.headers().get(header::ORIGIN) {
         let origin = origin.to_str().unwrap_or_default();
@@ -193,7 +231,7 @@ pub fn router(api: Arc<CoreApi>) -> Router {
     for op in OPS {
         let kinds = Arc::new(param_kinds(op));
         let api = api.clone();
-        let handler = move |uri: Uri, Query(query): Query<Vec<(String, String)>>, body: Bytes| rest(api, op, kinds, uri, query, body);
+        let handler = move |uri: Uri, headers: HeaderMap, Query(query): Query<Vec<(String, String)>>, body: Bytes| rest(api, op, kinds, uri, headers, query, body);
         let r = routes.remove(op.path).unwrap_or_default();
         routes.insert(op.path, r.on(method_filter(op.method), handler));
     }
@@ -203,28 +241,16 @@ pub fn router(api: Arc<CoreApi>) -> Router {
     }
 
     let hub = api.hub.clone();
-    let mcp = Arc::new(Mcp::new());
-    let mcp_api = api.clone();
     let daq_api = api.clone();
+    let ops_api = api.clone();
     router
         .route("/api/v1/events", get(move || events(hub)))
         // A WebSocket upgrade is an ordinary GET, so it is added before `.layer(check_origin)`
         // below and gets the same origin check. That matters more here than for REST: browsers
         // exempt WebSocket from CORS entirely, so the Origin check is the only defence.
         .route("/api/v1/daq", get(move |ws| crate::daq_ws::handler(daq_api, ws)))
-        .route(
-            "/mcp",
-            axum::routing::post(move |headers: HeaderMap, body: Bytes| crate::mcp::handle(mcp_api, mcp, headers, body))
-                .get(|| async { StatusCode::METHOD_NOT_ALLOWED })
-                .delete(|| async { StatusCode::METHOD_NOT_ALLOWED }),
-        )
-        .route("/openapi.json", get(|| async { ([(header::CONTENT_TYPE, "application/json")], OPENAPI) }))
-        .route("/", get(|| async { Redirect::temporary("/docs") }))
-        .merge(swagger_ui_dist::generate_routes(swagger_ui_dist::ApiDefinition {
-            uri_prefix: "/docs",
-            api_definition: swagger_ui_dist::OpenApiSource::Uri("/openapi.json"),
-            title: Some("aurix-dbg API"),
-        }))
+        .route("/api/v1/ops/{op}", post(move |Path(op): Path<String>, headers: HeaderMap, body: Bytes| by_name(ops_api, op, headers, body)))
+        .route("/", get(|| async { (StatusCode::OK, "aurix-dbg worker: its API is served by the hub (aurix-hub)\n") }))
         .layer(middleware::from_fn(check_origin))
 }
 

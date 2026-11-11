@@ -131,18 +131,7 @@ suite('AURIX breakpoint vs stop-at-function', () => {
 		assert.ok(ext, 'AURIX debugger extension not found in test host');
 		await ext.activate();
 
-		if (!config.autoStartAgent) {
-			config.autoStartAgent = true;
-		}
-		if (!config.autoStartAgent) {
-			const host = String((config as any).host ?? '127.0.0.1');
-			const port = Number((config as any).port ?? 1534);
-			const ok = await canConnectTcp(host, port, 300);
-			if (!ok) {
-				this.skip();
-				return;
-			}
-		}
+		// The extension opens the session through the hub (aurix-hub), which it starts when needed.
 
 		const existing = vscode.debug.breakpoints;
 		if (existing.length) {

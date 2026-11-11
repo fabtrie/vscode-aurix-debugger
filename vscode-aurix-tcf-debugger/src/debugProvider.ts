@@ -90,6 +90,8 @@ function splitElfSymbolName(raw: string): { name: string; file?: string } {
 }
 
 export interface InternalLaunchArguments {
+	/** The hub flashed and reset at launch (the extension sets it); the adapter does not flash again. */
+	hubFlashed?: boolean;
 	debugTCFMessages?: boolean;
 	commandToken?: 'debug' | 'default';
 	debugUIFocus?: boolean;
@@ -98,6 +100,7 @@ export interface InternalLaunchArguments {
 // We intentionally do not strictly validate these args because this extension
 // accepts AURIX-specific properties beyond the upstream Intel schema.
 export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
+	/** TCF endpoint of the session's worker; set by the extension from the hub session. */
 	host?: string;
 	port?: number;
 	timeout?: number;
@@ -2523,7 +2526,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.startupLog('connected');
 			void this.sendInitialTargetHealth();
 			const flashFiles = AurixTCFDebugSession.getFlashFiles(args);
-			if (args.enableFlashing === true) {
+			if (args.enableFlashing === true && args.internal?.hubFlashed !== true) {
 				if (flashFiles.length === 0) {
 					this.sendErrorResponse(response, 1, '"enableFlashing" is set, but the launch configuration has no "flashFiles"');
 					return;

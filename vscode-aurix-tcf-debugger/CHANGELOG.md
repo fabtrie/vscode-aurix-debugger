@@ -3,6 +3,10 @@
 Simple, human-readable release notes for this extension.
 
 ## Unreleased
+- **Debugger hub** (`aurix-hub`): one always-on process per machine (port 3001) serves VS Code, Claude (MCP over HTTP, or `aurix-hub stdio`) and scripts (REST, Python), and opens one `aurix-dbg` session per board. Sessions can be opened from launch configurations, from hub profiles (`%APPDATA%\aurix-dbg\profiles`) or by Claude, with the launch steps (symbols, flash, reset, breakpoints, run to a function), and attached to by any client. The hub can run on another machine (token, uploads, TCF relayed over its WebSocket).
+- The extension opens and attaches sessions through the hub instead of starting aurix-dbg itself. New launch attributes `profile`, `session`, `sessionName`, `sessionLifetime`, `adapter`, `probe`, `runTo`, `hub`, `hubToken`; removed `autoStartAgent`, `agentPath`, `host`, `port`, `additionalAgentOptions` and the settings `aurix-debugger.agentPath` / `aurix-debugger.autoStartAgent`.
+- The hub is installed to `%LOCALAPPDATA%\aurix-dbg` (kept up to date when the extension starts, setting `aurix-debugger.hub.install`) and can start at logon: *AURIX: Start Debugger Hub at Logon*. More commands: *Show Debugger Hub Status*, *Restart Debugger Hub Now*, *Attach to Hub Session*, *Add Debugger MCP Server to Claude Config*. Uninstalling the extension removes the hub unless another VS Code profile uses it.
+- Each client owns its breakpoints (they go when it ends) and can take a control lease that keeps other clients from controlling the target.
 - TC3xx standby controller (SCR, XC800): with `set tc3xx_scr_target 1` in `configCommands` the SCR is its own thread with disassembly, registers, stepping and instruction breakpoints. It is not halted with the TriCores. `@scr` picks it in breakpoint conditions, the Watch and the Live Watch.
 - The SCR can be debugged over the miniWiggler (TasServer) too, through the SCR's boot ROM monitor; no setting needed.
 - Peripheral View: the SCR's special function registers with their bit fields, paged SFRs included, as the `SCR_*` peripherals of the TC3xx devices (read while the SCR is halted).

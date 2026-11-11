@@ -32,7 +32,8 @@
 	"activationEvents": [
 		"onDebug",
 		"onDebugResolve:aurixdbg",
-		"onWebviewPanel:aurixLiveWatchPanel"
+		"onWebviewPanel:aurixLiveWatchPanel",
+		"onStartupFinished"
 	],
 	"extensionDependencies": [
 		"mcu-debug.peripheral-viewer",
@@ -57,7 +58,8 @@
 		"test": "node ./out/test/runTest.js",
 		"package": "npx vsce package --target win32-x64 --baseContentUrl https://github.com/fabtrie/vscode-aurix-debugger/blob/main/vscode-aurix-tcf-debugger --baseImagesUrl https://github.com/fabtrie/vscode-aurix-debugger/raw/main/vscode-aurix-tcf-debugger -o aurix-debugger.vsix",
 		"release": "npx vsce publish --target win32-x64 --baseContentUrl https://github.com/fabtrie/vscode-aurix-debugger/blob/main/vscode-aurix-tcf-debugger --baseImagesUrl https://github.com/fabtrie/vscode-aurix-debugger/raw/main/vscode-aurix-tcf-debugger",
-		"copy-agent": "node ./scripts/copy-agent.js"
+		"copy-agent": "node ./scripts/copy-agent.js",
+		"vscode:uninstall": "node ./out/uninstall.js"
 	},
 	"devDependencies": {
 		"@types/mocha": "^10.0.6",
@@ -328,6 +330,36 @@
 				"title": "Pause AUTOSAR OS Updates",
 				"category": "AURIX™ Debugger",
 				"icon": "$(debug-pause)"
+			},
+			{
+				"command": "aurix-debugger.hubInstallAutostart",
+				"title": "Start Debugger Hub at Logon",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.hubRemoveAutostart",
+				"title": "Don't Start Debugger Hub at Logon",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.hubStatus",
+				"title": "Show Debugger Hub Status",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.hubRestart",
+				"title": "Restart Debugger Hub Now",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.hubAttach",
+				"title": "Attach to Hub Session",
+				"category": "AURIX™ Debugger"
+			},
+			{
+				"command": "aurix-debugger.hubAddMcpConfig",
+				"title": "Add Debugger MCP Server to Claude Config",
+				"category": "AURIX™ Debugger"
 			}
 		],
 		"views": {
@@ -673,15 +705,6 @@
 					"default": true,
 					"description": "Execute path mapper function, if defined in launch configuration."
 				},
-				"aurix-debugger.agentPath": {
-					"type": "string",
-					"description": "Path to aurix-dbg.exe. Overrides the aurix-dbg bundled with the extension (launch configuration \"agentPath\" takes precedence)."
-				},
-				"aurix-debugger.autoStartAgent": {
-					"type": "boolean",
-					"default": false,
-					"description": "Automatically start aurix-dbg when a debug session starts."
-				},
 				"aurix-debugger.rememberDebugLayout": {
 					"type": "boolean",
 					"default": true,
@@ -732,6 +755,34 @@
 					"type": "boolean",
 					"default": true,
 					"description": "While every TriCore core is halted, the live views (Live Watch, AUTOSAR OS view, OS Objects panel) stop re-reading the target: they refresh once on the halt, after a write and when something is expanded, and start again on resume. Turn off to keep reading peripherals that run on while the cores are halted (timers without suspend, DMA, GTM). The OS profiler is not affected."
+				},
+				"aurix-debugger.hub.url": {
+					"type": "string",
+					"default": "http://127.0.0.1:3001",
+					"description": "URL of the debugger hub (aurix-hub). A hub on this machine is started when needed; one on another machine needs aurix-debugger.hub.token."
+				},
+				"aurix-debugger.hub.token": {
+					"type": "string",
+					"default": "",
+					"description": "Token of a debugger hub on another machine (its hub.toml; `aurix-hub install --remote` creates one). Default: the AURIX_HUB_TOKEN environment variable."
+				},
+				"aurix-debugger.hub.install": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"off"
+					],
+					"default": "auto",
+					"enumDescriptions": [
+						"Copy the bundled hub to %LOCALAPPDATA%\\aurix-dbg\\current when the extension starts and the bundled one is newer (no admin rights, no logon start).",
+						"Leave the installed hub alone."
+					],
+					"description": "Keep the hub at its fixed per-user location up to date, so that the logon start and MCP configurations keep working after extension updates."
+				},
+				"aurix-debugger.hub.offerAttach": {
+					"type": "boolean",
+					"default": true,
+					"description": "Offer to attach the debugger when another client (Claude, a script) opens a session on the hub."
 				}
 			}
 		},
@@ -926,11 +977,6 @@
 								"description": "Path to the symbol file of the SCR (standby controller, an XC800 core). A TriCore ELF is never mapped to the SCR.",
 								"type": "string"
 							},
-							"additionalAgentOptions": {
-								"description": "Additional aurix-dbg command-line options, appended after the generated ones (e.g. \"-d3 -l aurix-dbg.log\")",
-								"type": "string",
-								"default": ""
-							},
 							"liveWatchIntervalMs": {
 								"description": "Refresh interval in milliseconds for the Live Watch view while the target runs. Minimum 200ms+ is recommended and enforced.",
 								"type": "number",
@@ -942,25 +988,6 @@
 								"type": "boolean",
 								"default": false
 							},
-							"autoStartAgent": {
-								"description": "Start aurix-dbg before connecting (reuses an instance that is already running). If false, connects to an aurix-dbg that is already listening on host:port.",
-								"type": "boolean",
-								"default": false
-							},
-							"agentPath": {
-								"description": "Path to aurix-dbg.exe. Defaults to the aurix-dbg bundled with the extension (or the aurix-debugger.agentPath setting).",
-								"type": "string"
-							},
-							"host": {
-								"description": "Host of the debug server",
-								"type": "string",
-								"default": "127.0.0.1"
-							},
-							"port": {
-								"description": "Port of the debug server",
-								"type": "number",
-								"default": 1534
-							},
 							"searchDirs": {
 								"description": "Script search directories (OpenOCD -s), e.g. the OpenOCD tcl directory",
 								"type": "array",
@@ -969,7 +996,7 @@
 								}
 							},
 							"configFiles": {
-								"description": "OpenOCD configuration scripts (OpenOCD -f), in order",
+								"description": "OpenOCD configuration scripts (OpenOCD -f), in order. The hub starts a worker (aurix-dbg) with them; a file that exists relative to the workspace is passed by path (and uploaded to a hub on another machine), other names are searched in searchDirs and the bundled OpenOCD scripts.",
 								"type": "array",
 								"items": {
 									"type": "string"
@@ -1120,6 +1147,51 @@
 							"ortiFile": {
 								"type": "string",
 								"description": "ORTI file (.ORT) the AUTOSAR OS generator wrote beside the ELF. Loaded after the symbols; enables the AUTOSAR OS view and task names in the Call Stack."
+							},
+							"profile": {
+								"type": "string",
+								"description": "A session profile on the hub machine (%APPDATA%\\aurix-dbg\\profiles\\<name>.toml): its [connect] part replaces configFiles/configCommands/searchDirs/adapter (which override it when set), its [launch] part adds launch steps."
+							},
+							"session": {
+								"type": "string",
+								"description": "Attach to an open hub session (ID or name), e.g. one Claude opened, instead of opening one. Runs no launch steps (no flashing, no reset)."
+							},
+							"sessionName": {
+								"type": "string",
+								"description": "Name of the session the hub opens; default: the launch configuration name."
+							},
+							"sessionLifetime": {
+								"type": "string",
+								"enum": [
+									"close",
+									"keep"
+								],
+								"default": "close",
+								"enumDescriptions": [
+									"Close the hub session (disconnect from the board) when the debug session ends, if this debug session opened it.",
+									"Keep the session open, e.g. so that Claude can go on with it; close it with the close_session operation or AURIX: Restart Debugger Hub."
+								],
+								"description": "What happens to the hub session when the debug session ends."
+							},
+							"adapter": {
+								"type": "string",
+								"description": "Adapter driver of the worker (tas_client, winidea, bluebox, sim); default: what the configuration scripts select."
+							},
+							"probe": {
+								"type": "string",
+								"description": "Probe serial number: the hub refuses a second session on the same probe."
+							},
+							"runTo": {
+								"type": "string",
+								"description": "Run to this function, file:line or address after connecting: the hub resets into the software with a temporary breakpoint there."
+							},
+							"hub": {
+								"type": "string",
+								"description": "URL of the debugger hub; default: the aurix-debugger.hub.url setting (http://127.0.0.1:3001)."
+							},
+							"hubToken": {
+								"type": "string",
+								"description": "Token of a hub on another machine; default: the aurix-debugger.hub.token setting."
 							}
 						}
 					}
@@ -1132,7 +1204,6 @@
 							"type": "aurixdbg",
 							"request": "launch",
 							"name": "Debug AURIX™ Program",
-							"autoStartAgent": true,
 							"searchDirs": [
 								"^\"\\${workspaceFolder}/tcl\""
 							],
@@ -1146,8 +1217,6 @@
 							"flashFiles": [
 								"^\"\\${workspaceFolder}/build/program.elf\""
 							],
-							"host": "127.0.0.1",
-							"port": 1534,
 							"core": 0,
 							"enableFlashing": false,
 							"enableConsoleLog": false
@@ -1156,5 +1225,8 @@
 				]
 			}
 		]
-	}
+	},
+	"extensionKind": [
+		"workspace"
+	]
 }

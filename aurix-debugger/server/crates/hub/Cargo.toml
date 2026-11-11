@@ -1,0 +1,29 @@
+[package]
+name = "hub"
+description = "aurix-hub: the always-on front door of aurix-dbg (MCP, REST, Swagger, sessions, workers), its stdio wrapper and its installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "aurix-hub"
+path = "src/main.rs"
+
+[dependencies]
+api-spec.workspace = true
+serde_json.workspace = true
+serde = { version = "1", features = ["derive"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "signal"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+swagger-ui-dist = "5"
+toml = "0.8"
+sha2 = "0.10"
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_System_Console"] }

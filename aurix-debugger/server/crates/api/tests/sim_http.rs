@@ -97,6 +97,48 @@ impl Http {
     }
 }
 
+/// Named API clients own their breakpoints; `end_client` removes them; the control lease keeps
+/// other clients from controlling the target.
+fn clients_and_control(http: &Http) {
+    let a = [("X-Aurix-Client", "test-a")];
+    let b = [("X-Aurix-Client", "test-b")];
+    let (status, bp) = http.request("POST", "/api/v1/breakpoints", Some(json!({ "address": "0x80000100" })), &a);
+    assert_eq!(status, 200, "{bp}");
+    assert_eq!((bp["owner"].as_str(), bp["client"].as_str()), (Some("api"), Some("test-a")), "{bp}");
+    let id = bp["id"].as_str().unwrap().to_string();
+    let (status, bad) = http.request("POST", "/api/v1/breakpoints", Some(json!({ "address": "0x80000100" })), &[("X-Aurix-Client", "has space")]);
+    assert_eq!(status, 400, "{bad}");
+
+    // The lease: only a named client takes it; the others cannot control the target.
+    let (status, e) = http.request("POST", "/api/v1/control", Some(json!({})), &[]);
+    assert_eq!(status, 400, "{e}");
+    let (status, c) = http.request("POST", "/api/v1/control", Some(json!({ "ttl_s": 60 })), &a);
+    assert_eq!((status, c["holder"].as_str()), (200, Some("test-a")), "{c}");
+    assert_eq!(http.ok("GET", "/api/v1/info", None)["control"], "test-a");
+    let (status, e) = http.request("POST", "/api/v1/reset", Some(json!({ "mode": "halt" })), &b);
+    assert_eq!((status, e["code"].as_str()), (409, Some("busy")), "{e}");
+    assert!(e["message"].as_str().unwrap().contains("test-a"), "{e}");
+    let (status, e) = http.request("POST", "/api/v1/tcl", Some(json!({ "command": "targets" })), &[]);
+    assert_eq!(status, 409, "{e}");
+    let (status, _) = http.request("GET", "/api/v1/targets", None, &b);
+    assert_eq!(status, 200, "reading never waits for the lease");
+    let (status, e) = http.request("POST", "/api/v1/control", Some(json!({})), &b);
+    assert_eq!(status, 409, "{e}");
+    let (status, e) = http.request("DELETE", "/api/v1/control", None, &b);
+    assert_eq!(status, 409, "only the holder releases it: {e}");
+
+    // Ending the client removes its breakpoints and releases its lease.
+    let end = http.ok("POST", "/api/v1/clients/end", Some(json!({ "client": "test-a" })));
+    assert_eq!(end["removed"], json!([id]), "{end}");
+    assert_eq!(end["released_control"], true);
+    assert!(http.ok("GET", "/api/v1/breakpoints", None)["breakpoints"].as_array().unwrap().iter().all(|b| b["id"] != id.as_str()));
+    assert!(http.ok("GET", "/api/v1/info", None).get("control").is_none());
+    let (status, c) = http.request("POST", "/api/v1/control", Some(json!({})), &b);
+    assert_eq!(status, 200, "{c}");
+    let (status, c) = http.request("DELETE", "/api/v1/control", None, &b);
+    assert_eq!((status, c.get("holder")), (200, None), "{c}");
+}
+
 // --- A minimal TCF client (the VS Code side) -------------------------------------------------
 
 struct Tcf {
@@ -413,23 +455,12 @@ fn variables(http: &Http, vs: &mut Tcf) {
     assert_eq!((c["total"].as_u64(), c["type_name"].as_str()), (Some(0), Some("unsigned int")), "{c}");
     assert!(c["items"].as_array().unwrap().is_empty());
 
-    // MCP: the same operations are tools.
-    let v = [("MCP-Protocol-Version", "2025-06-18")];
-    let (_, tools) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/list" })), &v);
-    let tools = tools["result"]["tools"].as_array().unwrap().clone();
-    let tool = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap_or_else(|| panic!("no tool {n}")).clone();
-    assert_eq!(tool("evaluate")["annotations"]["readOnlyHint"], true);
-    assert_eq!(tool("write_variable")["annotations"]["readOnlyHint"], false);
-    assert_eq!(tool("info")["inputSchema"]["type"], "object");
-    let call = |id: u32, name: &str, args: Value| {
-        let (_, r) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": args } })), &v);
-        assert_eq!(r["result"]["isError"], false, "{r}");
-        r["result"]["structuredContent"].clone()
-    };
-    assert_eq!(call(11, "evaluate", json!({ "expression": "g_counter" }))["value"], 7);
-    assert_eq!(call(12, "list_globals", json!({ "query": "g_c*" }))["total"], 2);
-    assert_eq!(call(13, "write_variable", json!({ "expression": "g_boot", "value": 5 }))["value"], 5);
-    assert_eq!(call(14, "info", json!({}))["server"], "aurix-dbg");
+    // The operations by name, as the hub's MCP front door calls them.
+    let call = |name: &str, args: Value| http.ok("POST", &format!("/api/v1/ops/{name}"), Some(args));
+    assert_eq!(call("evaluate", json!({ "expression": "g_counter" }))["value"], 7);
+    assert_eq!(call("list_globals", json!({ "query": "g_c*" }))["total"], 2);
+    assert_eq!(call("write_variable", json!({ "expression": "g_boot", "value": 5 }))["value"], 5);
+    assert_eq!(call("info", json!({}))["server"], "aurix-dbg");
 
     // A DAQ point on the expression `list_globals` handed out samples the same variable.
     let mut ws = Ws::connect(http.0, &[]).unwrap();
@@ -439,6 +470,83 @@ fn variables(http: &Http, vs: &mut Tcf) {
     assert_eq!(cfg["points"][1]["address"], 0x100, "{cfg}");
     drop(ws);
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The launch steps: what a VS Code launch configuration does, for any client.
+fn launch_steps(http: &Http) {
+    let dir = std::env::temp_dir().join(format!("aurix-launch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("launch.asm");
+    std::fs::write(&app, ".org 0x300\ng_launch: .var 0\n").unwrap();
+    let me = [("X-Aurix-Client", "launcher")];
+    const CPU0: &str = "tc37x.cpu0";
+    let names = |st: &Value| st["steps"].as_array().unwrap().iter().map(|s| s["step"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+    // A failing step stops the launch and says which one failed.
+    let (status, st) = http.request("POST", "/api/v1/launch", Some(json!({ "flash": { "files": ["/no/such/image.hex"] } })), &me);
+    assert_eq!((status, st["phase"].as_str()), (200, Some("failed")), "{st}");
+    assert_eq!(names(&st), ["flash"], "{st}");
+    assert_eq!(st["steps"][0]["ok"], false);
+    assert!(st["error"].as_str().unwrap().starts_with("flash:"), "{st}");
+    assert_eq!(http.ok("GET", "/api/v1/info", None)["launch"], "failed");
+
+    // Symbols for one core, a breakpoint, a halting reset, all cores halted.
+    let req = json!({
+        "symbols": [{ "path": tcl_path(app.clone()), "cores": ["cpu0"] }],
+        "breakpoints": [{ "location": "0x80000200" }],
+        "reset": { "halt": true },
+        "stop_on_entry": true,
+    });
+    let (status, st) = http.request("POST", "/api/v1/launch", Some(req), &me);
+    assert_eq!((status, st["phase"].as_str()), (200, Some("ready")), "{st}");
+    assert_eq!(names(&st), ["symbols", "breakpoints", "reset", "stop_on_entry"], "{st}");
+    assert!(st["steps"][0]["detail"].as_str().unwrap().contains("tc37x.cpu0"), "{st}");
+    assert!(st["targets"].as_array().unwrap().iter().any(|t| t["name"] == CPU0 && t["state"] == "halted"), "{st}");
+    assert_eq!(http.ok("GET", "/api/v1/launch?timeout_s=0", None)["phase"], "ready");
+    assert_eq!(http.ok("GET", &format!("/api/v1/expressions?expression=g_launch&target={CPU0}"), None)["address"], 0x300);
+    let bps = http.ok("GET", "/api/v1/breakpoints", None);
+    assert!(bps["breakpoints"].as_array().unwrap().iter().any(|b| b["address"] == 0x8000_0200u32 && b["client"] == "launcher"), "{bps}");
+
+    // `relaunch` runs the same steps again.
+    let (status, st) = http.request("POST", "/api/v1/relaunch", Some(json!({})), &me);
+    assert_eq!((status, st["phase"].as_str()), (200, Some("ready")), "{st}");
+    assert_eq!(names(&st), ["symbols", "breakpoints", "reset", "stop_on_entry"], "{st}");
+
+    // `run_to` a location the target never reaches: the halted cores run, the wait times out and
+    // the temporary breakpoint is gone again.
+    let (status, st) = http.request("POST", "/api/v1/launch", Some(json!({ "run_to": "0x80000300", "reset": "none", "timeout_s": 1 })), &me);
+    assert_eq!((status, st["phase"].as_str()), (200, Some("failed")), "{st}");
+    assert_eq!(names(&st), ["run_to", "resume", "wait_run_to"], "{st}");
+    assert!(st["error"].as_str().unwrap().contains("0x80000300"), "{st}");
+    let bps = http.ok("GET", "/api/v1/breakpoints", None);
+    assert!(!bps["breakpoints"].as_array().unwrap().iter().any(|b| b["address"] == 0x8000_0300u32), "{bps}");
+
+    // Only one launch at a time; `wait_session` waits for it.
+    let (status, st) = http.request("POST", "/api/v1/launch", Some(json!({ "run_to": "0x80000300", "reset": "none", "timeout_s": 2, "wait_s": 0 })), &me);
+    assert_eq!((status, st["phase"].as_str()), (200, Some("starting")), "{st}");
+    let (status, e) = http.request("POST", "/api/v1/launch", Some(json!({})), &me);
+    assert_eq!((status, e["code"].as_str()), (409, Some("busy")), "{e}");
+    let st = http.ok("GET", "/api/v1/launch?timeout_s=10", None);
+    assert_eq!(st["phase"], "failed", "{st}");
+
+    http.ok("POST", "/api/v1/clients/end", Some(json!({ "client": "launcher" })));
+
+    // `run_to` resets into the software and stops where asked (the simulator executes linearly
+    // from the reset vector).
+    let (status, st) = http.request("POST", "/api/v1/launch", Some(json!({ "run_to": "0x80000300", "timeout_s": 10 })), &me);
+    assert_eq!((status, st["phase"].as_str()), (200, Some("ready")), "{st}");
+    assert_eq!(names(&st), ["run_to", "reset", "wait_run_to"], "{st}");
+    assert!(st["steps"][2]["detail"].as_str().unwrap().contains("halted at 0x80000300"), "{st}");
+    assert!(st["targets"].as_array().unwrap().iter().any(|t| t["pc"] == 0x8000_0300u32 && t["reason"] == "breakpoint"), "{st}");
+    let bps = http.ok("GET", "/api/v1/breakpoints", None);
+    assert!(!bps["breakpoints"].as_array().unwrap().iter().any(|b| b["address"] == 0x8000_0300u32), "the temporary breakpoint is gone: {bps}");
+
+    for t in http.ok("GET", "/api/v1/targets", None)["targets"].as_array().unwrap() {
+        if t["examined"] == true && t["state"] != "halted" {
+            http.ok("POST", &format!("/api/v1/targets/{}/halt", t["name"].as_str().unwrap()), None);
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -932,11 +1040,12 @@ fn rest_mcp_and_tcf_share_one_session() {
     let c0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
     const CPU0: &str = "tc37x.cpu0";
 
-    // Generated routes and the spec.
+    // Generated routes; the spec is the hub's.
     let targets = http.ok("GET", "/api/v1/targets", None);
     assert_eq!(targets["targets"][0]["name"], CPU0);
-    let spec = http.ok("GET", "/openapi.json", None);
-    assert_eq!(spec["paths"]["/api/v1/memory"]["get"]["operationId"], "read_memory");
+    assert_eq!(api_spec::gen::openapi()["paths"]["/api/v1/sessions/{session}/memory"]["get"]["operationId"], "read_memory");
+    let (status, _) = http.request("GET", "/openapi.json", None, &[]);
+    assert_eq!(status, 404);
     let (status, e) = http.request("GET", "/api/v1/targets/nope", None, &[]);
     assert_eq!((status, e["code"].as_str()), (404, Some("not_found")));
 
@@ -1043,29 +1152,17 @@ fn rest_mcp_and_tcf_share_one_session() {
     let (status, e) = waiter.join().unwrap();
     assert_eq!((status, e["code"].as_str()), (504, Some("timeout")));
 
-    // MCP: the tools are the operations.
-    let init = http.ok("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "1" } } })));
-    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
-    let (status, _) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })), &[]);
-    assert_eq!(status, 202);
-    let v = [("MCP-Protocol-Version", "2025-06-18")];
-    let (_, tools) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })), &v);
-    let tools = tools["result"]["tools"].as_array().unwrap().clone();
-    assert_eq!(tools.len(), api_spec::OPS.len());
-    let rm = tools.iter().find(|t| t["name"] == "read_memory").unwrap();
-    assert_eq!(rm["inputSchema"]["type"], "object");
-    assert!(rm["description"].as_str().unwrap().starts_with("Read memory"));
-    assert_eq!(rm["annotations"]["readOnlyHint"], true);
-    let (_, r) = http.request(
-        "POST",
-        "/mcp",
-        Some(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "read_memory", "arguments": { "address": "0x70000100", "length": 4 } } })),
-        &v,
-    );
-    assert_eq!(r["result"]["isError"], false, "{r}");
-    assert_eq!(r["result"]["structuredContent"]["data"], "deadbeef");
-    let (_, r) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "halt", "arguments": { "target": "nope" } } })), &v);
-    assert_eq!(r["result"]["isError"], true);
+    // Operations by name (the hub's MCP front door); MCP itself is the hub's.
+    let (status, r) = http.request("POST", "/api/v1/ops/read_memory", Some(json!({ "address": "0x70000100", "length": 4 })), &[]);
+    assert_eq!((status, r["data"].as_str()), (200, Some("deadbeef")), "{r}");
+    let (status, r) = http.request("POST", "/api/v1/ops/halt", Some(json!({ "target": "nope" })), &[]);
+    assert_eq!((status, r["code"].as_str()), (404, Some("not_found")), "{r}");
+    let (status, r) = http.request("POST", "/api/v1/ops/no_such_op", None, &[]);
+    assert_eq!(status, 404, "{r}");
+    let (status, _) = http.request("POST", "/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })), &[]);
+    assert_eq!(status, 404, "a worker serves no MCP");
+
+    clients_and_control(&http);
 
     // Tcl console.
     let out = http.ok("POST", "/api/v1/tcl", Some(json!({ "command": "targets" })));
@@ -1437,6 +1534,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     core_local_variables(&http, &mut vs);
     watchpoints(&http, &mut vs, &h, &sse);
     variables_of_real_elf(&http);
+    launch_steps(&http);
 
     // Web pages of other sites must not drive the debugger.
     let (status, _) = http.request("POST", &format!("/api/v1/targets/{CPU0}/halt"), None, &[("Origin", "http://evil.example")]);

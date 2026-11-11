@@ -37,7 +37,7 @@
           },
           "file": {
             "default": null,
-            "description": "Source file (with `line`); needs the symbols loaded by a VS Code debug session.",
+            "description": "Source file (with `line`); needs loaded symbols.",
             "type": [
               "string",
               "null"
@@ -55,7 +55,7 @@
           },
           "symbol": {
             "default": null,
-            "description": "Function name; needs the symbols loaded by a VS Code debug session.",
+            "description": "Function name; needs loaded symbols (`load_symbols`, `launch` or a VS Code debug session).",
             "type": [
               "string",
               "null"
@@ -467,6 +467,13 @@
               "null"
             ]
           },
+          "client": {
+            "description": "The API client that set it (`X-Aurix-Client`, e.g. `mcp:<id>`), for owner `api`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "condition": {
             "type": [
               "string",
@@ -627,6 +634,20 @@
         ],
         "type": "object"
       },
+      "ClientRef": {
+        "additionalProperties": false,
+        "description": "An API client, by the name it sends as `X-Aurix-Client`.",
+        "properties": {
+          "client": {
+            "description": "Client name (e.g. `mcp:3f2a...` for an MCP session of the hub, or a Python client's ID).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client"
+        ],
+        "type": "object"
+      },
       "CommandOutput": {
         "description": "Output of a command.",
         "properties": {
@@ -637,6 +658,122 @@
         },
         "required": [
           "output"
+        ],
+        "type": "object"
+      },
+      "ConnectSpec": {
+        "additionalProperties": false,
+        "description": "How a worker connects to its board: the OpenOCD-style command line.",
+        "properties": {
+          "adapter": {
+            "default": null,
+            "description": "Adapter driver (`tas_client`, `winidea`, `bluebox`, `sim`); default: what the scripts\nselect.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commands": {
+            "default": [],
+            "description": "Tcl commands (`-c`), run after the scripts.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "config_files": {
+            "default": [],
+            "description": "Configuration scripts (`-f`), searched in `search_dirs` and the bundled OpenOCD scripts.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "probe": {
+            "default": null,
+            "description": "Probe serial number, to refuse a second session on the same probe.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "search_dirs": {
+            "default": [],
+            "description": "Script search directories (`-s`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ControlInfo": {
+        "description": "The control lease of a session.",
+        "properties": {
+          "expires_in_s": {
+            "description": "Seconds until it expires.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "held_s": {
+            "description": "Seconds it has been held.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "holder": {
+            "description": "The client holding it; none: nobody, every client may control the target.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ControlRequest": {
+        "additionalProperties": false,
+        "description": "Control lease arguments.",
+        "properties": {
+          "ttl_s": {
+            "default": null,
+            "description": "Seconds until the lease expires unless it is taken again; default 600. Taking it again\nas its holder renews it.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "EndClientResult": {
+        "description": "What ending a client removed.",
+        "properties": {
+          "released_control": {
+            "description": "The client held the control lease, which is now free.",
+            "type": "boolean"
+          },
+          "removed": {
+            "description": "IDs of the breakpoints and watchpoints that were removed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "removed",
+          "released_control"
         ],
         "type": "object"
       },
@@ -858,6 +995,214 @@
         ],
         "type": "object"
       },
+      "HubEvent": {
+        "description": "Events of the hub (`/api/v1/events`); a session's own events are at\n`/api/v1/sessions/{session}/events`.",
+        "oneOf": [
+          {
+            "description": "A session was opened.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "opened_by": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_opened",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A session's worker is connected.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "session": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_running",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A session's launch steps finished.",
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/components/schemas/LaunchPhase"
+              },
+              "session": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_launched",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session",
+              "name",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A session was closed or its worker ended.",
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "session": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The client did not keep up: this many events were dropped.",
+            "properties": {
+              "missed": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "missed"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HubInfo": {
+        "description": "What is serving: the hub.",
+        "properties": {
+          "api_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "autostart": {
+            "description": "The hub is registered to start at logon.",
+            "type": "boolean"
+          },
+          "bind": {
+            "description": "The address it listens on.",
+            "type": "string"
+          },
+          "exe": {
+            "description": "The hub executable; hub and workers come from the same directory.",
+            "type": "string"
+          },
+          "log_file": {
+            "type": "string"
+          },
+          "mcp_clients": {
+            "description": "MCP sessions of clients.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "server": {
+            "description": "Always `aurix-hub`.",
+            "type": "string"
+          },
+          "sessions": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "token_required": {
+            "description": "Clients from other machines need the token.",
+            "type": "boolean"
+          },
+          "update_pending": {
+            "description": "A newer installation is waiting: the hub restarts from it once no session is open.",
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "version",
+          "api_version",
+          "pid",
+          "exe",
+          "port",
+          "bind",
+          "token_required",
+          "sessions",
+          "mcp_clients",
+          "update_pending",
+          "autostart",
+          "log_file"
+        ],
+        "type": "object"
+      },
       "ImageType": {
         "description": "Image file type.",
         "oneOf": [
@@ -936,6 +1281,294 @@
           "reachable"
         ],
         "type": "object"
+      },
+      "LaunchBreakpoint": {
+        "additionalProperties": false,
+        "description": "A breakpoint set at launch, before the target runs.",
+        "properties": {
+          "condition": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location": {
+            "description": "A function, `file:line` or address (`0x...`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      },
+      "LaunchFlash": {
+        "additionalProperties": false,
+        "description": "Images to flash at launch.",
+        "properties": {
+          "files": {
+            "description": "Image files, merged into one image (later files win where they overlap), as for\n`flash_write`.",
+            "items": {
+              "$ref": "#/components/schemas/FlashFile"
+            },
+            "type": "array"
+          },
+          "incremental": {
+            "default": null,
+            "description": "Skip sectors that already hold the image; default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "verify": {
+            "default": null,
+            "description": "Read the programmed sectors back and compare; default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "LaunchPhase": {
+        "description": "Where the launch steps of a session are.",
+        "oneOf": [
+          {
+            "const": "idle",
+            "description": "No launch has run.",
+            "type": "string"
+          },
+          {
+            "const": "starting",
+            "description": "The steps are running.",
+            "type": "string"
+          },
+          {
+            "const": "ready",
+            "description": "All steps succeeded.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "A step failed (see `error`).",
+            "type": "string"
+          }
+        ]
+      },
+      "LaunchRequest": {
+        "additionalProperties": false,
+        "description": "The launch steps of a session: what a VS Code launch configuration does.",
+        "properties": {
+          "breakpoints": {
+            "default": null,
+            "description": "Breakpoints, set before the target runs and owned by the calling client.",
+            "items": {
+              "$ref": "#/components/schemas/LaunchBreakpoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "flash": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LaunchFlash"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Images to program (VS Code `flashFiles` with `enableFlashing`)."
+          },
+          "orti": {
+            "default": null,
+            "description": "ORTI file (VS Code `ortiFile`), loaded after the symbols.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LaunchReset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Reset after the flash step; default: a running reset when flashing, none otherwise."
+          },
+          "run_to": {
+            "default": null,
+            "description": "Run to this location (a function, `file:line` or address) with a temporary breakpoint:\nthe target is reset halted, runs and the call waits until it halts there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stop_on_entry": {
+            "default": false,
+            "description": "Halt all cores after the steps (VS Code `stopOnEntry`).",
+            "type": "boolean"
+          },
+          "symbols": {
+            "default": null,
+            "description": "Symbol files (VS Code `symbolFiles`). Each core gets the files of its architecture\n(TriCore ELF files the TriCore cores, an ARM ELF the HSM, `.asm` the MCS channels, `.cdb`\nthe SCR) unless `cores` says otherwise.",
+            "items": {
+              "$ref": "#/components/schemas/LaunchSymbolFile"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "timeout_s": {
+            "default": null,
+            "description": "Seconds `run_to` waits for the breakpoint; default 30.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wait_s": {
+            "default": null,
+            "description": "Seconds the call waits for the steps; default 60. When they take longer it returns with\nphase `starting`; `wait_session` waits for the rest.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LaunchReset": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/LaunchResetKeyword",
+            "description": "`none`: no reset."
+          },
+          {
+            "$ref": "#/components/schemas/LaunchResetSpec",
+            "description": "A reset."
+          }
+        ],
+        "description": "How to reset at launch."
+      },
+      "LaunchResetKeyword": {
+        "description": "`none`: do not reset.",
+        "enum": [
+          "none"
+        ],
+        "type": "string"
+      },
+      "LaunchResetSpec": {
+        "additionalProperties": false,
+        "description": "A reset at launch.",
+        "properties": {
+          "halt": {
+            "default": false,
+            "description": "Halt at the reset vector instead of running (VS Code's `resetSuspend`).",
+            "type": "boolean"
+          },
+          "type": {
+            "default": null,
+            "description": "Reset type; `reset` (through the debug adapter) is the only one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LaunchStatus": {
+        "description": "The state of a session's launch.",
+        "properties": {
+          "error": {
+            "description": "Why the launch failed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "$ref": "#/components/schemas/LaunchPhase"
+          },
+          "steps": {
+            "description": "The steps done so far.",
+            "items": {
+              "$ref": "#/components/schemas/LaunchStep"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "description": "The targets after the steps (when `ready` or `failed`).",
+            "items": {
+              "$ref": "#/components/schemas/TargetInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "phase",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "LaunchStep": {
+        "description": "One launch step and how it went.",
+        "properties": {
+          "detail": {
+            "description": "What it did (e.g. the flash output, the files loaded) or why it failed.",
+            "type": "string"
+          },
+          "ms": {
+            "description": "Milliseconds it took.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "step": {
+            "description": "`connect`, `symbols`, `orti`, `flash`, `reset`, `breakpoints`, `run_to` or\n`stop_on_entry`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "ok",
+          "ms"
+        ],
+        "type": "object"
+      },
+      "LaunchSymbolFile": {
+        "anyOf": [
+          {
+            "description": "Path on the debug server's machine (a `file:` ID of an uploaded file works as well). A\ntrailing `@N` or `@N,M` names the TriCore cores that run it (see `load_symbols`).",
+            "type": "string"
+          },
+          {
+            "$ref": "#/components/schemas/PlacedSymbolFile",
+            "description": "A path limited to some cores."
+          }
+        ],
+        "description": "A symbol file of a launch."
       },
       "ListGlobalsRequest": {
         "additionalProperties": false,
@@ -1075,6 +1708,73 @@
       "NoArgs": {
         "additionalProperties": false,
         "description": "No arguments.",
+        "type": "object"
+      },
+      "OpenSessionRequest": {
+        "additionalProperties": false,
+        "description": "Opening a session.",
+        "properties": {
+          "acquire_control": {
+            "default": false,
+            "description": "Take the control lease for the calling client before the first step.",
+            "type": "boolean"
+          },
+          "close_on_error": {
+            "default": false,
+            "description": "Close the session when a step fails, instead of leaving it open to inspect.",
+            "type": "boolean"
+          },
+          "connect": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectSpec"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How to connect; overrides the profile's."
+          },
+          "launch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LaunchRequest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The launch steps; each field set here overrides the profile's."
+          },
+          "name": {
+            "default": null,
+            "description": "Session name; default: the profile name or `session-<n>`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "default": null,
+            "description": "Profile on the hub machine (`list_profiles`): connection and launch defaults that the\nother arguments override.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait_s": {
+            "default": null,
+            "description": "Seconds to wait for the worker and the launch steps; default 60. Longer starts return\nwith phase `starting`, `wait_session` waits for the rest.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "OsAttributeInfo": {
@@ -1430,6 +2130,88 @@
         ],
         "type": "object"
       },
+      "PlacedSymbolFile": {
+        "additionalProperties": false,
+        "description": "A symbol file limited to some cores.",
+        "properties": {
+          "cores": {
+            "default": null,
+            "description": "Cores (target names, core IDs, `*` and `?` as wildcards, e.g. `tc37x.cpu0`, `cpu0`,\n`mcs0.*`) the file applies to; default: every core of its architecture.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "ProfileInfo": {
+        "description": "A session setup stored on the hub machine.",
+        "properties": {
+          "connect": {
+            "$ref": "#/components/schemas/ConnectSpec"
+          },
+          "error": {
+            "description": "Why the file could not be read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "The profile file.",
+            "type": "string"
+          },
+          "launch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LaunchRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "file",
+          "connect"
+        ],
+        "type": "object"
+      },
+      "ProfileList": {
+        "description": "The profiles of the hub machine.",
+        "properties": {
+          "dir": {
+            "description": "The directory they are read from.",
+            "type": "string"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "dir",
+          "profiles"
+        ],
+        "type": "object"
+      },
       "ReadMemoryRequest": {
         "additionalProperties": false,
         "description": "Memory read arguments.",
@@ -1576,6 +2358,28 @@
         ],
         "type": "object"
       },
+      "RelaunchRequest": {
+        "additionalProperties": false,
+        "description": "Running the last launch again.",
+        "properties": {
+          "skip_flash": {
+            "default": false,
+            "description": "Leave the flash step out (only reset, breakpoints, `run_to`).",
+            "type": "boolean"
+          },
+          "wait_s": {
+            "default": null,
+            "description": "Seconds the call waits; see `launch`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ResetMode": {
         "description": "Reset mode.",
         "oneOf": [
@@ -1690,6 +2494,13 @@
             "description": "The adapter is connected to its probe.",
             "type": "boolean"
           },
+          "control": {
+            "description": "The client holding the control lease, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "core_lag_ms": {
             "description": "Milliseconds since the debug core last finished a job or a run-state poll. It stays below\nthe polling period while the server is responsive and grows while one long operation\n(flashing, a reset, a Tcl script) holds the core; the other operations wait for it.",
             "format": "uint64",
@@ -1700,6 +2511,17 @@
             "description": "At least one target is examined.",
             "type": "boolean"
           },
+          "launch": {
+            "$ref": "#/components/schemas/LaunchPhase",
+            "description": "Where the launch steps are (`idle` before the first `launch`)."
+          },
+          "log_file": {
+            "description": "The worker's log file, when it writes one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "pid": {
             "description": "Process ID of the server.",
             "format": "uint32",
@@ -1709,6 +2531,13 @@
           "server": {
             "description": "Always `aurix-dbg`.",
             "type": "string"
+          },
+          "session": {
+            "description": "The hub's session ID of this worker, when a hub started it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "symbol_files": {
             "description": "The loaded symbol files (by `load_symbols` or a VS Code debug session).",
@@ -1742,9 +2571,222 @@
           "targets",
           "symbol_files",
           "symbols_loading",
-          "core_lag_ms"
+          "core_lag_ms",
+          "launch"
         ],
         "type": "object"
+      },
+      "SessionInfo": {
+        "description": "A session: one board connection held by one worker process.",
+        "properties": {
+          "adapter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "age_s": {
+            "description": "Seconds since it was opened.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "base_url": {
+            "description": "Base URL of the session's operations on the hub.",
+            "type": "string"
+          },
+          "control": {
+            "description": "The client holding the control lease.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "description": "Why the worker ended, when `exited`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "launch": {
+            "$ref": "#/components/schemas/LaunchStatus",
+            "description": "The launch steps."
+          },
+          "log_file": {
+            "description": "The worker's log file.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "opened_by": {
+            "description": "The client that opened it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pid": {
+            "description": "Process ID of the worker.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "probe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "description": "Session ID.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          "targets": {
+            "default": [],
+            "description": "Targets of the board.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tcf_port": {
+            "description": "TCF port of the worker on the hub machine's loopback (VS Code connects there, or through\n`/api/v1/sessions/{session}/tcf` from another machine).",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "telnet_port": {
+            "description": "Port of the worker's Tcl console on the hub machine's loopback.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "name",
+          "state",
+          "base_url",
+          "launch",
+          "log_file",
+          "age_s"
+        ],
+        "type": "object"
+      },
+      "SessionList": {
+        "description": "The open sessions.",
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "SessionLog": {
+        "description": "The end of a session's log.",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "file",
+          "text"
+        ],
+        "type": "object"
+      },
+      "SessionLogRequest": {
+        "additionalProperties": false,
+        "description": "Reading a session's log.",
+        "properties": {
+          "lines": {
+            "default": null,
+            "description": "Lines from the end; default 200.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "session": {
+            "description": "Session ID or name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "type": "object"
+      },
+      "SessionRef": {
+        "additionalProperties": false,
+        "description": "A session by ID or name.",
+        "properties": {
+          "session": {
+            "description": "Session ID or name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "type": "object"
+      },
+      "SessionState": {
+        "description": "The state of a session.",
+        "oneOf": [
+          {
+            "const": "starting",
+            "description": "The worker is starting (running `init`).",
+            "type": "string"
+          },
+          {
+            "const": "running",
+            "description": "The worker is connected; see `launch` for the launch steps.",
+            "type": "string"
+          },
+          {
+            "const": "exited",
+            "description": "The worker exited or stopped answering.",
+            "type": "string"
+          }
+        ]
       },
       "SymbolChildren": {
         "description": "The members of a struct or union, or the elements of an array. Anything else has none.",
@@ -2244,6 +3286,23 @@
         ],
         "type": "object"
       },
+      "WaitSessionRequest": {
+        "additionalProperties": false,
+        "description": "Waiting for the launch steps.",
+        "properties": {
+          "timeout_s": {
+            "default": null,
+            "description": "Seconds to wait at most; default 60, 0 returns the status at once.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WatchAccess": {
         "description": "Access that triggers a watchpoint.",
         "oneOf": [
@@ -2273,6 +3332,13 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "client": {
+            "description": "The API client that set it (`X-Aurix-Client`, e.g. `mcp:<id>`), for owner `api`.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -2535,16 +3601,292 @@
     }
   },
   "info": {
-    "description": "Control and inspect AURIX targets through the aurix-dbg debug server: run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nThe API shares its session with the other frontends: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream.\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
+    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
     "title": "aurix-dbg API",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/v1/breakpoints": {
+    "/api/v1/events": {
+      "get": {
+        "description": "Events of the hub (`/api/v1/events`); a session's own events are at\n`/api/v1/sessions/{session}/events`.",
+        "operationId": "hub_events",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubEvent"
+                }
+              }
+            },
+            "description": "One SSE event per hub event"
+          }
+        },
+        "summary": "Event stream of the hub (server-sent events): sessions opened, launched, closed.",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/v1/hub": {
+      "get": {
+        "description": "What is serving: the hub, its version, address, sessions and whether an update waits.\n\nAlways answers at once.",
+        "operationId": "hub_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "What is serving: the hub, its version, address, sessions and whether an update waits.",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/profiles": {
+      "get": {
+        "description": "List the session profiles stored on the hub machine.",
+        "operationId": "list_profiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the session profiles stored on the hub machine.",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/sessions": {
+      "get": {
+        "description": "List the open sessions: one per board, each with its targets, ports, launch state and\ncontrol lease holder.",
+        "operationId": "list_sessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the open sessions: one per board, each with its targets, ports, launch state and control lease holder.",
+        "tags": [
+          "hub"
+        ]
+      },
+      "post": {
+        "description": "Open a session: start a worker for a board, connect, and run the launch steps.\n\nGive a `profile` (see `list_profiles`), or `connect` with the configuration scripts, or\nboth: the arguments override the profile. Without `launch` (and without a `[launch]` part\nin the profile) the session only connects. Opening a session connects to the hardware and\nmay reset the target.\n\nReturns once the steps are done or after `wait_s` seconds with phase `starting`;\n`wait_session` waits for the rest. A failed step leaves the session open to inspect,\nunless `close_on_error`.",
+        "operationId": "open_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Opening a session.",
+                "properties": {
+                  "acquire_control": {
+                    "default": false,
+                    "description": "Take the control lease for the calling client before the first step.",
+                    "type": "boolean"
+                  },
+                  "close_on_error": {
+                    "default": false,
+                    "description": "Close the session when a step fails, instead of leaving it open to inspect.",
+                    "type": "boolean"
+                  },
+                  "connect": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/ConnectSpec"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "How to connect; overrides the profile's."
+                  },
+                  "launch": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/LaunchRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "The launch steps; each field set here overrides the profile's."
+                  },
+                  "name": {
+                    "default": null,
+                    "description": "Session name; default: the profile name or `session-<n>`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "profile": {
+                    "default": null,
+                    "description": "Profile on the hub machine (`list_profiles`): connection and launch defaults that the\nother arguments override.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "wait_s": {
+                    "default": null,
+                    "description": "Seconds to wait for the worker and the launch steps; default 60. Longer starts return\nwith phase `starting`, `wait_session` waits for the rest.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Open a session: start a worker for a board, connect, and run the launch steps.",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}": {
+      "delete": {
+        "description": "Close a session: the worker disconnects from the board and ends. Connected VS Code\nsessions see the disconnect.",
+        "operationId": "close_session",
+        "parameters": [
+          {
+            "description": "Session ID or name.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Close a session: the worker disconnects from the board and ends.",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/breakpoints": {
       "get": {
         "description": "List the breakpoints of all clients (this API and VS Code).",
         "operationId": "list_breakpoints",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2575,6 +3917,17 @@
       "post": {
         "description": "Set a hardware breakpoint at an address, function or source line.\n\nThe breakpoint is shared with the connected debugger clients: VS Code reports its hits.\nA function or source line breakpoint needs the symbols a VS Code debug session loaded;\nbefore that it is pending (see `error`) and is planted when they are loaded.",
         "operationId": "add_breakpoint",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2614,7 +3967,7 @@
                   },
                   "file": {
                     "default": null,
-                    "description": "Source file (with `line`); needs the symbols loaded by a VS Code debug session.",
+                    "description": "Source file (with `line`); needs loaded symbols.",
                     "type": [
                       "string",
                       "null"
@@ -2632,7 +3985,7 @@
                   },
                   "symbol": {
                     "default": null,
-                    "description": "Function name; needs the symbols loaded by a VS Code debug session.",
+                    "description": "Function name; needs loaded symbols (`load_symbols`, `launch` or a VS Code debug session).",
                     "type": [
                       "string",
                       "null"
@@ -2684,11 +4037,20 @@
         ]
       }
     },
-    "/api/v1/breakpoints/{id}": {
+    "/api/v1/sessions/{session}/breakpoints/{id}": {
       "delete": {
         "description": "Remove a breakpoint (also one set in VS Code). Returns the remaining breakpoints.",
         "operationId": "remove_breakpoint",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Breakpoint ID.",
             "in": "path",
@@ -2727,10 +4089,193 @@
         ]
       }
     },
-    "/api/v1/events": {
+    "/api/v1/sessions/{session}/clients/end": {
+      "post": {
+        "description": "End an API client: remove its breakpoints and watchpoints and release its lease.\n\nThe hub calls it when an MCP session ends; a script can call it for itself when done.",
+        "operationId": "end_client",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "An API client, by the name it sends as `X-Aurix-Client`.",
+                "properties": {
+                  "client": {
+                    "description": "Client name (e.g. `mcp:3f2a...` for an MCP session of the hub, or a Python client's ID).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "client"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndClientResult"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "End an API client: remove its breakpoints and watchpoints and release its lease.",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/control": {
+      "delete": {
+        "description": "Release the control lease (only its holder can).",
+        "operationId": "release_control",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Release the control lease (only its holder can).",
+        "tags": [
+          "session"
+        ]
+      },
+      "post": {
+        "description": "Take the control lease of the session for the calling client.\n\nWhile another client holds it, run control (halt, resume, step, reset), register, memory\nand variable writes, flashing, launches and Tcl commands fail with `busy`; reading never\nwaits for it. Nobody holds it unless a client takes it. It expires after `ttl_s` unless\ntaken again, and is released when its client ends.",
+        "operationId": "acquire_control",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Control lease arguments.",
+                "properties": {
+                  "ttl_s": {
+                    "default": null,
+                    "description": "Seconds until the lease expires unless it is taken again; default 600. Taking it again\nas its holder renews it.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Take the control lease of the session for the calling client.",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/events": {
       "get": {
         "description": "An event of the stream `GET /api/v1/events` (server-sent events; the SSE event name is\n`type`). Includes the actions of all clients, e.g. a halt from VS Code.",
         "operationId": "events",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2743,17 +4288,26 @@
             "description": "One SSE event per target event"
           }
         },
-        "summary": "Event stream (server-sent events).",
+        "summary": "Event stream of a session (server-sent events).",
         "tags": [
           "events"
         ]
       }
     },
-    "/api/v1/expressions": {
+    "/api/v1/sessions/{session}/expressions": {
       "get": {
         "description": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.\n\nWorks while the cores run: there is no stack frame, so names are globals and statics, as in\na VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one\ncore the symbol file is assigned to; `address` is the system-bus address of that copy.\n\nFails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no\nsymbols are loaded; with `bad_request` for a variable in core-local RAM that needs an\n`@N` (the message lists the choices) or an `@N` that contradicts `target`; and with\n`memory` when the target memory cannot be read.",
         "operationId": "evaluate",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
             "in": "query",
@@ -2807,6 +4361,17 @@
       "put": {
         "description": "Write a variable by its expression and read it back.\n\nWorks while the cores run, like `write_memory`; a bit field is merged into its storage\nunit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM\nand the errors are as for `evaluate`.",
         "operationId": "write_variable",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2879,11 +4444,20 @@
         ]
       }
     },
-    "/api/v1/expressions/children": {
+    "/api/v1/sessions/{session}/expressions/children": {
       "get": {
         "description": "List the members of a struct or union, or the elements of an array, that an expression\nstands for, each with the expression that names it.\n\nReads no memory unless the expression itself needs to (`p->s`, `buf[i]`). Pointers are not\nfollowed: evaluate `*p` or `p->x` instead. Arrays are paged with `offset` and `limit`. The\nchildren of a `per_core` group are its copies, one per core, each named with its `@N`.",
         "operationId": "symbol_children",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned. It may end in `@N` as for `evaluate`; the children's\nexpressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are\nits copies, one per core.",
             "in": "query",
@@ -2965,10 +4539,21 @@
         ]
       }
     },
-    "/api/v1/flash/verify": {
+    "/api/v1/sessions/{session}/flash/verify": {
       "post": {
         "description": "Compare flash contents with an image file (`verify_image`).",
         "operationId": "flash_verify",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3018,10 +4603,21 @@
         ]
       }
     },
-    "/api/v1/flash/write": {
+    "/api/v1/sessions/{session}/flash/write": {
       "post": {
         "description": "Program image files into flash (`flash write_images`).\n\nNeeds a preceding halting reset (`reset` with mode `halt`): the flash is protected\notherwise. UCB data and data outside the flash banks (e.g. linked to RAM) in the images\nare skipped with a warning. Only the sectors the images touch are erased. Blocks the debug\nserver while it runs.",
         "operationId": "flash_write",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3089,11 +4685,20 @@
         ]
       }
     },
-    "/api/v1/globals": {
+    "/api/v1/sessions/{session}/globals": {
       "get": {
         "description": "List the global and static variables of the loaded symbols, filtered by a name pattern, one\npage at a time.\n\nThe search runs on the server and stays fast for an ELF with 10^5 globals. Each item says\nwhether a DAQ point can sample it and gives the expression to sample it by. A variable in\ncore-local RAM whose file is not assigned to exactly one core is a `per_core` group: its\nchildren are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ... Fails with\n`not_found` when no symbols are loaded (`load_symbols`).",
         "operationId": "list_globals",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Return at most this many (default 100, at most 10000).",
             "in": "query",
@@ -3179,10 +4784,21 @@
         ]
       }
     },
-    "/api/v1/info": {
+    "/api/v1/sessions/{session}/info": {
       "get": {
         "description": "What is serving: server version and API revision, process, probe connection, targets and\nloaded symbol files.\n\nAlways answers at once, whatever the state - no adapter, no examined target, no symbols, or\na core busy flashing: it reads what the core publishes and never queues a job on it. That\nmakes it the liveness probe; `core_lag_ms` says whether other operations would wait.",
         "operationId": "info",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3211,11 +4827,278 @@
         ]
       }
     },
-    "/api/v1/memory": {
+    "/api/v1/sessions/{session}/launch": {
+      "get": {
+        "description": "Wait until the launch steps are done and return how they went.",
+        "operationId": "wait_session",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Seconds to wait at most; default 60, 0 returns the status at once.",
+            "in": "query",
+            "name": "timeout_s",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchStatus"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Wait until the launch steps are done and return how they went.",
+        "tags": [
+          "session"
+        ]
+      },
+      "post": {
+        "description": "Run the launch steps on this session: what a VS Code launch configuration does.\n\nIn this order, each only when asked for: load the symbols, load the ORTI file, program\nthe flash (after a halting reset, as the flash needs it), reset, set the breakpoints, run\nto `run_to`, halt all cores (`stop_on_entry`). The steps stop at the first failure, which\nleaves the session open to inspect.\n\nReturns once the steps are done or after `wait_s` seconds with phase `starting`;\n`wait_session` waits for the rest. The session keeps the arguments for `relaunch`.",
+        "operationId": "launch",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The launch steps of a session: what a VS Code launch configuration does.",
+                "properties": {
+                  "breakpoints": {
+                    "default": null,
+                    "description": "Breakpoints, set before the target runs and owned by the calling client.",
+                    "items": {
+                      "$ref": "#/components/schemas/LaunchBreakpoint"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "flash": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/LaunchFlash"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Images to program (VS Code `flashFiles` with `enableFlashing`)."
+                  },
+                  "orti": {
+                    "default": null,
+                    "description": "ORTI file (VS Code `ortiFile`), loaded after the symbols.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "reset": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/LaunchReset"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Reset after the flash step; default: a running reset when flashing, none otherwise."
+                  },
+                  "run_to": {
+                    "default": null,
+                    "description": "Run to this location (a function, `file:line` or address) with a temporary breakpoint:\nthe target is reset halted, runs and the call waits until it halts there.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "stop_on_entry": {
+                    "default": false,
+                    "description": "Halt all cores after the steps (VS Code `stopOnEntry`).",
+                    "type": "boolean"
+                  },
+                  "symbols": {
+                    "default": null,
+                    "description": "Symbol files (VS Code `symbolFiles`). Each core gets the files of its architecture\n(TriCore ELF files the TriCore cores, an ARM ELF the HSM, `.asm` the MCS channels, `.cdb`\nthe SCR) unless `cores` says otherwise.",
+                    "items": {
+                      "$ref": "#/components/schemas/LaunchSymbolFile"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "timeout_s": {
+                    "default": null,
+                    "description": "Seconds `run_to` waits for the breakpoint; default 30.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "wait_s": {
+                    "default": null,
+                    "description": "Seconds the call waits for the steps; default 60. When they take longer it returns with\nphase `starting`; `wait_session` waits for the rest.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchStatus"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Run the launch steps on this session: what a VS Code launch configuration does.",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/log": {
+      "get": {
+        "description": "The end of a session's log (the worker's console output), e.g. to see why `init` failed.",
+        "operationId": "session_log",
+        "parameters": [
+          {
+            "description": "Lines from the end; default 200.",
+            "in": "query",
+            "name": "lines",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Session ID or name.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionLog"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The end of a session's log (the worker's console output), e.g.",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/memory": {
       "get": {
         "description": "Read memory (at most 65536 bytes per call).\n\nReads through the system bus, or with `target` as that core sees memory (HSM-private\nmemory, MCS program RAM). Some areas are protected at runtime (e.g. by the application's\nmemory protection) and fail with `memory`.",
         "operationId": "read_memory",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Start address.",
             "in": "query",
@@ -3290,6 +5173,17 @@
       "put": {
         "description": "Write memory (at most 65536 bytes per call). PFLASH is written with `flash_write`.\n\nConnected debugger clients (VS Code) are told to refresh their views.",
         "operationId": "write_memory",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3363,10 +5257,21 @@
         ]
       }
     },
-    "/api/v1/os": {
+    "/api/v1/sessions/{session}/os": {
       "get": {
         "description": "The loaded ORTI file: its object types, their attributes and how many cores it describes.\n\nObject types are whatever the file declared. A MICROSAR file adds `vs_ISR`, `vs_SPINLOCK`,\n`vs_EVENT` and `vs_OS_CONFIG` to the standard OSEK ones.",
         "operationId": "os",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3395,11 +5300,20 @@
         ]
       }
     },
-    "/api/v1/os/objects/{kind}": {
+    "/api/v1/sessions/{session}/os/objects/{kind}": {
       "get": {
         "description": "Read the objects of one ORTI type with their current attribute values.\n\nValues come from the target as it is now. Attributes that are constants (a stack address,\na `sizeof`) or literal text (an alarm action) cost no bus access.",
         "operationId": "os_objects",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "The ORTI object type, as `os` lists it: `TASK`, `STACK`, `vs_SPINLOCK`, ...",
             "in": "path",
@@ -3464,10 +5378,21 @@
         ]
       }
     },
-    "/api/v1/os/orti": {
+    "/api/v1/sessions/{session}/os/orti": {
       "post": {
         "description": "Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.\n\nEvery attribute is parsed as a C expression and resolved against the loaded symbols, so\n`load_symbols` (or a VS Code debug session) has to have run first. Attributes that cannot\nbe resolved are reported in `errors` and retried when they are first read, so loading\nbefore the board is powered is harmless.",
         "operationId": "load_orti",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3525,11 +5450,20 @@
         ]
       }
     },
-    "/api/v1/os/stacks": {
+    "/api/v1/sessions/{session}/os/stacks": {
       "get": {
         "description": "Measure stack coverage: how much of each OS stack has ever been used.\n\nThe OS fills every stack with a pattern at startup, so the high-water mark is the far end\nof the region that still holds it. Finding it means reading the untouched part of every\nstack, so this is on demand and never part of a refresh - prefer `names` to narrow it.\n\nA stack the debugger cannot read (a region the memory protection hides) is reported with\nits `error` rather than as unused.",
         "operationId": "os_stacks",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Measure only these stacks, by name. Default: every stack the ORTI file describes.",
             "in": "query",
@@ -3575,10 +5509,93 @@
         ]
       }
     },
-    "/api/v1/reset": {
+    "/api/v1/sessions/{session}/relaunch": {
+      "post": {
+        "description": "Run the last launch again, e.g. after a rebuild: flash (incremental), reset, breakpoints,\n`run_to`.",
+        "operationId": "relaunch",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Running the last launch again.",
+                "properties": {
+                  "skip_flash": {
+                    "default": false,
+                    "description": "Leave the flash step out (only reset, breakpoints, `run_to`).",
+                    "type": "boolean"
+                  },
+                  "wait_s": {
+                    "default": null,
+                    "description": "Seconds the call waits; see `launch`.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchStatus"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Run the last launch again, e.g.",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reset": {
       "post": {
         "description": "Reset the device through the debug adapter and run the reset handlers of the\nconfiguration (OpenOCD `reset run|halt|init`).\n\nFlash programming needs a preceding halting reset. Fails with `busy` while VS Code does\na source-level step.",
         "operationId": "reset",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3633,10 +5650,21 @@
         ]
       }
     },
-    "/api/v1/symbols": {
+    "/api/v1/sessions/{session}/symbols": {
       "get": {
         "description": "The symbol files loaded per target (by this API or by a VS Code debug session).",
         "operationId": "symbols",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3667,6 +5695,17 @@
       "post": {
         "description": "Load symbol files (ELF) for the targets, as a VS Code debug session does.\n\nMakes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a\nDAQ session work without VS Code. Breakpoints that were pending are planted.\n\nThere is one symbol set per core, and the last writer wins: a VS Code debug session\nstarted afterwards replaces what was loaded here, and the other way round. `path@N`\nassigns a file to the cores that run it, for its variables in core-local RAM.",
         "operationId": "load_symbols",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3730,10 +5769,21 @@
         ]
       }
     },
-    "/api/v1/targets": {
+    "/api/v1/sessions/{session}/targets": {
       "get": {
         "description": "List the targets (cores) with their run state.",
         "operationId": "targets",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3762,11 +5812,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}": {
+    "/api/v1/sessions/{session}/targets/{target}": {
       "get": {
         "description": "Get the run state of a target (and its PC when halted).",
         "operationId": "state",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
             "in": "path",
@@ -3805,11 +5864,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}/halt": {
+    "/api/v1/sessions/{session}/targets/{target}/halt": {
       "post": {
         "description": "Halt a target. Returns once it is halted (up to one second).\n\nDoes nothing if it is already halted. A source-level step from VS Code running on it is\ncancelled, like the VS Code pause button does.",
         "operationId": "halt",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
             "in": "path",
@@ -3848,11 +5916,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}/registers": {
+    "/api/v1/sessions/{session}/targets/{target}/registers": {
       "get": {
         "description": "Read the registers of a target (the core registers need a halted target).",
         "operationId": "read_registers",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Only this group (default `core`).",
             "in": "query",
@@ -3908,11 +5985,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}/registers/{name}": {
+    "/api/v1/sessions/{session}/targets/{target}/registers/{name}": {
       "get": {
         "description": "Read one register.",
         "operationId": "read_register",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Register name (e.g. `pc`, `d4`, `a10`, `psw`; aliases like `sp` work).",
             "in": "path",
@@ -3963,6 +6049,15 @@
         "description": "Write one register. Core registers need a halted target.\n\nConnected debugger clients (VS Code) are told to refresh their views.",
         "operationId": "write_register",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Register name.",
             "in": "path",
@@ -4041,11 +6136,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}/resume": {
+    "/api/v1/sessions/{session}/targets/{target}/resume": {
       "post": {
         "description": "Resume a halted target, optionally at another address.\n\nFails with `busy` while VS Code does a source-level step on it.",
         "operationId": "resume",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Target name or index.",
             "in": "path",
@@ -4120,11 +6224,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}/step": {
+    "/api/v1/sessions/{session}/targets/{target}/step": {
       "post": {
         "description": "Execute one instruction on a halted target.\n\nFails with `busy` while VS Code does a source-level step on it.",
         "operationId": "step",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Target name (e.g. `tc37x.cpu0`) or index, as listed by `targets`.",
             "in": "path",
@@ -4163,11 +6276,20 @@
         ]
       }
     },
-    "/api/v1/targets/{target}/wait": {
+    "/api/v1/sessions/{session}/targets/{target}/wait": {
       "get": {
         "description": "Wait until a target is halted (or running), e.g. after `resume` until a breakpoint hits.\n\nFails with `timeout` if the state is not reached in time. Other clients are not blocked\nwhile waiting.",
         "operationId": "wait_state",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "State to wait for (default `halted`).",
             "in": "query",
@@ -4238,10 +6360,21 @@
         ]
       }
     },
-    "/api/v1/tcl": {
+    "/api/v1/sessions/{session}/tcl": {
       "post": {
         "description": "Run a command of the OpenOCD-compatible Tcl console (like the telnet console).",
         "operationId": "tcl",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -4291,11 +6424,20 @@
         ]
       }
     },
-    "/api/v1/watchpoints": {
+    "/api/v1/sessions/{session}/watchpoints": {
       "delete": {
         "description": "Remove a watchpoint (also one set in VS Code or the Tcl console). Returns the remaining\nwatchpoints.",
         "operationId": "remove_watchpoint",
         "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "description": "Data address (with `target`): removes the watchpoint planted there, on all its targets.",
             "in": "query",
@@ -4380,6 +6522,17 @@
       "get": {
         "description": "List the watchpoints (data breakpoints) of all clients: the API's, VS Code's and those of\nthe Tcl console.",
         "operationId": "list_watchpoints",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -4410,6 +6563,17 @@
       "post": {
         "description": "Set a watchpoint on an address or a variable (`expression`): the target halts after an\naccess to it, with reason `watchpoint` and the PC at the instruction after the access.\n\nA watchpoint wider than one byte takes two of the 8 hardware events of a core (shared with\nbreakpoints) and catches every access that starts inside it; an access that starts below\nit and reaches into it is not caught. It shows up in VS Code's Breakpoints view.",
         "operationId": "add_watchpoint",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -4523,7 +6687,7 @@
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:8080"
+      "url": "http://127.0.0.1:3001"
     }
   ]
 }

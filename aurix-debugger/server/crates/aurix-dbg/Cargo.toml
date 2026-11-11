@@ -14,5 +14,13 @@ api = { workspace = true, optional = true }
 
 [features]
 default = ["api"]
-# REST / MCP / Swagger server (`api_port`, default 8080).
+# REST API and DAQ WebSocket (`api_port`) and the registration with the hub.
 api = ["dep:api"]
+
+[dev-dependencies]
+# End-to-end tests of the hub with real worker processes (tests/hub.rs).
+hub.workspace = true
+api-spec.workspace = true
+openocd-tcl.workspace = true
+serde_json.workspace = true
+tungstenite = "0.29"

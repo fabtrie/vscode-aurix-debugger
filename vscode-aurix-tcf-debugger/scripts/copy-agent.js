@@ -1,10 +1,12 @@
-// Copies aurix-dbg.exe and OpenOCD's Tcl scripts into bin/ so they are packaged
-// with the extension.
+// Copies aurix-hub.exe, aurix-dbg.exe and OpenOCD's Tcl scripts into bin/ so they are packaged
+// with the extension. The extension installs them from there to %LOCALAPPDATA%urix-dbg
+// (aurix-hub install).
 //
 // aurix-dbg.exe, first match wins:
 //   1. the environment variable AURIX_DBG_EXE
 //   2. ../aurix-debugger/server/target/release/aurix-dbg.exe
 //   3. ../aurix-debugger/server/target/debug/aurix-dbg.exe
+// aurix-hub.exe: AURIX_HUB_EXE, else next to the aurix-dbg.exe that was found.
 //
 // OpenOCD scripts (tcl/, COPYING, LICENSES/) -> bin/openocd/, first match wins:
 //   1. the environment variable AURIX_OPENOCD_DIR (a folder containing tcl/)
@@ -33,6 +35,16 @@ function main() {
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.copyFileSync(src, dest);
 	console.log(`Copied ${src} -> ${dest}`);
+
+	const hubSrc = process.env.AURIX_HUB_EXE ? path.resolve(process.env.AURIX_HUB_EXE) : path.join(path.dirname(src), 'aurix-hub.exe');
+	if (!fs.existsSync(hubSrc)) {
+		console.error(`aurix-hub.exe not found at ${hubSrc}
+Build the server (cargo build -p hub) or set AURIX_HUB_EXE.`);
+		process.exit(1);
+	}
+	const hubDest = path.join(projectRoot, 'bin', 'aurix-hub.exe');
+	fs.copyFileSync(hubSrc, hubDest);
+	console.log(`Copied ${hubSrc} -> ${hubDest}`);
 
 	const openocdSrc = process.env.AURIX_OPENOCD_DIR
 		? path.resolve(process.env.AURIX_OPENOCD_DIR)

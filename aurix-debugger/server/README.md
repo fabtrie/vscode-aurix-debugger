@@ -24,71 +24,158 @@ Stop a running `aurix-dbg.exe` before `cargo build`, because Windows locks the e
 
 ## Run
 
-The command-line options are the same as OpenOCD's:
+Two programs:
+
+- **`aurix-hub`** - the always-on front door, one per machine, on port **3001**: MCP, REST and Swagger UI for every client (Claude, VS Code, scripts), and the sessions. It never touches a probe.
+- **`aurix-dbg`** - the worker of one board (one *session*): one Jim interpreter, one set of cfg scripts, one probe. The hub starts it, it listens on free loopback ports and registers them with the hub. A worker that crashes or reset-storms takes only its own board down; a hub that restarts keeps the workers, which register again.
+
+```text
+Claude (http) ─────────────────┐
+Claude (stdio) ─ aurix-hub stdio ┤   http://127.0.0.1:3001  (token for other machines)
+Python / curl / aurix-hub tcl ───┤
+VS Code extension ───────────────┤
+                                 ▼
+                         aurix-hub ── spawn, proxy ──► aurix-dbg (board X)   aurix-dbg (board Y)
+                                                        ▲ TCF: VS Code (direct, or relayed by the hub)
+```
+
+Start the hub (the extension and `aurix-hub stdio` start it when needed; `aurix-hub install --autostart` starts it at logon, see [Installation](#installation)):
 
 ```powershell
-cd aurix-debugger
+.\server\target\debug\aurix-hub.exe serve --foreground     # Ctrl-C stops it
+```
+
+Open a session from a **profile** (`%APPDATA%\aurix-dbg\profiles\<name>.toml`) or from cfg scripts, through MCP (`open_session`), REST or Python:
+
+```toml
+# %APPDATA%\aurix-dbg\profiles\tc375-lite.toml
+[connect]
+config_files = ["board/infineon/kit_a2g_tc375_lite.cfg", "C:/work/my_board.cfg"]
+commands = []          # -c
+search_dirs = []       # -s; the bundled OpenOCD scripts are always searched
+adapter = "tas_client" # optional: tas_client, winidea, bluebox, sim
+probe = ""             # optional: serial number; a second session on it is refused
+
+[launch]               # optional: run on open_session, like a VS Code launch
+symbols = ["C:/work/build/app.elf"]
+flash = { files = ["C:/work/build/app.hex"] }
+reset = { halt = false }
+run_to = "main"
+```
+
+```powershell
+curl -X POST http://127.0.0.1:3001/api/v1/sessions -H "Content-Type: application/json" -d '{\"profile\": \"tc375-lite\"}'
+.\server\target\debug\aurix-hub.exe tcl targets "reg pc" "mdw 0x70013954 4"   # the Tcl console of the only session
+```
+
+The worker takes the same options as OpenOCD and can still be run by hand for development (it then registers with nothing):
+
+```powershell
 .\server\target\debug\aurix-dbg.exe -s server/target/openocd-tcl/tcl `
     -f board/infineon/kit_a2g_tc375_lite.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3] [-l log.txt]
 ```
-
-`server/target/openocd-tcl/tcl` holds OpenOCD's board/target scripts, fetched by `cargo build`. The VS Code extension ships the same folder and passes it as a search directory itself.
 
 | Option | Meaning |
 |---|---|
 | `-f` / `-c` / `-s` | Script, command, search directory; handled in order, like OpenOCD. `init` runs automatically at the end. |
 | `-d<n>`, `-l <file>` | Debug level 0..3, log file. |
 | `--adapter sim` | Built-in TC37x simulator instead of TAS. Used by the tests. |
+| `--hub <url> --session <id>` | Set by the hub: register with it. |
 
 Ports:
-- **Telnet Tcl console:** 4444 (`telnet_port`).
-- **TCF:** 1534 (`tcf_port`).
-- **REST / MCP / Swagger / DAQ:** 8080 (`api_port`, `api_port disabled` turns it off). See [REST, MCP and Python API](#rest-mcp-and-python-api).
-- **Bind address:** 127.0.0.1 by default (`bindto`).
+- **Hub:** 3001 (`port` in `hub.toml`). Binds to 127.0.0.1 unless `hub.toml` says otherwise; see [Remote use](#remote-use).
+- **Worker:** `telnet_port`, `tcf_port` and `api_port` default to 0: free ports on 127.0.0.1, shown in the worker log and in `list_sessions` (`tcf_port`, `telnet_port`). A worker of the hub always binds to loopback.
 
-Send console commands from a script:
-
-```powershell
-aurix-dbg.exe --remote 4444 targets "reg pc" "mdw 0x70013954 4"
-```
+`aurix-hub` commands: `serve`, `stdio`, `tcl`, `install`, `uninstall`, `stop [--now]`, `status`; `aurix-hub --help` explains them. Logs: `%LOCALAPPDATA%\aurix-dbg\logs\` (`hub.log`, `session-<id>.log` per worker, `stdio.log`).
 
 ## VS Code
 
-Use a launch configuration of type `aurixdbg`; the extension's [README](../../vscode-aurix-tcf-debugger/README.md#launch-configuration) has an example.
+Use a launch configuration of type `aurixdbg`; the extension's [README](../../vscode-aurix-tcf-debugger/README.md#launch-configuration) has an example. The extension opens the session through the hub (starting the hub when needed) and connects to the worker's TCF port.
 
 | Attribute | Meaning |
 |---|---|
-| `autoStartAgent`, `agentPath` | Start `aurix-dbg.exe`, or reuse one that is already listening. |
-| `searchDirs`, `configFiles`, `configCommands` | Passed as `-s`, `-f`, `-c`. |
-| `program` | ELF with debug information (symbols, source breakpoints, variables). |
-| `enableFlashing`, `flashFile` | Run `program {flashFile} preverify verify reset` before the session. `flashFile` defaults to `program`. |
+| `profile` | A hub profile; the attributes below override its parts. |
+| `searchDirs`, `configFiles`, `configCommands`, `adapter`, `probe` | The session's `connect`: passed to the worker as `-s`, `-f`, `-c`, `--adapter`. |
+| `session` | Attach to an open session (ID or name, e.g. one Claude opened) instead of opening one. |
+| `enableFlashing`, `flashFiles`, `verifyFlash`, `resetType`, `resetSuspend`, `runTo` | The launch steps the hub runs before the debugger attaches (flash, reset, run to). |
+| `sessionLifetime` | `close` (default): close the session when debugging ends, if this debug session opened it; `keep`: leave it open. |
+| `hub`, `hubToken` | Another hub (default: the `aurix-debugger.hub.url` setting, `http://127.0.0.1:3001`). TCF then goes through the hub's WebSocket relay. |
 
 Debug console: `monitor <tcl command>`, for example `monitor tc3xx_status` or `monitor sbc_status`.
 
+## Installation
+
+The extension ships `aurix-hub.exe`, `aurix-dbg.exe` and OpenOCD's scripts. Since its own directory changes with every update, `aurix-hub install` copies them to a fixed per-user location, which the logon start and MCP configurations name:
+
+```text
+%LOCALAPPDATA%\aurix-dbg\versions\<version>-<hash>\   the files of one build
+%LOCALAPPDATA%\aurix-dbg\current                      junction to the installed build
+%APPDATA%\aurix-dbg\hub.toml, profiles\              settings (never touched by install/uninstall)
+```
+
+- The extension runs `aurix-hub install` when it starts (setting `aurix-debugger.hub.install`, default `auto`); it copies only when the bundled build differs, never downgrades, and needs no admin rights (a junction, not a symlink).
+- **Logon start:** command *AURIX: Start Debugger Hub at Logon* (`aurix-hub install --autostart`) writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\AurixDbgHub` = `"%LOCALAPPDATA%\aurix-dbg\current\aurix-hub.exe" serve` and starts the hub; *Don't Start Debugger Hub at Logon* removes it. The `Run` key starts the hub while the user is logged on.
+- **Updates:** installing a newer build moves `current`; the running hub restarts from it as soon as no session is open (*AURIX: Restart Debugger Hub Now* applies it at once and closes the sessions). Hub and workers always come from the same build.
+- **Uninstall:** the extension's `vscode:uninstall` hook runs `aurix-hub uninstall`: it stops the hub, removes the logon start, and removes the files unless another VS Code profile still uses them (`installs.json`).
+- Without VS Code (e.g. the probe PC): copy the `extension\bin` folder of the `.vsix` (a zip) and run `aurix-hub.exe install --autostart`. With VS Code Remote-SSH or Remote-Tunnels the extension runs on the remote machine (`extensionKind: workspace`), so the commands install there.
+
+**Claude:** *AURIX: Add Debugger MCP Server to Claude Config* writes the workspace `.mcp.json`, either
+
+```json
+{ "mcpServers": { "aurix-debugger": { "command": "C:\\Users\\<you>\\AppData\\Local\\aurix-dbg\\current\\aurix-hub.exe", "args": ["stdio"] } } }
+```
+
+(`aurix-hub stdio`: Claude starts the wrapper, the wrapper starts the hub when none answers and ends its MCP session when Claude exits) or `{ "type": "http", "url": "http://127.0.0.1:3001/mcp" }` when the hub runs anyway.
+
+## Remote use
+
+The hub can serve other machines (Claude, Python, VS Code on a laptop; the probes on a lab PC):
+
+```toml
+# %APPDATA%\aurix-dbg\hub.toml on the lab PC (aurix-hub install --remote creates it)
+bind = "0.0.0.0"
+port = 3001
+token = "<random>"
+allow_tcl = true    # false: other machines may not run Tcl commands
+```
+
+- Clients that are not on loopback send `Authorization: Bearer <token>` on every route except `/health`; a non-loopback `bind` without a token is refused at startup. Worker registration (`/internal/*`) is for the hub machine only. Workers listen on loopback only, so the hub is the one exposed port.
+- **Tcl is shell access:** Jim is built with `exec` and `file`, so the token is as good as a login on that PC. `allow_tcl = false` refuses the `tcl` operation (and `monitor`) from other machines.
+- **Files:** paths in operations are on the hub machine. `POST /api/v1/files?name=app.elf` (raw body) stores a file and returns its ID `file:<sha256>/app.elf`, which works wherever a path does; the hub replaces IDs in every request. The extension uploads `configFiles` and `flashFiles` to a remote hub by itself; Python has `Client.upload`.
+- **VS Code:** TCF has no authentication, so the hub relays it over an authenticated WebSocket (`/api/v1/sessions/{session}/tcf`); the extension opens a local port for it.
+- **MCP:** `claude mcp add --transport http aurix http://<lab-pc>:3001/mcp --header "Authorization: Bearer <token>"`, or `aurix-hub stdio --url http://<lab-pc>:3001 --token <token>`.
+
 ## REST, MCP and Python API
 
-One HTTP port (`api_port`, default 8080) serves:
+The hub's port (3001) serves:
 
 | Path | Content |
 |---|---|
-| `/api/v1/...` | REST API: targets, run control, registers, memory, [variables by name](#variables-by-name), breakpoints, watchpoints, flash, Tcl. |
-| `/api/v1/info` | Liveness probe: server version, API revision, process ID, probe connection, targets, loaded symbol files. Never waits for the core. |
-| `/api/v1/os/...` | [AUTOSAR OS awareness](#autosar-os-awareness-orti): the objects an ORTI file describes, read from the running target. |
-| `/docs` | Swagger UI; `/openapi.json` is the OpenAPI 3.1 document. |
-| `/mcp` | MCP server (Streamable HTTP). Register it with `claude mcp add --transport http aurix http://127.0.0.1:8080/mcp`. |
-| `/api/v1/events` | Server-sent events: halts, resumes, resets, breakpoint changes and log lines of all clients. |
-| `/api/v1/daq` | WebSocket: [periodic sampling](#periodic-sampling-daq) of variables, each at its own rate. |
+| `/mcp` | MCP (Streamable HTTP, JSON responses). Register it with `claude mcp add --transport http aurix http://127.0.0.1:3001/mcp`. |
+| `/api/v1/hub`, `/api/v1/sessions`, `/api/v1/profiles` | The hub: `hub_info`, `list_sessions`, `open_session` (POST), `close_session` (DELETE `.../sessions/{session}`), `session_log`, `list_profiles`. |
+| `/api/v1/sessions/{session}/...` | A session's operations (ID or name): targets, run control, registers, memory, [variables by name](#variables-by-name), breakpoints, watchpoints, flash, Tcl, `launch`, the control lease. `/api/v1/session/...` is the only open session (409 with the list when several are open). |
+| `/api/v1/sessions/{session}/info` | Liveness probe of the worker: version, API revision, process ID, probe connection, targets, loaded symbol files, launch phase, lease holder. Never waits for the core. |
+| `/api/v1/sessions/{session}/os/...` | [AUTOSAR OS awareness](#autosar-os-awareness-orti): the objects an ORTI file describes, read from the running target. |
+| `/api/v1/sessions/{session}/events`, `/api/v1/events` | Server-sent events: a session's halts, resumes, resets, breakpoint changes and log lines; the hub's sessions opened, launched and closed. |
+| `/api/v1/sessions/{session}/daq` | WebSocket: [periodic sampling](#periodic-sampling-daq) of variables, each at its own rate. |
+| `/api/v1/sessions/{session}/tcf` | WebSocket: the worker's TCF connection, for a VS Code on another machine. |
+| `/api/v1/files` | Uploads (`file:` IDs, see [Remote use](#remote-use)). |
+| `/docs`, `/openapi.json` | Swagger UI and the OpenAPI 3.1 document. |
 
-**One source of truth.** The operations are declared once in [crates/api-spec/src/ops.rs](crates/api-spec/src/ops.rs), with their request and response types in [types.rs](crates/api-spec/src/types.rs). The `///` comments there are the documentation of all outputs. `cargo build` generates the rest from them:
-- the REST routes, the MCP tools and their JSON schemas, and the `DebuggerApi` trait that [crates/api](crates/api) implements;
+**Sessions.** `open_session` starts a worker for a board from a profile and/or `connect` (cfg scripts, commands, search directories, adapter) and runs the **launch steps** when asked: symbols, ORTI, flash (after `reset init`), breakpoints, reset, `run_to`, `stop_on_entry` - what a VS Code launch configuration does. It returns once the steps are done or after `wait_s` with phase `starting`; `wait_session` waits for the rest, `relaunch` runs the same steps again after a rebuild, and a failed step leaves the session open to inspect (its log: `session_log`). Over MCP, session operations take a `session` argument, optional while one session is open; with none or several open, the result is guidance (the profiles or the sessions to choose from) rather than an error, so the model can retry.
+
+**One source of truth.** The operations are declared once: the session operations in [crates/api-spec/src/ops.rs](crates/api-spec/src/ops.rs), the hub's in [hub_ops.rs](crates/api-spec/src/hub_ops.rs), with their request and response types in [types.rs](crates/api-spec/src/types.rs). The `///` comments there are the documentation of all outputs. `cargo build` generates the rest from them:
+- the REST routes, the MCP tools and their JSON schemas, and the `DebuggerApi` / `HubApi` traits that [crates/api](crates/api) and [crates/hub](crates/hub) implement;
 - [openapi/openapi.json](openapi/openapi.json);
 - the Python client's [_generated.py](../python/aurix_dbg/_generated.py).
 
-The generated files are checked in, and a file is only written when its content changes. To add an operation, add a line to `ops.rs` and implement the new trait method; the compiler reports what is missing.
+The generated files are checked in, and a file is only written when its content changes. To add an operation, add a line to `ops.rs` and implement the new trait method; the compiler reports what is missing. A worker serves the session operations at its own `/api/v1/...` routes and by name at `/api/v1/ops/{op}` (what the hub's MCP front door calls); MCP, Swagger and the OpenAPI document are the hub's.
 
 DAQ is deliberately *not* an operation: a streaming session is of no use as an MCP tool and would only hold a socket open, and putting its configuration on the WebSocket is what ties a session's lifetime to its connection. Its protocol is therefore hand-written and specified below instead of in the OpenAPI document.
 
-**Shared session.** REST, MCP and VS Code (TCF) share one session:
+**Clients.** Every client names itself with the header `X-Aurix-Client` (an MCP session is `mcp:<id>`, a VS Code debug session `vscode:<id>`, a Python client `py:<id>`). The client owns the breakpoints and watchpoints it sets (`list_breakpoints` shows it as `client`); `end_client` removes them, and the hub calls it when an MCP session ends (`DELETE /mcp`, or `mcp_idle_min`, default 30, without a request). A client that needs the target to itself takes the **control lease** (`acquire_control`): while another client holds it, run control, register/memory/variable writes, flashing, launches and Tcl fail with `busy`; reading never waits for it, it expires after `ttl_s`, and nobody holds it unless a client takes it.
+
+**Shared session.** All clients of a session share it - REST, MCP and VS Code (TCF):
 - Run control goes through the same core operations and events. A halt from the API shows up in VS Code, and a resume in VS Code shows up in `wait_state` and on the event stream.
 - Breakpoints live in one table. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
 - Watchpoints (data breakpoints) live in the same table: VS Code's data breakpoints and the API's watchpoints share hardware the same way. `list_watchpoints` also shows the Tcl console's (`wp`), with owner `console`; those are only on the core.
@@ -100,17 +187,19 @@ DAQ is deliberately *not* an operation: a streaming session is of no use as an M
 
 **Performance.** Every operation is one short job on the core thread, except `info`, which is none: it reads a status the core thread publishes after every job and poll, so it answers while a flash job or a long Tcl script holds the core. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. The core loop always sleeps: it never busy-waits for a DAQ deadline, and the sampler corrects its own rate instead, so 1 kHz costs ~8 % of a core. A point that is due when the run-state poll runs is read by the poll's own batch instead of costing a second round trip. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
 
-**Security.** There is no authentication. The port binds to `bindto` (localhost by default). Requests with an `Origin` header from other sites are rejected, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it. The core thread is never busy-waited, so the worst case is probe traffic and one batch of added latency, not a pinned CPU.
+**Security.** On this machine there is no authentication; other machines need the hub's token (see [Remote use](#remote-use)). Workers bind to loopback only. Requests with an `Origin` header from other sites are rejected by the hub and the workers, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it. The core thread is never busy-waited, so the worst case is probe traffic and one batch of added latency, not a pinned CPU.
 
 Python ([python/](../python)): `pip install -e python`, then:
 
 ```python
 from aurix_dbg import Client
-dbg = Client("http://127.0.0.1:8080")
+dbg = Client()                          # http://127.0.0.1:3001; Client(url, session=..., token=...)
+dbg.open_session(profile="tc375-lite")  # or connect={"config_files": [...]}, launch={...}
 dbg.halt("tc37x.cpu0")
 print(hex(dbg.read_register("tc37x.cpu0", "pc").value))
 data = dbg.read_bytes(0x70000000, 256)   # any length, split into 64 KB calls
-for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients
+for ev in dbg.events(): print(ev)       # halts, resumes, ... of all clients of the session
+dbg.end()                               # remove this client's breakpoints, release its lease
 ```
 
 ### Variables by name
@@ -163,7 +252,7 @@ A `condition` works as for breakpoints (see [Shared session](#rest-mcp-and-pytho
 
 ### Periodic sampling (DAQ)
 
-`ws://127.0.0.1:8080/api/v1/daq` samples variables while the target runs, **each at its own rate**, and streams their decoded values. There is no hardware DAQ behind this: TAS offers only MCDS trace (which needs an ED device, not a miniWiggler) and a channel that the target firmware would have to serve. The sampler is host-side polled reads, merged into one batch per tick on the core thread.
+`ws://127.0.0.1:3001/api/v1/sessions/{session}/daq` (or `/api/v1/session/daq`) samples variables while the target runs, **each at its own rate**, and streams their decoded values. There is no hardware DAQ behind this: TAS offers only MCDS trace (which needs an ED device, not a miniWiggler) and a channel that the target firmware would have to serve. The sampler is host-side polled reads, merged into one batch per tick on the core thread.
 
 **Sampling runs only while the socket is open.** Configuration travels on the same socket, so a session cannot outlive its client: close the socket, or crash, and the session is removed and the target is left alone. There is no reaper and no idle timeout.
 
@@ -398,8 +487,9 @@ A conditional attribute's read set depends on which branch is live, so an attrib
 | `orti` | ORTI files: the AUTOSAR/OSEK OS awareness description a generator emits. Parser (generic over the object types a file declares), and planning each attribute into the reads it costs. |
 | `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
 | `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
-| `api` | REST, MCP, Swagger UI, event stream and the DAQ WebSocket (axum on its own thread); its build script writes the generated files. |
-| `aurix-dbg` | The executable: OpenOCD-style CLI, telnet console, TCF and API listeners. |
+| `api` | The worker's REST routes, event stream, DAQ WebSocket, the launch steps, clients and the lease (axum on its own thread), and its registration with the hub; its build script writes the generated files. |
+| `aurix-dbg` | The worker: OpenOCD-style CLI, telnet console, TCF and API listeners. |
+| `hub` | `aurix-hub`: MCP, REST and Swagger front door, sessions and profiles, worker supervision, streaming proxy and WebSocket relays (DAQ, TCF), uploads, token check; the stdio wrapper; install/uninstall and the logon start. |
 | `winidea-sdk` | Rust bindings to the iSYSTEM winIDEA SDK (`isystemConnect.dll`), loaded at runtime. Used by the `winidea` backend. |
 
 Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures run on the core thread) and subscribe to core events.
@@ -596,9 +686,9 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 
 ## Tests
 
-- **Offline:** `cargo test --workspace --exclude aurix-dbg`. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, MCP, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`). The variable operations run there against two MCS assembler files the test writes (their data labels are globals, one shadowing another); struct members and array elements need `AURIX_TEST_ELF`. Watchpoints run there too: on expressions and core-local RAM, shared between the API and a TCF client, hit by a store the simulator makes (`SimAdapter::store`, which compares start addresses as the chip does), with conditions and running out of hardware events. The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
+- **Offline:** `cargo test --workspace`. `hub/tests/` cover the stdio wrapper (with a hub restart and starting the hub), install/uninstall (versioned copies, the junction, the installation records) and a hub serving other machines (token, `allow_tcl`, uploads, through the LAN address); `aurix-dbg/tests/hub.rs` runs the hub with real worker processes on the simulator: MCP and REST through the hub, sessions from a profile with launch steps, two sessions and the guidance between them, the TCF and DAQ relays, an uploaded file by its ID, ending an MCP session, a hub restart that keeps the workers, a failed start with its log, and closing. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`), with named clients, the control lease and the launch steps (symbols, flash failure, reset, `run_to` hitting and timing out, `relaunch`). The variable operations run there against two MCS assembler files the test writes (their data labels are globals, one shadowing another); struct members and array elements need `AURIX_TEST_ELF`. Watchpoints run there too: on expressions and core-local RAM, shared between the API and a TCF client, hit by a store the simulator makes (`SimAdapter::store`, which compares start addresses as the chip does), with conditions and running out of hardware events. The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
 - **Real files:** tests that need build output of a real application skip unless it is named in environment variables: `AURIX_TEST_ELF` (TriCore application ELF), `AURIX_TEST_FUNCTION` (a function in it, default `main`), `AURIX_TEST_ORTI` (its ORTI file), `AURIX_TEST_HSM_ELF`, `AURIX_TEST_APP_ELF` + `AURIX_TEST_BM_ELF` (application and bootloader), `AURIX_TEST_MCS_DIR` (MCS assembler sources with their GHS output), `AURIX_TEST_SREC` (an S-record image).
-- **Hardware:** run through the extension's debug adapter against a running server, with the board free (no OpenOCD). The scripts take the ELF and a breakpoint location as arguments or from `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs a few more variables, listed in its header:
+- **Hardware:** run through the extension's debug adapter against a running worker, with the board free (no OpenOCD). The scripts connect to the worker directly on the ports they default to, so start it by hand with them: `aurix-dbg ... -c "tcf_port 1534" -c "api_port 8080"` (or pass the ports a hub session reports). The scripts take the ELF and a breakpoint location as arguments or from `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs a few more variables, listed in its header:
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.
   - `node tools/dap_m5.js`: source breakpoint, call stack, step over/into/out.
   - `node tools/dap_m6.js`: locals, register/global/struct writes, enum names, live watch.

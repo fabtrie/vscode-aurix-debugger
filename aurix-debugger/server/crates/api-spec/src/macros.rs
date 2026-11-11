@@ -1,19 +1,27 @@
-/// Declares the operations of the API:
+/// Declares operations of the API:
 ///
 /// ```text
-/// /// Documentation (MCP tool description, OpenAPI description, Python docstring).
-/// op name [tag]: METHOD "/route/{param}" (RequestType) -> ResponseType;
+/// api! {
+///     trait DebuggerApi; table OPS; dispatch dispatch; scope Session;
+///
+///     /// Documentation (MCP tool description, OpenAPI description, Python docstring).
+///     op name [tag]: METHOD "/route/{param}" (RequestType) -> ResponseType;
+/// }
 /// ```
 ///
-/// Generates the [`DebuggerApi`](crate::DebuggerApi) trait (one method per operation), the
-/// [`OPS`](crate::OPS) table and [`dispatch`](crate::dispatch).
+/// Generates the trait (one method per operation), the [`OpMeta`](crate::OpMeta) table and the
+/// dispatch function. Used twice: for the session operations a worker implements and for the
+/// hub's own operations.
 macro_rules! api {
-    ($(
-        $(#[doc = $doc:literal])*
-        op $name:ident [$tag:ident] : $method:ident $path:literal ($req:ty) -> $resp:ty;
-    )*) => {
+    (
+        trait $trait:ident; table $table:ident; dispatch $dispatch:ident; scope $scope:ident;
+        $(
+            $(#[doc = $doc:literal])*
+            op $name:ident [$tag:ident] : $method:ident $path:literal ($req:ty) -> $resp:ty;
+        )*
+    ) => {
         /// The operations, implemented by the server.
-        pub trait DebuggerApi: Send + Sync {
+        pub trait $trait: Send + Sync {
             $(
                 $(#[doc = $doc])*
                 fn $name(&self, req: $req) -> Result<$resp, $crate::ApiError>;
@@ -21,10 +29,11 @@ macro_rules! api {
         }
 
         /// All operations in declaration order.
-        pub static OPS: &[$crate::OpMeta] = &[$(
+        pub static $table: &[$crate::OpMeta] = &[$(
             $crate::OpMeta {
                 name: stringify!($name),
                 tag: stringify!($tag),
+                scope: $crate::Scope::$scope,
                 method: $crate::Method::$method,
                 path: $path,
                 doc: concat!($($doc, "\n"),*),
@@ -34,7 +43,7 @@ macro_rules! api {
         )*];
 
         /// Runs operation `op` with its arguments as JSON object (fields of the request type).
-        pub fn dispatch(api: &dyn DebuggerApi, op: &str, args: serde_json::Value) -> Result<serde_json::Value, $crate::ApiError> {
+        pub fn $dispatch(api: &dyn $trait, op: &str, args: serde_json::Value) -> Result<serde_json::Value, $crate::ApiError> {
             let args = if args.is_null() { serde_json::Value::Object(Default::default()) } else { args };
             match op {
                 $(

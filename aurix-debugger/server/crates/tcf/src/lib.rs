@@ -40,8 +40,9 @@ pub use symstore::{elf_id, Elf, SymbolSet, SymbolStore};
 pub use breakpoints::{access_bits, Bp, Instance, Kind};
 pub use contexts::{core_id, cores, owning_core, CoreInfo, CONTAINER};
 
-/// Owner of the breakpoints set through the REST/MCP API (TCF channel IDs start at 1). They
-/// stay armed when a TCF client disconnects.
+/// Owner of the breakpoints set through the REST/MCP API by a client that did not name itself
+/// (TCF channel IDs start at 1). They stay armed when a TCF client disconnects. A named API
+/// client gets its own owner ([`Shared::api_owner`]).
 pub const API_OWNER: u64 = 0;
 
 /// Session changes for frontends other than TCF (REST/MCP).
@@ -110,6 +111,8 @@ pub struct Shared {
     pub live: Mutex<live::LiveSets>,
     /// Receivers of [`SessionEvent`]s (bounded: a receiver that does not keep up misses events).
     listeners: Mutex<Vec<SyncSender<SessionEvent>>>,
+    /// Breakpoint owners of the named API clients (`X-Aurix-Client`).
+    api_clients: Mutex<HashMap<String, u64>>,
     next_id: AtomicU64,
 }
 
@@ -214,8 +217,9 @@ impl Shared {
         removed
     }
 
-    /// Removes the breakpoints of a closed channel: they must not stay armed.
-    fn remove_owned(&self, owner: u64) {
+    /// Removes the breakpoints of a closed channel or an ended API client: they must not stay
+    /// armed. Returns their IDs.
+    fn remove_owned(&self, owner: u64) -> Vec<String> {
         live::clear_owner(self, owner);
         let removed: Vec<String> = {
             let mut table = self.bps.lock().unwrap();
@@ -226,6 +230,29 @@ impl Shared {
             ids
         };
         self.announce_removed(&removed);
+        removed
+    }
+
+    /// The breakpoint owner of the API client `client`, created on first use.
+    pub fn api_owner(&self, client: &str) -> u64 {
+        let mut m = self.api_clients.lock().unwrap();
+        *m.entry(client.to_string()).or_insert_with(|| self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The API client an owner belongs to, if it is one.
+    pub fn api_client_name(&self, owner: u64) -> Option<String> {
+        self.api_clients.lock().unwrap().iter().find(|(_, o)| **o == owner).map(|(n, _)| n.clone())
+    }
+
+    /// Whether `owner` is the API: an anonymous or a named API client (not a TCF channel).
+    pub fn is_api_owner(&self, owner: u64) -> bool {
+        owner == API_OWNER || self.api_clients.lock().unwrap().values().any(|o| *o == owner)
+    }
+
+    /// Ends the API client `client`: removes its breakpoints and watchpoints. Returns their IDs.
+    pub fn end_api_client(&self, client: &str) -> Vec<String> {
+        let owner = self.api_clients.lock().unwrap().remove(client);
+        owner.map(|o| self.remove_owned(o)).unwrap_or_default()
     }
 
     /// Re-plants the breakpoints that depend on symbols after symbol files changed.
@@ -351,6 +378,7 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         profile: Mutex::new(None),
         live: Mutex::new(live::LiveSets::default()),
         listeners: Mutex::new(Vec::new()),
+        api_clients: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
     })
 }

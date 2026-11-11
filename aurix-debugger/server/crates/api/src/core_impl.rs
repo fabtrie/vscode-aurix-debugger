@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -19,9 +19,30 @@ use aurix_core::target::{DebugReason, TargetState};
 use aurix_core::{ops, Cx, Event, ServerHandle};
 
 use crate::events::Hub;
+use crate::launch::Launcher;
 use crate::orti_state::CoreTarget;
-use crate::variables;
+use crate::{client, variables};
 use orti::Awareness;
+
+/// What the worker knows about itself for `info`.
+#[derive(Clone, Debug, Default)]
+pub struct WorkerMeta {
+    /// The hub's session ID, when a hub started the worker.
+    pub session: Option<String>,
+    /// The log file the worker writes.
+    pub log_file: Option<String>,
+}
+
+/// The control lease (`acquire_control`).
+#[derive(Clone, Debug)]
+pub struct Lease {
+    pub holder: String,
+    pub since: Instant,
+    pub expires: Instant,
+}
+
+/// Default lifetime of a lease.
+const LEASE_TTL: Duration = Duration::from_secs(600);
 
 pub struct CoreApi {
     pub handle: ServerHandle,
@@ -31,6 +52,11 @@ pub struct CoreApi {
     pub globals: variables::GlobalsCache,
     /// The symbol files `info` last saw, for while a load holds the symbol store.
     pub symbol_files: Mutex<Vec<InfoSymbolFile>>,
+    pub meta: WorkerMeta,
+    pub control: Mutex<Option<Lease>>,
+    pub launcher: Launcher,
+    /// This API itself, for work that outlives a call (the launch steps).
+    pub me: OnceLock<Weak<CoreApi>>,
 }
 
 fn api_err(e: aurix_core::Error) -> ApiError {
@@ -61,7 +87,7 @@ fn resolve(cx: &Cx, name: &str) -> Result<usize, ApiError> {
 /// Splits a `load_symbols` file into its path and the TriCore cores of a trailing `@N` or `@N,M`,
 /// as VS Code's `symbolFiles` writes them. A file that exists as given is never split, so a path
 /// that really ends in `@2` still loads.
-fn split_run_cores(f: &str) -> (PathBuf, Vec<u32>) {
+pub(crate) fn split_run_cores(f: &str) -> (PathBuf, Vec<u32>) {
     let whole = || (PathBuf::from(f), Vec::new());
     let Some((path, list)) = f.trim().rsplit_once('@') else { return whole() };
     if Path::new(f).is_file() || path.trim().is_empty() {
@@ -153,15 +179,15 @@ fn core_access(a: WatchAccess) -> aurix_core::target::WatchAccess {
 /// ID of a watchpoint set on the core directly (Tcl `wp`), by its core ID.
 const CONSOLE_WATCHPOINT: &str = "console-";
 
-fn owner(bp: &tcf::Bp) -> BreakpointOwner {
-    if bp.owner == tcf::API_OWNER {
-        BreakpointOwner::Api
+fn owner(bp: &tcf::Bp, session: &tcf::Shared) -> (BreakpointOwner, Option<String>) {
+    if session.is_api_owner(bp.owner) {
+        (BreakpointOwner::Api, session.api_client_name(bp.owner))
     } else {
-        BreakpointOwner::Client
+        (BreakpointOwner::Client, None)
     }
 }
 
-fn watchpoint_info(id: &str, bp: &tcf::Bp, access: aurix_core::target::WatchAccess, names: &HashMap<usize, String>) -> WatchpointInfo {
+fn watchpoint_info(id: &str, bp: &tcf::Bp, access: aurix_core::target::WatchAccess, names: &HashMap<usize, String>, session: &tcf::Shared) -> WatchpointInfo {
     let p = &bp.props;
     let location = p.get("Location");
     let instances = bp
@@ -177,9 +203,11 @@ fn watchpoint_info(id: &str, bp: &tcf::Bp, access: aurix_core::target::WatchAcce
             error: i.error.clone(),
         })
         .collect();
+    let (owner, client) = owner(bp, session);
     WatchpointInfo {
         id: id.to_string(),
-        owner: owner(bp),
+        owner,
+        client,
         enabled: bp.enabled(),
         address: p.get("Address").and_then(addr_prop).or_else(|| location.and_then(addr_prop)),
         expression: location.filter(|l| addr_prop(l).is_none()).and_then(Value::as_str).map(str::to_string),
@@ -212,9 +240,11 @@ fn breakpoint_info(id: &str, bp: &tcf::Bp, names: &HashMap<usize, String>, sessi
             BreakpointInstance { target: names.get(&i.target).cloned().unwrap_or_else(|| i.target.to_string()), address: i.addr, file, line, error: i.error.clone() }
         })
         .collect();
+    let (owner, client) = owner(bp, session);
     BreakpointInfo {
         id: id.to_string(),
-        owner: owner(bp),
+        owner,
+        client,
         enabled: bp.enabled(),
         address,
         symbol,
@@ -228,6 +258,68 @@ fn breakpoint_info(id: &str, bp: &tcf::Bp, names: &HashMap<usize, String>, sessi
 }
 
 impl CoreApi {
+    pub fn new(handle: ServerHandle, session: Arc<tcf::Shared>, meta: WorkerMeta) -> Arc<CoreApi> {
+        let hub = Hub::start(&handle, &session);
+        let api = Arc::new(CoreApi {
+            handle,
+            session,
+            hub,
+            globals: Default::default(),
+            symbol_files: Default::default(),
+            meta,
+            control: Mutex::new(None),
+            launcher: Launcher::default(),
+            me: OnceLock::new(),
+        });
+        let _ = api.me.set(Arc::downgrade(&api));
+        api
+    }
+
+    /// The breakpoint owner of the calling client.
+    pub(crate) fn caller_owner(&self) -> u64 {
+        match client::current() {
+            Some(c) => self.session.api_owner(&c),
+            None => tcf::API_OWNER,
+        }
+    }
+
+    /// The current lease, dropping an expired one.
+    fn lease(&self) -> Option<Lease> {
+        let mut l = self.control.lock().unwrap();
+        if l.as_ref().is_some_and(|l| l.expires <= Instant::now()) {
+            *l = None;
+        }
+        l.clone()
+    }
+
+    /// Fails with `busy` while another client holds the control lease.
+    pub(crate) fn check_control(&self) -> Result<(), ApiError> {
+        let me = client::current();
+        // The hub closing a session: a lease does not keep it open (the hub never forwards this
+        // name from its clients).
+        if me.as_deref() == Some(client::HUB) {
+            return Ok(());
+        }
+        match self.lease() {
+            Some(l) if me.as_deref() != Some(l.holder.as_str()) => Err(ApiError::new(
+                ErrorCode::Busy,
+                format!("control is held by client '{}' (for {} s; see `acquire_control`)", l.holder, l.since.elapsed().as_secs()),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn control_info(&self) -> ControlInfo {
+        match self.lease() {
+            Some(l) => ControlInfo {
+                holder: Some(l.holder),
+                held_s: Some(l.since.elapsed().as_secs()),
+                expires_in_s: Some(l.expires.saturating_duration_since(Instant::now()).as_secs()),
+            },
+            None => ControlInfo { holder: None, held_s: None, expires_in_s: None },
+        }
+    }
+
     /// Runs `f` on the core thread.
     fn call<R, F>(&self, f: F) -> Result<R, ApiError>
     where
@@ -252,7 +344,7 @@ impl CoreApi {
 
     /// Waits for a state change without blocking the core thread: woken by the core events,
     /// the state is checked again at least every 500 ms.
-    fn wait_for(&self, t: usize, want: WaitFor, timeout: Duration) -> Result<TargetInfo, ApiError> {
+    pub(crate) fn wait_for(&self, t: usize, want: WaitFor, timeout: Duration) -> Result<TargetInfo, ApiError> {
         let wake = self.hub.waiter();
         let deadline = Instant::now() + timeout;
         loop {
@@ -273,7 +365,7 @@ impl CoreApi {
         }
     }
 
-    fn breakpoint_list(&self) -> Result<BreakpointList, ApiError> {
+    pub(crate) fn breakpoint_list(&self) -> Result<BreakpointList, ApiError> {
         let names = self.names()?;
         let breakpoints = self.session.breakpoints().iter().filter(|(_, bp)| bp.data().is_none()).map(|(id, bp)| breakpoint_info(id, bp, &names, &self.session)).collect();
         Ok(BreakpointList { breakpoints })
@@ -283,7 +375,7 @@ impl CoreApi {
     fn watchpoint_list(&self) -> Result<WatchpointList, ApiError> {
         let names = self.names()?;
         let mut watchpoints: Vec<WatchpointInfo> =
-            self.session.breakpoints().iter().filter_map(|(id, bp)| bp.data().map(|a| watchpoint_info(id, bp, a, &names))).collect();
+            self.session.breakpoints().iter().filter_map(|(id, bp)| bp.data().map(|a| watchpoint_info(id, bp, a, &names, &self.session))).collect();
         let session = self.session.session_watchpoints();
         let console = self.call(move |cx| {
             Ok(cx.with(|c| {
@@ -297,6 +389,7 @@ impl CoreApi {
         watchpoints.extend(console.into_iter().map(|(target, w)| WatchpointInfo {
             id: format!("{CONSOLE_WATCHPOINT}{}", w.id),
             owner: BreakpointOwner::Console,
+            client: None,
             enabled: true,
             address: Some(w.addr),
             expression: None,
@@ -363,7 +456,7 @@ impl CoreApi {
         SymbolsInfo { targets, load_seconds: 0.0 }
     }
 
-    fn tcl_command(&self, command: &str) -> Result<CommandOutput, ApiError> {
+    pub(crate) fn tcl_command(&self, command: &str) -> Result<CommandOutput, ApiError> {
         let (res, lines) = self.handle.tcl_with_output(command);
         let mut out = lines.join("\n");
         match res {
@@ -469,6 +562,10 @@ impl DebuggerApi for CoreApi {
             symbol_files,
             symbols_loading,
             core_lag_ms: lag.as_millis() as u64,
+            session: self.meta.session.clone(),
+            log_file: self.meta.log_file.clone(),
+            launch: self.launcher.phase(),
+            control: self.lease().map(|l| l.holder),
         })
     }
 
@@ -481,6 +578,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn halt(&self, req: TargetRef) -> Result<TargetInfo, ApiError> {
+        self.check_control()?;
         let t = self.target(&req.target)?;
         // Pause during a source-level step of a TCF client stops the step (it reports the halt).
         if !self.session.cancel_step(t) {
@@ -493,6 +591,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn resume(&self, req: ResumeRequest) -> Result<TargetInfo, ApiError> {
+        self.check_control()?;
         let t = self.target(&req.target)?;
         if self.session.is_stepping(t) {
             return Err(busy(&req.target));
@@ -508,6 +607,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn step(&self, req: TargetRef) -> Result<TargetInfo, ApiError> {
+        self.check_control()?;
         let t = self.target(&req.target)?;
         if self.session.is_stepping(t) {
             return Err(busy(&req.target));
@@ -530,6 +630,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn reset(&self, req: ResetRequest) -> Result<TargetList, ApiError> {
+        self.check_control()?;
         if self.session.any_stepping() {
             return Err(ApiError::new(ErrorCode::Busy, "a source-level step of a debugger client is in progress"));
         }
@@ -569,6 +670,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn write_register(&self, req: WriteRegisterRequest) -> Result<RegisterValue, ApiError> {
+        self.check_control()?;
         self.call(move |cx| {
             let t = resolve(cx, &req.target)?;
             let idx = register(cx, t, &req.name)?;
@@ -593,6 +695,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn write_memory(&self, req: WriteMemoryRequest) -> Result<MemoryWritten, ApiError> {
+        self.check_control()?;
         let address = req.address.0;
         let len = req.data.0.len();
         check_range(address, len)?;
@@ -637,7 +740,7 @@ impl DebuggerApi for CoreApi {
         if let Some(c) = req.condition.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
             props.insert("Condition".into(), json!(c));
         }
-        self.session.apply_breakpoints(vec![props], false, tcf::API_OWNER).map_err(ApiError::bad_request)?;
+        self.session.apply_breakpoints(vec![props], false, self.caller_owner()).map_err(ApiError::bad_request)?;
         let (bp, _) = self.session.breakpoint(&id).ok_or_else(|| ApiError::failed("breakpoint vanished"))?;
         // An address breakpoint that cannot be planted will not be later: report and drop it.
         if req.address.is_some() && !bp.planted() {
@@ -689,7 +792,7 @@ impl DebuggerApi for CoreApi {
         if let Some(c) = req.condition.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
             props.insert("Condition".into(), json!(c));
         }
-        self.session.apply_breakpoints(vec![props], false, tcf::API_OWNER).map_err(ApiError::bad_request)?;
+        self.session.apply_breakpoints(vec![props], false, self.caller_owner()).map_err(ApiError::bad_request)?;
         let (bp, _) = self.session.breakpoint(&id).ok_or_else(|| ApiError::failed("watchpoint vanished"))?;
         // Planted nowhere (an expression that names nothing, no free hardware event): report it
         // rather than leave a watchpoint that never halts.
@@ -699,7 +802,7 @@ impl DebuggerApi for CoreApi {
             let code = if why.contains("hardware event") { ErrorCode::Resource } else { ErrorCode::BadRequest };
             return Err(ApiError::new(code, why));
         }
-        Ok(watchpoint_info(&id, &bp, access, &self.names()?))
+        Ok(watchpoint_info(&id, &bp, access, &self.names()?, &self.session))
     }
 
     fn remove_watchpoint(&self, req: WatchpointRef) -> Result<WatchpointList, ApiError> {
@@ -739,6 +842,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn flash_write(&self, req: FlashWriteRequest) -> Result<CommandOutput, ApiError> {
+        self.check_control()?;
         if req.files.is_empty() {
             return Err(ApiError::bad_request("no image files given"));
         }
@@ -773,6 +877,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn tcl(&self, req: TclRequest) -> Result<CommandOutput, ApiError> {
+        self.check_control()?;
         self.tcl_command(&req.command)
     }
 
@@ -851,6 +956,7 @@ impl DebuggerApi for CoreApi {
     }
 
     fn write_variable(&self, req: WriteVariableRequest) -> Result<VariableValue, ApiError> {
+        self.check_control()?;
         variables::write_variable(self, req)
     }
 
@@ -940,6 +1046,63 @@ impl DebuggerApi for CoreApi {
             })
             .collect();
         Ok(OsStackList { stacks, reads: t.reads })
+    }
+
+    fn launch(&self, req: LaunchRequest) -> Result<LaunchStatus, ApiError> {
+        self.check_control()?;
+        crate::launch::start(self, req)
+    }
+
+    fn relaunch(&self, req: RelaunchRequest) -> Result<LaunchStatus, ApiError> {
+        self.check_control()?;
+        let mut last = self.launcher.last().ok_or_else(|| ApiError::not_found("no launch ran on this session yet (use `launch`)"))?;
+        if req.skip_flash {
+            last.flash = None;
+        }
+        last.wait_s = req.wait_s;
+        crate::launch::start(self, last)
+    }
+
+    fn wait_session(&self, req: WaitSessionRequest) -> Result<LaunchStatus, ApiError> {
+        Ok(self.launcher.wait(Duration::from_secs(req.timeout_s.unwrap_or(60).min(3600) as u64)))
+    }
+
+    fn acquire_control(&self, req: ControlRequest) -> Result<ControlInfo, ApiError> {
+        let me = client::current().ok_or_else(|| ApiError::bad_request("only a named client can take the control lease (send the `X-Aurix-Client` header)"))?;
+        self.check_control()?;
+        let ttl = req.ttl_s.map_or(LEASE_TTL, |s| Duration::from_secs(s.clamp(1, 24 * 3600) as u64));
+        let now = Instant::now();
+        {
+            let mut l = self.control.lock().unwrap();
+            let since = l.as_ref().filter(|l| l.holder == me).map_or(now, |l| l.since);
+            *l = Some(Lease { holder: me, since, expires: now + ttl });
+        }
+        Ok(self.control_info())
+    }
+
+    fn release_control(&self, _: NoArgs) -> Result<ControlInfo, ApiError> {
+        match self.lease() {
+            Some(l) if client::current().as_deref() == Some(l.holder.as_str()) => {
+                *self.control.lock().unwrap() = None;
+                Ok(self.control_info())
+            }
+            Some(l) => Err(ApiError::new(ErrorCode::Busy, format!("control is held by client '{}', not by the caller", l.holder))),
+            None => Ok(self.control_info()),
+        }
+    }
+
+    fn end_client(&self, req: ClientRef) -> Result<EndClientResult, ApiError> {
+        let removed = self.session.end_api_client(&req.client);
+        let released_control = {
+            let mut l = self.control.lock().unwrap();
+            if l.as_ref().is_some_and(|l| l.holder == req.client) {
+                *l = None;
+                true
+            } else {
+                false
+            }
+        };
+        Ok(EndClientResult { removed, released_control })
     }
 }
 

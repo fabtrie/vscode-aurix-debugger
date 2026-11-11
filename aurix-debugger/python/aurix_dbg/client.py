@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from typing import Any, Iterator
+from urllib.parse import quote
 
 import requests
 
@@ -22,31 +25,58 @@ class ApiError(Exception):
 
 
 class Client(GeneratedClient):
-    """Client of the aurix-dbg REST API (``api_port``, default 8080).
+    """Client of the aurix-dbg hub (``aurix-hub``, port 3001).
 
-    All API operations are methods (generated from the API definition), e.g.::
+    All API operations are methods (generated from the API definition). The hub's own operations
+    (``open_session``, ``list_sessions``, ...) work on the hub; the session operations go to
+    ``session`` (an ID or name), or to the only open session when it is None::
 
         dbg = Client()
+        dbg.open_session(profile="my-board", launch={"run_to": "main"})
         dbg.halt("tc37x.cpu0")
         print(hex(dbg.read_register("tc37x.cpu0", "pc").value))
         data = dbg.read_bytes(0x70000000, 16)
+
+    Each client has its own ID (``X-Aurix-Client``): it owns the breakpoints it sets and the
+    control lease it takes, and ``end()`` removes them again.
     """
 
-    def __init__(self, url: str = "http://127.0.0.1:8080", timeout: float | None = None, session: requests.Session | None = None):
-        """``timeout``: seconds per request; None waits as long as an operation runs
-        (flash programming, ``wait_state``)."""
+    def __init__(self, url: str = "http://127.0.0.1:3001", session: str | None = None, timeout: float | None = None,
+                 token: str | None = None, client_id: str | None = None, http: requests.Session | None = None):
+        """``session``: the session the session operations go to (default: the only open one).
+        ``timeout``: seconds per request; None waits as long as an operation runs (flash
+        programming, ``wait_state``). ``token``: the hub's token, needed from another machine
+        (default: the ``AURIX_HUB_TOKEN`` environment variable). ``client_id``: this client's
+        name (default: a new ``py:<uuid>``)."""
         self.url = url.rstrip("/")
-        self.timeout = timeout
-        if session is None:
-            session = requests.Session()
-            # The debug server is local, so never look for a proxy. Left on (the requests
-            # default), every single call pays a Windows proxy-configuration lookup: measured
-            # 21 ms versus 0.5 ms here. Pass your own `session` to get the usual behaviour.
-            session.trust_env = False
         self.session = session
+        self.timeout = timeout
+        self.client_id = client_id or f"py:{uuid.uuid4().hex[:12]}"
+        token = token if token is not None else os.environ.get("AURIX_HUB_TOKEN")
+        if http is None:
+            http = requests.Session()
+            # The hub is usually local, so never look for a proxy. Left on (the requests
+            # default), every single call pays a Windows proxy-configuration lookup: measured
+            # 21 ms versus 0.5 ms here. Pass your own `http` session to get the usual behaviour.
+            http.trust_env = False
+        http.headers["X-Aurix-Client"] = self.client_id
+        if token:
+            http.headers["Authorization"] = f"Bearer {token}"
+        self.http = http
+
+    def for_session(self, session: str) -> "Client":
+        """A client of the same hub and ID whose session operations go to ``session``."""
+        c = Client.__new__(Client)
+        c.url, c.session, c.timeout, c.client_id, c.http = self.url, session, self.timeout, self.client_id, self.http
+        return c
+
+    def _session_path(self) -> str:
+        if self.session:
+            return "/api/v1/sessions/" + quote(self.session, safe="")
+        return "/api/v1/session"
 
     def _call(self, method: str, path: str, query: dict[str, Any] | None, body: dict[str, Any] | None) -> Any:
-        r = self.session.request(method, self.url + path, params=query, json=body, timeout=self.timeout)
+        r = self.http.request(method, self.url + path, params=query, json=body, timeout=self.timeout)
         if r.status_code >= 400:
             try:
                 e = r.json()
@@ -54,6 +84,22 @@ class Client(GeneratedClient):
             except ValueError:
                 raise ApiError(r.status_code, "failed", r.text) from None
         return r.json()
+
+    def upload(self, path: str) -> str:
+        """Uploads a file to the hub machine and returns its ID (``file:<sha256>/<name>``), which
+        works wherever an operation takes a path (``load_symbols``, ``flash_write``, the launch
+        steps). Needed when the hub runs on another machine."""
+        with open(path, "rb") as f:
+            r = self.http.post(self.url + "/api/v1/files", params={"name": os.path.basename(path)}, data=f,
+                               headers={"Content-Type": "application/octet-stream"}, timeout=self.timeout)
+        if r.status_code >= 400:
+            raise ApiError(r.status_code, "failed", r.text)
+        return r.json()["file"]
+
+    def end(self) -> None:
+        """Ends this client on its session: removes its breakpoints and watchpoints and
+        releases its control lease."""
+        self.end_client(client=self.client_id)
 
     def read_bytes(self, address: int, length: int, target: str | None = None) -> bytes:
         """Reads memory of any length (split into ``MAX_TRANSFER`` sized calls)."""
@@ -114,13 +160,22 @@ class Client(GeneratedClient):
                     print(batch.t_us, batch.values)
         """
         url = self.url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-        return DaqStream(url + "/api/v1/daq", points, rate_hz, mode, queue, timeout)
+        headers = [f"{k}: {v}" for k, v in self.http.headers.items() if k in ("X-Aurix-Client", "Authorization")]
+        return DaqStream(url + self._session_path() + "/daq", points, rate_hz, mode, queue, timeout, headers)
 
     def events(self) -> Iterator[dict[str, Any]]:
-        """Yields the events of all clients (halts, resumes, breakpoint changes, log lines, ...)
-        as dicts with a ``type`` key, until the connection closes. See ``ApiEvent`` in the
-        OpenAPI document (``/docs``)."""
-        with self.session.get(self.url + "/api/v1/events", stream=True, timeout=(10, None)) as r:
+        """Yields the events of the session's clients (halts, resumes, breakpoint changes, log
+        lines, ...) as dicts with a ``type`` key, until the connection closes. See ``ApiEvent``
+        in the OpenAPI document (``/docs``)."""
+        return self._sse(self._session_path() + "/events")
+
+    def hub_events(self) -> Iterator[dict[str, Any]]:
+        """Yields the hub's events (sessions opened, launched, closed) as dicts with a ``type``
+        key. See ``HubEvent`` in the OpenAPI document."""
+        return self._sse("/api/v1/events")
+
+    def _sse(self, path: str) -> Iterator[dict[str, Any]]:
+        with self.http.get(self.url + path, stream=True, timeout=(10, None)) as r:
             r.raise_for_status()
             data: list[str] = []
             for line in r.iter_lines(decode_unicode=True):

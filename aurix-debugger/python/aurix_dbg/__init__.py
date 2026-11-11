@@ -1,4 +1,4 @@
-"""Python client of the aurix-dbg debug server's REST API.
+"""Python client of the aurix-dbg hub's REST API (aurix-hub).
 
 The API methods and types are generated from the server's API definition
 (``server/crates/api-spec``) by ``cargo build``; see ``_generated.py``.

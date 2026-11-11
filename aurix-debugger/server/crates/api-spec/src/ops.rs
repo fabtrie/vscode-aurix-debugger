@@ -1,9 +1,17 @@
-//! The operations. Each `///` comment is the documentation of the REST route, the MCP tool, the
-//! Rust trait method and the Python client method.
+//! The session operations: one board, served by its worker. Each `///` comment is the
+//! documentation of the REST route, the MCP tool, the Rust trait method and the Python client
+//! method.
+//!
+//! The routes are the worker's own. The hub serves them at `/api/v1/sessions/{session}/...`
+//! (and `/api/v1/session/...` while exactly one session is open); see [`OpMeta::hub_path`].
+//!
+//! [`OpMeta::hub_path`]: crate::OpMeta::hub_path
 
 use crate::types::*;
 
 api! {
+    trait DebuggerApi; table OPS; dispatch dispatch; scope Session;
+
     /// What is serving: server version and API revision, process, probe connection, targets and
     /// loaded symbol files.
     ///
@@ -192,4 +200,38 @@ api! {
 
     /// Run a command of the OpenOCD-compatible Tcl console (like the telnet console).
     op tcl [tcl]: POST "/api/v1/tcl" (TclRequest) -> CommandOutput;
+
+    /// Run the launch steps on this session: what a VS Code launch configuration does.
+    ///
+    /// In this order, each only when asked for: load the symbols, load the ORTI file, program
+    /// the flash (after a halting reset, as the flash needs it), reset, set the breakpoints, run
+    /// to `run_to`, halt all cores (`stop_on_entry`). The steps stop at the first failure, which
+    /// leaves the session open to inspect.
+    ///
+    /// Returns once the steps are done or after `wait_s` seconds with phase `starting`;
+    /// `wait_session` waits for the rest. The session keeps the arguments for `relaunch`.
+    op launch [session]: POST "/api/v1/launch" (LaunchRequest) -> LaunchStatus;
+
+    /// Run the last launch again, e.g. after a rebuild: flash (incremental), reset, breakpoints,
+    /// `run_to`.
+    op relaunch [session]: POST "/api/v1/relaunch" (RelaunchRequest) -> LaunchStatus;
+
+    /// Wait until the launch steps are done and return how they went.
+    op wait_session [session]: GET "/api/v1/launch" (WaitSessionRequest) -> LaunchStatus;
+
+    /// Take the control lease of the session for the calling client.
+    ///
+    /// While another client holds it, run control (halt, resume, step, reset), register, memory
+    /// and variable writes, flashing, launches and Tcl commands fail with `busy`; reading never
+    /// waits for it. Nobody holds it unless a client takes it. It expires after `ttl_s` unless
+    /// taken again, and is released when its client ends.
+    op acquire_control [session]: POST "/api/v1/control" (ControlRequest) -> ControlInfo;
+
+    /// Release the control lease (only its holder can).
+    op release_control [session]: DELETE "/api/v1/control" (NoArgs) -> ControlInfo;
+
+    /// End an API client: remove its breakpoints and watchpoints and release its lease.
+    ///
+    /// The hub calls it when an MCP session ends; a script can call it for itself when done.
+    op end_client [session]: POST "/api/v1/clients/end" (ClientRef) -> EndClientResult;
 }

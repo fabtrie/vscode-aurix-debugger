@@ -1,10 +1,11 @@
-//! OpenAPI 3.1 document (served at `/openapi.json`, shown by Swagger UI at `/docs`).
+//! OpenAPI 3.1 document of the hub (served at `/openapi.json`, shown by Swagger UI at `/docs`):
+//! the hub's operations and the session operations below `/api/v1/sessions/{session}`.
 
 use schemars::generate::SchemaSettings;
 use serde_json::{json, Map, Value};
 
-use crate::types::ApiEvent;
-use crate::{ApiError, API_DOC, OPS};
+use crate::types::{ApiEvent, HubEvent};
+use crate::{all_ops, ApiError, Scope, API_DOC, HUB_PORT};
 
 const SCHEMAS: &str = "#/components/schemas/";
 
@@ -22,17 +23,25 @@ pub fn openapi() -> Value {
         .into_generator();
     let error = g.subschema_for::<ApiError>().to_value();
     let event = g.subschema_for::<ApiEvent>().to_value();
-    let schemas: Vec<(Value, Value)> = OPS.iter().map(|op| ((op.request)(&mut g).to_value(), (op.response)(&mut g).to_value())).collect();
+    let hub_event = g.subschema_for::<HubEvent>().to_value();
+    let schemas: Vec<(Value, Value)> = all_ops().map(|op| ((op.request)(&mut g).to_value(), (op.response)(&mut g).to_value())).collect();
     let defs = g.take_definitions(true);
+    let session_param = json!({
+        "name": "session", "in": "path", "required": true, "schema": { "type": "string" },
+        "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+    });
 
     let mut paths = Map::new();
-    for (op, (req, resp)) in OPS.iter().zip(schemas) {
+    for (op, (req, resp)) in all_ops().zip(schemas) {
         // The request type's fields: path parameters, then query parameters or the JSON body.
         let def = ref_name(&req).and_then(|n| defs.get(n)).cloned().unwrap_or(req);
         let props = def.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
         let required: Vec<&str> = def.get("required").and_then(Value::as_array).map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
         let path_params = op.path_params();
         let mut params = Vec::new();
+        if op.scope == Scope::Session {
+            params.push(session_param.clone());
+        }
         let mut body_props = Map::new();
         for (name, schema) in &props {
             let mut schema = schema.clone();
@@ -79,26 +88,37 @@ pub fn openapi() -> Value {
             }
             operation["requestBody"] = json!({ "required": !body_required.is_empty(), "content": { "application/json": { "schema": body } } });
         }
-        let entry = paths.entry(op.path).or_insert_with(|| json!({}));
+        let entry = paths.entry(op.hub_path()).or_insert_with(|| json!({}));
         entry[op.method.as_str().to_ascii_lowercase()] = operation;
     }
 
-    let event_doc = ref_name(&event).and_then(|n| defs.get(n)).and_then(|d| d.get("description")).cloned().unwrap_or_default();
+    let doc_of = |schema: &Value| ref_name(schema).and_then(|n| defs.get(n)).and_then(|d| d.get("description")).cloned().unwrap_or_default();
     paths.insert(
-        "/api/v1/events".into(),
+        "/api/v1/sessions/{session}/events".into(),
         json!({ "get": {
             "operationId": "events",
             "tags": ["events"],
-            "summary": "Event stream (server-sent events).",
-            "description": event_doc,
+            "summary": "Event stream of a session (server-sent events).",
+            "description": doc_of(&event),
+            "parameters": [session_param],
             "responses": { "200": { "description": "One SSE event per target event", "content": { "text/event-stream": { "schema": event } } } },
+        } }),
+    );
+    paths.insert(
+        "/api/v1/events".into(),
+        json!({ "get": {
+            "operationId": "hub_events",
+            "tags": ["events"],
+            "summary": "Event stream of the hub (server-sent events): sessions opened, launched, closed.",
+            "description": doc_of(&hub_event),
+            "responses": { "200": { "description": "One SSE event per hub event", "content": { "text/event-stream": { "schema": hub_event } } } },
         } }),
     );
 
     json!({
         "openapi": "3.1.0",
         "info": { "title": "aurix-dbg API", "version": env!("CARGO_PKG_VERSION"), "description": API_DOC },
-        "servers": [{ "url": "http://127.0.0.1:8080" }],
+        "servers": [{ "url": format!("http://127.0.0.1:{HUB_PORT}") }],
         "paths": paths,
         "components": { "schemas": defs },
     })

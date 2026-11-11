@@ -21,6 +21,7 @@ pub mod events;
 pub mod flash;
 pub mod image;
 pub mod ops;
+pub mod scr_monitor;
 pub mod server;
 pub mod sim;
 pub mod sim_mcs;

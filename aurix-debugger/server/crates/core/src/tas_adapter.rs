@@ -13,23 +13,20 @@
 //!
 //! PING costs 6 to 30 ms and `get_targets` about 55 ms, so neither runs while all is well.
 //!
-//! The standby controller (SCR, target type `xc800`) is not debugged here yet:
-//! [`Adapter::scr_debug`] is `None`. Two ways are open, both behind
-//! [`crate::adapter::ScrDebug`] without changes to the core or the frontends:
-//!
-//! * TasServer's own XC800 driver, in a second session with `device_type 0x101EC083` (the
-//!   override applies to a whole session). Earlier tries crashed the TasServer; they ran the DAP
-//!   faster than the 10 MHz the SCR allows in DAP Standard mode, which winIDEA needs too.
-//! * The SCR's boot ROM monitor (TC3xx UM 49.5.2) driven directly with [`TasAdapter::jtag_scan`]:
-//!   JTAG IR `IOINSTR1` (0xC1), the 16-bit hardware commands and the READ/WRITE frames on the
-//!   monitor's virtual addresses, which are [`crate::adapter::scr_space`].
+//! The standby controller (SCR, target type `xc800`): [`Adapter::scr_debug`] drives the SCR's
+//! boot ROM monitor (TC3xx UM 49.5.2) over TasServer's native JTAG scans, as winIDEA does over
+//! the DAP: JTAG instruction 0xC0 with the 3-bit setting 3, then `IOINSTR1` (0xC1) and 16-bit DR
+//! scans carrying the monitor's hardware commands and frames ([`crate::scr_monitor`]). Every
+//! monitor exchange is one TAS transaction; TasServer leaves the scan mode (IR back to 0x04) at
+//! its end, so TriCore accesses go on between them.
 
 use std::any::Any;
 use std::time::{Duration, Instant};
 
 use tas::{Batch, ConnectMode, OpResult, TasClient};
 
-use crate::adapter::{check, Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth};
+use crate::adapter::{check, Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth, ScrDebug, ScrReg, ScrRegs, ScrStatus};
+use crate::scr_monitor::{Monitor, MonitorLink, BREAKPOINT_SLOTS};
 use crate::error::{Error, Result};
 use crate::util::parse_u32;
 use crate::{log_info, log_warn};
@@ -89,6 +86,8 @@ pub struct TasAdapter {
     health: Option<LinkHealth>,
     /// Last health check, or reconnect attempt to the TasServer.
     check_at: Option<Instant>,
+    /// The SCR's debug monitor, once attached.
+    scr: Option<crate::scr_monitor::Monitor>,
 }
 
 impl Default for TasAdapter {
@@ -109,6 +108,7 @@ impl Default for TasAdapter {
             failed: false,
             health: None,
             check_at: None,
+            scr: None,
         }
     }
 }
@@ -126,6 +126,19 @@ impl TasAdapter {
     /// Each scan is `(ir_width, ir, dr_bits, data)`; `ir_width` 0 keeps the IR. Also the transport
     /// for a future SCR monitor implementation (see the module docs).
     pub fn jtag_scan(&mut self, scans: &[(u32, u32, u32, Vec<u8>)]) -> Result<Vec<String>> {
+        let outs = self.jtag_scan_raw(scans)?;
+        Ok(outs
+            .iter()
+            .zip(scans)
+            .map(|(bytes, s)| {
+                let bytes = &bytes[..(s.2 as usize).div_ceil(8)];
+                format!("0x{}", bytes.iter().rev().map(|x| format!("{x:02x}")).collect::<String>())
+            })
+            .collect())
+    }
+
+    /// [`Self::jtag_scan`] returning the captured DR bytes (LSB first) of every scan.
+    pub fn jtag_scan_raw(&mut self, scans: &[(u32, u32, u32, Vec<u8>)]) -> Result<Vec<Vec<u8>>> {
         let mut b = Batch::new();
         b.write_am(AM15_RW_JTAG_SCAN_MODE_ENABLE, &0u32.to_le_bytes(), AM15);
         let mut reads = Vec::new();
@@ -150,13 +163,7 @@ impl TasAdapter {
         for (i, res) in r.iter().enumerate() {
             check(res, i as u64, false).map_err(|e| Error::Adapter(format!("JTAG scan access {i} failed: {e}")))?;
         }
-        Ok(reads
-            .iter()
-            .map(|&(h, bits)| {
-                let bytes = &r[h].data[..(bits as usize).div_ceil(8)];
-                format!("0x{}", bytes.iter().rev().map(|x| format!("{x:02x}")).collect::<String>())
-            })
-            .collect())
+        Ok(reads.iter().map(|&(h, bits)| r[h].data[..(bits as usize).div_ceil(8)].to_vec()).collect())
     }
 
     fn am15_read(&mut self, addr: u64) -> Result<u32> {
@@ -433,6 +440,10 @@ impl Adapter for TasAdapter {
         "tas_client"
     }
 
+    fn scr_debug(&mut self) -> Option<&mut dyn ScrDebug> {
+        Some(self)
+    }
+
     fn command_groups(&self) -> &'static [&'static str] {
         &["tas-client"]
     }
@@ -633,5 +644,97 @@ impl Adapter for TasAdapter {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+/// JTAG instruction 0xC0 takes the 3-bit setting 3 (winIDEA writes it twice), then 0xC1 connects
+/// the SCR's OCDS interface. TasServer restores IR 0x04 at the end of every scan transaction, so
+/// every [`MonitorLink::monitor_scan`] selects 0xC1 again; the 0xC0 setting stays.
+impl MonitorLink for TasAdapter {
+    fn monitor_select(&mut self) -> Result<()> {
+        self.jtag_scan_raw(&[(8, 0xC0, 3, vec![3]), (0, 0, 3, vec![3])])?;
+        Ok(())
+    }
+
+    fn monitor_scan(&mut self, tdi: &[u16]) -> Result<Vec<u16>> {
+        let scans: Vec<_> = tdi
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| if i == 0 { (8, 0xC1, 16, t.to_le_bytes().to_vec()) } else { (0, 0, 16, t.to_le_bytes().to_vec()) })
+            .collect();
+        Ok(self.jtag_scan_raw(&scans)?.iter().map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
+    }
+}
+
+impl TasAdapter {
+    fn with_scr<T>(&mut self, f: impl FnOnce(&mut Monitor, &mut TasAdapter) -> Result<T>) -> Result<T> {
+        let mut m = self.scr.take().ok_or_else(|| Error::Usage("the SCR is not attached".into()))?;
+        let r = f(&mut m, self);
+        self.scr = Some(m);
+        r
+    }
+}
+
+impl ScrDebug for TasAdapter {
+    fn attach(&mut self) -> Result<()> {
+        if !self.inited {
+            return Err(Error::Usage("TAS: not connected (run 'init')".into()));
+        }
+        let mut m = Monitor::new();
+        m.attach(self)?;
+        self.scr = Some(m);
+        Ok(())
+    }
+
+    fn detach(&mut self) -> Result<()> {
+        self.scr = None;
+        Ok(())
+    }
+
+    fn status(&mut self) -> Result<ScrStatus> {
+        self.with_scr(|m, l| {
+            let halted = m.poll(l)?;
+            Ok(ScrStatus { halted, pc: m.pc(), reason: m.reason() })
+        })
+    }
+
+    fn halt(&mut self) -> Result<()> {
+        self.with_scr(|m, l| m.halt(l))
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        self.with_scr(|m, l| m.resume(l))
+    }
+
+    fn step(&mut self) -> Result<()> {
+        self.with_scr(|m, l| m.step(l))
+    }
+
+    fn read_regs(&mut self) -> Result<ScrRegs> {
+        self.with_scr(|m, l| m.read_regs(l))
+    }
+
+    fn write_reg(&mut self, reg: ScrReg, value: u16) -> Result<()> {
+        self.with_scr(|m, l| m.write_reg(l, reg, value))
+    }
+
+    fn hw_breakpoint_slots(&self) -> usize {
+        BREAKPOINT_SLOTS
+    }
+
+    fn set_hw_breakpoint(&mut self, slot: usize, addr: u16) -> Result<()> {
+        self.with_scr(|m, l| m.set_breakpoint(l, slot, Some(addr)))
+    }
+
+    fn clear_hw_breakpoint(&mut self, slot: usize) -> Result<()> {
+        self.with_scr(|m, l| m.set_breakpoint(l, slot, None))
+    }
+
+    fn read(&mut self, vaddr: u32, len: usize) -> Result<Vec<u8>> {
+        self.with_scr(|m, l| m.read(l, vaddr, len))
+    }
+
+    fn write(&mut self, vaddr: u32, data: &[u8]) -> Result<()> {
+        self.with_scr(|m, l| m.write(l, vaddr, data))
     }
 }

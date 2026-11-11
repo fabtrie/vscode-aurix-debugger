@@ -104,7 +104,7 @@ Here `debug/` holds `tc3xx_ocds.cfg` and `tc37x_ocds_init.cfg`, copied from the 
 
 ### Standby controller (SCR)
 
-The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSYSTEM BlueBox when the device's debug mode is DAP Standard. It is off by default; turn it on with a `configCommands` entry:
+The TC3xx standby controller, an XC800 (8051) core, can be debugged over the miniWiggler (TasServer) and over the iSYSTEM BlueBox when the device's debug mode is DAP Standard. It is off by default; turn it on with a `configCommands` entry:
 
 ```json
 {
@@ -126,7 +126,8 @@ The TC3xx standby controller, an XC800 (8051) core, can be debugged over the iSY
 - TriCore ELF files are never mapped to the SCR.
 - Source-level debugging: add the SCR's SDCC debug file to `symbolFiles`, e.g. `".../TriSCR/gen/scr_main.cdb"`, with the `.ihx` of the same build beside it (it gives the functions' ends). A `.cdb` file goes to the SCR. Its sources are looked up next to it and in the `src`, `inc` and `api` folders beside its folder. Then the SCR has source lines, line breakpoints (2 hardware breakpoints), step over, into and out, its global variables by name, and the local variables of the current function (in the Variables view). SDCC records which register a local lives in but not where in the function it is valid: before its first assignment or after its last use the register may hold something else, and locals the compiler removed show as optimized out. The `.cdb` must come from the build that runs on the SCR.
 - The SCR's special function registers are in the Peripheral View as the `SCR_*` peripherals (see below).
-- The application must start the SCR in its OCDS boot mode (PMSWCR4.SCRCFG = 0x0A); until it does, the SCR thread stays unexamined. With the SCR on, the BlueBox runs DAP Standard, which caps the DAP clock at 10 MHz for the whole session.
+- The application must start the SCR in its OCDS boot mode (PMSWCR4.SCRCFG = 0x0A); until it does, the SCR thread stays unexamined. With the SCR on, the BlueBox runs DAP Standard, which caps the DAP clock at 10 MHz for the whole session. The miniWiggler talks to the SCR's boot ROM monitor with JTAG scans between the TriCore accesses and needs no setting (tested at 30 MHz).
+- Over the miniWiggler, a halt is a request to the SCR's monitor. If an SCR that no debugger has prepared does not answer it, the server resets the SCR into its monitor, as winIDEA's attach does, and the SCR's program starts again at 0x0000 (a warning says so).
 
 ### GTM MCS channels
 

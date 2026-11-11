@@ -79,7 +79,7 @@ Create `.vscode/launch.json`:
       "name": "AURIX Debug",
       "autoStartAgent": true,
       "searchDirs": ["${workspaceFolder}/debug"],
-      "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg", "tc37x_ocds_init.cfg"],
+      "configFiles": ["board/infineon/kit_a2g_tc375_lite.cfg", "tc37x_ocds_init.cfg"],
       "symbolFiles": ["${workspaceFolder}/build/app.elf"],
       "flashFiles": ["${workspaceFolder}/build/app.hex"],
       "ortiFile": "${workspaceFolder}/build/Os_Trace.ORT",

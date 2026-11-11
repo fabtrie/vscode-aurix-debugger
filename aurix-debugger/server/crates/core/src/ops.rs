@@ -117,6 +117,19 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
 pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
     match tr {
         Transition::None => {}
+        Transition::Rehalted => {
+            let (name, reason, pc, trigger) = cx.with(|c| {
+                let reason = c.targets[t].core.reason();
+                let pc = c.target_io(t).ok().and_then(|(mut io, e)| {
+                    let pc = e.core.arch().pc;
+                    e.core.read_reg(&mut io, pc).ok()
+                });
+                (c.targets[t].name.clone(), reason, pc, c.targets[t].core.hit_trigger())
+            });
+            let pc_s = pc.map(|pc| format!(", pc: 0x{pc:08x}")).unwrap_or_default();
+            log_info!("[{name}] halted due to {} (ran since the last poll){pc_s}", reason.name());
+            emit(Event::Halted { target: t, name, reason, pc, trigger });
+        }
         Transition::Halted { debug, boot } => {
             let (name, reason, pc, trigger) = cx.with(|c| {
                 let reason = c.targets[t].core.reason();

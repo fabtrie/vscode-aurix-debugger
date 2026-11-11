@@ -68,11 +68,15 @@ pub const C_STEP: u32 = 1 << 2;
 pub const C_MASKINTS: u32 = 1 << 3;
 pub const S_REGRDY: u32 = 1 << 16;
 pub const S_HALT: u32 = 1 << 17;
+/// Sticky: an instruction retired since the last DHCSR read (cleared by the read).
+pub const S_RETIRE_ST: u32 = 1 << 24;
 pub const DCRSR_REGWNR: u32 = 1 << 16;
 pub const DEMCR_TRCENA: u32 = 1 << 24;
 pub const DFSR_HALTED: u32 = 1 << 0;
 pub const DFSR_BKPT: u32 = 1 << 1;
 pub const DFSR_DWTTRAP: u32 = 1 << 2;
+/// EDBGRQ: halted from outside, here the TL1 group halt.
+pub const DFSR_EXTERNAL: u32 = 1 << 4;
 pub const DFSR_ALL: u32 = 0x1F;
 pub const FP_CTRL_KEY_ENABLE: u32 = 0x3;
 
@@ -394,6 +398,22 @@ impl CortexM {
                 self.cache_clean = false;
                 self.decode_reason();
                 return Transition::Halted { debug: prev == TargetState::DebugRunning, boot: false };
+            }
+            if self.dhcsr & S_RETIRE_ST != 0 {
+                // Halted at both polls, yet instructions retired since the last DHCSR read: a
+                // script released the core (the HSM's boot breakpoint in reset-end) and the group
+                // halt stopped it again before a poll saw it run.
+                self.invalidate();
+                self.cache_clean = false;
+                // DFSR is sticky too: the boot breakpoint's BKPT is still set, so the group halt
+                // (EDBGRQ) names the reason when it is there.
+                self.reason = DebugReason::NotHalted;
+                if self.dfsr & DFSR_EXTERNAL != 0 {
+                    self.reason = DebugReason::DbgRq;
+                } else {
+                    self.decode_reason();
+                }
+                return Transition::Rehalted;
             }
         } else {
             self.state = TargetState::Running;
@@ -780,6 +800,27 @@ mod tests {
         // A TL1 break-in (external) or a C_HALT request.
         c.poll_apply(&[S_HALT, 1 << 4]);
         assert_eq!(c.reason, DebugReason::DbgRq);
+    }
+
+    #[test]
+    fn a_halt_between_two_polls_is_found_by_the_retire_flag() {
+        // The HSM at its boot breakpoint, as the reset left it.
+        let mut c = CortexM::new();
+        c.state = TargetState::Running;
+        assert_eq!(c.poll_apply(&[S_HALT, DFSR_BKPT]), Transition::Halted { debug: false, boot: false });
+        c.cache[CM_REG_PC] = Some(0x8000_8000);
+        // Still halted, nothing retired: no change.
+        assert_eq!(c.poll_apply(&[S_HALT, DFSR_BKPT]), Transition::None);
+        assert_eq!(c.cache[CM_REG_PC], Some(0x8000_8000));
+        // reset-end released it, the group halt (EDBGRQ) stopped it again before this poll: the
+        // breakpoint's DFSR bit is stale, the PC with it.
+        assert_eq!(c.poll_apply(&[S_HALT | S_RETIRE_ST, DFSR_BKPT | DFSR_EXTERNAL]), Transition::Rehalted);
+        assert_eq!(c.reason, DebugReason::DbgRq);
+        assert_eq!(c.cache[CM_REG_PC], None);
+        // Released and stopped by a breakpoint of its own.
+        c.reason = DebugReason::DbgRq;
+        assert_eq!(c.poll_apply(&[S_HALT | S_RETIRE_ST, DFSR_BKPT]), Transition::Rehalted);
+        assert_eq!(c.reason, DebugReason::Breakpoint);
     }
 
     #[test]

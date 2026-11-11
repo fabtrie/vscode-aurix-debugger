@@ -167,8 +167,12 @@ impl Tricore {
                 return Transition::Halted { debug: prev == TargetState::DebugRunning, boot };
             }
             if !boot && self.reason == DebugReason::BootHalt {
-                // Debug halt requested while in boot halt.
+                // Out of boot halt into a debug halt: the application started the core and the
+                // group halt stopped it before a poll saw it run (or a halt reached it while it
+                // still waited in boot halt). The cached registers are the boot halt's.
+                self.invalidate();
                 self.decode_reason();
+                return Transition::Rehalted;
             }
         } else {
             self.state = TargetState::Running;
@@ -814,6 +818,23 @@ mod tests {
         let _ = c.poll_apply(&[halted_tr0, 0]);
         assert_eq!(c.reason, DebugReason::Breakpoint);
         assert_eq!(c.hit_trigger(), Some(0));
+    }
+
+    #[test]
+    fn debug_halt_after_boot_halt_drops_the_boot_halt_registers() {
+        // cpu1 in boot halt after a reset, its PC at the boot address.
+        let mut c = Tricore::new();
+        c.state = TargetState::Running;
+        assert_eq!(c.poll_apply(&[DBGSR_DE, SYSCON_BHALT]), Transition::Halted { debug: false, boot: true });
+        assert_eq!(c.reason, DebugReason::BootHalt);
+        c.cache[0] = Some(0xAFFF_C000);
+        assert_eq!(c.poll_apply(&[DBGSR_DE, SYSCON_BHALT]), Transition::None);
+        // The application started it and the group halt stopped it before a poll saw it run.
+        assert_eq!(c.poll_apply(&[DBGSR_DE | DBGSR_HALTED, 0]), Transition::Rehalted);
+        assert_eq!(c.reason, DebugReason::DbgRq);
+        assert!(c.cache.iter().all(Option::is_none));
+        // Halted as before: nothing new.
+        assert_eq!(c.poll_apply(&[DBGSR_DE | DBGSR_HALTED, 0]), Transition::None);
     }
 
     #[test]

@@ -80,6 +80,14 @@ pub enum Transition {
     /// (e.g. suspend all STMs) must not react to a core that is just not
     /// started yet.
     Halted { debug: bool, boot: bool },
+    /// Halted at this poll and the last, but halted anew in between: the
+    /// application started a boot-halted core, or a script released one (the
+    /// HSM's boot breakpoint in `reset-end`), and the group halt (TL1) stopped
+    /// it again before a poll saw it run -- e.g. a breakpoint hit while a
+    /// reset hook still ran. Its cached registers are dropped and the halt is
+    /// reported to the frontends. No `halted` Tcl event: the core whose halt
+    /// stopped the group fires it.
+    Rehalted,
     /// The core runs again without a resume from us (e.g. a raw DBGSR
     /// write by a multi-core sync script).
     Running,

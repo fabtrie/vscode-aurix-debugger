@@ -77,6 +77,8 @@ const SCRATCH: u32 = 0x1_1FE8;
 const SCRATCH_LEN: usize = 16;
 
 pub const BREAKPOINT_SLOTS: usize = 4;
+/// How long a halt for a breakpoint change waits for the monitor entry.
+const HALT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 const MAX_BLOCK: usize = 128;
 
 /// The JTAG path to the SCR's OCDS interface.
@@ -109,6 +111,8 @@ pub struct Monitor {
     breakpoints: [Option<u16>; BREAKPOINT_SLOTS],
     /// The monitor answered frames since the attach: a halt request works without reset.
     armed: bool,
+    /// When a halt was requested from a monitor not armed yet (see [`Monitor::poll`]).
+    halt_since: Option<std::time::Instant>,
 }
 
 impl Default for Monitor {
@@ -133,6 +137,7 @@ impl Monitor {
             scratch: None,
             breakpoints: [None; BREAKPOINT_SLOTS],
             armed: false,
+            halt_since: None,
         }
     }
 
@@ -178,7 +183,9 @@ impl Monitor {
 
     /// winIDEA's attach: HRESET, then HCOMRST, HCONFIG, HMONITOR, HSTATE five times. The boot
     /// ROM enters the monitor at its start breakpoint (0x0000); the program continues from 0.
+    /// The reset clears the OCDS: the breakpoints are written again.
     pub fn reset_halt(&mut self, l: &mut dyn MonitorLink) -> Result<()> {
+        let bps = self.breakpoints;
         *self = Monitor::new();
         let mut seq = vec![HRESET];
         for _ in 0..5 {
@@ -194,6 +201,12 @@ impl Monitor {
         self.save_scratch(l)?;
         self.write_pc(l, 0)?;
         self.pc = 0;
+        for (slot, a) in bps.iter().enumerate() {
+            if let Some(a) = *a {
+                self.write(l, vreg::BREAKPOINTS + 2 * slot as u32, &a.to_le_bytes())?;
+                self.breakpoints[slot] = Some(a);
+            }
+        }
         self.arm(l)
     }
 
@@ -231,11 +244,24 @@ impl Monitor {
         }
         let st = self.hw(l, HSTATE)?;
         if st == 0xFFFF {
-            // The JTAG setting is lost after a new DAP connect (e.g. a chip reset).
+            // The JTAG setting is lost after a new DAP connect (e.g. a chip reset, which also
+            // reset the SCR: its monitor is unprepared again).
             l.monitor_select()?;
+            self.armed = false;
             return Ok(false);
         }
-        if st & TDO_MONITOR != 0 {
+        if st & TDO_MONITOR == 0 {
+            if let Some(t) = self.halt_since.filter(|t| t.elapsed() > HALT_TIMEOUT) {
+                // After a reset the SCR ignores HMONITOR until a debugger has reset it into its
+                // monitor (measured: no effect at all on the status bits). winIDEA's attach does that.
+                crate::log_warn!(
+                    "SCR: no monitor entry {} ms after the halt request; resetting the SCR into its monitor (its program restarts at 0x0000)",
+                    t.elapsed().as_millis()
+                );
+                self.reset_halt(l)?;
+            }
+        } else {
+            self.halt_since = None;
             self.frame = 0;
             self.halted = true;
             match self.entered(l).and_then(|_| self.arm(l)) {
@@ -296,6 +322,7 @@ impl Monitor {
             // Debug interface on (MMCR2.JENA) and a fresh frame state machine first.
             self.hw(l, HCOMRST)?;
             self.hw(l, HCONFIG)?;
+            self.halt_since.get_or_insert_with(std::time::Instant::now);
         }
         self.hw(l, HMONITOR)?;
         Ok(())
@@ -349,15 +376,46 @@ impl Monitor {
         }
     }
 
+    /// Sets or clears a hardware breakpoint. Only the monitor can write them, so a running SCR is
+    /// halted for it and continues afterwards (frontends set breakpoints while the target runs).
     pub fn set_breakpoint(&mut self, l: &mut dyn MonitorLink, slot: usize, addr: Option<u16>) -> Result<()> {
-        self.need_halted()?;
         if slot >= BREAKPOINT_SLOTS {
             return Err(Error::Resource(format!("SCR breakpoint slot {slot} (0..{})", BREAKPOINT_SLOTS - 1)));
         }
+        self.while_halted(l, |m, l| m.write_breakpoint(l, slot, addr))
+    }
+
+    fn write_breakpoint(&mut self, l: &mut dyn MonitorLink, slot: usize, addr: Option<u16>) -> Result<()> {
         self.write(l, vreg::BREAKPOINTS + 2 * slot as u32, &addr.unwrap_or(0).to_le_bytes())?;
         self.breakpoints[slot] = addr;
         let mask = self.bp_mask();
         self.write(l, ocds::BP_ENABLE, &[mask])
+    }
+
+    /// Runs `f` in the monitor. A running SCR is halted for it and resumed afterwards, unless it
+    /// stopped at a breakpoint of its own before the halt request took effect: then it stays
+    /// halted and the next poll reports that stop.
+    fn while_halted<T>(&mut self, l: &mut dyn MonitorLink, f: impl FnOnce(&mut Self, &mut dyn MonitorLink) -> Result<T>) -> Result<T> {
+        if self.halted {
+            return f(self, l);
+        }
+        let last = self.last;
+        self.halt(l)?;
+        let start = std::time::Instant::now();
+        let mut polls = 0;
+        while !self.poll(l)? {
+            polls += 1;
+            if polls >= 50 && start.elapsed() > 2 * HALT_TIMEOUT {
+                return Err(Error::Timeout("SCR: no monitor entry after the halt request".into()));
+            }
+        }
+        crate::log_debug!("SCR: halted for a breakpoint change after {polls} polls, {} ms", start.elapsed().as_millis());
+        let r = f(self, l);
+        if self.reason == ScrStop::Request {
+            self.last = if last == Last::None { Last::Run } else { last };
+            self.go(l, 0xE0)?;
+        }
+        r
     }
 
     pub fn read(&mut self, l: &mut dyn MonitorLink, vaddr: u32, len: usize) -> Result<Vec<u8>> {
@@ -537,6 +595,8 @@ mod tests {
         selected: bool,
         exits: Vec<u8>,
         scans: usize,
+        /// Ignores HMONITOR until an HRESET (an SCR reset with the chip).
+        deaf: bool,
     }
 
     impl Fake {
@@ -552,6 +612,7 @@ mod tests {
                 selected: false,
                 exits: Vec::new(),
                 scans: 0,
+                deaf: false,
             }
         }
         fn byte(&mut self, b: u8) {
@@ -630,7 +691,9 @@ mod tests {
                 }
                 tdo.push(d);
                 match t {
+                    HMONITOR if self.deaf => {}
                     HMONITOR | HRESET => {
+                        self.deaf = false;
                         self.monitor = true;
                         self.rx.clear();
                         self.mem.insert(vreg::PC, 0);
@@ -685,6 +748,47 @@ mod tests {
         assert_eq!(f.mem[&ocds::BP_ENABLE], 0x82);
         m.set_breakpoint(&mut f, 1, None).unwrap();
         assert_eq!(f.mem[&ocds::BP_ENABLE], 0x80);
+    }
+
+    #[test]
+    fn breakpoints_set_while_running_halt_and_continue() {
+        let mut f = Fake::new();
+        let mut m = Monitor::new();
+        m.attach(&mut f).unwrap();
+        m.set_breakpoint(&mut f, 0, Some(0x00F3)).unwrap();
+        assert_eq!((f.mem[&vreg::BREAKPOINTS], f.mem[&ocds::BP_ENABLE]), (0xF3, 0x81));
+        assert_eq!(f.exits, vec![0xE0], "continued after the breakpoint write");
+        assert_eq!(f.mem[&(vreg::PC + 1)], 0x10, "continues where the halt request stopped it");
+        assert!(!m.halted() && !m.poll(&mut f).unwrap());
+        m.set_breakpoint(&mut f, 0, None).unwrap();
+        assert_eq!(f.mem[&ocds::BP_ENABLE], 0x80);
+        assert_eq!(f.exits, vec![0xE0, 0xE0]);
+    }
+
+    #[test]
+    fn reset_into_the_monitor_keeps_the_breakpoints() {
+        let mut f = Fake::new();
+        let mut m = Monitor::new();
+        m.attach(&mut f).unwrap();
+        m.set_breakpoint(&mut f, 2, Some(0x0123)).unwrap();
+        f.mem.clear();
+        m.reset_halt(&mut f).unwrap();
+        assert_eq!((f.mem[&(vreg::BREAKPOINTS + 4)], f.mem[&(vreg::BREAKPOINTS + 5)]), (0x23, 0x01));
+        assert_eq!(f.mem[&ocds::BP_ENABLE], 0x84);
+    }
+
+    #[test]
+    fn unprepared_monitor_is_reset_into() {
+        let mut f = Fake::new();
+        f.deaf = true;
+        let mut m = Monitor::new();
+        m.attach(&mut f).unwrap();
+        m.set_breakpoint(&mut f, 0, Some(0x00F3)).unwrap();
+        assert!(!f.deaf, "HRESET sent");
+        assert_eq!((f.mem[&vreg::BREAKPOINTS], f.mem[&ocds::BP_ENABLE]), (0xF3, 0x81));
+        assert_eq!(f.exits, vec![0xE0], "the program continues (from 0)");
+        assert_eq!((f.mem[&vreg::PC], f.mem[&(vreg::PC + 1)]), (0, 0));
+        assert!(!m.halted());
     }
 
     #[test]

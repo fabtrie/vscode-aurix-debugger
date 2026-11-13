@@ -153,9 +153,24 @@ export function activate(context: vscode.ExtensionContext) {
 			flashing = true;
 			try {
 				try {
+					// The worker reports the progress in its log (followed into the AURIX Debug Server
+					// output): its sector lines go into the notification.
+					agentOutput?.show(true);
 					await vscode.window.withProgress(
-						{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ Debugger: flashing target (see Debug Console)...' },
-						async () => { await s.customRequest('aurix/flash', {}); }
+						{ location: vscode.ProgressLocation.Notification, title: 'AURIX™ Debugger: flashing target' },
+						async (progress) => {
+							hubLogListeners.set(s.id, (line) => {
+								const m = /^(?:Info|Warn)\s*:\s*(.*(?:sectors|flash|erase|program|verif).*)$/i.exec(line);
+								if (m) {
+									progress.report({ message: m[1] });
+								}
+							});
+							try {
+								await s.customRequest('aurix/flash', {});
+							} finally {
+								hubLogListeners.delete(s.id);
+							}
+						}
 					);
 				} catch (e) {
 					void vscode.window.showErrorMessage(`AURIX™ Debugger: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -1024,9 +1039,43 @@ interface HubBinding {
 	opened: boolean;
 	lifetime: 'close' | 'keep';
 	relay?: hub.TcfRelay;
+	/** Stops following the session's log into the output channel. */
+	stopLog?: () => void;
 }
 
 const hubBindings = new Map<string, HubBinding>();
+
+/** Per debug session: gets each new line of its hub session's log (the Flash Target progress). */
+const hubLogListeners = new Map<string, (line: string) => void>();
+
+/**
+ * Follows the hub session's log into the output channel: the worker writes its progress
+ * (connecting, flashing sector by sector) only there. A session this debug session opened is shown
+ * from its start, an attached one from its last lines.
+ */
+async function followHubLog(sessionId: string, b: HubBinding): Promise<void> {
+	let offset = 0;
+	if (!b.opened) {
+		try {
+			const r = await b.client.sessionLog(b.session, 20);
+			agentOutput?.appendLine(r.text);
+			offset = r.next;
+		} catch {
+			// Followed from the start below.
+		}
+	}
+	b.stopLog = b.client.followLog(b.session, offset, (text) => {
+		agentOutput?.append(text);
+		const listener = hubLogListeners.get(sessionId);
+		if (listener) {
+			for (const line of text.split(/\r?\n/)) {
+				if (line.trim() !== '') {
+					listener(line);
+				}
+			}
+		}
+	});
+}
 let stopHubEvents: (() => void) | undefined;
 
 function hubSetting<T>(key: string, fallback: T): T {
@@ -1184,6 +1233,7 @@ async function prepareHubSession(session: vscode.DebugSession, config: vscode.De
 		port = binding.relay.port;
 	}
 	hubBindings.set(session.id, binding);
+	await followHubLog(session.id, binding);
 	// The hub flashed and reset when it opened the session: the debug adapter must not flash again.
 	return { host: '127.0.0.1', port, hubFlashed: opened && config.enableFlashing === true };
 }
@@ -1195,6 +1245,8 @@ async function hubSessionEnded(session: vscode.DebugSession): Promise<void> {
 		return;
 	}
 	hubBindings.delete(session.id);
+	hubLogListeners.delete(session.id);
+	b.stopLog?.();
 	b.relay?.close();
 	try {
 		if (b.opened && b.lifetime === 'close') {

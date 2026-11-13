@@ -2711,10 +2711,16 @@
         "type": "object"
       },
       "SessionLog": {
-        "description": "The end of a session's log.",
+        "description": "The end of a session's log, or the part from an `offset`.",
         "properties": {
           "file": {
             "type": "string"
+          },
+          "next": {
+            "description": "Byte offset after `text`: the `offset` that continues the log.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "session": {
             "type": "string"
@@ -2726,7 +2732,8 @@
         "required": [
           "session",
           "file",
-          "text"
+          "text",
+          "next"
         ],
         "type": "object"
       },
@@ -2738,6 +2745,16 @@
             "default": null,
             "description": "Lines from the end; default 200.",
             "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Read from this byte offset instead, whole lines up to 1 MiB: to follow the log, pass the\n`next` of the previous answer. A log shorter than the offset is read from its start.",
+            "format": "uint64",
             "minimum": 0,
             "type": [
               "integer",
@@ -5040,6 +5057,21 @@
             "schema": {
               "default": null,
               "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Read from this byte offset instead, whole lines up to 1 MiB: to follow the log, pass the\n`next` of the previous answer. A log shorter than the offset is read from its start.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint64",
               "minimum": 0,
               "type": [
                 "integer",

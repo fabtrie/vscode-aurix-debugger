@@ -131,6 +131,29 @@ pub fn tail(path: &Path, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// The whole lines of a log from byte `offset` (from 0 when the file is shorter), at most `max`
+/// bytes, and the offset after them. A line still being written stays for the next call.
+pub fn read_from(path: &Path, offset: u64, max: usize) -> (String, u64) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return (String::new(), offset);
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = if offset > len { 0 } else { offset };
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(start)).is_err() || f.take(max as u64).read_to_end(&mut buf).is_err() {
+        return (String::new(), start);
+    }
+    // Whole lines only, unless one line alone fills `max`.
+    let keep = match buf.iter().rposition(|&b| b == b'\n') {
+        Some(i) => i + 1,
+        None if buf.len() == max => buf.len(),
+        None => 0,
+    };
+    buf.truncate(keep);
+    (String::from_utf8_lossy(&buf).into_owned(), start + keep as u64)
+}
+
 /// A profile file: `[connect]` and an optional `[launch]`.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -977,8 +1000,14 @@ impl HubApi for Hub {
             let s = Self::find(&st, &req.session).ok_or_else(|| ApiError::not_found(format!("no session '{}'", req.session)))?;
             (s.id.clone(), s.log_file.clone())
         };
+        let file_s = file.to_string_lossy().into_owned();
+        if let Some(offset) = req.offset {
+            let (text, next) = read_from(&file, offset, 1 << 20);
+            return Ok(SessionLog { session: id, file: file_s, text, next });
+        }
         let n = req.lines.unwrap_or(200).clamp(1, 100_000) as usize;
-        Ok(SessionLog { session: id, file: file.to_string_lossy().into_owned(), text: tail(&file, n) })
+        let next = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        Ok(SessionLog { session: id, file: file_s, text: tail(&file, n), next })
     }
 
     fn list_profiles(&self, _: NoArgs) -> Result<ProfileList, ApiError> {
@@ -989,6 +1018,22 @@ impl HubApi for Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_follows_whole_lines() {
+        let dir = std::env::temp_dir().join(format!("aurix-hub-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.log");
+        std::fs::write(&p, "one\ntwo\nthr").unwrap();
+        let (t, n) = read_from(&p, 0, 1 << 20);
+        assert_eq!((t.as_str(), n), ("one\ntwo\n", 8));
+        assert_eq!(read_from(&p, n, 1 << 20), (String::new(), 8), "a line still being written waits");
+        std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(read_from(&p, n, 1 << 20), ("three\n".to_string(), 14));
+        assert_eq!(read_from(&p, 100, 1 << 20).1, 14, "a shorter (new) log is read from its start");
+        assert_eq!(read_from(&p, 0, 5), ("one\n".to_string(), 4), "at most max bytes, whole lines");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn profiles_merge() {

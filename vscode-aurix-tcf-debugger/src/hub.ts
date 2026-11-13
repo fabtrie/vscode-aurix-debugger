@@ -141,8 +141,49 @@ export class HubClient {
 		return this.request('GET', `/api/v1/sessions/${encodeURIComponent(key)}/launch?timeout_s=${timeoutS}`);
 	}
 
-	sessionLog(key: string, lines = 40): Promise<{ text: string; file: string }> {
+	/** The last `lines` of a session's log; `next` is the offset after it (see `followLog`). */
+	sessionLog(key: string, lines = 40): Promise<{ text: string; file: string; next: number }> {
 		return this.request('GET', `/api/v1/sessions/${encodeURIComponent(key)}/log?lines=${lines}`, undefined, 10_000);
+	}
+
+	/** The whole lines of a session's log from byte `offset`, and the offset after them. */
+	sessionLogFrom(key: string, offset: number): Promise<{ text: string; file: string; next: number }> {
+		return this.request('GET', `/api/v1/sessions/${encodeURIComponent(key)}/log?offset=${offset}`, undefined, 10_000);
+	}
+
+	/**
+	 * Follows a session's log from byte `offset`: `onText` gets every new part (whole lines). The
+	 * worker writes its progress (connecting, flashing) only there. Returns the function that stops.
+	 */
+	followLog(key: string, offset: number, onText: (text: string) => void, periodMs = 300): () => void {
+		let stopped = false;
+		let timer: NodeJS.Timeout | undefined;
+		const tick = async () => {
+			let more = false;
+			try {
+				const r = await this.sessionLogFrom(key, offset);
+				if (stopped) {
+					return;
+				}
+				if (r.text) {
+					onText(r.text);
+				}
+				more = r.next > offset && r.text.length >= 1 << 19;
+				offset = r.next;
+			} catch {
+				// The session is closing or the hub restarts: the caller stops us when it is over.
+			}
+			if (!stopped) {
+				timer = setTimeout(tick, more ? 0 : periodMs);
+			}
+		};
+		void tick();
+		return () => {
+			stopped = true;
+			if (timer) {
+				clearTimeout(timer);
+			}
+		};
 	}
 
 	endClient(key: string): Promise<unknown> {

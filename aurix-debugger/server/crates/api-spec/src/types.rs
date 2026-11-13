@@ -1477,14 +1477,20 @@ pub struct SessionLogRequest {
     /// Lines from the end; default 200.
     #[serde(default)]
     pub lines: Option<u32>,
+    /// Read from this byte offset instead, whole lines up to 1 MiB: to follow the log, pass the
+    /// `next` of the previous answer. A log shorter than the offset is read from its start.
+    #[serde(default)]
+    pub offset: Option<u64>,
 }
 
-/// The end of a session's log.
+/// The end of a session's log, or the part from an `offset`.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLog {
     pub session: String,
     pub file: String,
     pub text: String,
+    /// Byte offset after `text`: the `offset` that continues the log.
+    pub next: u64,
 }
 
 /// The state of a session.

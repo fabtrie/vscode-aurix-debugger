@@ -902,9 +902,11 @@ class SessionList:
 
 @dataclass
 class SessionLog:
-    """The end of a session's log."""
+    """The end of a session's log, or the part from an `offset`."""
 
     file: str
+    next: int
+    """Byte offset after `text`: the `offset` that continues the log."""
     session: str
     text: str
 
@@ -912,6 +914,7 @@ class SessionLog:
     def from_dict(cls, d: dict[str, Any]) -> SessionLog:
         return cls(
             file=d.get("file"),
+            next=d.get("next"),
             session=d.get("session"),
             text=d.get("text"),
         )
@@ -1268,14 +1271,15 @@ class GeneratedClient:
         """
         return SessionList.from_dict(self._call("DELETE", f"/api/v1/sessions/{quote(str(session), safe='')}", None, None))
 
-    def session_log(self, session: str, *, lines: int | None = None) -> SessionLog:
+    def session_log(self, session: str, *, lines: int | None = None, offset: int | None = None) -> SessionLog:
         """The end of a session's log (the worker's console output), e.g. to see why `init` failed.
 
         Args:
             session: Session ID or name.
             lines: Lines from the end; default 200.
+            offset: Read from this byte offset instead, whole lines up to 1 MiB: to follow the log, pass the `next` of the previous answer. A log shorter than the offset is read from its start.
         """
-        return SessionLog.from_dict(self._call("GET", f"/api/v1/sessions/{quote(str(session), safe='')}/log", _args({"lines": lines}), None))
+        return SessionLog.from_dict(self._call("GET", f"/api/v1/sessions/{quote(str(session), safe='')}/log", _args({"lines": lines, "offset": offset}), None))
 
     def list_profiles(self) -> ProfileList:
         """List the session profiles stored on the hub machine.

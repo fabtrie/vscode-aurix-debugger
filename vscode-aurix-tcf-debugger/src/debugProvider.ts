@@ -67,6 +67,7 @@ import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './br
 import { CoreRef, describeCores, capitalize, parseBreakpointCondition, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
 import * as arch from './coreArchitecture';
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
+import { cppVariableName } from './cppNames';
 
 type ElfSymbol = { name: string; address: number; size: number; file?: string };
 type FlashFile = { path: string; offset?: number | string; type?: string };
@@ -3342,7 +3343,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return this.getElfSymbols().functions;
 	}
 
-	/** Reads the function (STT_FUNC) and variable (STT_OBJECT) symbols from the ELF .symtab, sorted by name. */
+	/**
+	 * Reads the function (STT_FUNC) and variable (STT_OBJECT) symbols from the ELF .symtab, sorted by
+	 * name. C++ variables get their qualified name (`ns::Class::member`).
+	 */
 	private loadSymbolsFromElf(elfPath: string): { functions: ElfSymbol[]; variables: ElfSymbol[] } {
 		const buf = fs.readFileSync(elfPath);
 		if (buf.length < 0x40 || !(buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46)) {
@@ -3393,7 +3397,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				const end = buf.indexOf(0, start);
 				const rawName = buf.toString('utf8', start, end < 0 ? buf.length : end);
 				if (rawName && !target.has(rawName)) {
-					target.set(rawName, { ...splitElfSymbolName(rawName), address: value, size });
+					const sym = splitElfSymbolName(rawName);
+					if (target === variables) {
+						// C++: the qualified name an expression takes, not the mangled one.
+						const name = cppVariableName(sym.name);
+						if (name === undefined) {
+							continue;
+						}
+						sym.name = name;
+					}
+					target.set(rawName, { ...sym, address: value, size });
 				}
 			}
 		}

@@ -4,6 +4,12 @@
 //! Written against GHS C 2021 output (DWARF 2: no .debug_aranges, absolute
 //! Windows paths in the line table, CU DIEs without PC ranges, type
 //! references across units), which also covers GCC output.
+//!
+//! C++: functions, variables and types declared in namespaces and classes get their qualified
+//! name (`app::Motor::step`); a lookup by name also finds them by any trailing part of it
+//! (`Motor::step`, `step`). Definitions outside their class or namespace (DW_AT_specification)
+//! and out-of-line instances (DW_AT_abstract_origin) take name, type and linkage from the DIE
+//! they complete.
 
 pub mod cdb;
 pub mod expr;
@@ -14,7 +20,7 @@ pub mod types;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gimli::{AttributeValue, EndianSlice, LittleEndian, UnitOffset};
@@ -98,6 +104,8 @@ pub struct Unit {
     pub header: gimli::UnitHeader<R>,
     pub name: String,
     pub comp_dir: String,
+    /// Compiled from C++: types are named without `struct`/`enum`, qualified by their scope.
+    pub cpp: bool,
 }
 
 pub struct Symbols {
@@ -109,10 +117,17 @@ pub struct Symbols {
     pub globals: Vec<Global>,
     functions_by_name: HashMap<String, Vec<usize>>,
     globals_by_name: HashMap<String, Vec<usize>>,
-    /// Named types ("uint8", "struct foo", "enum bar"), a few definitions each.
+    /// C++: functions and globals by a trailing part of their qualified name, for names
+    /// that no symbol has as its full name.
+    functions_by_suffix: HashMap<String, Vec<usize>>,
+    globals_by_suffix: HashMap<String, Vec<usize>>,
+    /// Named types ("uint8", "struct foo", "enum bar"; C++ also "ns::foo", "foo"), a few definitions each.
     types_by_name: HashMap<String, Vec<DieRef>>,
     /// Enumerator name -> (enumerator, enumeration type).
     enumerators_by_name: HashMap<String, Vec<(DieRef, DieRef)>>,
+    /// C++: the scope prefix (`app::Motor::`) of the functions, variables, static members and
+    /// types declared in a namespace or class.
+    scopes: HashMap<DieRef, Arc<str>>,
     /// All line table rows, sorted by address (end-of-sequence rows first).
     rows: Vec<Row>,
     files: Vec<String>,
@@ -175,6 +190,48 @@ fn is_declaration(e: &Die) -> bool {
     matches!(e.attr_value(gimli::DW_AT_declaration), Some(AttributeValue::Flag(true)))
 }
 
+/// A DIE that completes a declaration or is an instance of an abstract DIE, so takes its name
+/// from there.
+fn completes_other(e: &Die) -> bool {
+    e.attr_value(gimli::DW_AT_specification).is_some() || e.attr_value(gimli::DW_AT_abstract_origin).is_some()
+}
+
+/// Byte offsets of the top-level `::` separators of a C++ name (not those inside `<...>` or
+/// `(...)`, as in `Ring<app::Item, 4>::push`).
+fn scope_separators(name: &str) -> Vec<usize> {
+    let b = name.as_bytes();
+    let mut out = Vec::new();
+    let mut nest = 0i32;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'<' | b'(' => nest += 1,
+            b'>' | b')' => nest -= 1,
+            b':' if nest == 0 && b.get(i + 1) == Some(&b':') => {
+                out.push(i);
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The trailing parts of a qualified C++ name, longest first, without the name itself:
+/// `a::B::f` gives `B::f` and `f`.
+pub fn name_suffixes(name: &str) -> impl Iterator<Item = &str> {
+    scope_separators(name).into_iter().map(move |i| &name[i + 2..])
+}
+
+/// Adds `i` under `key` once.
+fn index_name(map: &mut HashMap<String, Vec<usize>>, key: &str, i: usize) {
+    let v = map.entry(key.to_string()).or_default();
+    if !v.contains(&i) {
+        v.push(i);
+    }
+}
+
 impl Symbols {
     pub fn load(path: &Path) -> Result<Symbols, String> {
         let t0 = Instant::now();
@@ -203,8 +260,11 @@ impl Symbols {
             globals: Vec::new(),
             functions_by_name: HashMap::new(),
             globals_by_name: HashMap::new(),
+            functions_by_suffix: HashMap::new(),
+            globals_by_suffix: HashMap::new(),
             types_by_name: HashMap::new(),
             enumerators_by_name: HashMap::new(),
+            scopes: HashMap::new(),
             rows: Vec::new(),
             files: Vec::new(),
             files_norm: Vec::new(),
@@ -215,6 +275,10 @@ impl Symbols {
             load_time: Duration::ZERO,
         };
         let mut file_ids: HashMap<String, u32> = HashMap::new();
+        // Functions and globals whose DIE has no name of its own (C++ definitions completing a
+        // declaration): named once all units are read, as the declaration may come later.
+        let mut unnamed_functions: Vec<usize> = Vec::new();
+        let mut unnamed_globals: Vec<usize> = Vec::new();
 
         let mut iter = syms.dwarf.units();
         while let Some(header) = iter.next().map_err(err("unit header"))? {
@@ -222,16 +286,80 @@ impl Symbols {
             let unit_idx = syms.units.len();
             let mut name = String::new();
             let mut comp_dir = String::new();
+            let mut cpp = false;
+            let no_prefix: Arc<str> = "".into();
             let mut cur_enum: Option<(isize, DieRef)> = None;
+            // The DIEs enclosing the current one: depth, tag, and the C++ scope prefix of
+            // their children ("app::Motor::", empty outside namespaces and classes).
+            let mut parents: Vec<(isize, gimli::DwTag, Arc<str>)> = Vec::new();
 
             let mut cursor = unit.entries();
             while let Some(entry) = cursor.next_dfs().map_err(err("DIE"))? {
                 let depth = entry.depth();
                 let here = DieRef { unit: unit_idx, off: entry.offset().0 };
+                while parents.last().is_some_and(|p| p.0 >= depth) {
+                    parents.pop();
+                }
+                let parent_tag = parents.last().map(|p| p.1);
+                let prefix: Arc<str> = parents.last().map_or_else(|| Arc::clone(&no_prefix), |p| p.2.clone());
+                // Read on demand: most DIEs need no name. Borrows only the DWARF sections.
+                let dwarf = &syms.dwarf;
+                let own_name = || {
+                    let s = dwarf.attr_string(&unit, entry.attr_value(gimli::DW_AT_name)?).ok()?;
+                    Some(s.to_string_lossy().into_owned()).filter(|n| !n.is_empty())
+                };
+                if entry.has_children() {
+                    let scope = match entry.tag() {
+                        gimli::DW_TAG_namespace => Some(own_name().unwrap_or_else(|| "(anonymous namespace)".into())),
+                        gimli::DW_TAG_structure_type
+                        | gimli::DW_TAG_class_type
+                        | gimli::DW_TAG_union_type
+                        | gimli::DW_TAG_enumeration_type
+                            if cpp =>
+                        {
+                            own_name()
+                        }
+                        _ => None,
+                    };
+                    let child_prefix = match scope {
+                        Some(n) => format!("{prefix}{n}::").into(),
+                        None => prefix.clone(),
+                    };
+                    parents.push((depth, entry.tag(), child_prefix));
+                }
+                // The scope of what a namespace or class declares, also of declarations that a
+                // definition elsewhere completes.
+                if !prefix.is_empty() {
+                    let named = match entry.tag() {
+                        gimli::DW_TAG_subprogram
+                        | gimli::DW_TAG_variable
+                        | gimli::DW_TAG_base_type
+                        | gimli::DW_TAG_typedef
+                        | gimli::DW_TAG_structure_type
+                        | gimli::DW_TAG_class_type
+                        | gimli::DW_TAG_union_type
+                        | gimli::DW_TAG_enumeration_type => true,
+                        // A static data member (DWARF 2-4).
+                        gimli::DW_TAG_member => is_declaration(entry),
+                        _ => false,
+                    };
+                    if named {
+                        syms.scopes.insert(here, prefix.clone());
+                    }
+                }
                 match entry.tag() {
                     gimli::DW_TAG_compile_unit | gimli::DW_TAG_partial_unit => {
                         name = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)).unwrap_or_default();
                         comp_dir = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_comp_dir)).unwrap_or_default();
+                        cpp = matches!(
+                            entry.attr_value(gimli::DW_AT_language),
+                            Some(AttributeValue::Language(
+                                gimli::DW_LANG_C_plus_plus
+                                    | gimli::DW_LANG_C_plus_plus_03
+                                    | gimli::DW_LANG_C_plus_plus_11
+                                    | gimli::DW_LANG_C_plus_plus_14
+                            ))
+                        );
                     }
                     gimli::DW_TAG_subprogram => {
                         if is_declaration(entry) {
@@ -251,7 +379,14 @@ impl Symbols {
                         if low == 0 || high <= low {
                             continue;
                         }
-                        let Some(fname) = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)) else { continue };
+                        let fname = match own_name() {
+                            Some(n) => format!("{prefix}{n}"),
+                            None if completes_other(entry) => {
+                                unnamed_functions.push(syms.functions.len());
+                                String::new()
+                            }
+                            None => continue,
+                        };
                         let decl_line = entry.attr_value(gimli::DW_AT_decl_line).and_then(|v| v.udata_value()).unwrap_or(0) as u32;
                         let external = matches!(entry.attr_value(gimli::DW_AT_external), Some(AttributeValue::Flag(true)));
                         syms.functions.push(Function {
@@ -265,11 +400,22 @@ impl Symbols {
                             exit: None,
                         });
                     }
-                    gimli::DW_TAG_variable if depth == 1 => {
+                    // File scope or a C++ namespace (not a function's static variable).
+                    gimli::DW_TAG_variable
+                        if depth == 1
+                            || matches!(parent_tag, Some(gimli::DW_TAG_namespace | gimli::DW_TAG_compile_unit | gimli::DW_TAG_partial_unit)) =>
+                    {
                         let Some(AttributeValue::Exprloc(expr)) = entry.attr_value(gimli::DW_AT_location) else { continue };
                         let mut ops = expr.operations(unit.encoding());
                         let Ok(Some(gimli::Operation::Address { address })) = ops.next() else { continue };
-                        let Some(vname) = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)) else { continue };
+                        let vname = match own_name() {
+                            Some(n) => format!("{prefix}{n}"),
+                            None if completes_other(entry) => {
+                                unnamed_globals.push(syms.globals.len());
+                                String::new()
+                            }
+                            None => continue,
+                        };
                         let external = matches!(entry.attr_value(gimli::DW_AT_external), Some(AttributeValue::Flag(true)));
                         syms.globals.push(Global { name: vname, addr: address as u32, unit: unit_idx, die: entry.offset(), external, ty: None });
                     }
@@ -285,18 +431,26 @@ impl Symbols {
                         if is_declaration(entry) {
                             continue;
                         }
-                        let Some(n) = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)).filter(|n| !n.is_empty()) else {
-                            continue;
-                        };
-                        let key = match entry.tag() {
+                        let Some(n) = own_name() else { continue };
+                        let mut keys = vec![match entry.tag() {
                             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => format!("struct {n}"),
                             gimli::DW_TAG_union_type => format!("union {n}"),
                             gimli::DW_TAG_enumeration_type => format!("enum {n}"),
-                            _ => n,
-                        };
-                        let v = syms.types_by_name.entry(key).or_default();
-                        if v.len() < NAME_INDEX_CAP {
-                            v.push(here);
+                            _ => n.clone(),
+                        }];
+                        // C++ names a type without the keyword, qualified or not.
+                        if cpp && !prefix.is_empty() {
+                            let q = format!("{prefix}{n}");
+                            keys.extend(name_suffixes(&q).map(str::to_string));
+                            keys.push(q);
+                        } else if cpp {
+                            keys.push(n);
+                        }
+                        for key in keys {
+                            let v = syms.types_by_name.entry(key).or_default();
+                            if v.len() < NAME_INDEX_CAP && !v.contains(&here) {
+                                v.push(here);
+                            }
                         }
                     }
                     gimli::DW_TAG_enumerator => {
@@ -305,9 +459,19 @@ impl Symbols {
                             continue;
                         }
                         let Some(n) = syms.attr_str(&unit, entry.attr_value(gimli::DW_AT_name)) else { continue };
-                        let v = syms.enumerators_by_name.entry(n).or_default();
-                        if v.len() < NAME_INDEX_CAP {
-                            v.push((here, en));
+                        // C++: also `Mode::Fast` and `app::Mode::Fast` (the prefix includes the
+                        // enumeration's name); C names an enumerator by its name only.
+                        let mut keys = vec![n.clone()];
+                        if !prefix.is_empty() {
+                            let q = format!("{prefix}{n}");
+                            keys.extend(name_suffixes(&q).filter(|k| *k != n).map(str::to_string));
+                            keys.push(q);
+                        }
+                        for key in keys {
+                            let v = syms.enumerators_by_name.entry(key).or_default();
+                            if v.len() < NAME_INDEX_CAP && !v.contains(&(here, en)) {
+                                v.push((here, en));
+                            }
                         }
                     }
                     _ => {}
@@ -359,19 +523,32 @@ impl Symbols {
                 }
             }
             syms.unit_offsets.push(header.debug_info_offset().map(|o| o.0).unwrap_or(0));
-            syms.units.push(Unit { header, name, comp_dir });
+            syms.units.push(Unit { header, name, comp_dir, cpp });
             let cell = OnceLock::new();
             let _ = cell.set(Some(unit));
             syms.unit_cache.push(cell);
         }
 
+        // Definitions completing a declaration: name and linkage from the declaration.
+        for i in unnamed_functions {
+            let d = syms.functions[i].die_ref();
+            syms.functions[i].name = syms.qualified_name(d).unwrap_or_default();
+            syms.functions[i].external |= syms.inherited_flag(d, gimli::DW_AT_external);
+            if syms.functions[i].decl_line == 0 {
+                syms.functions[i].decl_line =
+                    syms.inherited_attr(d, gimli::DW_AT_decl_line).and_then(|(_, v)| v.udata_value()).unwrap_or(0) as u32;
+            }
+        }
+        for i in unnamed_globals {
+            let d = syms.globals[i].die_ref();
+            syms.globals[i].name = syms.qualified_name(d).unwrap_or_default();
+            syms.globals[i].external |= syms.inherited_flag(d, gimli::DW_AT_external);
+        }
+        syms.functions.retain(|f| !f.name.is_empty());
+        syms.globals.retain(|g| !g.name.is_empty());
+
         syms.functions.sort_by_key(|f| (f.low, f.high));
-        for (i, f) in syms.functions.iter().enumerate() {
-            syms.functions_by_name.entry(f.name.clone()).or_default().push(i);
-        }
-        for (i, g) in syms.globals.iter().enumerate() {
-            syms.globals_by_name.entry(g.name.clone()).or_default().push(i);
-        }
+        syms.index_names();
         syms.rows.sort_by_key(|r| (r.addr, !r.end));
         for (i, r) in syms.rows.iter().enumerate() {
             if !r.end && r.line != 0 {
@@ -380,6 +557,22 @@ impl Symbols {
         }
         syms.load_time = t0.elapsed();
         Ok(syms)
+    }
+
+    /// Fills the function and global name indexes.
+    fn index_names(&mut self) {
+        for (i, f) in self.functions.iter().enumerate() {
+            index_name(&mut self.functions_by_name, &f.name, i);
+            for s in name_suffixes(&f.name) {
+                index_name(&mut self.functions_by_suffix, s, i);
+            }
+        }
+        for (i, g) in self.globals.iter().enumerate() {
+            index_name(&mut self.globals_by_name, &g.name, i);
+            for s in name_suffixes(&g.name) {
+                index_name(&mut self.globals_by_suffix, s, i);
+            }
+        }
     }
 
     /// Symbols without debug information (e.g. from an assembler source): functions as
@@ -407,8 +600,11 @@ impl Symbols {
                 .collect(),
             functions_by_name: HashMap::new(),
             globals_by_name: HashMap::new(),
+            functions_by_suffix: HashMap::new(),
+            globals_by_suffix: HashMap::new(),
             types_by_name: HashMap::new(),
             enumerators_by_name: HashMap::new(),
+            scopes: HashMap::new(),
             rows: rows
                 .into_iter()
                 .map(|(addr, file, line)| Row { addr, file: file.unwrap_or(0), line, col: 0, end: file.is_none() })
@@ -422,12 +618,7 @@ impl Symbols {
             load_time: Duration::ZERO,
         };
         syms.functions.sort_by_key(|f| (f.low, f.high));
-        for (i, f) in syms.functions.iter().enumerate() {
-            syms.functions_by_name.entry(f.name.clone()).or_default().push(i);
-        }
-        for (i, g) in syms.globals.iter().enumerate() {
-            syms.globals_by_name.entry(g.name.clone()).or_default().push(i);
-        }
+        syms.index_names();
         syms.rows.sort_by_key(|r| (r.addr, !r.end));
         for (i, r) in syms.rows.iter().enumerate() {
             if !r.end && r.line != 0 {
@@ -504,11 +695,72 @@ impl Symbols {
 
     /// A reference attribute (e.g. DW_AT_type) of a DIE.
     pub(crate) fn ref_attr(&self, from: DieRef, e: &Die, at: gimli::DwAt) -> Option<DieRef> {
-        match e.attr_value(at)? {
+        self.ref_value(from, e.attr_value(at)?)
+    }
+
+    /// The DIE that a reference attribute value of DIE `from` refers to.
+    fn ref_value(&self, from: DieRef, v: AttributeValue<R>) -> Option<DieRef> {
+        match v {
             AttributeValue::UnitRef(o) => Some(DieRef { unit: from.unit, off: o.0 }),
             AttributeValue::DebugInfoRef(g) => self.die_at_global(g.0),
             _ => None,
         }
+    }
+
+    /// The DIE that a DIE completes (DW_AT_specification: a C++ definition outside its class or
+    /// namespace) or is an instance of (DW_AT_abstract_origin).
+    fn origin(&self, d: DieRef, e: &Die) -> Option<DieRef> {
+        self.ref_attr(d, e, gimli::DW_AT_specification).or_else(|| self.ref_attr(d, e, gimli::DW_AT_abstract_origin))
+    }
+
+    /// An attribute of a DIE, else of its [origin](Self::origin): the DIE that has it, and the value.
+    pub(crate) fn inherited_attr(&self, d: DieRef, at: gimli::DwAt) -> Option<(DieRef, AttributeValue<R>)> {
+        let mut cur = d;
+        for _ in 0..8 {
+            let (_, e) = self.entry(cur)?;
+            if let Some(v) = e.attr_value(at) {
+                return Some((cur, v));
+            }
+            cur = self.origin(cur, &e)?;
+        }
+        None
+    }
+
+    fn inherited_flag(&self, d: DieRef, at: gimli::DwAt) -> bool {
+        matches!(self.inherited_attr(d, at), Some((_, AttributeValue::Flag(true))))
+    }
+
+    /// A reference attribute of a DIE or of its origin (see [`Self::inherited_attr`]).
+    pub(crate) fn inherited_ref(&self, d: DieRef, at: gimli::DwAt) -> Option<DieRef> {
+        let (from, v) = self.inherited_attr(d, at)?;
+        self.ref_value(from, v)
+    }
+
+    /// The name of a function, variable or type, qualified by its C++ namespaces and classes.
+    pub fn qualified_name(&self, d: DieRef) -> Option<String> {
+        let mut cur = d;
+        for _ in 0..8 {
+            let (u, e) = self.entry(cur)?;
+            if let Some(n) = self.attr_str(u, e.attr_value(gimli::DW_AT_name)).filter(|n| !n.is_empty()) {
+                return Some(match self.scopes.get(&cur) {
+                    Some(p) => format!("{p}{n}"),
+                    None => n,
+                });
+            }
+            cur = self.origin(cur, &e)?;
+        }
+        None
+    }
+
+    /// Whether a DIE comes from a C++ unit.
+    pub(crate) fn is_cpp(&self, d: DieRef) -> bool {
+        self.units.get(d.unit).is_some_and(|u| u.cpp)
+    }
+
+    /// The qualified name of a type DIE declared in a C++ namespace or class.
+    pub(crate) fn scoped_name(&self, d: DieRef) -> Option<String> {
+        let p = self.scopes.get(&d)?;
+        Some(format!("{p}{}", self.die_name(d)?))
     }
 
     /// The type of global `i`: its DIE's; without one, the type its table gave (SDCC), else one
@@ -521,9 +773,10 @@ impl Symbols {
         }
     }
 
+    /// The (unqualified) name of a DIE, or of the DIE it completes or is an instance of.
     pub fn die_name(&self, r: DieRef) -> Option<String> {
-        let (u, e) = self.entry(r)?;
-        self.attr_str(u, e.attr_value(gimli::DW_AT_name))
+        let (d, v) = self.inherited_attr(r, gimli::DW_AT_name)?;
+        self.attr_str(self.unit(d.unit)?, Some(v))
     }
 
     pub fn types_named(&self, name: &str) -> &[DieRef] {
@@ -539,12 +792,18 @@ impl Symbols {
         self.files.len()
     }
 
+    /// Globals with this name; else (C++) the globals whose qualified name ends in it
+    /// (`Motor::count` finds `app::Motor::count`). A leading `::` is ignored.
     pub fn global_indices(&self, name: &str) -> &[usize] {
-        self.globals_by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
+        let name = name.strip_prefix("::").unwrap_or(name);
+        self.globals_by_name.get(name).or_else(|| self.globals_by_suffix.get(name)).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Functions with this name, else C++ functions whose qualified name ends in it (see
+    /// [`Self::global_indices`]); all overloads of a C++ function.
     pub fn function_indices(&self, name: &str) -> &[usize] {
-        self.functions_by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
+        let name = name.strip_prefix("::").unwrap_or(name);
+        self.functions_by_name.get(name).or_else(|| self.functions_by_suffix.get(name)).map(Vec::as_slice).unwrap_or(&[])
     }
 
     // --- Addresses and lines -------------------------------------------------------------
@@ -696,6 +955,25 @@ impl Symbols {
         }
         let fns = self.functions_named(t);
         fns.iter().find(|f| f.external).or(fns.first()).map(|f| f.low)
+    }
+
+    /// Addresses for a location expression: a number, or every function of that name (the
+    /// overloads of a C++ function, its constructor variants, static functions of several
+    /// files), external ones first.
+    pub fn resolve_locations(&self, loc: &str) -> Vec<u32> {
+        let t = loc.trim();
+        let mut fns = self.functions_named(t);
+        if fns.is_empty() {
+            return self.resolve_location(t).into_iter().collect();
+        }
+        fns.sort_by_key(|f| (!f.external, f.low));
+        let mut out: Vec<u32> = Vec::new();
+        for f in fns {
+            if !out.contains(&f.low) {
+                out.push(f.low);
+            }
+        }
+        out
     }
 }
 

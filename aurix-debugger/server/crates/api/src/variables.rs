@@ -90,8 +90,7 @@ fn shape(syms: &Symbols, ty: &TypeId, bits: Option<(u32, u32)>) -> Shape {
         TypeClass::Pointer => VariableClass::Pointer,
         TypeClass::Enumeration => VariableClass::Enum,
         TypeClass::Array => VariableClass::Array,
-        // A typedef keeps its own name, so ask the type it stands for whether it is a union.
-        TypeClass::Composite if syms.type_info(&info.resolved).name.is_some_and(|n| n.starts_with("union ")) => VariableClass::Union,
+        TypeClass::Composite if syms.is_union(ty) => VariableClass::Union,
         TypeClass::Composite => VariableClass::Struct,
         TypeClass::Function => VariableClass::Function,
         TypeClass::Unknown => VariableClass::Unknown,
@@ -198,9 +197,12 @@ fn glob(pattern: &[u8], name: &[u8]) -> bool {
     pattern[p..].iter().all(|&c| c == b'*')
 }
 
+/// A C identifier, or a qualified C++ name of identifiers (`app::Motor::count`).
 fn is_identifier(s: &str) -> bool {
-    let mut b = s.bytes();
-    b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    s.split("::").all(|part| {
+        let mut b = part.bytes();
+        b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    })
 }
 
 /// The expression that names global `i` of the ELF at position `p`: its plain name if a lookup
@@ -593,5 +595,9 @@ mod tests {
         assert!(!is_identifier("2x"));
         assert!(!is_identifier("a.b"));
         assert!(!is_identifier(""));
+        assert!(is_identifier("app::Motor::count"));
+        assert!(!is_identifier("::count"));
+        assert!(!is_identifier("std::ctype<char>::id"));
+        assert!(!is_identifier("(anonymous namespace)::x"));
     }
 }

@@ -152,8 +152,9 @@ impl Symbols {
                     if matches!(e.attr_value(gimli::DW_AT_declaration), Some(AttributeValue::Flag(true))) {
                         continue;
                     }
-                    let Some(name) = self.attr_str(u, e.attr_value(gimli::DW_AT_name)) else { continue };
-                    let ty = self.ref_attr(here, e, gimli::DW_AT_type).map(TypeId::Die).unwrap_or(TypeId::Void);
+                    // An out-of-line instance names its variables through DW_AT_abstract_origin.
+                    let Some(name) = self.attr_str(u, e.attr_value(gimli::DW_AT_name)).or_else(|| self.die_name(here)) else { continue };
+                    let ty = self.var_type(here);
                     out.push(Local { var: VarRef::Die(here), name, ty, param: e.tag() == gimli::DW_TAG_formal_parameter });
                 }
                 _ => {}

@@ -211,6 +211,17 @@ impl Symbols {
         let t = TypeId::Die(d);
         let Some((u, e)) = self.entry(d) else { return Self::unknown_type(&t) };
         let name = self.attr_str(u, e.attr_value(gimli::DW_AT_name)).filter(|n| !n.is_empty());
+        // C++ names a type by its qualified name, without `struct`/`enum`.
+        let cpp = self.is_cpp(d);
+        let name = match self.scoped_name(d) {
+            Some(q) if cpp => Some(q),
+            _ => name,
+        };
+        let tagged = |kw: &str| match &name {
+            Some(n) if cpp => n.clone(),
+            Some(n) => format!("{kw} {n}"),
+            None => format!("{kw} {{...}}"),
+        };
         let size = e.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value()).unwrap_or(0) as u32;
         let inner = self.ref_attr(d, &e, gimli::DW_AT_type).map(TypeId::Die).unwrap_or(TypeId::Void);
         match e.tag() {
@@ -235,17 +246,29 @@ impl Symbols {
             gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type | gimli::DW_TAG_restrict_type => {
                 let mut i = self.type_info_at(&inner, depth + 1);
                 let q = match e.tag() {
-                    gimli::DW_TAG_const_type => "const ",
-                    gimli::DW_TAG_volatile_type => "volatile ",
+                    gimli::DW_TAG_const_type => "const",
+                    gimli::DW_TAG_volatile_type => "volatile",
                     _ => "",
                 };
-                i.name = i.name.map(|n| format!("{q}{n}"));
+                // A qualified pointer (`int* const`) is not a pointer to a qualified type (`const int*`).
+                let pointer = i.class == TypeClass::Pointer;
+                i.name = i.name.map(|n| match q {
+                    "" => n,
+                    _ if pointer => format!("{n} {q}"),
+                    _ => format!("{q} {n}"),
+                });
                 i
             }
-            gimli::DW_TAG_pointer_type | gimli::DW_TAG_reference_type => {
+            // A C++ reference is a pointer underneath; expressions read through it.
+            gimli::DW_TAG_pointer_type | gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type => {
                 let bi = self.type_info_at(&inner, depth + 1);
+                let sym = match e.tag() {
+                    gimli::DW_TAG_reference_type => "&",
+                    gimli::DW_TAG_rvalue_reference_type => "&&",
+                    _ => "*",
+                };
                 TypeInfo {
-                    name: Some(format!("{}*", bi.name.unwrap_or_default())),
+                    name: Some(format!("{}{sym}", bi.name.unwrap_or_default())),
                     class: TypeClass::Pointer,
                     size: if size == 0 { 4 } else { size },
                     base: Some(inner),
@@ -254,9 +277,13 @@ impl Symbols {
                 }
             }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type | gimli::DW_TAG_union_type => {
-                let kw = if e.tag() == gimli::DW_TAG_union_type { "union" } else { "struct" };
+                let kw = match e.tag() {
+                    gimli::DW_TAG_union_type => "union",
+                    gimli::DW_TAG_class_type => "class",
+                    _ => "struct",
+                };
                 TypeInfo {
-                    name: Some(name.map(|n| format!("{kw} {n}")).unwrap_or_else(|| format!("{kw} {{...}}"))),
+                    name: Some(tagged(kw)),
                     class: TypeClass::Composite,
                     size,
                     base: None,
@@ -272,7 +299,7 @@ impl Symbols {
                     inner
                 };
                 TypeInfo {
-                    name: Some(name.map(|n| format!("enum {n}")).unwrap_or_else(|| "enum {...}".into())),
+                    name: Some(tagged("enum")),
                     class: TypeClass::Enumeration,
                     size,
                     base: Some(base),
@@ -336,12 +363,38 @@ impl Symbols {
         }
     }
 
-    /// Type of a variable, parameter or member DIE.
+    /// Type of a variable, parameter or member DIE (C++: of the declaration a definition completes).
     pub fn var_type(&self, d: DieRef) -> TypeId {
-        self.entry(d).and_then(|(_, e)| self.ref_attr(d, &e, gimli::DW_AT_type)).map(TypeId::Die).unwrap_or(TypeId::Void)
+        self.inherited_ref(d, gimli::DW_AT_type).map(TypeId::Die).unwrap_or(TypeId::Void)
     }
 
-    /// Members of a struct/union type (in declaration order).
+    /// The type DIE under typedefs and qualifiers.
+    fn strip_typedefs(&self, t: &TypeId) -> Option<(DieRef, gimli::DwTag)> {
+        let TypeId::Die(mut d) = t else { return None };
+        for _ in 0..MAX_TYPE_DEPTH {
+            let (_, e) = self.entry(d)?;
+            match e.tag() {
+                gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type | gimli::DW_TAG_restrict_type => {
+                    d = self.ref_attr(d, &e, gimli::DW_AT_type)?;
+                }
+                tag => return Some((d, tag)),
+            }
+        }
+        None
+    }
+
+    /// Whether a type is a union (C++ names it without the keyword).
+    pub fn is_union(&self, t: &TypeId) -> bool {
+        self.strip_typedefs(t).is_some_and(|(_, tag)| tag == gimli::DW_TAG_union_type)
+    }
+
+    /// Whether a type is a C++ reference (`T&`, `T&&`), which expressions read through.
+    pub fn is_reference(&self, t: &TypeId) -> bool {
+        self.strip_typedefs(t).is_some_and(|(_, tag)| tag == gimli::DW_TAG_reference_type || tag == gimli::DW_TAG_rvalue_reference_type)
+    }
+
+    /// Members of a struct/union type (in declaration order); C++ base classes are unnamed
+    /// members, static data members are left out.
     pub fn members(&self, t: &TypeId) -> Vec<MemberInfo> {
         let info = self.type_info(t);
         let TypeId::Die(d) = info.resolved else { return Vec::new() };
@@ -351,6 +404,7 @@ impl Symbols {
         self.children(d)
             .into_iter()
             .filter(|(_, e)| e.tag() == gimli::DW_TAG_member || e.tag() == gimli::DW_TAG_inheritance)
+            .filter(|(_, e)| !matches!(e.attr_value(gimli::DW_AT_declaration), Some(AttributeValue::Flag(true))))
             .filter_map(|(r, _)| self.member_info(r))
             .collect()
     }

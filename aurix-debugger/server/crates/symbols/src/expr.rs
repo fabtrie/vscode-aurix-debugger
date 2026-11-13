@@ -1,6 +1,7 @@
 //! C expressions over DWARF symbols: parsing, evaluation and assignment.
 //!
-//! Supported: identifiers (locals, globals, functions, enumerators),
+//! Supported: identifiers (locals, globals, functions, enumerators; C++ qualified names,
+//! class members through `this`, references read as the object they refer to),
 //! `$d0`..`$a15`/`$sp`/`$ra`/`$pc`, `${SymbolID}`, integer/float/char
 //! literals, `.` `->` `[]`, unary `- + ~ ! * &`, casts to named, builtin and
 //! pointer types, `sizeof`, the conditional operator `?:`, and the binary C
@@ -47,11 +48,21 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             i = end + 1;
             continue;
         }
-        if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
+        // An identifier, C++ qualified ones included (`app::Motor::count`, `::count`).
+        let ident_start = |j: usize| b.get(j).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_');
+        let scope_at = |j: usize| b.get(j) == Some(&b':') && b.get(j + 1) == Some(&b':') && ident_start(j + 2);
+        if c.is_ascii_alphabetic() || c == b'_' || c == b'$' || scope_at(i) {
             let st = i;
-            i += 1;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
+            i += if c == b':' { 3 } else { 1 };
+            loop {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                    i += 1;
+                }
+                if b[st] != b'$' && scope_at(i) {
+                    i += 3;
+                    continue;
+                }
+                break;
             }
             out.push(Tok::Ident(s[st..i].to_string()));
             continue;
@@ -557,7 +568,23 @@ impl<'a, T: Target> Eval<'a, T> {
         self.syms.type_info(t)
     }
 
+    /// The value of a symbol; a C++ reference reads as the object it refers to.
     pub fn value_of(&mut self, s: &SymbolRef) -> Result<Value, String> {
+        let v = self.symbol_value(s)?;
+        self.through_reference(v)
+    }
+
+    /// A C++ reference as the object it refers to; any other value as it is.
+    fn through_reference(&mut self, v: Value) -> Result<Value, String> {
+        if !self.syms.is_reference(&v.ty) {
+            return Ok(v);
+        }
+        let base = self.info(&v.ty).base.unwrap_or(TypeId::Void);
+        let (s, _) = self.scalar(&v)?;
+        Ok(Value { ty: base, place: Place::Memory(s.as_u64() as u32), bytes: None, symbol: None })
+    }
+
+    fn symbol_value(&mut self, s: &SymbolRef) -> Result<Value, String> {
         let syms = self.syms;
         match s {
             SymbolRef::Local(d) => {
@@ -607,13 +634,28 @@ impl<'a, T: Target> Eval<'a, T> {
             return Ok(Value { ty: TypeId::Base(TypeClass::Cardinal, 4), place: Place::Register(n), bytes: None, symbol: None });
         }
         let pc = self.target.pc();
-        if let Some(pc) = pc {
-            if let Some(l) = syms.locals_at(pc).into_iter().rev().find(|l| l.name == name) {
+        // A qualified name is not a local or member; a C++ member function finds its class's
+        // members through `this` before any global.
+        let plain = !name.contains("::");
+        if let (Some(pc), true) = (pc, plain) {
+            let locals = syms.locals_at(pc);
+            if let Some(l) = locals.iter().rev().find(|l| l.name == name) {
                 return self.value_of(&SymbolRef::Local(l.var));
+            }
+            if let Some(this) = locals.iter().rev().find(|l| l.name == "this") {
+                let pointee = syms.type_info(&this.ty).base;
+                if pointee.is_some_and(|t| syms.find_member(&t, name).is_some()) {
+                    let this = self.value_of(&SymbolRef::Local(this.var))?;
+                    let obj = self.deref(this)?;
+                    return self.member(obj, name);
+                }
             }
         }
         let unit = pc.and_then(|pc| syms.function_at(pc)).map(|f| f.unit);
-        let gi = syms.global_indices(name);
+        // A global at address 0 is a definition the linker dropped (unless it is the only one).
+        let all = syms.global_indices(name);
+        let live: Vec<usize> = all.iter().copied().filter(|&i| syms.globals[i].addr != 0 || syms.globals[i].unit == usize::MAX).collect();
+        let gi = if live.is_empty() { all } else { &live[..] };
         let pick = gi
             .iter()
             .find(|&&i| Some(syms.globals[i].unit) == unit)
@@ -626,7 +668,7 @@ impl<'a, T: Target> Eval<'a, T> {
         if let Some(&i) = fi.iter().find(|&&i| syms.functions[i].external).or(fi.first()) {
             return self.value_of(&SymbolRef::Function(i));
         }
-        if let Some((e, en)) = syms.enumerators_named(name).first() {
+        if let Some((e, en)) = syms.enumerators_named(name.strip_prefix("::").unwrap_or(name)).first() {
             let (_, v) = syms.enumerator(*e).ok_or("invalid enumerator")?;
             let ty = TypeId::Die(*en);
             return Ok(self.rvalue(ty, Scalar::I(v)));
@@ -757,7 +799,8 @@ impl<'a, T: Target> Eval<'a, T> {
             return Err(format!("'{}' is not a struct or union", info.name.unwrap_or_default()));
         }
         let m = self.syms.find_member(&v.ty, name).ok_or_else(|| format!("no member named '{name}'"))?;
-        self.sub_value(&v, m.offset, m.ty, m.size, m.bits)
+        let v = self.sub_value(&v, m.offset, m.ty, m.size, m.bits)?;
+        self.through_reference(v)
     }
 
     pub fn eval(&mut self, e: &Expr) -> Result<Value, String> {

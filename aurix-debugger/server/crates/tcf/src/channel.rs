@@ -334,10 +334,10 @@ impl Channel {
                 let name = a.string(1)?;
                 let s = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
                 for (e, s) in &s.elfs {
-                    if let Some(i) = s.functions.iter().position(|f| f.name == name) {
+                    if let Some(i) = s.function_indices(&name).first() {
                         return Ok(vec![String::new(), j(&elf_id(*e, &format!("FN:{i}")))]);
                     }
-                    if let Some(i) = s.globals.iter().position(|g| g.name == name) {
+                    if let Some(i) = s.global_indices(&name).first() {
                         return Ok(vec![String::new(), j(&elf_id(*e, &format!("GV:{i}")))]);
                     }
                 }

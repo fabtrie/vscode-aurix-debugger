@@ -152,7 +152,12 @@ fn resolve_code(props: &Map<String, Value>, syms: Option<&SymbolSet>) -> Result<
         }
         let name = l.as_str().unwrap_or_default();
         let s = syms.ok_or_else(|| format!("Cannot evaluate location '{name}': symbols not loaded"))?;
-        return s.resolve_location(name).map(|x| (vec![x], None)).ok_or_else(|| format!("Unknown symbol '{name}'"));
+        let mut addrs = s.resolve_locations(name);
+        if addrs.is_empty() {
+            return Err(format!("Unknown symbol '{name}'"));
+        }
+        addrs.truncate(MAX_ADDRESSES);
+        return Ok((addrs, None));
     }
     if let (Some(file), Some(line)) = (props.get("File").and_then(Value::as_str), props.get("Line").and_then(Value::as_u64)) {
         let s = syms.ok_or("Line number information not available (no symbols loaded)")?;

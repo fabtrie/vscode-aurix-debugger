@@ -97,6 +97,12 @@ impl SymbolSet {
     pub fn resolve_location(&self, loc: &str) -> Option<u32> {
         self.elfs.iter().find_map(|(_, s)| s.resolve_location(loc))
     }
+
+    /// Addresses for a location expression: a number, or all functions of that name (C++
+    /// overloads) in the first ELF that has any.
+    pub fn resolve_locations(&self, loc: &str) -> Vec<u32> {
+        self.elfs.iter().map(|(_, s)| s.resolve_locations(loc)).find(|a| !a.is_empty()).unwrap_or_default()
+    }
 }
 
 #[derive(Default)]

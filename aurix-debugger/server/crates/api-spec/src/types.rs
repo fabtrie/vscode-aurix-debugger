@@ -1454,6 +1454,11 @@ pub struct OpenSessionRequest {
     /// Close the session when a step fails, instead of leaving it open to inspect.
     #[serde(default)]
     pub close_on_error: bool,
+    /// Process ID, on the hub machine, of the program the session belongs to (e.g. the IDE
+    /// that opened it): the hub closes the session when that process ends, also when it crashed
+    /// or was killed before it could close the session itself.
+    #[serde(default)]
+    pub owner_pid: Option<u32>,
     /// Seconds to wait for the worker and the launch steps; default 60. Longer starts return
     /// with phase `starting`, `wait_session` waits for the rest.
     #[serde(default)]
@@ -1520,6 +1525,10 @@ pub struct SessionInfo {
     /// The client that opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_by: Option<String>,
+    /// The process the session belongs to (`owner_pid` of `open_session`): it closes when that
+    /// process ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

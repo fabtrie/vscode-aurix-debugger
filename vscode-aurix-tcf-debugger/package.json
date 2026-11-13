@@ -1168,7 +1168,7 @@
 								],
 								"default": "close",
 								"enumDescriptions": [
-									"Close the hub session (disconnect from the board) when the debug session ends, if this debug session opened it.",
+									"Close the hub session (disconnect from the board) when the debug session ends or VS Code closes, if this debug session opened it.",
 									"Keep the session open, e.g. so that Claude can go on with it; close it with the close_session operation or AURIX: Restart Debugger Hub."
 								],
 								"description": "What happens to the hub session when the debug session ends."

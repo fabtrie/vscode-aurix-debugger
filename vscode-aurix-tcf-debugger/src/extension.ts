@@ -1193,12 +1193,29 @@ async function prepareHubSession(session: vscode.DebugSession, config: vscode.De
 		if (Object.keys(launch).length) {
 			req.launch = launch;
 		}
+		// The hub of this machine closes the session when this extension host ends (VS Code closed,
+		// crashed or killed), also while the launch still runs.
+		if (client.local && config.sessionLifetime !== 'keep') {
+			req.owner_pid = process.pid;
+		}
 		agentOutput?.show(true);
 		log(`Opening a session on ${url}: ${JSON.stringify(req)}`);
 		try {
 			info = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'AURIX: opening the debug session…' },
-				() => client.openSession(req),
+				async () => {
+					try {
+						return await client.openSession(req);
+					} catch (e) {
+						// A hub older than the extension (its update waits for its sessions to close).
+						if (e instanceof hub.HubError && e.status === 400 && req.owner_pid !== undefined && /owner_pid/.test(e.message)) {
+							log('The hub does not know owner_pid yet: the session is closed with VS Code only when VS Code ends normally');
+							delete req.owner_pid;
+							return client.openSession(req);
+						}
+						throw e;
+					}
+				},
 			);
 		} catch (e) {
 			const body = e instanceof hub.HubError ? e.body : undefined;
@@ -1238,14 +1255,27 @@ async function prepareHubSession(session: vscode.DebugSession, config: vscode.De
 	return { host: '127.0.0.1', port, hubFlashed: opened && config.enableFlashing === true };
 }
 
+/** Hub sessions being closed or left (`hubSessionEnded`): `deactivate` waits for them. */
+const pendingHubEnds = new Set<Promise<void>>();
+
 /** A debug session ended: close the relay, and the hub session if the extension opened it. */
-async function hubSessionEnded(session: vscode.DebugSession): Promise<void> {
-	const b = hubBindings.get(session.id);
+function hubSessionEnded(session: vscode.DebugSession): Promise<void> {
+	return endHubBinding(session.id);
+}
+
+function endHubBinding(id: string): Promise<void> {
+	const b = hubBindings.get(id);
 	if (!b) {
-		return;
+		return Promise.resolve();
 	}
-	hubBindings.delete(session.id);
-	hubLogListeners.delete(session.id);
+	hubBindings.delete(id);
+	hubLogListeners.delete(id);
+	const p = finishHubBinding(b).finally(() => pendingHubEnds.delete(p));
+	pendingHubEnds.add(p);
+	return p;
+}
+
+async function finishHubBinding(b: HubBinding): Promise<void> {
 	b.stopLog?.();
 	b.relay?.close();
 	try {
@@ -2036,12 +2066,21 @@ function normalizePathForCompare(p: string): string {
 }
 
 
-export function deactivate() {
-	// The hub and its sessions outlive VS Code; only the relays end here. Sessions this window
-	// opened with sessionLifetime "close" end with their debug sessions.
+export async function deactivate(): Promise<void> {
+	// VS Code closes (or the window reloads): the sessions this window opened with sessionLifetime
+	// "close" are closed, the others are left (this client's breakpoints and lease go). The hub
+	// outlives VS Code. A local hub also closes them by itself once this process is gone
+	// (owner_pid), which covers a VS Code that crashed or was killed.
 	stopHubEvents?.();
-	for (const b of hubBindings.values()) {
-		b.relay?.close();
+	for (const id of [...hubBindings.keys()]) {
+		void endHubBinding(id);
+	}
+	if (pendingHubEnds.size) {
+		// VS Code gives deactivate a few seconds; the hub finishes a close it has received anyway.
+		await Promise.race([
+			Promise.allSettled([...pendingHubEnds]),
+			new Promise((r) => setTimeout(r, 4000)),
+		]);
 	}
 	agentOutput?.dispose();
 	agentOutput = undefined;

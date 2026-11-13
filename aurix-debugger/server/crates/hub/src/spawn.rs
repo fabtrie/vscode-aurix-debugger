@@ -59,6 +59,57 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// Watches a process that this hub did not start (the owner of a session). On Windows it holds a
+/// handle, so the process ID cannot be reused by another process while it is watched.
+pub struct ProcessWatch {
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(not(windows))]
+    pid: u32,
+}
+
+// The handle is only a kernel object reference: usable from any thread.
+#[cfg(windows)]
+unsafe impl Send for ProcessWatch {}
+
+impl ProcessWatch {
+    /// Starts watching process `pid`; `None` when no such process runs.
+    pub fn open(pid: u32) -> Option<ProcessWatch> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE};
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+            let w = (!handle.is_null()).then_some(ProcessWatch { handle })?;
+            (!w.ended()).then_some(w)
+        }
+        #[cfg(not(windows))]
+        {
+            alive(pid).then_some(ProcessWatch { pid })
+        }
+    }
+
+    /// Whether the process ended.
+    pub fn ended(&self) -> bool {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            unsafe { WaitForSingleObject(self.handle, 0) != WAIT_TIMEOUT }
+        }
+        #[cfg(not(windows))]
+        {
+            !alive(self.pid)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessWatch {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
 /// Ends process `pid` the hard way.
 pub fn kill(pid: u32) {
     #[cfg(windows)]

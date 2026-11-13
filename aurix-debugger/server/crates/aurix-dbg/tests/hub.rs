@@ -341,6 +341,26 @@ fn hub_sessions_end_to_end() {
     let msg = e.as_str().unwrap_or_default();
     assert!(msg.contains("ended before it was connected") && msg.contains("no/such/board.cfg"), "{msg}");
 
+    // --- A session that belongs to a process: closed when that process ends -------------------------
+    let (err, e) = mcp.call("open_session", json!({ "profile": "sim", "owner_pid": u32::MAX - 3 }));
+    assert!(err && e.as_str().unwrap_or_default().contains("owner_pid"), "{e}");
+    let mut owner = if cfg!(windows) {
+        std::process::Command::new("ping").args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap()
+    } else {
+        std::process::Command::new("sleep").arg("120").spawn().unwrap()
+    };
+    let s4 = mcp.ok("open_session", json!({ "profile": "sim", "name": "owned", "owner_pid": owner.id() }));
+    assert_eq!((s4["state"].as_str(), s4["owner_pid"].as_u64()), (Some("running"), Some(owner.id() as u64)), "{s4}");
+    let id4 = s4["session"].as_str().unwrap().to_string();
+    let pid4 = s4["pid"].as_u64().unwrap() as u32;
+    owner.kill().unwrap();
+    let _ = owner.wait();
+    wait_until("the owned session to close", Duration::from_secs(15), || {
+        let list = http.ok("GET", "/api/v1/sessions", None);
+        !list["sessions"].as_array().unwrap().iter().any(|s| s["session"] == id4.as_str())
+    });
+    wait_until("the owned session's worker to end", Duration::from_secs(10), || !hub::spawn::alive(pid4));
+
     // --- Closing ---------------------------------------------------------------------------------------
     for id in [&id1, &id2, &id3] {
         mcp.ok("close_session", json!({ "session": id }));

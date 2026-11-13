@@ -1756,6 +1756,16 @@
               "null"
             ]
           },
+          "owner_pid": {
+            "default": null,
+            "description": "Process ID, on the hub machine, of the program the session belongs to (e.g. the IDE\nthat opened it): the hub closes the session when that process ends, also when it crashed\nor was killed before it could close the session itself.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "profile": {
             "default": null,
             "description": "Profile on the hub machine (`list_profiles`): connection and launch defaults that the\nother arguments override.",
@@ -2624,6 +2634,15 @@
             "description": "The client that opened it.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "owner_pid": {
+            "description": "The process the session belongs to (`owner_pid` of `open_session`): it closes when that\nprocess ends.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -3790,6 +3809,16 @@
                     "description": "Session name; default: the profile name or `session-<n>`.",
                     "type": [
                       "string",
+                      "null"
+                    ]
+                  },
+                  "owner_pid": {
+                    "default": null,
+                    "description": "Process ID, on the hub machine, of the program the session belongs to (e.g. the IDE\nthat opened it): the hub closes the session when that process ends, also when it crashed\nor was killed before it could close the session itself.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
                       "null"
                     ]
                   },

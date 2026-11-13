@@ -48,6 +48,10 @@ pub struct Session {
     pub name: String,
     pub profile: Option<String>,
     pub opened_by: Option<String>,
+    /// The process the session belongs to (`owner_pid`): the monitor closes the session when it
+    /// ends. `owner` watches it (taken when the close starts); `owner_pid` stays for the info.
+    pub owner_pid: Option<u32>,
+    pub owner: Option<spawn::ProcessWatch>,
     pub adapter: Option<String>,
     pub probe: Option<String>,
     pub created: Instant,
@@ -400,6 +404,7 @@ impl Hub {
             state: s.state,
             pid: s.pid,
             opened_by: s.opened_by.clone(),
+            owner_pid: s.owner_pid,
             adapter: s.adapter.clone(),
             probe: s.probe.clone(),
             targets: s.targets.clone(),
@@ -424,6 +429,8 @@ impl Hub {
                 name: s.name.clone(),
                 profile: s.profile.clone(),
                 opened_by: s.opened_by.clone(),
+                owner_pid: s.owner_pid,
+                owner: None,
                 adapter: s.adapter.clone(),
                 probe: s.probe.clone(),
                 created: s.created,
@@ -482,6 +489,8 @@ impl Hub {
                     name: reg.session.clone(),
                     profile: None,
                     opened_by: None,
+                    owner_pid: None,
+                    owner: None,
                     adapter: reg.adapter.clone(),
                     probe: None,
                     created: Instant::now(),
@@ -557,6 +566,7 @@ impl Hub {
                     thread::sleep(Duration::from_secs(1));
                     tick += 1;
                     hub.check_workers(tick % 5 == 0);
+                    hub.check_owners();
                     if tick % 30 == 0 {
                         hub.reap_mcp();
                     }
@@ -618,6 +628,32 @@ impl Hub {
         for (id, base) in ping_list {
             if http1::json(&base, "GET", "/api/v1/info", &[], None, Duration::from_secs(3)).is_err() {
                 self.exited(&id, "the worker stopped answering".into());
+            }
+        }
+    }
+
+    /// Closes the sessions whose owner process ended (`owner_pid`), each on its own thread: a
+    /// close waits for the worker.
+    fn check_owners(&self) {
+        let ended: Vec<(String, String, u32)> = {
+            let mut st = self.lock();
+            st.sessions
+                .iter_mut()
+                .filter(|s| s.live() && s.owner.as_ref().is_some_and(|o| o.ended()))
+                .map(|s| {
+                    s.owner = None;
+                    (s.id.clone(), s.name.clone(), s.owner_pid.unwrap_or_default())
+                })
+                .collect()
+        };
+        for (id, name, pid) in ended {
+            hlog!("session {id} ({name}): its owner (pid {pid}) ended: closing it");
+            let hub = self.arc();
+            let spawned = thread::Builder::new().name(format!("hub-close-{id}")).spawn(move || {
+                let _ = hub.close(&id);
+            });
+            if let Err(e) = spawned {
+                hlog!("cannot close session {name}: {e}");
             }
         }
     }
@@ -880,6 +916,10 @@ impl HubApi for Hub {
         if !exe.is_file() {
             return Err(ApiError::failed(format!("the worker executable is missing: {}", exe.display())));
         }
+        let owner = match req.owner_pid {
+            Some(pid) => Some(spawn::ProcessWatch::open(pid).ok_or_else(|| ApiError::bad_request(format!("owner_pid: no process {pid} runs on the hub machine")))?),
+            None => None,
+        };
         let client = current_client();
         let (id, name, log_file) = {
             let mut st = self.lock();
@@ -932,6 +972,8 @@ impl HubApi for Hub {
                 name: name.clone(),
                 profile: req.profile.clone(),
                 opened_by: client.clone(),
+                owner_pid: req.owner_pid,
+                owner,
                 adapter: connect.adapter.clone(),
                 probe: connect.probe.clone(),
                 created: Instant::now(),
@@ -975,8 +1017,8 @@ impl HubApi for Hub {
         let present = st.sessions.iter().any(|s| s.id == id);
         drop(st);
         if !present {
-            // Closed on error: say how the launch went.
-            return Err(ApiError::failed(format!("the launch failed and the session was closed (close_on_error); see the hub log {}", paths::hub_log().display())));
+            // Closed on error (or its owner ended): say where to look.
+            return Err(ApiError::failed(format!("the session was closed before its launch finished (close_on_error, or its owner_pid ended); see the hub log {}", paths::hub_log().display())));
         }
         let info = self.info_of(&id)?;
         if info.state == SessionState::Exited {

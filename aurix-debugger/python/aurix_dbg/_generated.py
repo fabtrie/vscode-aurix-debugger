@@ -852,6 +852,9 @@ class SessionInfo:
     """Why the worker ended, when `exited`."""
     opened_by: str | None = None
     """The client that opened it."""
+    owner_pid: int | None = None
+    """The process the session belongs to (`owner_pid` of `open_session`): it closes when that
+    process ends."""
     pid: int | None = None
     """Process ID of the worker."""
     probe: str | None = None
@@ -878,6 +881,7 @@ class SessionInfo:
             control=d.get("control"),
             error=d.get("error"),
             opened_by=d.get("opened_by"),
+            owner_pid=d.get("owner_pid"),
             pid=d.get("pid"),
             probe=d.get("probe"),
             profile=d.get("profile"),
@@ -1239,7 +1243,7 @@ class GeneratedClient:
         """
         return SessionList.from_dict(self._call("GET", "/api/v1/sessions", None, None))
 
-    def open_session(self, *, acquire_control: bool | None = None, close_on_error: bool | None = None, connect: ConnectSpec | None = None, launch: LaunchRequest | None = None, name: str | None = None, profile: str | None = None, wait_s: int | None = None) -> SessionInfo:
+    def open_session(self, *, acquire_control: bool | None = None, close_on_error: bool | None = None, connect: ConnectSpec | None = None, launch: LaunchRequest | None = None, name: str | None = None, owner_pid: int | None = None, profile: str | None = None, wait_s: int | None = None) -> SessionInfo:
         """Open a session: start a worker for a board, connect, and run the launch steps.
 
         Give a `profile` (see `list_profiles`), or `connect` with the configuration scripts, or
@@ -1257,10 +1261,11 @@ class GeneratedClient:
             connect: How to connect; overrides the profile's.
             launch: The launch steps; each field set here overrides the profile's.
             name: Session name; default: the profile name or `session-<n>`.
+            owner_pid: Process ID, on the hub machine, of the program the session belongs to (e.g. the IDE that opened it): the hub closes the session when that process ends, also when it crashed or was killed before it could close the session itself.
             profile: Profile on the hub machine (`list_profiles`): connection and launch defaults that the other arguments override.
             wait_s: Seconds to wait for the worker and the launch steps; default 60. Longer starts return with phase `starting`, `wait_session` waits for the rest.
         """
-        return SessionInfo.from_dict(self._call("POST", "/api/v1/sessions", None, _args({"acquire_control": acquire_control, "close_on_error": close_on_error, "connect": connect, "launch": launch, "name": name, "profile": profile, "wait_s": wait_s})))
+        return SessionInfo.from_dict(self._call("POST", "/api/v1/sessions", None, _args({"acquire_control": acquire_control, "close_on_error": close_on_error, "connect": connect, "launch": launch, "name": name, "owner_pid": owner_pid, "profile": profile, "wait_s": wait_s})))
 
     def close_session(self, session: str) -> SessionList:
         """Close a session: the worker disconnects from the board and ends. Connected VS Code

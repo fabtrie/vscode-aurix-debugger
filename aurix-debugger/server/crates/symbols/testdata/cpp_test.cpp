@@ -3,8 +3,10 @@
 //
 // Built with the TriCore GCC 11 of AURIX Development Studio (in this directory):
 //   tricore-elf-g++ -mcpu=tc39xx -g -O0 -fno-exceptions -fno-rtti -nostartfiles -nostdlib
-//       -fdebug-prefix-map=$PWD=. -T cpp_test.ld -o cpp_test_O0.elf cpp_test.cpp
+//       -fdebug-prefix-map=$PWD=. -T cpp_test.ld -o cpp_test_O0.elf cpp_test.cpp cpp_test2.cpp
 // and the same with -O2 into cpp_test_O2.elf. The program is never run.
+
+#include "cpp_test.h"
 
 namespace app {
 namespace motor {
@@ -52,6 +54,9 @@ Word g_word = {0x11223344u};
 
 } // namespace motor
 
+int Widget::made = 2;
+int Widget::tick() { return ++count + made; }
+
 template <typename T, int N> struct Ring {
     T buf[N];
     int head;
@@ -85,6 +90,7 @@ int main() {
     app::motor::counter += add_ref(app::motor::counter, plain_global);
     app::g_ring.push(5);
     app::motor::Controller::instances++;
+    app::motor::counter += widget_tick();
     while (1) {
         app::motor::counter++;
     }

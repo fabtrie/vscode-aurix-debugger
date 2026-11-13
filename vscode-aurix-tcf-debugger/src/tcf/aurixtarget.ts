@@ -217,3 +217,43 @@ export class ClearLiveSetAurixTargetCommand extends AurixTargetCommand<undefined
 		parseEmptyResponse(responseAll, success, error);
 	}
 }
+
+/** A member of a struct global, nested or not, by the expression that names it. */
+export interface MemberPath {
+	expression: string;
+	address: number;
+	size: number;
+}
+
+/** The reply of `getMemberPaths`: `[[expression, address, size], ...]`. */
+export function asMemberPaths(json: unknown): MemberPath[] {
+	if (!Array.isArray(json)) {
+		throw new JSONValidationError('Not an array', json);
+	}
+	return json
+		.filter((e): e is [string, number, number] => Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'number' && typeof e[2] === 'number')
+		.map(([expression, address, size]) => ({ expression, address, size }));
+}
+
+/**
+ * The members of the struct globals of the symbol files of context `ctx` (empty: the first
+ * context with symbols), for a variable picker. A server without the command answers with an
+ * error.
+ */
+export class GetMemberPathsAurixTargetCommand extends AurixTargetCommand<MemberPath[]> {
+	constructor(readonly ctx: string) {
+		super();
+	}
+
+	command(): string {
+		return 'getMemberPaths';
+	}
+
+	protected args(): unknown[] {
+		return [this.ctx];
+	}
+
+	result(responseAll: Buffer[], success: PromiseSuccess<MemberPath[]>, error: PromiseError<MemberPath[]>): void {
+		parseResponse(responseAll, success, error, asMemberPaths);
+	}
+}

@@ -142,7 +142,8 @@ export function liveWatchChildExpression(parentExpression: string, childName: st
 }
 
 function childExpression(parentExpr: string, childName: string): string {
-	const simple = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*$/.test(parentExpr);
+	// A name (C++: qualified, `app::Motor::g`) with members and elements needs no parentheses.
+	const simple = /^[A-Za-z_$][\w$]*(?:::[A-Za-z_]\w*)*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*$/.test(parentExpr);
 	const p = simple ? parentExpr : `(${parentExpr})`;
 	if (childName === '*') {
 		return `*${p}`;

@@ -63,6 +63,8 @@ suite('LiveWatchEvaluator', () => {
 		assert.strictEqual(liveWatchChildExpression('p@2', '*'), '*p@2');
 		assert.strictEqual(liveWatchChildExpression('a + b@0', 'x'), '(a + b).x@0');
 		assert.strictEqual(liveWatchChildExpression('s', 'x'), 's.x');
+		assert.strictEqual(liveWatchChildExpression('app::Motor::g', 'x'), 'app::Motor::g.x');
+		assert.strictEqual(liveWatchChildExpression('app::g.s@1', '[3]'), 'app::g.s[3]@1');
 	});
 
 	test('expr@hsm names the HSM, and children keep it', () => {

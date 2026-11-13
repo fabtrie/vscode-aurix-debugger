@@ -104,6 +104,20 @@ pub struct TypeInfo {
     pub resolved: TypeId,
 }
 
+/// A member of a struct global, nested or not: the expression that names it, where it is, and
+/// the global it belongs to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemberPath {
+    pub expression: String,
+    pub address: u32,
+    pub size: u32,
+    pub global: usize,
+}
+
+/// Nesting depth and number of the member paths of an ELF, as a guard against huge programs.
+const MEMBER_PATH_DEPTH: u32 = 8;
+const MEMBER_PATHS_MAX: usize = 200_000;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberInfo {
     pub die: DieRef,
@@ -207,9 +221,39 @@ impl Symbols {
         }
     }
 
+    /// The definition of a struct/class/union/enum that DIE `d` only declares: the definition
+    /// with the same (qualified) name and kind elsewhere, typically in another compilation unit.
+    /// GCC writes a C++ class with virtual functions out in full only in the unit that has its
+    /// vtable; C declares a struct in units that use it through pointers only.
+    pub fn type_definition(&self, d: DieRef) -> Option<DieRef> {
+        let (u, e) = self.entry(d)?;
+        let kind = |tag| match tag {
+            gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => Some("struct"),
+            gimli::DW_TAG_union_type => Some("union"),
+            gimli::DW_TAG_enumeration_type => Some("enum"),
+            _ => None,
+        };
+        let kw = kind(e.tag())?;
+        let name = self.attr_str(u, e.attr_value(gimli::DW_AT_name)).filter(|n| !n.is_empty())?;
+        let scoped = self.scoped_name(d).unwrap_or_else(|| name.clone());
+        let key = if self.is_cpp(d) { scoped.clone() } else { format!("{kw} {name}") };
+        // The index holds definitions only; a key can also be the tail of a longer C++ name.
+        self.types_named(&key).iter().copied().find(|c| {
+            let Some((cu, ce)) = self.entry(*c) else { return false };
+            kind(ce.tag()) == Some(kw)
+                && self.attr_str(cu, ce.attr_value(gimli::DW_AT_name)).as_deref() == Some(name.as_str())
+                && self.scoped_name(*c).unwrap_or_else(|| name.clone()) == scoped
+        })
+    }
+
     fn die_type_info(&self, d: DieRef, depth: u32) -> TypeInfo {
         let t = TypeId::Die(d);
         let Some((u, e)) = self.entry(d) else { return Self::unknown_type(&t) };
+        if matches!(e.attr_value(gimli::DW_AT_declaration), Some(AttributeValue::Flag(true))) {
+            if let Some(def) = self.type_definition(d) {
+                return self.die_type_info(def, depth + 1);
+            }
+        }
         let name = self.attr_str(u, e.attr_value(gimli::DW_AT_name)).filter(|n| !n.is_empty());
         // C++ names a type by its qualified name, without `struct`/`enum`.
         let cpp = self.is_cpp(d);
@@ -454,6 +498,74 @@ impl Symbols {
         })
     }
 
+    /// A C++ static data member of a class or of one of its base classes: the global that
+    /// defines `Class::name`.
+    pub fn static_member(&self, t: &TypeId, name: &str) -> Option<usize> {
+        self.static_member_at(t, name, 0)
+    }
+
+    fn static_member_at(&self, t: &TypeId, name: &str, depth: u32) -> Option<usize> {
+        let info = self.type_info(t);
+        if info.class != TypeClass::Composite || depth > MAX_TYPE_DEPTH {
+            return None;
+        }
+        let q = format!("{}::{name}", info.name?);
+        let gi = self.global_indices(&q);
+        let named: Vec<usize> = gi.iter().copied().filter(|&i| self.globals[i].name == q).collect();
+        // A definition the linker dropped sits at address 0.
+        if let Some(&i) = named.iter().find(|&&i| self.globals[i].addr != 0).or(named.first()) {
+            return Some(i);
+        }
+        self.members(t).iter().filter(|m| m.name.is_none()).find_map(|base| self.static_member_at(&base.ty, name, depth + 1))
+    }
+
+    /// See [`Symbols::member_paths`]. Members of the globals an expression can name (a C
+    /// identifier or a qualified C++ name), the one a lookup of a name picks where several have
+    /// it; array elements and pointer targets are left out, base class and anonymous members
+    /// are taken as the members they contain.
+    pub(crate) fn build_member_paths(&self) -> Vec<MemberPath> {
+        let mut out = Vec::new();
+        for (i, g) in self.globals.iter().enumerate() {
+            if g.addr == 0 || !crate::is_expression_name(&g.name) {
+                continue;
+            }
+            let live = || self.global_indices(&g.name).iter().copied().filter(|&j| self.globals[j].addr != 0);
+            if live().find(|&j| self.globals[j].external).or_else(|| live().next()) != Some(i) {
+                continue;
+            }
+            let ty = self.global_type(i);
+            if self.type_info(&ty).class == TypeClass::Composite {
+                self.walk_members(&ty, &g.name, g.addr, i, 0, &mut out);
+            }
+            if out.len() >= MEMBER_PATHS_MAX {
+                out.truncate(MEMBER_PATHS_MAX);
+                break;
+            }
+        }
+        out
+    }
+
+    fn walk_members(&self, ty: &TypeId, path: &str, addr: u32, global: usize, depth: u32, out: &mut Vec<MemberPath>) {
+        if depth >= MEMBER_PATH_DEPTH || out.len() >= MEMBER_PATHS_MAX {
+            return;
+        }
+        for m in self.members(ty) {
+            let address = addr.wrapping_add(m.offset);
+            match &m.name {
+                None => self.walk_members(&m.ty, path, address, global, depth + 1, out),
+                Some(n) if n.starts_with("_vptr") => {}
+                Some(n) => {
+                    let expression = format!("{path}.{n}");
+                    let nested = self.type_info(&m.ty).class == TypeClass::Composite;
+                    out.push(MemberPath { expression: expression.clone(), address, size: m.size, global });
+                    if nested {
+                        self.walk_members(&m.ty, &expression, address, global, depth + 1, out);
+                    }
+                }
+            }
+        }
+    }
+
     /// Enumerators of an enumeration type: (DIE, name, value).
     pub fn enumerators(&self, t: &TypeId) -> Vec<(DieRef, String, i64)> {
         let resolved = match t {
@@ -464,7 +576,10 @@ impl Symbols {
                 loop {
                     let Some((_, e)) = self.entry(cur) else { return Vec::new() };
                     match e.tag() {
-                        gimli::DW_TAG_enumeration_type => break cur,
+                        gimli::DW_TAG_enumeration_type => {
+                            let declaration = matches!(e.attr_value(gimli::DW_AT_declaration), Some(AttributeValue::Flag(true)));
+                            break if declaration { self.type_definition(cur).unwrap_or(cur) } else { cur };
+                        }
                         gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type if guard < MAX_TYPE_DEPTH => {
                             let Some(next) = self.ref_attr(cur, &e, gimli::DW_AT_type) else { return Vec::new() };
                             cur = next;

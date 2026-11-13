@@ -139,6 +139,8 @@ pub struct Symbols {
     /// Locals of a symbol source without DWARF (see [`scope::TableLocal`]).
     pub table_locals: Vec<scope::TableLocal>,
     pub load_time: Duration,
+    /// The members of the struct globals by expression, built on first use.
+    member_paths: OnceLock<Vec<types::MemberPath>>,
 }
 
 /// Index entries kept per name: enough to pick a definition, bounded for
@@ -218,6 +220,15 @@ fn scope_separators(name: &str) -> Vec<usize> {
     out
 }
 
+/// Whether an expression can name a global by its name: a C identifier or a qualified C++ name
+/// of identifiers (`app::Motor::count`), not a template instance or an anonymous namespace.
+pub fn is_expression_name(s: &str) -> bool {
+    s.split("::").all(|part| {
+        let mut b = part.bytes();
+        b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    })
+}
+
 /// The trailing parts of a qualified C++ name, longest first, without the name itself:
 /// `a::B::f` gives `B::f` and `f`.
 pub fn name_suffixes(name: &str) -> impl Iterator<Item = &str> {
@@ -273,6 +284,7 @@ impl Symbols {
             unit_offsets: Vec::new(),
             table_locals: Vec::new(),
             load_time: Duration::ZERO,
+            member_paths: OnceLock::new(),
         };
         let mut file_ids: HashMap<String, u32> = HashMap::new();
         // Functions and globals whose DIE has no name of its own (C++ definitions completing a
@@ -616,6 +628,7 @@ impl Symbols {
             unit_offsets: Vec::new(),
             table_locals: Vec::new(),
             load_time: Duration::ZERO,
+            member_paths: OnceLock::new(),
         };
         syms.functions.sort_by_key(|f| (f.low, f.high));
         syms.index_names();
@@ -777,6 +790,13 @@ impl Symbols {
     pub fn die_name(&self, r: DieRef) -> Option<String> {
         let (d, v) = self.inherited_attr(r, gimli::DW_AT_name)?;
         self.attr_str(self.unit(d.unit)?, Some(v))
+    }
+
+    /// The members of the struct, class and union globals, nested ones included, each by the
+    /// expression that names it (`g_motor.cfg.speed`, `ns::g_obj.count`); see
+    /// [`types::MemberPath`].
+    pub fn member_paths(&self) -> &[types::MemberPath] {
+        self.member_paths.get_or_init(|| self.build_member_paths())
     }
 
     pub fn types_named(&self, name: &str) -> &[DieRef] {

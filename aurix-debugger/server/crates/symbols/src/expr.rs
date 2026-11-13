@@ -643,11 +643,15 @@ impl<'a, T: Target> Eval<'a, T> {
                 return self.value_of(&SymbolRef::Local(l.var));
             }
             if let Some(this) = locals.iter().rev().find(|l| l.name == "this") {
-                let pointee = syms.type_info(&this.ty).base;
-                if pointee.is_some_and(|t| syms.find_member(&t, name).is_some()) {
-                    let this = self.value_of(&SymbolRef::Local(this.var))?;
-                    let obj = self.deref(this)?;
-                    return self.member(obj, name);
+                if let Some(class) = syms.type_info(&this.ty).base {
+                    if syms.find_member(&class, name).is_some() {
+                        let this = self.value_of(&SymbolRef::Local(this.var))?;
+                        let obj = self.deref(this)?;
+                        return self.member(obj, name);
+                    }
+                    if let Some(i) = syms.static_member(&class, name) {
+                        return self.value_of(&SymbolRef::Global(i));
+                    }
                 }
             }
         }
@@ -798,7 +802,11 @@ impl<'a, T: Target> Eval<'a, T> {
         if info.class != TypeClass::Composite {
             return Err(format!("'{}' is not a struct or union", info.name.unwrap_or_default()));
         }
-        let m = self.syms.find_member(&v.ty, name).ok_or_else(|| format!("no member named '{name}'"))?;
+        let Some(m) = self.syms.find_member(&v.ty, name) else {
+            // A static data member is not in the object, it is the global `Class::name`.
+            let i = self.syms.static_member(&v.ty, name).ok_or_else(|| format!("no member named '{name}'"))?;
+            return self.value_of(&SymbolRef::Global(i));
+        };
         let v = self.sub_value(&v, m.offset, m.ty, m.size, m.bits)?;
         self.through_reference(v)
     }

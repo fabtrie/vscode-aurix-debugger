@@ -416,6 +416,25 @@ impl Channel {
                 let v = live::values(&self.shared, self.id, &key).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
+            // The members of the struct globals of a context's symbol files, for a variable picker:
+            // [[expression, address, size], ...]. An expression names the global a lookup finds,
+            // so a global whose name an earlier file has too is left out.
+            ("AurixTarget", "getMemberPaths") => {
+                let ctx = a.opt_string(0)?.unwrap_or_default();
+                let s = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
+                let mut out = Vec::new();
+                for (k, (_, syms)) in s.elfs.iter().enumerate() {
+                    let earlier = &s.elfs[..k];
+                    for m in syms.member_paths() {
+                        let root = &syms.globals[m.global].name;
+                        if earlier.iter().any(|(_, e)| !e.global_indices(root).is_empty()) {
+                            continue;
+                        }
+                        out.push(json!([m.expression, m.address, m.size]));
+                    }
+                }
+                Ok(vec![String::new(), Value::Array(out).to_string()])
+            }
             ("AurixTarget", "clearLiveSet") => {
                 live::clear(&self.shared, self.id, &a.string(0)?);
                 Ok(vec![String::new()])

@@ -199,10 +199,7 @@ fn glob(pattern: &[u8], name: &[u8]) -> bool {
 
 /// A C identifier, or a qualified C++ name of identifiers (`app::Motor::count`).
 fn is_identifier(s: &str) -> bool {
-    s.split("::").all(|part| {
-        let mut b = part.bytes();
-        b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
-    })
+    symbols::is_expression_name(s)
 }
 
 /// The expression that names global `i` of the ELF at position `p`: its plain name if a lookup

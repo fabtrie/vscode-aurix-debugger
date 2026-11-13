@@ -178,6 +178,46 @@ fn expressions_with_cpp_names() {
 }
 
 #[test]
+fn class_declared_in_the_unit_of_a_global() {
+    // cpp_test2.cpp defines g_widget but only declares app::Widget (its vtable is elsewhere).
+    for f in ["cpp_test_O0.elf", "cpp_test_O2.elf"] {
+        let s = load(f);
+        let gi = s.global_indices("g_widget")[0];
+        let ty = s.global_type(gi);
+        let info = s.type_info(&ty);
+        assert_eq!((info.name.as_deref(), info.size), (Some("app::Widget"), 12), "{f}");
+        let members: Vec<Option<String>> = s.members(&ty).into_iter().map(|m| m.name).collect();
+        assert_eq!(members, [Some("_vptr.Widget".into()), Some("count".into()), Some("level".into())], "{f}");
+
+        let w = s.globals[gi].addr;
+        let mut t = Mock::new(f, None, 0);
+        assert_eq!(eval(&s, &mut t, "g_widget.count").place, Place::Memory(w + 4));
+        assert_eq!(eval(&s, &mut t, "(&g_widget)->level").place, Place::Memory(w + 8));
+        assert_eq!(int(&s, &mut t, "sizeof(g_widget)"), 12);
+    }
+}
+
+#[test]
+fn static_members() {
+    let s = load("cpp_test_O0.elf");
+    let mut t = Mock::new("cpp_test_O0.elf", None, 0);
+    let made = global_addr(&s, "app::Widget::made");
+    assert_eq!(eval(&s, &mut t, "g_widget.made").place, Place::Memory(made));
+    assert_eq!(int(&s, &mut t, "(&g_widget)->made"), 2);
+    let instances = global_addr(&s, "Controller::instances");
+    assert_eq!(eval(&s, &mut t, "g_ctrl.instances").place, Place::Memory(instances));
+    assert!(Eval::new(&s, &mut t).evaluate("g_ctrl.nothing").is_err());
+
+    // In a member function, through `this`.
+    let ctrl = global_addr(&s, "g_ctrl");
+    let f = s.functions_named("Controller::step")[0];
+    let pc = s.lines_in_range(f.low, f.high).iter().map(|l| l.start).find(|a| *a > f.low).unwrap();
+    let mut t = Mock::new("cpp_test_O0.elf", Some(pc), ctrl);
+    assert_eq!(eval(&s, &mut t, "instances").place, Place::Memory(instances));
+    assert_eq!(eval(&s, &mut t, "this->instances").place, Place::Memory(instances));
+}
+
+#[test]
 fn locals_in_member_functions() {
     let s = load("cpp_test_O0.elf");
     let ctrl = global_addr(&s, "g_ctrl");
@@ -210,5 +250,32 @@ fn locals_in_member_functions() {
     for f in s.functions_named("Controller::~Controller") {
         let names: Vec<String> = s.locals_at(f.low).into_iter().map(|l| l.name).collect();
         assert!(names.contains(&"this".into()), "{names:?}");
+    }
+}
+
+#[test]
+fn member_paths_for_a_variable_picker() {
+    let s = load("cpp_test_O0.elf");
+    let paths: Vec<(&str, u32, u32)> = s.member_paths().iter().map(|m| (m.expression.as_str(), m.address, m.size)).collect();
+    let ctrl = global_addr(&s, "g_ctrl");
+    let widget = global_addr(&s, "g_widget");
+    for want in [
+        // A member of the base class is named as a member of the object; no vtable pointer.
+        ("app::motor::g_ctrl.id", ctrl + 4, 4),
+        ("app::motor::g_ctrl.speed", ctrl + 8, 4),
+        ("app::motor::g_ctrl.limit", ctrl + 12, 4),
+        ("app::g_ring.buf", global_addr(&s, "g_ring"), 8),
+        ("app::g_ring.head", global_addr(&s, "g_ring") + 8, 4),
+        // A class the global's unit only declares.
+        ("g_widget.count", widget + 4, 4),
+        ("g_widget.level", widget + 8, 2),
+    ] {
+        assert!(paths.contains(&want), "{want:?} not in {paths:?}");
+    }
+    assert!(!paths.iter().any(|p| p.0.contains("_vptr")), "{paths:?}");
+    // Every path evaluates to its address.
+    let mut t = Mock::new("cpp_test_O0.elf", None, 0);
+    for (e, addr, _) in &paths {
+        assert_eq!(eval(&s, &mut t, e).place, Place::Memory(*addr), "{e}");
     }
 }

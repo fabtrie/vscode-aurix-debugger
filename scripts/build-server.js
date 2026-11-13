@@ -1,4 +1,4 @@
-// Builds the aurix-dbg debug server (release) so the extension can package it.
+// Builds the aurix-dbg debug server and aurix-hub (release) so the extension can package them.
 //
 // Jim Tcl is compiled with MinGW gcc, which needs its DLLs on PATH. The MinGW
 // bin folder is taken from the environment variable MINGW_BIN, default
@@ -15,7 +15,7 @@ const env = { ...process.env };
 const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
 env[pathKey] = [mingwBin, cargoBin, env[pathKey]].join(path.delimiter);
 
-const result = spawnSync('cargo', ['build', '--release', '-p', 'aurix-dbg'], {
+const result = spawnSync('cargo', ['build', '--release', '-p', 'aurix-dbg', '-p', 'hub'], {
 	cwd: serverDir,
 	env,
 	stdio: 'inherit',

@@ -215,6 +215,7 @@ fn merge_connect(base: ConnectSpec, over: Option<ConnectSpec>) -> ConnectSpec {
         search_dirs: if o.search_dirs.is_empty() { base.search_dirs } else { o.search_dirs },
         adapter: o.adapter.or(base.adapter),
         probe: o.probe.or(base.probe),
+        ucb_write: o.ucb_write || base.ucb_write,
     }
 }
 
@@ -921,6 +922,11 @@ impl HubApi for Hub {
             None => None,
         };
         let client = current_client();
+        // Writing UCBs can permanently lock a device: an MCP client cannot enable it, only a person
+        // through the launch configuration (`ucbWrite`) or a hub profile they wrote.
+        if req.connect.as_ref().is_some_and(|c| c.ucb_write) && client.as_deref().is_some_and(|c| c == "mcp" || c.starts_with("mcp:")) {
+            return Err(ApiError::bad_request("`ucb_write` cannot be enabled by an MCP client: set \"ucbWrite\" in the VS Code launch configuration or `ucb_write` in a hub profile"));
+        }
         let (id, name, log_file) = {
             let mut st = self.lock();
             if let Some(probe) = &connect.probe {
@@ -960,6 +966,9 @@ impl HubApi for Hub {
         }
         for c in &connect.commands {
             args.extend(["-c".into(), c.clone()]);
+        }
+        if connect.ucb_write {
+            args.push("--ucb-write".into());
         }
         args.extend(["--hub".into(), self.url(), "--session".into(), id.clone()]);
         let cwd = profile_dir.unwrap_or_else(paths::config_dir_or_exe);

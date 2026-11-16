@@ -456,8 +456,16 @@ impl CoreApi {
         SymbolsInfo { targets, load_seconds: 0.0 }
     }
 
+    /// A `ucb ... -json` command; its JSON result (the last line: the log output comes first).
+    fn ucb_json(&self, command: &str) -> Result<UcbData, ApiError> {
+        let out = self.tcl_command(command)?.output;
+        let last = out.lines().last().unwrap_or_default();
+        let data = serde_json::from_str(last).map_err(|e| ApiError::failed(format!("{command}: unexpected answer ({e}): {out}")))?;
+        Ok(UcbData { data })
+    }
+
     pub(crate) fn tcl_command(&self, command: &str) -> Result<CommandOutput, ApiError> {
-        let (res, lines) = self.handle.tcl_with_output(command);
+        let (res, lines) = self.handle.tcl_with_output_from_api(command);
         let mut out = lines.join("\n");
         match res {
             Ok(r) => {
@@ -879,6 +887,101 @@ impl DebuggerApi for CoreApi {
     fn tcl(&self, req: TclRequest) -> Result<CommandOutput, ApiError> {
         self.check_control()?;
         self.tcl_command(&req.command)
+    }
+
+    fn ucb_read(&self, req: UcbReadRequest) -> Result<UcbData, ApiError> {
+        let mut cmd = format!("ucb {} -json", if req.cached { "show" } else { "read" });
+        if let Some(u) = &req.ucb {
+            cmd += " ";
+            cmd += &jim::quote(u);
+        }
+        self.ucb_json(&cmd)
+    }
+
+    fn ucb_stage(&self, req: UcbStageRequest) -> Result<UcbData, ApiError> {
+        self.check_control()?;
+        if req.discard {
+            self.tcl_command("ucb discard")?;
+        }
+        for c in &req.changes {
+            self.tcl_command(&format!("ucb set {} {}", jim::quote(&c.field), jim::quote(&c.value)))?;
+        }
+        for u in &req.confirm {
+            self.tcl_command(&format!("ucb confirm {}", jim::quote(u)))?;
+        }
+        self.ucb_json("ucb staged -json")
+    }
+
+    fn ucb_review(&self, req: UcbReviewRequest) -> Result<UcbData, ApiError> {
+        self.check_control()?;
+        let mut cmd = String::from("ucb review -json");
+        for f in &req.files {
+            let path = match f {
+                FlashFile::Path(path) => path,
+                FlashFile::Placed(p) => {
+                    if let Some(offset) = p.offset {
+                        cmd += &format!(" -offset {:#x}", offset.0);
+                    }
+                    if let Some(kind) = p.kind {
+                        cmd += &format!(" -type {}", kind.tcl_name());
+                    }
+                    &p.path
+                }
+            };
+            cmd += " ";
+            cmd += &jim::quote(path);
+        }
+        self.ucb_json(&cmd)
+    }
+
+    fn ucb_compare(&self, req: UcbCompareRequest) -> Result<UcbData, ApiError> {
+        let mut cmd = String::from("ucb compare -json");
+        for f in &req.files {
+            let path = match f {
+                FlashFile::Path(path) => path,
+                FlashFile::Placed(p) => {
+                    if let Some(offset) = p.offset {
+                        cmd += &format!(" -offset {:#x}", offset.0);
+                    }
+                    if let Some(kind) = p.kind {
+                        cmd += &format!(" -type {}", kind.tcl_name());
+                    }
+                    &p.path
+                }
+            };
+            cmd += " ";
+            cmd += &jim::quote(path);
+        }
+        self.ucb_json(&cmd)
+    }
+
+    fn ucb_apply(&self, req: UcbApplyRequest) -> Result<UcbData, ApiError> {
+        self.check_control()?;
+        self.tcl_command(&format!("ucb apply {}", jim::quote(&req.target)))?;
+        self.ucb_json("ucb compare -json")
+    }
+
+    fn ucb_export(&self, req: UcbExportRequest) -> Result<UcbData, ApiError> {
+        let mut cmd = format!("ucb export {} -json", jim::quote(&req.file));
+        if !req.ucbs.is_empty() {
+            cmd += &format!(" -ucbs {}", jim::quote(&req.ucbs.join(" ")));
+        }
+        for st in &req.states {
+            cmd += &format!(" -state {}", jim::quote(st));
+        }
+        if !req.classes.is_empty() {
+            cmd += &format!(" -class {}", jim::quote(&req.classes.join(" ")));
+        }
+        if req.changed {
+            cmd += " -changed";
+        }
+        if req.staged {
+            cmd += " -staged";
+        }
+        if let Some(w) = &req.which {
+            cmd += &format!(" -which {}", jim::quote(w));
+        }
+        self.ucb_json(&cmd)
     }
 
     fn load_symbols(&self, req: LoadSymbolsRequest) -> Result<SymbolsInfo, ApiError> {

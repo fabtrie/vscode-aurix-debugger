@@ -152,6 +152,8 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	flashFiles?: Array<string | FlashFile>;
 	enableFlashing?: boolean;
 	verifyFlash?: boolean;
+	/** Allow writing UCBs in this session (the hub starts the worker with --ucb-write). */
+	ucbWrite?: boolean;
 	// Debugger Actions toolbar button; handled in the extension (debuggerActions.ts).
 	actions?: unknown[];
 }
@@ -1870,12 +1872,16 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	 */
 	private static flashCommand(files: FlashFile[], args: any): string {
 		const verify = args?.verifyFlash === false ? '' : ' verify';
-		const words = files.map(f => [
+		return `flash write_images erase incremental${verify} ${AurixTCFDebugSession.imageWords(files)}`;
+	}
+
+	/** The files as Tcl words: "-offset" and "-type" before the file they apply to. */
+	private static imageWords(files: FlashFile[]): string {
+		return files.map(f => [
 			...(f.offset !== undefined ? [`-offset {${f.offset}}`] : []),
 			...(f.type ? [`-type {${f.type}}`] : []),
 			`{${f.path.replace(/\\/g, '/')}}`,
-		].join(' '));
-		return `flash write_images erase incremental${verify} ${words.join(' ')}`;
+		].join(' ')).join(' ');
 	}
 
 	/** Runs the Tcl commands, printing each with its output. */
@@ -2558,6 +2564,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.invalidateLiveWatchContext();
 			this.sendResponse(response);
 			this.sendEvent(new InitializedEvent());
+			// Flashing skipped the UCB records of the images: the extension reviews them and asks
+			// the user before anything is written (UCBs panel).
+			if (args.enableFlashing === true && args.ucbWrite === true && flashFiles.length > 0) {
+				this.sendEvent(new Event('aurix/ucbImages', {}));
+			}
 			await this.startupLogThreads('after InitializedEvent');
 
 			// If the target is already suspended (e.g. agent stops on entry by itself),
@@ -5077,6 +5088,24 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
+		// The UCB records of the launch's flash files, reviewed (UCBs panel; nothing is written).
+		if (command === 'aurix/ucbReviewImages') {
+			try {
+				const files = AurixTCFDebugSession.getFlashFiles(this.launchArgs);
+				if (files.length === 0 || !this.tcfClient.supportedServices?.includes(TCL_SERVICE)) {
+					response.body = { changes: [] };
+					this.sendResponse(response);
+					return;
+				}
+				const out = await this.tcfClient.sendCommand(new TclEvalCommand(`ucb review -json ${AurixTCFDebugSession.imageWords(files)}`));
+				response.body = JSON.parse((out ?? '').trim().split(/\r?\n/).pop() ?? '{}');
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 1, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+
 		// Tcl command from a launch configuration "actions" entry (Debugger Actions toolbar button).
 		if (command === 'aurix/tcl') {
 			const script = typeof args?.script === 'string' ? args.script.trim() : '';
@@ -5094,9 +5123,13 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				if (timeoutMs) {
 					this.tcfClient.setCommandTimeout(timeoutMs);
 				}
-				this.sendEvent(new OutputEvent(`> ${script}\n`, 'console'));
+				// "quiet": the UCBs panel's JSON calls stay out of the Debug Console.
+				const quiet = args?.quiet === true;
+				if (!quiet) {
+					this.sendEvent(new OutputEvent(`> ${script}\n`, 'console'));
+				}
 				const out = await this.tcfClient.sendCommand(new TclEvalCommand(script));
-				if (out) {
+				if (out && !quiet) {
 					this.sendEvent(new OutputEvent(`${out}\n`, 'console'));
 				}
 				response.body = { result: out ?? '' };

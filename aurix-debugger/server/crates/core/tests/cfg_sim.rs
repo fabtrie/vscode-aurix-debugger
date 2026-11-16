@@ -326,10 +326,9 @@ fn write_images_places_each_file_by_its_own_options() {
     assert!(err(&format!("flash write_images {bin} -offset 0x90000000")).starts_with("usage"));
     assert!(err("flash write_images -type").starts_with("usage"));
     // Next to flash data, data outside the flash banks (here the non-cached LMU) is skipped with a
-    // warning instead of failing the write. The simulator has no flash controller, so the write
-    // stops at the bank probe that follows the bank check.
+    // warning instead of failing the write.
     let e = err(&format!("flash write_images erase -offset 0x80000000 {bin} -offset 0xb0040000 {bin}"));
-    assert!(e.contains("SCU_CHIPID"), "{e}");
+    assert!(e.contains("wrote 4 bytes from 2 files") && e.contains("4 bytes outside the flash banks skipped"), "{e}");
     std::fs::remove_file(std::env::temp_dir().join(format!("aurix-write-images-{}.bin", std::process::id()))).unwrap();
 }
 

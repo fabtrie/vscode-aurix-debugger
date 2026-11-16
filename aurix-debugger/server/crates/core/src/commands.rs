@@ -67,6 +67,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "target", cmd_target);
     reg(interp, sh, "targets", cmd_targets);
     reg(interp, sh, "flash", cmd_flash);
+    reg(interp, sh, "ucb", crate::ucb_cmd::cmd_ucb);
     reg(interp, sh, "verify_image", cmd_verify_image);
     reg(interp, sh, "program", cmd_program);
     reg(interp, sh, "aurix_eflash", cmd_aurix_eflash);

@@ -118,6 +118,44 @@ api! {
     /// Compare flash contents with an image file (`verify_image`).
     op flash_verify [flash]: POST "/api/v1/flash/verify" (FlashVerifyRequest) -> CommandOutput;
 
+    /// Read the TC3xx UCBs (user configuration blocks) from the device and decode them.
+    ///
+    /// Each UCB comes with its confirmation state (ORIG, COPY, installed), its risk class, and its
+    /// words and fields: value, text, default (delivery state; Infineon data: the chip's first
+    /// readout), whether it differs from the default or between ORIG and COPY, staged changes,
+    /// and for protection words the value the DMU installed (`pending_reset` when they differ).
+    /// Passwords and HSM keys are masked; words the DMU protects are reported unreadable.
+    op ucb_read [ucb]: GET "/api/v1/ucb" (UcbReadRequest) -> UcbData;
+
+    /// Stage UCB changes by field (or discard them). Nothing is written to the device.
+    ///
+    /// The staged changes are shared with the other clients: the VS Code UCB panel shows them, and
+    /// a person writes them from there after the review. Returns the staged UCBs.
+    op ucb_stage [ucb]: POST "/api/v1/ucb/stage" (UcbStageRequest) -> UcbData;
+
+    /// Review the staged UCB changes, or the UCB records of image files: the changes by field,
+    /// the problems the checks found (blocking ones first), the risk (`reversible`, `password`,
+    /// `permanent`) and the confirmation the write needs.
+    ///
+    /// Writing is not part of this API: UCBs are written only after a person confirmed the
+    /// review, in the VS Code UCB panel or the Tcl console (`ucb write`), and only in a session
+    /// started with UCB writing enabled.
+    op ucb_review [ucb]: POST "/api/v1/ucb/review" (UcbReviewRequest) -> UcbData;
+
+    /// Compare the device's UCBs with the UCB records of image files (e.g. a post-build HEX), field
+    /// by field: per UCB whether the files hold it (ORIG, COPY, both, none), how many fields
+    /// differ, and per field the device and the file value (passwords only as set/zero). Read-only
+    /// UCBs are reported but cannot be applied.
+    op ucb_compare [ucb]: POST "/api/v1/ucb/compare" (UcbCompareRequest) -> UcbData;
+
+    /// Stage values from the compared files: everything, one UCB, one field or the password.
+    /// Nothing is written; the result is the updated comparison (`taken` per field).
+    op ucb_apply [ucb]: POST "/api/v1/ucb/apply" (UcbApplyRequest) -> UcbData;
+
+    /// Export a selection of UCBs (whole 512-byte UCBs) to an Intel HEX file: by name, state
+    /// (e.g. only `unlocked`), group, or only those changed from the delivery state.
+    op ucb_export [ucb]: POST "/api/v1/ucb/export" (UcbExportRequest) -> UcbData;
+
     /// Load symbol files (ELF) for the targets, as a VS Code debug session does.
     ///
     /// Makes `add_breakpoint` by `symbol` or `file` with `line` and the `expression` points of a

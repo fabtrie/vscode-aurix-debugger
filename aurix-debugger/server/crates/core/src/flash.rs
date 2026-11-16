@@ -36,25 +36,25 @@ pub struct FlashBank {
 pub const DRIVERS: &[&str] = &["tc3x_eflash", "aurix_eflash"];
 
 const SCU_CHIPID: u32 = 0xF003_6140;
-const CMD: u32 = 0xAF00_0000;
-const KEY: u32 = CMD + 0x5554;
-const LOAD_PAGE: u32 = CMD + 0x55F0;
-const SEQ_ADDR: u32 = CMD + 0xAA50;
-const SEQ_COUNT: u32 = CMD + 0xAA58;
-const SEQ_CMD: u32 = CMD + 0xAAA8;
-const DMU_HF_STATUS: u32 = 0xF804_0010;
-const DMU_HF_ERRSR: u32 = 0xF804_0034;
+pub(crate) const CMD: u32 = 0xAF00_0000;
+pub(crate) const KEY: u32 = CMD + 0x5554;
+pub(crate) const LOAD_PAGE: u32 = CMD + 0x55F0;
+pub(crate) const SEQ_ADDR: u32 = CMD + 0xAA50;
+pub(crate) const SEQ_COUNT: u32 = CMD + 0xAA58;
+pub(crate) const SEQ_CMD: u32 = CMD + 0xAAA8;
+pub(crate) const DMU_HF_STATUS: u32 = 0xF804_0010;
+pub(crate) const DMU_HF_ERRSR: u32 = 0xF804_0034;
 
-const KEY_CLEAR_STATUS: u32 = 0xFA;
-const KEY_RESET_TO_READ: u32 = 0xF0;
+pub(crate) const KEY_CLEAR_STATUS: u32 = 0xFA;
+pub(crate) const KEY_RESET_TO_READ: u32 = 0xF0;
 const KEY_PAGE_MODE_PFLASH: u32 = 0x50;
 
-const ERR_OPER: u32 = 1 << 0;
-const ERR_SQER: u32 = 1 << 1;
-const ERR_PROER: u32 = 1 << 2;
-const ERR_PVER: u32 = 1 << 3;
-const ERR_EVER: u32 = 1 << 4;
-const ERR_MASK: u32 = 0x7F;
+pub(crate) const ERR_OPER: u32 = 1 << 0;
+pub(crate) const ERR_SQER: u32 = 1 << 1;
+pub(crate) const ERR_PROER: u32 = 1 << 2;
+pub(crate) const ERR_PVER: u32 = 1 << 3;
+pub(crate) const ERR_EVER: u32 = 1 << 4;
+pub(crate) const ERR_MASK: u32 = 0x7F;
 
 pub const SECTOR_SIZE: u32 = 16 * 1024;
 const PAGE_SIZE: u32 = 32;
@@ -114,7 +114,7 @@ const TC39X: &[Pflash] = &[
 const TC3EX: &[Pflash] = &[pf(0x8000_0000, 3 * MB, 2), pf(0x8030_0000, 3 * MB, 3), pf(0x8060_0000, 3 * MB, 4), pf(0x8090_0000, 3 * MB, 5)];
 
 /// PFLASH banks per TC3xx variant (SCU_CHIPID.CHID), as in OpenOCD's `aurix_eflash`.
-fn pflash_banks(variant: u32) -> &'static [Pflash] {
+pub(crate) fn pflash_banks(variant: u32) -> &'static [Pflash] {
     match variant {
         0x6 => TC36X,
         0x7 => TC37X,
@@ -138,6 +138,22 @@ fn generic_pflash(base: u32) -> Option<Pflash> {
     (is_flash_address(base) && off % PF_STRIDE == 0 && n < MAX_PF_BANKS).then(|| pf(0x8000_0000 + n * PF_STRIDE, PF_STRIDE, 2 + n))
 }
 
+/// The PFLASH bank of variant `variant` that holds `addr` (cached or non-cached address), from the
+/// table or the common scheme. Used to erase-check single sectors without reading them.
+pub fn pflash_at(variant: u32, addr: u32) -> Option<Pflash> {
+    if !is_flash_address(addr) {
+        return None;
+    }
+    let off = addr & 0x0FFF_FFFF;
+    let inside = |p: &Pflash| off >= (p.base & 0x0FFF_FFFF) && off < (p.base & 0x0FFF_FFFF) + p.size;
+    let table = pflash_banks(variant);
+    if table.is_empty() {
+        generic_pflash(0x8000_0000 + off / PF_STRIDE * PF_STRIDE).filter(inside)
+    } else {
+        table.iter().copied().find(inside)
+    }
+}
+
 /// Layout of the bank at `base` with `size` on TC3xx variant `variant`, and whether it comes from the
 /// generic scheme instead of the variant's table. A bank may be smaller than its table entry (devices
 /// with less flash than the largest of their family); DFLASH0/1 are the same on all variants, their
@@ -155,7 +171,7 @@ fn bank_layout(variant: u32, base: u32, size: u32) -> Option<(Pflash, bool)> {
 }
 
 /// Non-cached address (segment 0xA) of a flash address.
-fn seg_a(addr: u32) -> u32 {
+pub(crate) fn seg_a(addr: u32) -> u32 {
     (addr & 0x0FFF_FFFF) | 0xA000_0000
 }
 
@@ -163,7 +179,7 @@ fn is_flash_address(addr: u32) -> bool {
     matches!(addr >> 28, 0x8 | 0xA)
 }
 
-fn err_text(e: u32) -> String {
+pub(crate) fn err_text(e: u32) -> String {
     const NAMES: &[(u32, &str)] = &[
         (ERR_OPER, "operation error"),
         (ERR_SQER, "command sequence error"),
@@ -465,17 +481,18 @@ impl std::fmt::Display for WriteStats {
 const UCB_START: u32 = 0xAF40_0000;
 const UCB_END: u64 = 0xAF40_6000;
 
-/// The image without its UCB data, and the number of bytes removed. UCBs are never written:
-/// a wrong UCB can lock the device permanently. Without `unlock` the UCB data is skipped with a
-/// warning, so a post-build HEX with UCB records still flashes; with `unlock` it is an error,
-/// because UCB flashing is not implemented.
+/// The image without its UCB data, and the number of bytes removed. `flash write_image` never
+/// writes UCBs: a wrong UCB can lock the device permanently, so they go through `ucb review` and
+/// `ucb write` with their checks and a confirmation (VS Code does that right after flashing).
+/// Without `unlock` the UCB data is skipped with a warning, so a post-build HEX with UCB records
+/// still flashes; with `unlock` it is an error pointing there.
 pub fn skip_ucbs(img: &Image, unlock: bool, what: &str) -> Result<(Image, usize)> {
     let (rest, n) = img.without(UCB_START, UCB_END);
     if n > 0 {
         if unlock {
-            return Err(other(format!("image has {n} bytes of UCB data (0x{UCB_START:08x}..0x{UCB_END:08x}): UCB flashing is not supported")));
+            return Err(other(format!("image has {n} bytes of UCB data (0x{UCB_START:08x}..0x{UCB_END:08x}): UCBs are written with `ucb review <files>` and `ucb write`")));
         }
-        log_warn!("{what}: skipping {n} bytes of UCB data (0x{UCB_START:08x}..0x{UCB_END:08x}), UCB flashing is not unlocked");
+        log_warn!("{what}: skipping {n} bytes of UCB data (0x{UCB_START:08x}..0x{UCB_END:08x}); UCBs are written with `ucb review <files>` and `ucb write` (VS Code: \"ucbWrite\")");
     }
     Ok((rest, n))
 }

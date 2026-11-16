@@ -630,6 +630,109 @@ pub struct CommandOutput {
     pub output: String,
 }
 
+// --- UCBs ------------------------------------------------------------------------------------
+
+/// Reading the UCBs.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbReadRequest {
+    /// One UCB by name (`BMHD0`, `DBG`, `OTP3`, ...); default: all.
+    #[serde(default)]
+    pub ucb: Option<String>,
+    /// Use the last readout instead of reading the device again.
+    #[serde(default)]
+    pub cached: bool,
+}
+
+/// One staged UCB change.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbChange {
+    /// `<UCB>.<word>.<field>` (e.g. `BMHD1.BMI_BMHDID.HWCFG`) or `<UCB>.<word>` for a whole word.
+    pub field: String,
+    /// A number, `yes`/`no`, an option label (e.g. `Internal flash`) or a sector list
+    /// (`S0-S3, S10`, `none`).
+    pub value: String,
+}
+
+/// Staging UCB changes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbStageRequest {
+    /// Discard all staged changes first.
+    #[serde(default)]
+    pub discard: bool,
+    /// Changes to stage, in order.
+    #[serde(default)]
+    pub changes: Vec<UcbChange>,
+    /// UCBs to stage the confirmation UNLOCKED -> CONFIRMED of.
+    #[serde(default)]
+    pub confirm: Vec<String>,
+}
+
+/// Reviewing UCB changes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbReviewRequest {
+    /// Review the UCB records of these image files instead of the staged changes (e.g. a
+    /// post-build HEX). An entry is a path, or an object with `path`, `offset` and `type`.
+    #[serde(default)]
+    pub files: Vec<FlashFile>,
+}
+
+/// Comparing the UCBs with image files.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbCompareRequest {
+    /// Image files with UCB records (e.g. a post-build HEX) on the debug server's machine; empty:
+    /// compare again with the files of the last comparison.
+    #[serde(default)]
+    pub files: Vec<FlashFile>,
+}
+
+/// Staging UCB values from the compared image files.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbApplyRequest {
+    /// `all`, a UCB (`DFLASH`), a word or field (`BMHD1.STAD`, `DFLASH.PROCONRAM.RAMIN`) or a
+    /// password (`DBG.PW`).
+    pub target: String,
+}
+
+/// Exporting UCBs to Intel HEX.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UcbExportRequest {
+    /// Output file on the debug server's machine.
+    pub file: String,
+    /// UCBs by name; default: all (filtered by the other fields).
+    #[serde(default)]
+    pub ucbs: Vec<String>,
+    /// Only UCBs in one of these states: `unlocked` (unconfirmed), `confirmed`, `errored`.
+    #[serde(default)]
+    pub states: Vec<String>,
+    /// Only these groups: `boot`, `protection`, `hsm`, `otp`, `infineon`.
+    #[serde(default)]
+    pub classes: Vec<String>,
+    /// Only UCBs that differ from the delivery state (Infineon data: from the chip's first
+    /// readout).
+    #[serde(default)]
+    pub changed: bool,
+    /// `orig`, `copy` or `both` (default) of the ORIG/COPY pairs.
+    #[serde(default)]
+    pub which: Option<String>,
+    /// Export the staged content instead of the device's.
+    #[serde(default)]
+    pub staged: bool,
+}
+
+/// UCB data as the `ucb` Tcl command answers with `-json`: a readout (device, status, UCBs with
+/// their words and fields), a review (changes, problems, risk, token) or an export result.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct UcbData {
+    pub data: serde_json::Value,
+}
+
 // --- Symbols ---------------------------------------------------------------------------------
 
 /// Symbol files to load.
@@ -1429,6 +1532,11 @@ pub struct ConnectSpec {
     /// Probe serial number, to refuse a second session on the same probe.
     #[serde(default)]
     pub probe: Option<String>,
+    /// Allow writing UCBs in this session (`ucb write`, after a person's confirmation). Off by
+    /// default; refused when an MCP client asks for it (a hub profile or the VS Code launch
+    /// configuration `ucbWrite` can set it).
+    #[serde(default)]
+    pub ucb_write: bool,
 }
 
 /// Opening a session.

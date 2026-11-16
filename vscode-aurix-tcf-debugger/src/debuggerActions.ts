@@ -2,7 +2,8 @@
  * AURIX Debugger VSCode Extension
  * Copyright (C) 2025 Infineon Technologies AG
  *
- * Debugger actions: user-defined Tcl commands from the launch configuration ("actions"),
+ * Debugger actions: user-defined Tcl commands and commands of this extension (e.g. the UCBs
+ * panel) from the launch configuration ("actions"),
  * offered through a single "Debugger Actions" toolbar button as a (nested) QuickPick.
  * VS Code menus are static, so the actions cannot become toolbar buttons of their own.
  */
@@ -20,6 +21,13 @@ export interface DebuggerActionNode {
 	items?: DebuggerActionNode[];
 	/** Action: Tcl script(s) run in order on the debug server; stops at the first error. */
 	tcl?: string | string[];
+	/**
+	 * Action: a command of this extension (`aurix-debugger.*`), e.g. `aurix-debugger.showUcbs`;
+	 * run after the Tcl scripts when both are given.
+	 */
+	command?: string;
+	/** Argument passed to `command`. */
+	args?: unknown;
 	/** Modal confirmation text shown before running. */
 	confirm?: string;
 	/** Reset the target afterwards like the Reset toolbar button. */
@@ -172,11 +180,20 @@ function showLevel(title: string, nodes: DebuggerActionNode[], canGoBack: boolea
 	});
 }
 
+/** Only this extension's own commands: a launch configuration from a cloned repository must not
+ * be able to run arbitrary VS Code commands through an action. */
+const ACTION_COMMAND_PREFIX = 'aurix-debugger.';
+
 async function runAction(session: vscode.DebugSession, action: DebuggerActionNode): Promise<void> {
 	const scripts = (Array.isArray(action.tcl) ? action.tcl : [action.tcl])
 		.filter((s): s is string => typeof s === 'string' && s.trim() !== '');
-	if (scripts.length === 0) {
-		void vscode.window.showErrorMessage(`AURIX™ Debugger: action "${action.label}" has no "tcl" command.`);
+	const command = typeof action.command === 'string' ? action.command.trim() : '';
+	if (scripts.length === 0 && !command) {
+		void vscode.window.showErrorMessage(`AURIX™ Debugger: action "${action.label}" has neither "tcl" nor "command".`);
+		return;
+	}
+	if (command && (!command.startsWith(ACTION_COMMAND_PREFIX) || command === 'aurix-debugger.runAction' || command === 'aurix-debugger.showActions')) {
+		void vscode.window.showErrorMessage(`AURIX™ Debugger: action "${action.label}": only commands of this extension ("${ACTION_COMMAND_PREFIX}…") can be run, not "${command}".`);
 		return;
 	}
 	if (action.confirm) {
@@ -184,6 +201,18 @@ async function runAction(session: vscode.DebugSession, action: DebuggerActionNod
 		if (choice !== action.label) {
 			return;
 		}
+	}
+	if (scripts.length === 0) {
+		// A command only (e.g. open the UCBs panel): no progress notification, no Tcl.
+		try {
+			await vscode.commands.executeCommand(command, ...(action.args === undefined ? [] : [action.args]));
+			if (action.resetAfter) {
+				await session.customRequest('aurix/reset', {});
+			}
+		} catch (e) {
+			void vscode.window.showErrorMessage(`AURIX™ Debugger: ${action.label} failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		return;
 	}
 	if (running) {
 		void vscode.window.showWarningMessage('AURIX™ Debugger: another debugger action is still running.');
@@ -207,6 +236,9 @@ async function runAction(session: vscode.DebugSession, action: DebuggerActionNod
 				}
 			}
 		);
+		if (command) {
+			await vscode.commands.executeCommand(command, ...(action.args === undefined ? [] : [action.args]));
+		}
 		const output = action.showOutput && outputs.length > 0 ? `: ${outputs.join('\n')}` : ' done.';
 		void vscode.window.showInformationMessage(`AURIX™ Debugger: ${action.label}${output}`);
 	} catch (e) {

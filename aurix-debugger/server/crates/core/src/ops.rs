@@ -623,7 +623,15 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
         return Err(usage("'reset' can not be invoked recursively"));
     }
     let r = reset_inner(cx, mode, halt);
-    cx.with(|c| c.in_reset = false);
+    cx.with(|c| {
+        c.in_reset = false;
+        // The DMU installs the UCBs at startup: what was written is now active (or not).
+        if r.is_ok() {
+            c.ucb.written_since_reset.clear();
+            c.ucb.readout = None;
+            c.ucb.review = None;
+        }
+    });
     emit(Event::ResetDone);
     r
 }

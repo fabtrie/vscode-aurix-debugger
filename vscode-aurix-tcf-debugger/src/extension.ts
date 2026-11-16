@@ -16,6 +16,7 @@ import { createGunzip, gunzipSync } from 'zlib';
 import { LiveWatchCommandArgument } from './liveWatchView';
 import { LiveWatchManager, pickIntervalMs } from './liveWatchManager';
 import { OsObjectsPanel } from './osObjectsPanel';
+import { UcbPanel } from './ucbPanel';
 import { OsProfilePanel } from './osProfilePanel';
 import { DebugLayout, focusEditorGroup } from './debugLayout';
 import { describeOsError } from './tcf/osaware';
@@ -175,6 +176,10 @@ export function activate(context: vscode.ExtensionContext) {
 				} catch (e) {
 					void vscode.window.showErrorMessage(`AURIX™ Debugger: flashing failed: ${e instanceof Error ? e.message : String(e)}`);
 					return;
+				}
+				if (s.configuration.ucbWrite === true) {
+					// Flashing skipped the UCB records: review them; the UCBs panel writes them on confirmation.
+					await UcbPanel.reviewFlashImages(context.extensionUri, s);
 				}
 				try {
 					// Same as the Reset button: the launch configuration decides whether the target halts or runs.
@@ -434,6 +439,7 @@ export function activate(context: vscode.ExtensionContext) {
 			void vscode.window.showInformationMessage('Debug layout forgotten: the next session opens the default layout.');
 		}),
 		vscode.commands.registerCommand('aurix-debugger.osShowProfile', () => OsProfilePanel.show(context.extensionUri)),
+		vscode.commands.registerCommand('aurix-debugger.showUcbs', () => UcbPanel.show(context.extensionUri)),
 		vscode.commands.registerCommand('aurix-debugger.osShowObjects', (kind?: string) =>
 			OsObjectsPanel.show(context.extensionUri, typeof kind === 'string' ? kind : undefined),
 		),
@@ -618,6 +624,11 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.debug.onDidReceiveDebugSessionCustomEvent((e) => {
 			if (e.session.type !== 'aurixdbg') {
+				return;
+			}
+			if (e.event === 'aurix/ucbImages') {
+				// The launch flashed images with UCB records: review them, write only on confirmation.
+				void UcbPanel.reviewFlashImages(context.extensionUri, e.session);
 				return;
 			}
 			if (e.event === 'aurix/targetHealth') {
@@ -1178,13 +1189,15 @@ async function prepareHubSession(session: vscode.DebugSession, config: vscode.De
 		if (typeof config.profile === 'string' && config.profile.trim() !== '') {
 			req.profile = config.profile.trim();
 		}
-		if (configFiles.length || asStringList(config.configCommands).length || searchDirs.length || config.adapter || config.probe) {
+		if (configFiles.length || asStringList(config.configCommands).length || searchDirs.length || config.adapter || config.probe || config.ucbWrite === true) {
 			req.connect = {
 				config_files: configFiles,
 				commands: asStringList(config.configCommands),
 				search_dirs: searchDirs,
 				adapter: typeof config.adapter === 'string' && config.adapter ? config.adapter : undefined,
 				probe: typeof config.probe === 'string' && config.probe ? config.probe : undefined,
+				// Writing UCBs (after the confirmation in the UCBs panel) only when the launch configuration asks.
+				ucb_write: config.ucbWrite === true ? true : undefined,
 			};
 		}
 		if (!req.profile && !req.connect) {

@@ -268,7 +268,7 @@ When a session ends, the extension remembers where its tabs were (Disassembly, L
 
 ### Debugger Actions
 
-The launch configuration can define custom Tcl commands in `actions`. They are offered by the `Debugger Actions` toolbar button, which only appears when `actions` is set. An entry with `items` opens a submenu, an entry with `tcl` runs its command(s) in order on the debug server. The output is written to the Debug Console.
+The launch configuration can define custom actions in `actions`. They are offered by the `Debugger Actions` toolbar button, which only appears when `actions` is set. An entry with `items` opens a submenu, an entry with `tcl` runs its command(s) in order on the debug server (the output is written to the Debug Console), and an entry with `command` runs a command of this extension, e.g. opens the UCBs panel.
 
 ```jsonc
 "actions": [
@@ -297,6 +297,12 @@ The launch configuration can define custom Tcl commands in `actions`. They are o
     "icon": "info",
     "tcl": "<tcl command>",
     "showOutput": true
+  },
+  {
+    "id": "ucbs",
+    "label": "Show UCBs",
+    "icon": "shield",
+    "command": "aurix-debugger.showUcbs"
   }
 ]
 ```
@@ -307,6 +313,8 @@ The launch configuration can define custom Tcl commands in `actions`. They are o
 | `description`, `detail`, `icon` | Additional text and codicon name |
 | `items` | Submenu entries (same format) |
 | `tcl` | Tcl command or list of commands; stops at the first error |
+| `command` | A command of this extension (`aurix-debugger.*`), e.g. `aurix-debugger.showUcbs`; runs after `tcl` if both are given |
+| `args` | Argument for `command` |
 | `confirm` | Confirmation text shown before running |
 | `resetAfter` | Reset the target afterwards like the Reset button |
 | `showOutput` | Show the Tcl output in a notification |

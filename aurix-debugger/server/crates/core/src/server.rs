@@ -83,6 +83,19 @@ impl ServerHandle {
             .unwrap_or_else(|| (Err("server stopped".into()), Vec::new()))
     }
 
+    /// Like [`tcl_with_output`](Self::tcl_with_output) for a command from the REST/MCP API: the
+    /// commands that need a person's confirmation (writing UCBs) refuse it.
+    pub fn tcl_with_output_from_api(&self, script: &str) -> (CmdResult, Vec<String>) {
+        let s = script.to_string();
+        self.call(move |cx| {
+            let prev = cx.with(|c| std::mem::replace(&mut c.tcl_origin, crate::ucb_write::Origin::Api));
+            let r = log::capture(|| cx.interp.eval_global(&s));
+            cx.with(|c| c.tcl_origin = prev);
+            r
+        })
+        .unwrap_or_else(|| (Err("server stopped".into()), Vec::new()))
+    }
+
     pub fn subscribe(&self) -> Receiver<Event> {
         events::subscribe()
     }

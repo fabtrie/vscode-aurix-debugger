@@ -48,6 +48,7 @@ dependencies = [
  "isa",
  "jim",
  "openocd-tcl",
+ "serde_json",
  "tas",
  "winidea-sdk",
 ]

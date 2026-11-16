@@ -332,6 +332,12 @@
 				"icon": "$(debug-pause)"
 			},
 			{
+				"command": "aurix-debugger.showUcbs",
+				"title": "Show UCBs (User Configuration Blocks)",
+				"category": "AURIX™ Debugger",
+				"icon": "$(shield)"
+			},
+			{
 				"command": "aurix-debugger.hubInstallAutostart",
 				"title": "Start Debugger Hub at Logon",
 				"category": "AURIX™ Debugger"
@@ -907,6 +913,11 @@
 								"type": "boolean",
 								"default": true
 							},
+							"ucbWrite": {
+								"description": "Allow writing the TC3xx UCBs (user configuration blocks) in this session: edited in the UCBs panel, or the UCB records of flashFiles after flashing. Every write is reviewed by the debug server's checks and needs your confirmation in the UCBs panel; permanent changes need the device name typed. A wrong UCB can lock the device for good. Off by default; reading and exporting UCBs works without it.",
+								"type": "boolean",
+								"default": false
+							},
 							"workspace": {
 								"description": "Workspace or project path",
 								"type": "string"
@@ -1010,7 +1021,7 @@
 								}
 							},
 							"actions": {
-								"description": "Custom Tcl commands offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu, an entry with 'tcl' is an action.",
+								"description": "Custom actions offered by the 'Debugger Actions' toolbar button. An entry with 'items' is a submenu; an entry with 'tcl' (Tcl commands on the debug server) and/or 'command' (a command of this extension, e.g. 'aurix-debugger.showUcbs') is an action.",
 								"type": "array",
 								"items": {
 									"type": "object",
@@ -1081,6 +1092,13 @@
 														},
 														"description": "Tcl command(s) run in order on the debug server; stops at the first error"
 													},
+													"command": {
+														"type": "string",
+														"description": "A command of this extension to run, e.g. 'aurix-debugger.showUcbs' (UCBs panel) or 'aurix-debugger.osShowObjects'; after the Tcl commands if both are given. Only 'aurix-debugger.*' commands are run."
+													},
+													"args": {
+														"description": "Argument passed to 'command'"
+													},
 													"confirm": {
 														"type": "string",
 														"description": "Confirmation text shown before running"
@@ -1112,6 +1130,13 @@
 												"type": "string"
 											},
 											"description": "Tcl command(s) run in order on the debug server; stops at the first error"
+										},
+										"command": {
+											"type": "string",
+											"description": "A command of this extension to run, e.g. 'aurix-debugger.showUcbs' (UCBs panel) or 'aurix-debugger.osShowObjects'; after the Tcl commands if both are given. Only 'aurix-debugger.*' commands are run."
+										},
+										"args": {
+											"description": "Argument passed to 'command'"
 										},
 										"confirm": {
 											"type": "string",

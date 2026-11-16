@@ -198,6 +198,10 @@ class ConnectSpec:
     """Probe serial number, to refuse a second session on the same probe."""
     search_dirs: list[str] | None = None
     """Script search directories (`-s`)."""
+    ucb_write: bool | None = None
+    """Allow writing UCBs in this session (`ucb write`, after a person's confirmation). Off by
+    default; refused when an MCP client asks for it (a hub profile or the VS Code launch
+    configuration `ucbWrite` can set it)."""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ConnectSpec:
@@ -207,6 +211,7 @@ class ConnectSpec:
             config_files=d.get("config_files"),
             probe=d.get("probe"),
             search_dirs=d.get("search_dirs"),
+            ucb_write=d.get("ucb_write"),
         )
 
 
@@ -1041,6 +1046,38 @@ class TargetList:
 
 
 @dataclass
+class UcbChange:
+    """One staged UCB change."""
+
+    field: str
+    """`<UCB>.<word>.<field>` (e.g. `BMHD1.BMI_BMHDID.HWCFG`) or `<UCB>.<word>` for a whole word."""
+    value: str
+    """A number, `yes`/`no`, an option label (e.g. `Internal flash`) or a sector list
+    (`S0-S3, S10`, `none`)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> UcbChange:
+        return cls(
+            field=d.get("field"),
+            value=d.get("value"),
+        )
+
+
+@dataclass
+class UcbData:
+    """UCB data as the `ucb` Tcl command answers with `-json`: a readout (device, status, UCBs with
+    their words and fields), a review (changes, problems, risk, token) or an export result."""
+
+    data: Any
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> UcbData:
+        return cls(
+            data=d.get("data"),
+        )
+
+
+@dataclass
 class VariableInfo:
     """A variable, or a member or element of one, as the symbols describe it."""
 
@@ -1515,6 +1552,83 @@ class GeneratedClient:
             file: Image file on the debug server's machine.
         """
         return CommandOutput.from_dict(self._call("POST", self._session_path() + "/flash/verify", None, _args({"file": file})))
+
+    def ucb_read(self, *, cached: bool | None = None, ucb: str | None = None) -> UcbData:
+        """Read the TC3xx UCBs (user configuration blocks) from the device and decode them.
+
+        Each UCB comes with its confirmation state (ORIG, COPY, installed), its risk class, and its
+        words and fields: value, text, default (delivery state; Infineon data: the chip's first
+        readout), whether it differs from the default or between ORIG and COPY, staged changes,
+        and for protection words the value the DMU installed (`pending_reset` when they differ).
+        Passwords and HSM keys are masked; words the DMU protects are reported unreadable.
+
+        Args:
+            cached: Use the last readout instead of reading the device again.
+            ucb: One UCB by name (`BMHD0`, `DBG`, `OTP3`, ...); default: all.
+        """
+        return UcbData.from_dict(self._call("GET", self._session_path() + "/ucb", _args({"cached": cached, "ucb": ucb}), None))
+
+    def ucb_stage(self, *, changes: list[UcbChange] | None = None, confirm: list[str] | None = None, discard: bool | None = None) -> UcbData:
+        """Stage UCB changes by field (or discard them). Nothing is written to the device.
+
+        The staged changes are shared with the other clients: the VS Code UCB panel shows them, and
+        a person writes them from there after the review. Returns the staged UCBs.
+
+        Args:
+            changes: Changes to stage, in order.
+            confirm: UCBs to stage the confirmation UNLOCKED -> CONFIRMED of.
+            discard: Discard all staged changes first.
+        """
+        return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/stage", None, _args({"changes": changes, "confirm": confirm, "discard": discard})))
+
+    def ucb_review(self, *, files: list[str | dict[str, Any]] | None = None) -> UcbData:
+        """Review the staged UCB changes, or the UCB records of image files: the changes by field,
+        the problems the checks found (blocking ones first), the risk (`reversible`, `password`,
+        `permanent`) and the confirmation the write needs.
+
+        Writing is not part of this API: UCBs are written only after a person confirmed the
+        review, in the VS Code UCB panel or the Tcl console (`ucb write`), and only in a session
+        started with UCB writing enabled.
+
+        Args:
+            files: Review the UCB records of these image files instead of the staged changes (e.g. a post-build HEX). An entry is a path, or an object with `path`, `offset` and `type`.
+        """
+        return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/review", None, _args({"files": files})))
+
+    def ucb_compare(self, *, files: list[str | dict[str, Any]] | None = None) -> UcbData:
+        """Compare the device's UCBs with the UCB records of image files (e.g. a post-build HEX), field
+        by field: per UCB whether the files hold it (ORIG, COPY, both, none), how many fields
+        differ, and per field the device and the file value (passwords only as set/zero). Read-only
+        UCBs are reported but cannot be applied.
+
+        Args:
+            files: Image files with UCB records (e.g. a post-build HEX) on the debug server's machine; empty: compare again with the files of the last comparison.
+        """
+        return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/compare", None, _args({"files": files})))
+
+    def ucb_apply(self, *, target: str) -> UcbData:
+        """Stage values from the compared files: everything, one UCB, one field or the password.
+        Nothing is written; the result is the updated comparison (`taken` per field).
+
+        Args:
+            target: `all`, a UCB (`DFLASH`), a word or field (`BMHD1.STAD`, `DFLASH.PROCONRAM.RAMIN`) or a password (`DBG.PW`).
+        """
+        return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/apply", None, _args({"target": target})))
+
+    def ucb_export(self, *, file: str, changed: bool | None = None, classes: list[str] | None = None, staged: bool | None = None, states: list[str] | None = None, ucbs: list[str] | None = None, which: str | None = None) -> UcbData:
+        """Export a selection of UCBs (whole 512-byte UCBs) to an Intel HEX file: by name, state
+        (e.g. only `unlocked`), group, or only those changed from the delivery state.
+
+        Args:
+            file: Output file on the debug server's machine.
+            changed: Only UCBs that differ from the delivery state (Infineon data: from the chip's first readout).
+            classes: Only these groups: `boot`, `protection`, `hsm`, `otp`, `infineon`.
+            staged: Export the staged content instead of the device's.
+            states: Only UCBs in one of these states: `unlocked` (unconfirmed), `confirmed`, `errored`.
+            ucbs: UCBs by name; default: all (filtered by the other fields).
+            which: `orig`, `copy` or `both` (default) of the ORIG/COPY pairs.
+        """
+        return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/export", None, _args({"file": file, "changed": changed, "classes": classes, "staged": staged, "states": states, "ucbs": ucbs, "which": which})))
 
     def load_symbols(self, *, files: list[str], targets: list[str] | None = None) -> SymbolsInfo:
         """Load symbol files (ELF) for the targets, as a VS Code debug session does.

@@ -704,6 +704,11 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "ucb_write": {
+            "default": false,
+            "description": "Allow writing UCBs in this session (`ucb write`, after a person's confirmation). Off by\ndefault; refused when an MCP client asks for it (a hub profile or the VS Code launch\nconfiguration `ucbWrite` can set it).",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -3063,6 +3068,183 @@
         "required": [
           "command"
         ],
+        "type": "object"
+      },
+      "UcbApplyRequest": {
+        "additionalProperties": false,
+        "description": "Staging UCB values from the compared image files.",
+        "properties": {
+          "target": {
+            "description": "`all`, a UCB (`DFLASH`), a word or field (`BMHD1.STAD`, `DFLASH.PROCONRAM.RAMIN`) or a\npassword (`DBG.PW`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "UcbChange": {
+        "additionalProperties": false,
+        "description": "One staged UCB change.",
+        "properties": {
+          "field": {
+            "description": "`<UCB>.<word>.<field>` (e.g. `BMHD1.BMI_BMHDID.HWCFG`) or `<UCB>.<word>` for a whole word.",
+            "type": "string"
+          },
+          "value": {
+            "description": "A number, `yes`/`no`, an option label (e.g. `Internal flash`) or a sector list\n(`S0-S3, S10`, `none`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "value"
+        ],
+        "type": "object"
+      },
+      "UcbCompareRequest": {
+        "additionalProperties": false,
+        "description": "Comparing the UCBs with image files.",
+        "properties": {
+          "files": {
+            "default": [],
+            "description": "Image files with UCB records (e.g. a post-build HEX) on the debug server's machine; empty:\ncompare again with the files of the last comparison.",
+            "items": {
+              "$ref": "#/components/schemas/FlashFile"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "UcbData": {
+        "description": "UCB data as the `ucb` Tcl command answers with `-json`: a readout (device, status, UCBs with\ntheir words and fields), a review (changes, problems, risk, token) or an export result.",
+        "properties": {
+          "data": true
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "UcbExportRequest": {
+        "additionalProperties": false,
+        "description": "Exporting UCBs to Intel HEX.",
+        "properties": {
+          "changed": {
+            "default": false,
+            "description": "Only UCBs that differ from the delivery state (Infineon data: from the chip's first\nreadout).",
+            "type": "boolean"
+          },
+          "classes": {
+            "default": [],
+            "description": "Only these groups: `boot`, `protection`, `hsm`, `otp`, `infineon`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file": {
+            "description": "Output file on the debug server's machine.",
+            "type": "string"
+          },
+          "staged": {
+            "default": false,
+            "description": "Export the staged content instead of the device's.",
+            "type": "boolean"
+          },
+          "states": {
+            "default": [],
+            "description": "Only UCBs in one of these states: `unlocked` (unconfirmed), `confirmed`, `errored`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ucbs": {
+            "default": [],
+            "description": "UCBs by name; default: all (filtered by the other fields).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "which": {
+            "default": null,
+            "description": "`orig`, `copy` or `both` (default) of the ORIG/COPY pairs.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "type": "object"
+      },
+      "UcbReadRequest": {
+        "additionalProperties": false,
+        "description": "Reading the UCBs.",
+        "properties": {
+          "cached": {
+            "default": false,
+            "description": "Use the last readout instead of reading the device again.",
+            "type": "boolean"
+          },
+          "ucb": {
+            "default": null,
+            "description": "One UCB by name (`BMHD0`, `DBG`, `OTP3`, ...); default: all.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UcbReviewRequest": {
+        "additionalProperties": false,
+        "description": "Reviewing UCB changes.",
+        "properties": {
+          "files": {
+            "default": [],
+            "description": "Review the UCB records of these image files instead of the staged changes (e.g. a\npost-build HEX). An entry is a path, or an object with `path`, `offset` and `type`.",
+            "items": {
+              "$ref": "#/components/schemas/FlashFile"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "UcbStageRequest": {
+        "additionalProperties": false,
+        "description": "Staging UCB changes.",
+        "properties": {
+          "changes": {
+            "default": [],
+            "description": "Changes to stage, in order.",
+            "items": {
+              "$ref": "#/components/schemas/UcbChange"
+            },
+            "type": "array"
+          },
+          "confirm": {
+            "default": [],
+            "description": "UCBs to stage the confirmation UNLOCKED -> CONFIRMED of.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "discard": {
+            "default": false,
+            "description": "Discard all staged changes first.",
+            "type": "boolean"
+          }
+        },
         "type": "object"
       },
       "VariableClass": {
@@ -6482,6 +6664,450 @@
         "summary": "Run a command of the OpenOCD-compatible Tcl console (like the telnet console).",
         "tags": [
           "tcl"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/ucb": {
+      "get": {
+        "description": "Read the TC3xx UCBs (user configuration blocks) from the device and decode them.\n\nEach UCB comes with its confirmation state (ORIG, COPY, installed), its risk class, and its\nwords and fields: value, text, default (delivery state; Infineon data: the chip's first\nreadout), whether it differs from the default or between ORIG and COPY, staged changes,\nand for protection words the value the DMU installed (`pending_reset` when they differ).\nPasswords and HSM keys are masked; words the DMU protects are reported unreadable.",
+        "operationId": "ucb_read",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Use the last readout instead of reading the device again.",
+            "in": "query",
+            "name": "cached",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "One UCB by name (`BMHD0`, `DBG`, `OTP3`, ...); default: all.",
+            "in": "query",
+            "name": "ucb",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UcbData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read the TC3xx UCBs (user configuration blocks) from the device and decode them.",
+        "tags": [
+          "ucb"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/ucb/apply": {
+      "post": {
+        "description": "Stage values from the compared files: everything, one UCB, one field or the password.\nNothing is written; the result is the updated comparison (`taken` per field).",
+        "operationId": "ucb_apply",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Staging UCB values from the compared image files.",
+                "properties": {
+                  "target": {
+                    "description": "`all`, a UCB (`DFLASH`), a word or field (`BMHD1.STAD`, `DFLASH.PROCONRAM.RAMIN`) or a\npassword (`DBG.PW`).",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UcbData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stage values from the compared files: everything, one UCB, one field or the password.",
+        "tags": [
+          "ucb"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/ucb/compare": {
+      "post": {
+        "description": "Compare the device's UCBs with the UCB records of image files (e.g. a post-build HEX), field\nby field: per UCB whether the files hold it (ORIG, COPY, both, none), how many fields\ndiffer, and per field the device and the file value (passwords only as set/zero). Read-only\nUCBs are reported but cannot be applied.",
+        "operationId": "ucb_compare",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Comparing the UCBs with image files.",
+                "properties": {
+                  "files": {
+                    "default": [],
+                    "description": "Image files with UCB records (e.g. a post-build HEX) on the debug server's machine; empty:\ncompare again with the files of the last comparison.",
+                    "items": {
+                      "$ref": "#/components/schemas/FlashFile"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UcbData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Compare the device's UCBs with the UCB records of image files (e.g.",
+        "tags": [
+          "ucb"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/ucb/export": {
+      "post": {
+        "description": "Export a selection of UCBs (whole 512-byte UCBs) to an Intel HEX file: by name, state\n(e.g. only `unlocked`), group, or only those changed from the delivery state.",
+        "operationId": "ucb_export",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Exporting UCBs to Intel HEX.",
+                "properties": {
+                  "changed": {
+                    "default": false,
+                    "description": "Only UCBs that differ from the delivery state (Infineon data: from the chip's first\nreadout).",
+                    "type": "boolean"
+                  },
+                  "classes": {
+                    "default": [],
+                    "description": "Only these groups: `boot`, `protection`, `hsm`, `otp`, `infineon`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "file": {
+                    "description": "Output file on the debug server's machine.",
+                    "type": "string"
+                  },
+                  "staged": {
+                    "default": false,
+                    "description": "Export the staged content instead of the device's.",
+                    "type": "boolean"
+                  },
+                  "states": {
+                    "default": [],
+                    "description": "Only UCBs in one of these states: `unlocked` (unconfirmed), `confirmed`, `errored`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "ucbs": {
+                    "default": [],
+                    "description": "UCBs by name; default: all (filtered by the other fields).",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "which": {
+                    "default": null,
+                    "description": "`orig`, `copy` or `both` (default) of the ORIG/COPY pairs.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UcbData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Export a selection of UCBs (whole 512-byte UCBs) to an Intel HEX file: by name, state (e.g.",
+        "tags": [
+          "ucb"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/ucb/review": {
+      "post": {
+        "description": "Review the staged UCB changes, or the UCB records of image files: the changes by field,\nthe problems the checks found (blocking ones first), the risk (`reversible`, `password`,\n`permanent`) and the confirmation the write needs.\n\nWriting is not part of this API: UCBs are written only after a person confirmed the\nreview, in the VS Code UCB panel or the Tcl console (`ucb write`), and only in a session\nstarted with UCB writing enabled.",
+        "operationId": "ucb_review",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Reviewing UCB changes.",
+                "properties": {
+                  "files": {
+                    "default": [],
+                    "description": "Review the UCB records of these image files instead of the staged changes (e.g. a\npost-build HEX). An entry is a path, or an object with `path`, `offset` and `type`.",
+                    "items": {
+                      "$ref": "#/components/schemas/FlashFile"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UcbData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Review the staged UCB changes, or the UCB records of image files: the changes by field, the problems the checks found (blocking ones first), the risk (`reversible`, `password`, `permanent`) and the confirmation the write needs.",
+        "tags": [
+          "ucb"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/ucb/stage": {
+      "post": {
+        "description": "Stage UCB changes by field (or discard them). Nothing is written to the device.\n\nThe staged changes are shared with the other clients: the VS Code UCB panel shows them, and\na person writes them from there after the review. Returns the staged UCBs.",
+        "operationId": "ucb_stage",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Staging UCB changes.",
+                "properties": {
+                  "changes": {
+                    "default": [],
+                    "description": "Changes to stage, in order.",
+                    "items": {
+                      "$ref": "#/components/schemas/UcbChange"
+                    },
+                    "type": "array"
+                  },
+                  "confirm": {
+                    "default": [],
+                    "description": "UCBs to stage the confirmation UNLOCKED -> CONFIRMED of.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "discard": {
+                    "default": false,
+                    "description": "Discard all staged changes first.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UcbData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stage UCB changes by field (or discard them).",
+        "tags": [
+          "ucb"
         ]
       }
     },

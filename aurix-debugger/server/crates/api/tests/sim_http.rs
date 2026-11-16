@@ -1267,6 +1267,24 @@ fn rest_mcp_and_tcf_share_one_session() {
     }
     assert_eq!(h.call(|cx| cx.with(|c| c.daq.is_empty())), Some(true), "the DAQ session outlived its socket");
 
+    // --- UCBs --------------------------------------------------------------------------------
+
+    let dir = std::env::temp_dir().join(format!("aurix-ucb-http-{}", std::process::id()));
+    http.ok("POST", "/api/v1/tcl", Some(json!({ "command": format!("ucb dir {{{}}}", tcl_path(dir.clone())) })));
+    let v = http.ok("GET", "/api/v1/ucb?ucb=BMHD0", None);
+    assert_eq!(v["data"]["device"]["name"], "TC37x", "{v}");
+    assert_eq!(v["data"]["ucbs"][0]["name"], "BMHD0");
+    let st = http.ok("POST", "/api/v1/ucb/stage", Some(json!({ "changes": [{ "field": "BMHD1.STAD", "value": "0xA0000000" }] })));
+    assert_eq!(st["data"], json!(["BMHD1"]));
+    let rv = http.ok("POST", "/api/v1/ucb/review", Some(json!({})));
+    let token = rv["data"]["token"].as_str().unwrap().to_string();
+    // The API can review but never write, not even through the Tcl console operation.
+    let (status, e) = http.request("POST", "/api/v1/tcl", Some(json!({ "command": format!("ucb write -token {token}") })), &[]);
+    assert_eq!(status, 500);
+    assert!(e["message"].as_str().unwrap_or_default().contains("REST/MCP"), "{e}");
+    http.ok("POST", "/api/v1/ucb/stage", Some(json!({ "discard": true })));
+    let _ = std::fs::remove_dir_all(&dir);
+
     // --- AUTOSAR OS awareness (ORTI) ---------------------------------------------------------
 
     // Nothing loaded: an empty description rather than an error, so a panel can ask on startup.

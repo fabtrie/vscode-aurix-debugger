@@ -22,6 +22,7 @@ Usage: aurix-dbg [options]
       --adapter <driver>  force the adapter driver (tas_client, sim, winidea, bluebox)
       --hub <url>         register with the hub at <url> (set by aurix-hub)
       --session <id>      the hub's session ID (set by aurix-hub)
+      --ucb-write         allow writing UCBs (`ucb write`; launch configuration ucbWrite)
   -h, --help              this help
   -v, --version           version
 
@@ -88,6 +89,7 @@ fn main() {
                 session = Some(value(i));
                 i += 1;
             }
+            "--ucb-write" => cx.with(|c| c.ucb.write_enabled = true),
             "--debug" => {
                 log::set_debug_level(value(i).parse().unwrap_or(3));
                 i += 1;

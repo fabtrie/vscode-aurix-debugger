@@ -28,6 +28,7 @@ use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHeal
 use crate::arch::{OEC, OSTATE};
 use crate::cortex_m::*;
 use crate::error::Result;
+use crate::sim_dmu::SimDmu;
 use crate::sim_mcs::SimGtm;
 use crate::sim_scr::SimScr;
 
@@ -314,6 +315,8 @@ pub struct SimAdapter {
     /// A probe sampler, for tests of the DAQ offload. `None` (the default): the simulator has
     /// none, as a TAS probe, and every DAQ point is read by the host.
     pub sampler: Option<SimSampler>,
+    /// The DMU with the UCBs ([`SimDmu`]).
+    pub dmu: SimDmu,
 }
 
 /// A probe sampler as the BlueBox's behaves: after a configure every readable item sends one
@@ -369,6 +372,7 @@ impl SimAdapter {
             srst: false,
             health: None,
             sampler: None,
+            dmu: SimDmu::new(),
             app: Some(SimApp::new()),
             fs26: None,
             violations: Vec::new(),
@@ -445,6 +449,7 @@ impl SimAdapter {
     /// reset vector (the application starts when it is resumed).
     fn power_on_reset(&mut self, halt: bool) {
         self.ostate = 0;
+        self.dmu.install();
         self.halted = [halt, false, false];
         self.pc = [0x800A_8000, 0x8010_0000, 0x8020_0000];
         self.stm_epoch = Instant::now();
@@ -682,6 +687,39 @@ impl SimAdapter {
         }
     }
 
+    /// DMU registers, command sequences and the UCBs (word access); `None` for other addresses.
+    fn dmu_access(&mut self, op: &BatchOp) -> Option<OpResult> {
+        match *op {
+            BatchOp::Read { addr, len, addr_map: 0 } if SimDmu::claims(addr as u32) => {
+                let mut data = Vec::with_capacity(len);
+                for k in (0..len).step_by(4) {
+                    match self.dmu.read32(addr as u32 + k as u32) {
+                        Some(v) => data.extend_from_slice(&v.to_le_bytes()),
+                        None => {
+                            data.resize(len, 0);
+                            return Some(OpResult { err: PL0_ERR_DATA, bytes_ok: k, data });
+                        }
+                    }
+                }
+                data.truncate(len);
+                Some(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: len, data })
+            }
+            BatchOp::Write { addr, data, addr_map: 0 } if SimDmu::claims(addr as u32) => {
+                for (k, chunk) in data.chunks(4).enumerate() {
+                    let mut w = [0u8; 4];
+                    w[..chunk.len()].copy_from_slice(chunk);
+                    let (a, v) = (addr as u32 + 4 * k as u32, u32::from_le_bytes(w));
+                    self.writes.push((a, v));
+                    if !self.dmu.write32(a, v) {
+                        return Some(OpResult { err: PL0_ERR_DATA, bytes_ok: 4 * k, data: Vec::new() });
+                    }
+                }
+                Some(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: data.len(), data: Vec::new() })
+            }
+            _ => None,
+        }
+    }
+
     /// GTM register and MCS RAM accesses (word access); `None` for other addresses.
     fn gtm_access(&mut self, op: &BatchOp) -> Option<OpResult> {
         match *op {
@@ -797,6 +835,10 @@ impl Adapter for SimAdapter {
             }
             if let Some(r) = self.hsm_access(&op) {
                 bridge_failed |= !r.ok();
+                out.push(r);
+                continue;
+            }
+            if let Some(r) = self.dmu_access(&op) {
                 out.push(r);
                 continue;
             }

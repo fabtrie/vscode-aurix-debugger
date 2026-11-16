@@ -20,6 +20,7 @@ Notation: `<value>` is a value to fill in, `[...]` is optional, `a|b` is one of 
 - [Breakpoints and watchpoints](#breakpoints-and-watchpoints)
 - [Core-specific (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`)](#core-specific-tricore-cortex_m-gtm_mcs-xc800)
 - [Flash](#flash)
+- [User configuration blocks (`ucb`, TC3xx)](#user-configuration-blocks-ucb-tc3xx)
 - [Server, ports and logging](#server-ports-and-logging)
 - [Scripting](#scripting)
 - [TAS adapter (`adapter driver tas_client`)](#tas-adapter-adapter-driver-tas_client)
@@ -812,6 +813,180 @@ aurix_eflash fallback <bank> [on|off]
 ```
 
 Accepted: the command sequences (OpenOCD's fallback mode) are always used.
+
+## User configuration blocks (`ucb`, TC3xx)
+
+### `ucb read`
+
+```
+ucb read [-json] [-reveal] [<UCB>]
+```
+
+Read all UCBs from the device and show them (one UCB in detail).
+
+Words the DMU protects (passwords of a CONFIRMED UCB, a CONFIRMED read-protected UCB) are not read but shown as unreadable. The first readout of a chip is saved as its baseline (Infineon data is compared with it). Passwords and HSM keys are masked unless `-reveal`. `-json` is the structure the REST/MCP operations and the VS Code UCB panel use.
+
+### `ucb show`
+
+```
+ucb show [-json] [-reveal] [<UCB>]
+```
+
+Like `ucb read`, from the last readout.
+
+### `ucb set`
+
+```
+ucb set <UCB>.<word>[.<field>] <value> | <UCB>.PW <PW0> .. <PW7>
+```
+
+Stage a change (not written yet).
+
+Values are numbers, `yes`/`no`, an option label (e.g. `{Internal flash}`) or a sector list (`S0-S3, S10`, `none`). Boot mode header IDs and checksums are computed. Read-only UCBs (SSW, USER, TEST, REDSEC, RETEST, spare) are refused.
+
+### `ucb confirm`
+
+```
+ucb confirm <UCB>
+```
+
+Stage UNLOCKED -> CONFIRMED (an over-program, no erase).
+
+Refused by the review until a reset after the UNLOCKED write showed that the setting works.
+
+### `ucb unset`
+
+```
+ucb unset <UCB>
+```
+
+Discard the staged changes of one UCB.
+
+### `ucb discard`
+
+```
+ucb discard
+```
+
+Discard all staged changes.
+
+### `ucb staged`
+
+```
+ucb staged [-json]
+```
+
+List the UCBs with staged changes.
+
+### `ucb compare`
+
+```
+ucb compare [-json] [-close] [[-offset <o>] [-type <t>] <file> ...]
+```
+
+Compare the device's UCBs with the UCB records of image files, field by field.
+
+Shows per UCB whether the files hold ORIG, COPY or both, and per field the device and the file value.          Without files it compares again with the files loaded last (e.g. after `ucb apply`); `-close` forgets them.          Passwords are compared but not shown.
+
+### `ucb apply`
+
+```
+ucb apply all | <UCB> | <UCB>.<word>[.<field>] | <UCB>.PW
+```
+
+Stage values from the files of `ucb compare`: everything, one UCB, one word or field, or the password.
+
+Nothing is written: the staged values go through `ucb review` and `ucb write` like any edit. Boot mode header          IDs and checksums are computed; read-only UCBs are not applied (`all` lists them).
+
+### `ucb revert`
+
+```
+ucb revert all | <UCB> | <UCB>.<word>[.<field>] | <UCB>.PW
+```
+
+Put staged values back to the device's (the counterpart of `ucb apply`, while comparing).
+
+### `ucb review`
+
+```
+ucb review [-json] [[-offset <o>] [-type <t>] <file> ...]
+```
+
+Check the staged changes (or the UCB records of image files) and get the token for `ucb write`.
+
+Runs the general checks (confirmation codes, reserved bits, what the DMU allows in the current state, passwords) and the per-UCB ones (a valid boot header remains and its start address holds code, no debugger lock-out, HSM code before HSM boot, SWAP entries appended, OTP not on erased sectors, ...). Checks that need the PFLASH run only while the cores are halted, otherwise again when writing. Reports the risk: can be undone, undo needs the password, permanent.
+
+### `ucb write`
+
+```
+ucb write -token <token> [-confirm <device>] [-noreset] [-json]
+```
+
+Write what the last review showed.
+
+Needs the session flag (`--ucb-write`; VS Code: `"ucbWrite": true`), a person (refused through the REST/MCP API) and, for permanent changes, the device name (e.g. `-confirm TC37x`). Halts the cores, reads again, saves a backup, writes COPY before ORIG with read-back, stops at the first DMU error, logs, resets and reads again.
+
+### `ucb restore`
+
+```
+ucb restore [-json] <backup.hex>
+```
+
+Review a backup (`ucb write` then writes it).
+
+### `ucb password`
+
+```
+ucb password <UCB> [<PW0> .. <PW7> | -env <variable> | none]
+```
+
+Set the password that disables the protection of a CONFIRMED UCB (BMHD1..3 use BMHD0's).
+
+Never logged. UCB_DBG also uses `adapter debug_password`.
+
+### `ucb unlock`
+
+```
+ucb unlock <UCB>
+```
+
+Disable Protection with the session password, until `ucb lock` or a reset.
+
+A wrong password makes the DMU refuse further attempts until the next reset.
+
+### `ucb lock`
+
+```
+ucb lock
+```
+
+Resume Protection.
+
+### `ucb export`
+
+```
+ucb export <file>|- [-ucbs {<UCB> ...}] [-state unlocked|confirmed|errored] [-unconfirmed] [-confirmed] [-class <class>] [-changed] [-which orig|copy|both] [-staged] [-json]
+```
+
+Write a selection of UCBs (whole 512-byte UCBs) to an Intel HEX file.
+
+Classes: boot, protection, hsm, otp, infineon. `-changed`: differing from the delivery state (Infineon data: from the baseline). `-staged`: the staged content instead of the device's. File `-`: the HEX text is          returned (`-json`: in `hex`) instead of written.
+
+### `ucb dir`
+
+```
+ucb dir [<directory>]
+```
+
+Where baselines, backups and the write log go; default `~/.aurix-dbg/ucb`.
+
+### `ucb status`
+
+```
+ucb status [-json]
+```
+
+Whether writing is enabled, what is staged.
 
 ## Server, ports and logging
 

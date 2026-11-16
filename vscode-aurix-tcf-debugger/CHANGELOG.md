@@ -1,57 +1,60 @@
-# Changelog
+# Change Log
 
-Simple, human-readable release notes for this extension.
+All notable changes to the "AURIX™ Debugger" extension will be documented in this file.
 
-## Unreleased
-- Disassembly: the current instruction is marked at the PC again after instruction steps and in short functions. With TASKING ELF files (one executable segment per function) the disassembly window ended at the function's start, so VS Code took a later instruction for the PC. Segments a few bytes apart now count as one range, and missing instructions before the PC are padded.
-- A source breakpoint set before the first stop could not be removed: VS Code sends the file's path spelled as in the editor first and as in the stack frames later (drive letter case), and the extension kept both. Files are now matched by their resolved, case-insensitive path, and breakpoint updates go to the debug server one after the other, so an older list can no longer arrive last.
-- **UCBs** (TC3xx user configuration blocks): *AURIX: Show UCBs* reads all 48 UCBs from the device and shows every field by name and meaning, what differs from the delivery state (Infineon data: from the chip's first readout), where ORIG and COPY differ and what the DMU installs only at the next reset. Fields are edited in place; the changes stay pending until written. Filters for the UCB list and the fields.
-- Writing UCBs needs `"ucbWrite": true` in the launch configuration (an MCP client cannot enable it) and a confirmation after the debug server's review: blocking problems and warnings per UCB (a valid boot header remains and its start address holds code, HSM code before HSM boot, no debugger lock-out, OTP not on erased sectors, ...), stronger confirmation for changes that need the password to undo, the device name typed for permanent ones. COPY is written before ORIG; a backup of all UCBs is saved first.
-- With `ucbWrite`, the UCB records of `flashFiles` (e.g. a post-build HEX) are reviewed after flashing and written only on confirmation in the UCBs panel.
-- Export a selection of UCBs to Intel HEX: by name, only unconfirmed or confirmed, by group, only changed, ORIG and/or COPY. The filters tick the matching UCBs, which can then be adjusted one by one.
-- UCBs panel: *Compare with HEX…* compares the device's UCBs with the UCB records of image files (e.g. a post-build HEX) field by field, and takes the file's values for everything, one UCB or single fields; they are written after the usual review. Read-only UCBs are shown but not applied; passwords are compared without being shown.
-- Debugger actions can run a command of this extension (`"command": "aurix-debugger.showUcbs"`), e.g. to open the UCBs panel from the Debugger Actions button.
-- **Debugger hub** (`aurix-hub`): one always-on process per machine (port 3001) serves VS Code, Claude (MCP over HTTP, or `aurix-hub stdio`) and scripts (REST, Python), and opens one `aurix-dbg` session per board. Sessions can be opened from launch configurations, from hub profiles (`%APPDATA%\aurix-dbg\profiles`) or by Claude, with the launch steps (symbols, flash, reset, breakpoints, run to a function), and attached to by any client. The hub can run on another machine (token, uploads, TCF relayed over its WebSocket).
-- The extension opens and attaches sessions through the hub instead of starting aurix-dbg itself. New launch attributes `profile`, `session`, `sessionName`, `sessionLifetime`, `adapter`, `probe`, `runTo`, `hub`, `hubToken`; removed `autoStartAgent`, `agentPath`, `host`, `port`, `additionalAgentOptions` and the settings `aurix-debugger.agentPath` / `aurix-debugger.autoStartAgent`.
-- The hub is installed to `%LOCALAPPDATA%\aurix-dbg` (kept up to date when the extension starts, setting `aurix-debugger.hub.install`) and can start at logon: *AURIX: Start Debugger Hub at Logon*. More commands: *Show Debugger Hub Status*, *Restart Debugger Hub Now*, *Attach to Hub Session*, *Add Debugger MCP Server to Claude Config*. Uninstalling the extension removes the hub unless another VS Code profile uses it.
-- C++ variables are listed by their qualified name (`app::g_motor`) when adding a Live Watch expression, instead of the mangled ELF symbol name; vtables, typeinfo and other compiler symbols are left out.
-- Adding a Live Watch expression also lists the members of struct and class variables, nested ones included (`app::g_motor.cfg.speed`), so a member is found by typing its name.
-- C++ class variables whose class is only declared in their own source file (GCC writes a class with virtual functions out in full only where its vtable is) show their members; static data members are found through an object (`obj.count`, `p->count`) and in member functions.
-- Closing VS Code closes the hub sessions it opened (`sessionLifetime: "close"`) and frees the probe, also when VS Code crashed or was killed: the hub watches the VS Code process that opened the session (`owner_pid` of `open_session`).
-- Each client owns its breakpoints (they go when it ends) and can take a control lease that keeps other clients from controlling the target.
-- TC3xx standby controller (SCR, XC800): with `set tc3xx_scr_target 1` in `configCommands` the SCR is its own thread with disassembly, registers, stepping and instruction breakpoints. It is not halted with the TriCores. `@scr` picks it in breakpoint conditions, the Watch and the Live Watch.
-- The SCR can be debugged over the miniWiggler (TasServer) too, through the SCR's boot ROM monitor; no setting needed. Breakpoints can be set while the SCR runs: it is halted for a moment to set them. After a chip reset the SCR takes no halt request until the debugger has reset it into its monitor once: the first halt or breakpoint then restarts the SCR program at 0x0000 (with a warning).
-- Peripheral View: the SCR's special function registers with their bit fields, paged SFRs included, as the `SCR_*` peripherals of the TC3xx devices (read while the SCR is halted).
-- SCR source-level debugging from its SDCC debug file (`.cdb` in `symbolFiles`): source lines, line breakpoints, step over/into/out, global and local variables.
-- Data breakpoints: Break on Value Change / Read / Access on variables and watch expressions, and at an address. Globals are watched by name on every TriCore core; core-local RAM as the copy of the chosen core.
-- The Live Watch context menu has Break on Value Change / Read / Access too, also while the target runs.
-- So does the editor context menu, on the variable under the cursor or the selected expression; locals are looked up in the selected stack frame.
-- Breakpoint conditions are evaluated: any condition other than a task filter or `@core` is a C expression the debug server checks on each hit (`count > 100`), resuming the core when it is false. They used to be ignored with a warning.
-- Renamed the extension to `fabtrie.aurix-debugger` (AURIX™ Debugger).
-- Renamed the IDs: debug type `aurix-tcf` → `aurixdbg`; commands, settings and context keys `aurix-tcf.*` → `aurix-debugger.*`. Existing launch configurations, keybindings and settings need to be updated.
-- aurix-dbg is the only debug server and is bundled with the extension; `agentPath` / `aurix-debugger.agentPath` still override it.
-- Removed `program`: all ELF files go into `symbolFiles`, the images to flash into `flashFiles` (no longer defaults to the ELF). A launch configuration that still sets `program` is rejected with a hint.
-- Removed the Debug Configuration panel (`Open Debug Configuration` command); use a launch configuration.
-- Removed the previous debug agent, the AURIX™ Flasher and the launch attributes `agentFlavor`, `targetDevice`, `entryFunction`, `flashDownload`, `ppuFlashHex` and `cdspFlashHex`.
-- Flashing: image data outside the flash banks of the cfg (e.g. initialized data a post-build HEX has in LMU RAM) is skipped with a warning instead of failing the whole write with "no flash bank for image data". An image with no data in any flash bank is still an error.
-- Flashing: image data linked to the non-cached PFLASH addresses (0xA..., e.g. the startup code of an iLLD project at 0xA0000000 and the CPU1/CPU2 starts at 0xA0300200) is programmed and verified at the cached address of its flash bank (0x8...), the same flash. It used to be skipped as outside the flash banks, so such a project did not boot after flashing. The same bytes at both addresses are written once; different ones in one file are an error.
-- Faster first debug session after starting VS Code: the XPeripherals view no longer parses the device SVD file itself, which blocked the debugger for 5–8 seconds on TC3xx devices. The SVD file is converted once, in the background, and read back in well under a second.
+## 0.4.0
 
-- iSYSTEM BlueBox (iC5700, iC5000) as a debug probe, straight over USB without winIDEA: `adapter driver bluebox` in `configCommands`. Memory, run control and resets go through the probe; the probe kernel (and the iC5000's FPGA image) is taken from a winIDEA 9.21.417 install (`bluebox winidea <folder>`, `%WINIDEA_DIR%`, the usual install folders or Chocolatey). A lost target connection, an external reset or a BlueBox power cycle is recovered without ending the session.
-- Live Watch values on the BlueBox are sampled by the probe itself and only the changes are read, instead of reading every value per refresh.
-- Target health in the status bar: no target power, reset (reconnecting), no debug access, no device or probe lost, with the probe's details and Vref in the tooltip. When the debug probe is gone, the debug session ends with "Debug probe lost" instead of retrying for ever.
-- Password-protected TC3xx devices (`UCB_DBG`) can be debugged over the miniWiggler: `adapter debug_password <PW0> .. <PW7>`, or `adapter debug_password -env <variable>` to keep the password out of cfg files. It is never logged.
-- Boards with an NXP FS26 safety SBC (`fs26_sbc.cfg`): attach modes `passive`, `hot`, `halt`, `reset_halt` and `reset_run` (`set sbc_attach_mode <mode>` before `init`); halts and resets that respect the FS26 watchdog; a halting reset is repeated until it holds.
-- `reset_hook <proc>`: a cfg proc handles every reset request (the `reset` command, VS Code's reset buttons, flashing).
-- Peripherals can be suspended while the cores are halted (`tc3xx_periph` in the board cfg), as winIDEA's "Suspend peripherals while stopped". They are only written when the module accepts the debugger's write.
-- `monitor help` lists every Tcl command by topic, `monitor help <command>` describes one and `monitor help <word>` searches the descriptions. The same text is in the Tcl command reference (`aurix-debugger/server/docs/commands.md`).
-- Running GTM MCS channels are no longer shown as paused after a TriCore breakpoint.
-- Over the miniWiggler, `adapter speed` now also applies to the device connect, not only afterwards.
-- **Breaking:** the TC3xx cfg scripts are split into chip mechanics (`tc3xx_ocds.cfg`, set up with `tc3xx_setup <chip>` instead of `tc3xx_ocds_setup`), the FS26 policy (`fs26_sbc.cfg`) and the board cfg. A board cfg copied from an earlier version needs to be redone; start from `tc37x_ocds_init.cfg`.
-- **Breaking:** `tc37x_ocds_init.cfg` is now a generic example for a TC37x board with an FS26 and uses the TC375 Lite board cfg's target (JTAG ID 0x10207083). The GTM MCS channels are off by default (`set tc3xx_mcs_modules {0 1}` turns them on); the peripheral suspend list and the FS26 disarm check are empty, with examples. Keep your application's settings in a cfg of your own that sets them and then loads it.
+### Added
 
-## 0.1.0 - 2026-01-20
-- First public release.
-- Core debugging: breakpoints, step/continue, call stack, variables.
-- Memory read/write and disassembly view.
-- Launch configs, multi-core support, optional auto-start agent.
+- debugger hub: one always-on process shares the debug sessions between VS Code, Claude (MCP) and scripts (REST, Python)
+- TC3xx UCBs: view, compare with HEX, edit, export and guarded write
+- iSYSTEM BlueBox (iC5700, iC5000) over USB without winIDEA
+- debugging of the TC3xx standby controller (SCR), with source-level debugging from SDCC files
+- target health in the status bar
+- password-protected TC3xx devices over the miniWiggler
+- boards with an NXP FS26 safety SBC
+- C++ variables by their qualified name in the Live Watch
+
+### Changed
+
+- **Breaking:** launch configurations connect through the hub; `autoStartAgent`, `agentPath`, `host` and `port` are removed
+- **Breaking:** the TC3xx cfg scripts are split into chip, FS26 and board cfgs; copied board cfgs need to be redone
+
+### Fixed
+
+- flashing of projects linked to non-cached PFLASH addresses
+- PC marker in the disassembly
+- source breakpoints that could not be removed
+
+## 0.3.0
+
+### Added
+
+- data breakpoints (break on value change, read, access)
+- breakpoint conditions
+- start the local TasServer when none is running
+
+## 0.2.0
+
+### Added
+
+- Motorola S-record flashing
+- offset and type per flash file
+
+### Fixed
+
+- Continue button while another core is halted
+
+## 0.1.1
+
+### Added
+
+- variables by name over REST and MCP
+
+### Fixed
+
+- core-local variables
+
+## 0.1.0
+
+- Initial release, based on [vscode-aurix-tcf-debugger](https://github.com/ZeZhan/vscode-aurix-tcf-debugger) by ZeZhan

@@ -2,336 +2,261 @@
 
 > **Disclaimer:** This is a personal project, built and maintained by one developer in my own time. It is not an official Infineon product and has nothing to do with Infineon Technologies AG. It comes with no warranty and no promise of support or future updates. Use it at your own risk.
 
-VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3) and the GTM MCS channels.
+VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3), the standby controller (SCR) and the GTM MCS channels. It talks to the board through an Infineon miniWiggler/DAP probe or an iSYSTEM BlueBox. The same debug session can be used by Claude and by scripts at the same time.
 
-The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts, behind `aurix-hub`, the always-on front door that serves VS Code, Claude (MCP) and scripts (REST, Python) and opens one `aurix-dbg` session per board. Their source is in the [`aurix-debugger`](aurix-debugger) folder of this repository; both are bundled with the extension, which installs them to `%LOCALAPPDATA%\aurix-dbg` and starts the hub when needed (see [Debugger hub](#debugger-hub)).
+![A multi-core debug session](vscode-aurix-tcf-debugger/media/readme/hero.png)
 
 ## Features
 
-- Multi-core debugging of the TriCore cores, the HSM and the GTM MCS channels
-- Line, function and instruction breakpoints, optionally only on chosen cores (`@1`, `@hsm`, `@scr`), in a chosen AUTOSAR task or under a condition (`count > 100`)
-- Data breakpoints (watchpoints) on variables, watch expressions and addresses: break on write, read or both
-- Step in/out, step over, continue/pause, restart, terminate
-- Call stack and variables, including frames without debug information
-- Live Watch of variables and registers while the target runs, in the sidebar or in editor panels
-- Peripheral view (read and write SVD registers), including the TC3xx HSM peripherals
-- Memory Inspector (read and write memory)
-- Disassembly view, instruction stepping mode, Go to Address or Symbol
-- AUTOSAR OS awareness from the ORTI file: tasks, stacks, running task per core, task profiling
-- Flashing through aurix-dbg (`enableFlashing`, Flash Target toolbar button)
-- Reset, with or without halting at the reset vector
-- Custom Tcl debugger actions and `monitor` commands in the Debug Console
-- Source path mapping for ELF files built in another checkout
-- The debug tab layout is remembered between sessions
+- **Run control:** multi-core debugging, step in/over/out, continue/pause, reset (running or halted at the reset vector), instruction stepping in the Disassembly view
+- **Breakpoints:** line, function and instruction breakpoints, on chosen cores only (`@1`, `@hsm`), in a chosen AUTOSAR task or under a C condition (`count > 100`)
+- **Data breakpoints:** break when a variable, an expression or an address is written, read or both
+- **Watching data:** Call Stack and Variables, the Watch view, and a **Live Watch** that keeps updating while the target runs, in the sidebar or in editor tabs; C++ names are supported
+- **Peripherals and memory:** read and write SVD registers in the Peripheral view (HSM and SCR peripherals included), the Memory Inspector, the Disassembly view with Go to Address or Symbol
+- **AUTOSAR OS:** from the ORTI file: the running task per core, task names in the Call Stack, tasks, stacks and alarms, task profiling
+- **Flash and UCBs:** program ELF, HEX, S-record and binary images; read, compare, edit, export and write the TC3xx UCBs
+- **Target health** in the status bar: no power, reset, no debug access, probe lost
+- **Automation:** custom toolbar actions, `monitor` Tcl commands, and the debugger hub that serves VS Code, Claude (MCP), REST and Python
 
 ## Requirements
 
-- Windows (x64)
-- Visual Studio Code 1.79.0 or higher
-- Infineon `tas_server` (TAS, installed with Infineon DAS) and a miniWiggler/DAP probe. If the server isn't running, `aurix-dbg` starts it.
-- OpenOCD configuration scripts for the board. OpenOCD's own scripts (`board/`, `target/`, ...) are bundled; the TC3xx setup [`tc3xx_ocds.cfg`](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/tc3xx_ocds.cfg) and a board file like [`tc37x_ocds_init.cfg`](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/tc37x_ocds_init.cfg) come from the `aurix-debugger` folder
-- Peripheral Inspector extension (installed automatically as a dependency)
-- Memory Inspector extension (installed automatically as a dependency)
-
-## Bundled files (`vscode-aurix-tcf-debugger/bin/`)
-
-- `aurix-hub.exe` — the debugger hub (MCP, REST, sessions)
-- `aurix-dbg.exe` — the debug server of one board, started by the hub
-- `THIRD_PARTY_LICENSES.txt` — the license texts of the third-party code in `aurix-dbg.exe`
-- `openocd/` — OpenOCD's Tcl scripts, passed to the server as a search directory
-- `svd/` — SVD files for the Peripheral view
-
-`aurix-hub.exe`, `aurix-dbg.exe`, `THIRD_PARTY_LICENSES.txt` and `openocd/` are not in the repository: `npm run copy-agent` (also run when packaging) copies them from the `aurix-debugger` build and generates the license file.
-
-## Build
-
-From the repository root, to build the server and package the extension with it:
-
-```bash
-npm install
-npm run package
-```
-
-In `vscode-aurix-tcf-debugger`, `npm run package` only compiles the TypeScript sources, copies the static assets, `aurix-dbg.exe` and the OpenOCD scripts, and produces `aurix-debugger.vsix`. `aurix-dbg.exe` is taken from the environment variable `AURIX_DBG_EXE` if set, otherwise from `aurix-debugger/server/target/release/` or `aurix-debugger/server/target/debug/`. See the [server README](aurix-debugger/server/README.md) for building the server.
+- Windows (x64) and VS Code 1.79 or newer
+- A debug probe:
+  - an Infineon miniWiggler or other DAP probe, with Infineon's `tas_server` (installed with Infineon DAS; started automatically when it isn't running), or
+  - an iSYSTEM BlueBox (iC5700, iC5000). The extension talks to it over USB without winIDEA, but needs a winIDEA 9.21.417 installation for the probe's firmware files.
+- A board configuration script for your board (see [Board setup](#board-setup))
+- The Peripheral Inspector and Memory Inspector extensions (installed automatically)
 
 ## Installation
 
-### Install from VSIX
+1. Get `aurix-debugger.vsix`: [build it](docs/building.md) or use one you were given.
+2. In VS Code, open the Extensions view (`Ctrl+Shift+X`), click `...` and choose **Install from VSIX...**.
+3. Reload the window.
 
-1. Build the project (see above)
-2. Open the Extensions view by selecting the Extensions icon in the Activity Bar, or use the (`Ctrl+Shift+X`) keyboard shortcut.
-3. Click `...` and choose "Install from VSIX..."
-4. Select the `.vsix` file
-5. Open Command Palette and run `Developer: Reload Window`
+The extension installs its debug server to `%LOCALAPPDATA%\aurix-dbg` and keeps it up to date; there is nothing else to install.
 
-## Usage
+## Quick start
 
-### Launch configuration
+1. Copy `tc3xx_ocds.cfg`, `fs26_sbc.cfg` and the example board script `tc37x_ocds_init.cfg` from the [`aurix-debugger`](aurix-debugger) folder into your project, e.g. into `debug/`, and adapt the board script to your board (see [Board setup](#board-setup)).
+2. Create `.vscode/launch.json`:
 
-Create `.vscode/launch.json`:
+   ```json
+   {
+     "version": "0.2.0",
+     "configurations": [
+       {
+         "type": "aurixdbg",
+         "request": "launch",
+         "name": "AURIX Debug",
+         "searchDirs": ["${workspaceFolder}/debug"],
+         "configFiles": ["board/infineon/kit_a2g_tc375_lite.cfg", "tc37x_ocds_init.cfg"],
+         "symbolFiles": ["${workspaceFolder}/build/app.elf"],
+         "flashFiles": ["${workspaceFolder}/build/app.hex"],
+         "enableFlashing": true,
+         "ortiFile": "${workspaceFolder}/build/Os_Trace.ORT",
+         "device": "TC37x"
+       }
+     ]
+   }
+   ```
 
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "type": "aurixdbg",
-      "request": "launch",
-      "name": "AURIX Debug",
-      "searchDirs": ["${workspaceFolder}/debug"],
-      "configFiles": ["board/infineon/kit_a2g_tc375_lite.cfg", "tc37x_ocds_init.cfg"],
-      "symbolFiles": ["${workspaceFolder}/build/app.elf"],
-      "flashFiles": ["${workspaceFolder}/build/app.hex"],
-      "ortiFile": "${workspaceFolder}/build/Os_Trace.ORT",
-      "device": "TC37x"
-    }
-  ]
-}
-```
+3. Press `F5`. The target is flashed, reset and runs; pause it with the toolbar.
 
-Here `debug/` holds `tc3xx_ocds.cfg`, `fs26_sbc.cfg` and `tc37x_ocds_init.cfg`, copied from the `aurix-debugger` folder; `tc37x_ocds_init.cfg` is an example, adjust it for the board and application.
+## Launch configuration
 
-- The extension asks the debugger hub to open a session for the board and connects to it. `searchDirs`, `configFiles`, `configCommands` (and `adapter`, `probe`) are passed to the session's aurix-dbg as `-s`, `-f`, `-c`. The bundled OpenOCD scripts are always searched, after `searchDirs`. Instead, `profile` names a session profile stored with the hub (`%APPDATA%\aurix-dbg\profiles\<name>.toml`), which the attributes override.
-- `session` attaches to a session that is already open, e.g. one Claude opened, instead of opening one: no flashing, no reset. *AURIX: Attach to Hub Session* picks one from a list, and the extension offers to attach when another client opens one (setting `aurix-debugger.hub.offerAttach`).
-- `sessionLifetime`: `close` (default) closes the session when debugging ends, if this debug session opened it; `keep` leaves it open (e.g. for Claude to go on).
-- `runTo` runs to a function, `file:line` or address after connecting: the hub resets into the software with a temporary breakpoint there.
-- `hub` and `hubToken` select another debugger hub, e.g. on the PC the board is connected to (default: the setting `aurix-debugger.hub.url`, `http://127.0.0.1:3001`). `configFiles` and `flashFiles` that exist locally are uploaded to it, and the debugger's connection goes through the hub.
-- The Tcl commands for cfg files, `configCommands`, debugger actions and `monitor` are listed in the [Tcl command reference](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/docs/commands.md). In the Debug Console, `monitor help` lists them, `monitor help <command>` describes one (`monitor help reset_config`) and `monitor help <word>` searches the descriptions (`monitor help srst`).
-- `symbolFiles` lists the ELF files with debug information: the application and, if needed, bootloader, HSM or other images. A file applies to all cores of its architecture unless it has a `cores` filter.
-- `enableFlashing` has the hub program `flashFiles` when it opens the session; the Flash Target toolbar button uses the same list. `verifyFlash` (default true) reads the programmed sectors back.
-- `flashFiles` takes ELF, Intel HEX, S-record (`.srec`, `.s19`, `.s28`, `.s37`, `.mot`) and binary files, merged into one image (later files win). An entry is a path, or an object with `path`, `offset` and `type` (`elf`, `ihex`, `srec`, `bin`; detected by default). `offset` is added to the file's addresses: a binary file has none of its own and is placed at its `offset`, e.g. `{ "path": "${workspaceFolder}/build/cal.bin", "offset": "0x80300000" }`.
-- After flashing and with the Reset button, the target is reset with `resetType` (default `reset`). With `resetSuspend: true` it halts at the reset vector; otherwise it runs, and the toolbar buttons pause all cores afterwards.
-- `ortiFile` enables the AUTOSAR OS view and task names in the Call Stack.
-- `sourceFileMap` maps path prefixes in the debug information onto local folders, and `sourceSearchPaths` lists folders searched for sources that are not found, e.g. when a compiler cache supplied objects built in another checkout.
-- `device` selects the SVD file bundled with the extension for the Peripheral view: `TC22x`, `TC23x`, `TC26x`, `TC27x`, `TC29x`, `TC33x`, `TC33xEXT`, `TC35x`, `TC36x`, `TC37x`, `TC37xEXT`, `TC38x`, `TC39x`, `TC4Dx`.
+| Attribute | Description |
+|---|---|
+| **Connection** | |
+| `configFiles` | Configuration scripts, in order. The OpenOCD board scripts (`board/infineon/...`) are bundled. |
+| `searchDirs` | Folders searched for the configuration scripts |
+| `configCommands` | Tcl commands run after the scripts, e.g. `"set tc3xx_scr_target 1"` |
+| `adapter` | Probe driver: `tas_client` (miniWiggler), `bluebox`, `winidea`; default: what the scripts select |
+| `probe` | Serial number of the probe to use, when several are connected |
+| `profile` | A session profile stored with the hub, used instead of the attributes above (which override its parts) |
+| **Program** | |
+| `symbolFiles` | ELF files with debug information: the application and, if needed, bootloader, HSM, SCR (`.cdb`) or MCS (`.asm`) files. A file applies to every core of its architecture; an entry `{ "path": ..., "cores": ["cpu0"] }` limits it. |
+| `ortiFile` | The ORTI file of the AUTOSAR OS: enables the AUTOSAR OS view and task names |
+| `sourceFileMap` | Maps path prefixes in the debug information onto local folders, e.g. `{ "c:/build/project": "${workspaceFolder}" }` |
+| `sourceSearchPaths` | Folders searched for sources that are not found where the debug information says |
+| `device` | Selects the SVD file of the Peripheral view: `TC22x` … `TC39x`, `TC33xEXT`, `TC37xEXT`, `TC4Dx` |
+| **Flash and reset** | |
+| `flashFiles` | Images to program: ELF, Intel HEX, S-record or binary files ([details](docs/flashing-and-ucbs.md#flash-files)) |
+| `enableFlashing` | Program `flashFiles` when the session starts (default `false`) |
+| `verifyFlash` | Read the programmed sectors back (default `true`) |
+| `resetType` | Reset used by the Reset button and after flashing (default `reset`) |
+| `resetSuspend` | Halt at the reset vector after a reset (default `false`: run) |
+| `runTo` | Run to a function, `file:line` or address after connecting |
+| `stopOnEntry` | Pause after connecting |
+| `ucbWrite` | Allow writing UCBs in this session (default `false`, see [UCBs](#ucbs)) |
+| **Session** | |
+| `session` | Attach to a session that is already open (e.g. one Claude opened) instead of opening one: no flashing, no reset |
+| `sessionName` | Name of the session (default: the configuration name) |
+| `sessionLifetime` | `close` (default): close the session when debugging ends; `keep`: leave it open, e.g. for Claude to go on |
+| `hub`, `hubToken` | Use a debugger hub on another PC (see [Debugger hub](#debugger-hub-claude-and-scripts)) |
+| **Views** | |
+| `actions` | Custom toolbar actions (see [Debugger Actions](#debugger-actions)) |
+| `liveWatchIntervalMs` | Refresh interval of the Live Watch in this session (minimum 200 ms) |
+| `core` | Core to focus for memory access and instruction breakpoints |
+| `enableConsoleLog` | Show the messages exchanged with the debug server in the Debug Console |
 
-### Debugger hub
+## Settings
 
-`aurix-hub` runs once per machine on port 3001 and holds the debug sessions, one per board. VS Code, Claude and scripts all use it, so a session can be opened by one and used by the others: breakpoints and halts show up everywhere, and each client's own breakpoints go when it ends.
+| Setting | Default | Description |
+|---|---|---|
+| `aurix-debugger.liveWatch.intervalMs` | `1000` | How often the Live Watch and the AUTOSAR OS views refresh while the target runs (also set from the status bar) |
+| `aurix-debugger.liveWatch.pauseWhileHalted` | `true` | Stop refreshing while all cores are halted. Turn off to watch peripherals that keep running. |
+| `aurix-debugger.autoOpenDisassemblyView` | `true` | Open the Disassembly view when a session starts |
+| `aurix-debugger.autoLockDisassemblyView` | `true` | Lock the Disassembly view's editor group |
+| `aurix-debugger.autoEvenEditorWidths` | `true` | Size the editor groups evenly after opening the Disassembly view |
+| `aurix-debugger.disassembly.opcodeBytes` | `left` | Opcode bytes `left` or `right` of the instruction, or `hidden` |
+| `aurix-debugger.instructionSteppingDefault` | `false` | Start sessions in instruction stepping mode |
+| `aurix-debugger.rememberDebugLayout` | `true` | Reopen the debug tabs where they were in the last session |
+| `aurix-debugger.executePathMapper` | `true` | Run the `pathMapper` function of a launch configuration (trusted workspaces only) |
+| `aurix-debugger.hub.url` | `http://127.0.0.1:3001` | The debugger hub to use |
+| `aurix-debugger.hub.token` | | Token of a hub on another PC (default: the `AURIX_HUB_TOKEN` environment variable) |
+| `aurix-debugger.hub.install` | `auto` | Keep the installed hub up to date (`off` to manage it yourself) |
+| `aurix-debugger.hub.offerAttach` | `true` | Offer to attach when Claude or a script opens a session |
 
-- The extension keeps the installed hub (`%LOCALAPPDATA%\aurix-dbg\current`) up to date when it starts (setting `aurix-debugger.hub.install`) and starts the hub for a debug session when it is not running.
-- *AURIX: Start Debugger Hub at Logon* registers the hub to start when you log on (no admin rights), *AURIX: Don't Start Debugger Hub at Logon* removes that. *AURIX: Show Debugger Hub Status* lists the sessions and the installation; *AURIX: Restart Debugger Hub Now* applies an update at once.
-- *AURIX: Add Debugger MCP Server to Claude Config* writes the workspace `.mcp.json` so that Claude Code can open sessions, flash, set breakpoints and read variables: through `aurix-hub stdio` (Claude starts the hub when needed) or `http://127.0.0.1:3001/mcp`.
-- A hub on another machine (the PC with the probes): run `aurix-hub install --autostart --remote` there (it creates a token in `%APPDATA%\aurix-dbg\hub.toml`), and set `aurix-debugger.hub.url` and `aurix-debugger.hub.token` here. With VS Code Remote-SSH the extension runs on that PC and does this there.
+## Using the debugger
 
-Details: the [server README](aurix-debugger/server/README.md#run).
+### Breakpoints
 
-### Standby controller (SCR)
+A breakpoint halts every core that reaches it. To halt only some cores, put them in the condition (`@1`, `@0,2`, `@hsm`, `@scr`) or after a function breakpoint's name (`Os_Task_10ms@1`). `task == ComTask` halts only in that AUTOSAR task. **Halt Only on Core…** and **Halt Only in Task…** on the line number's context menu set the same.
 
-The TC3xx standby controller, an XC800 (8051) core, can be debugged over the miniWiggler (TasServer) and over the iSYSTEM BlueBox when the device's debug mode is DAP Standard. It is off by default; turn it on with a `configCommands` entry:
+![Halt only on core](vscode-aurix-tcf-debugger/media/readme/breakpoint-core-menu.png)
 
-```json
-{
-  "type": "aurixdbg",
-  "request": "launch",
-  "name": "AURIX Debug with SCR",
-  "configFiles": ["board/infineon/kit_a2g_tc377tx_3v3_trb.cfg"],
-  "configCommands": ["set tc3xx_scr_target 1"],
-  "symbolFiles": ["${workspaceFolder}/build/app.elf"],
-  "device": "TC37x"
-}
-```
-
-- The SCR shows in the Call Stack as its own thread (`tc37x.scr`), with disassembly, registers, stepping and instruction breakpoints.
-- It is not on the trigger line that halts the TriCores and the HSM together: a TriCore breakpoint or the toolbar's pause leaves it running, and an SCR breakpoint stops only the SCR. Pause it from its own thread.
-- Its code addresses are `0x0000`..`0xFFFF`, the SCR's own code space; they overlap TriCore addresses but mean the SCR's code. **Go to Address or Symbol** and instruction breakpoints take the address on the core whose disassembly is shown.
-- `x@scr` in the Watch or Live Watch evaluates `x` on the SCR; `@scr` in a breakpoint condition halts only the SCR.
-- TriCore ELF files are never mapped to the SCR.
-- Source-level debugging: add the SCR's SDCC debug file to `symbolFiles`, e.g. `".../TriSCR/gen/scr_main.cdb"`, with the `.ihx` of the same build beside it (it gives the functions' ends). A `.cdb` file goes to the SCR. Its sources are looked up next to it and in the `src`, `inc` and `api` folders beside its folder. Then the SCR has source lines, line breakpoints (2 hardware breakpoints), step over, into and out, its global variables by name, and the local variables of the current function (in the Variables view). SDCC records which register a local lives in but not where in the function it is valid: before its first assignment or after its last use the register may hold something else, and locals the compiler removed show as optimized out. The `.cdb` must come from the build that runs on the SCR.
-- The SCR's special function registers are in the Peripheral View as the `SCR_*` peripherals (see below).
-- The application must start the SCR in its OCDS boot mode (PMSWCR4.SCRCFG = 0x0A); until it does, the SCR thread stays unexamined. With the SCR on, the BlueBox runs DAP Standard, which caps the DAP clock at 10 MHz for the whole session. The miniWiggler talks to the SCR's boot ROM monitor with JTAG scans between the TriCore accesses and needs no setting (tested at 30 MHz).
-- Over the miniWiggler, a halt is a request to the SCR's monitor. If an SCR that no debugger has prepared does not answer it, the server resets the SCR into its monitor, as winIDEA's attach does, and the SCR's program starts again at 0x0000 (a warning says so).
-
-### GTM MCS channels
-
-The channels of the GTM's MCS modules can be debugged as cores of their own. They are off by default; name the modules your application runs in a `configCommands` entry (or set `tc3xx_mcs_modules` in your board cfg):
-
-```json
-"configCommands": ["set tc3xx_mcs_modules {0 1}"]
-```
-
-- Each module gives eight threads, `tc37x.mcs<m>.ch0` .. `ch7`. A channel shows in the Call Stack once the application has enabled it.
-- A channel halts only itself: TriCore breakpoints and the pause button leave it running, and an MCS breakpoint stops only that channel.
-- Source-level debugging: add the MCS assembler sources (`.asm`) to `symbolFiles`; they go to the MCS channels.
-- Both can be combined: `"configCommands": ["set tc3xx_mcs_modules {0 1}", "set tc3xx_scr_target 1"]`.
-- Every module adds eight targets to the server's poll, so enable only the modules you debug.
-
-### Breakpoints on chosen cores
-
-Without anything else, a breakpoint halts every core that reaches it. To halt only some cores, put them in the breakpoint's condition (`@1`, `@0,2`, `@hsm`, `@scr`, or with a task filter `task == ComTask @1`), or after a function breakpoint's name (`Os_Task_10ms@1`). **Halt Only on Core…** and **Halt Only in Task…** on the line number context menu set the same.
-
-### Conditions
-
-Any other condition is a C expression, e.g. `g_motor.speed > 100 @1`. The debug server evaluates it on the halted core in its top stack frame (locals included). When it is zero, the core runs on before VS Code hears about the halt. The core still halts on every hit, so a breakpoint on a hot path slows the target down. Hit counts are not supported.
+Any other condition is a C expression, evaluated on the halted core with its local variables, e.g. `g_motor.speed > 100 @1`. The core still halts on every hit and runs on when the condition is false, so a conditional breakpoint on a hot path slows the target down. Hit counts are not supported.
 
 ### Data breakpoints
 
-Right-click a variable in the Variables or Watch view and choose **Break on Value Change** (or **Break on Value Read** / **Break on Value Access**), or add one at an address from the Breakpoints view (VS Code 1.90 and later). The core halts after the access, at the next instruction. A condition works as above, e.g. `g_mode == 3`.
+Right-click a variable in the Variables, Watch or Live Watch view, or in the editor, and choose **Break on Value Change**, **Break on Value Read** or **Break on Value Access**. The core halts right after the access. Global variables are watched on every core; a condition such as `g_mode == 3 @1` narrows it down.
 
-- **Globals** are watched by name on every TriCore core, so writes from any core are caught. They are resolved again when the ELF is rebuilt, and VS Code keeps them between sessions. Limit them with `@N` in the condition.
-- **Locals, and what a local pointer points to,** are watched at their fixed address on that core only, for the rest of the session.
-- **Core-local RAM** (`0xD000_0000`) means the copy of the core whose variable you picked (`CRASH_state@2`).
-- Each core has 8 hardware events, shared with breakpoints. A data breakpoint wider than one byte takes two, and catches every access that starts inside the variable. An access that starts below it and reaches into it is not caught, e.g. a 64-bit copy of the struct around it. When the hardware events run out, the breakpoint is shown unverified with the reason.
-- In the **Live Watch**, the same three entries are on the context menu of every row. The expression means what it means there, so `x@1` is core 1's copy. These work while the target runs. VS Code offers extensions no way to add data breakpoints to its view, so they show up as function breakpoints named `expression [access]`, e.g. `g_count [write]`. You can disable or remove them there, and they end with the debug session.
-- In the **editor**, right-click a variable, or select an expression such as `g_motor.speed` or `buf[3]` first, and pick one of the three entries. They are also in the Command Palette. While a core is halted, the name is looked up in the frame selected in the Call Stack: a local is watched at its address on that core, and shown by that address, e.g. `0x7003fe20 [write]`. While the target runs, the name means what it means in the Live Watch. They show up and end like the Live Watch's.
-- Watchpoints set through the debug server's API show up the same way.
+![Break on value change](vscode-aurix-tcf-debugger/media/readme/data-breakpoint.gif)
 
-### Watch global variables
+Each core has 8 hardware breakpoints, shared with the code breakpoints; a breakpoint that does not fit is shown unverified. More: [Data breakpoints](docs/data-breakpoints.md).
 
-Variables and expressions can be watched in the Run and Debug view's **WATCH** section.
+### Live Watch
 
-![add-to-watch](vscode-aurix-tcf-debugger/media/add-to-watch.gif)
+The **Live Watch** view in the Run and Debug sidebar keeps reading variables and registers while the target runs. **Open Live Watch Panel...** opens more of them as editor tabs, each with its own list and refresh interval, e.g. on a second monitor.
 
-### Live Watch View
+![Live Watch](vscode-aurix-tcf-debugger/media/readme/live-watch.gif)
 
-The Live Watch view periodically refreshes selected global variables. Use the view's Settings button to configure its refresh interval (the minimum enforced value is 200 ms), or choose **Use global interval** to follow the interval set in the status bar, which the AUTOSAR OS views also use.
-
-Once configured, the active interval appears in the view header (highlighted in orange). Resume the target to run the cores and observe the selected global variables update automatically.
-
-- Entries look like the WATCH section: `name: value` in the theme's debug colors, with changed values highlighted. Structs and arrays show a short preview (`{a: 1, b: 2, …}`) and can be expanded. Pointers can be expanded to show the value they point to.
-- `expr@N` evaluates an expression on core N (`expr@hsm` on the HSM, `expr@scr` on the SCR), e.g. for a variable in a core's local RAM.
-- Double-click a value (or press Enter) to change it. Double-click the name (or press F2) to edit the expression, e.g. to fix a typo. The context menu also copies the value or the expression.
-- Right-click a register or field in the **XPeripherals** view and choose **Add to Live Watch**. Registers show as hex and can be set. Fields show their bits and are read-only; change them in the XPeripherals view.
-- **Pause Updates** on an entry moves it to the **Paused** group, which is not refreshed while the target runs. **Resume Updates** moves it back.
-- Paused entries still update like the WATCH section: when the target stops and when you press Refresh.
-- The WATCH section only evaluates while the target is stopped. Use the Live Watch view to follow values while the target runs.
-
-#### Live Watch Panels
-
-Debugging needs room, so a Live Watch can also be opened as an editor tab: click **Open Live Watch Panel...** in the Live Watch view's title bar (or run it from the Command Palette) and create a named panel. Open as many as you need; each has its own expressions and its own refresh interval, and the Live Watch in the sidebar stays as it is.
-
-- A panel is an editor, so it can be dragged out of the window, or moved with **Move Live Watch Panel into New Window** from its title bar menu (VS Code 1.85 or newer), e.g. onto a second monitor.
-- Closing a panel keeps its expressions. Reopen it by name from **Open Live Watch Panel...**, where saved panels can also be renamed or deleted. Panels open when VS Code closes are restored.
-- A panel that is not on screen (a tab in the background) reads nothing from the target. Each visible Live Watch reads at its own rate, so the load on the target adds up.
-- **Add to Live Watch** in the XPeripherals view asks which Live Watch to add to when panels are open.
-
-![live-watch](vscode-aurix-tcf-debugger/media/live-watch.gif)
+- Add an expression with **+**: the list offers the global variables and their members, C++ ones by their qualified name (`app::g_motor.cfg.speed`).
+- Double-click a value to change it, the name to edit the expression.
+- `expr@1` reads the expression on core 1 (`@hsm`, `@scr`), e.g. for variables in core-local RAM.
+- **Add to Live Watch** on a register in the Peripheral view adds the register.
+- **Pause Updates** keeps an entry from being refreshed while the target runs.
+- The refresh interval is set from the status bar or per view with its gear button. A view that is not visible reads nothing.
 
 ### AUTOSAR OS
 
-With `ortiFile` set (or after the **Load ORTI File…** command), the **AUTOSAR OS** view in the Run and Debug sidebar shows per core the running task, its priority, the running ISR, the last OS service and error, and each core's thread in the Call Stack is named after its running task. **Show AUTOSAR OS Objects** opens tables of the objects the ORTI file declares (tasks, stacks with their usage, alarms, resources, ...) in an editor tab. **Show OS Profile** samples which task runs on each core while the target runs; task switches shorter than the sampling period are missed. The views refresh at the global interval set in the status bar; **Pause AUTOSAR OS Updates** stops that.
+With `ortiFile` set (or **Load ORTI File…**), the **AUTOSAR OS** view shows per core the running task, its priority, the running ISR and the last OS error, and the Call Stack names each core's thread after its running task. **Show AUTOSAR OS Objects** opens tables of tasks, stacks with their usage, alarms, resources and more. **Show OS Profile** samples which task runs on each core while the target runs.
 
-### Peripheral View
+### Peripheral view
 
-This Peripheral View depends on the extension `mcu-debug.peripheral-viewer`. The register definitions come from the SVD file bundled for the `device` set in the launch configuration.
+The **XPeripherals** view shows the registers of the `device` set in the launch configuration, with their bit fields, and lets you change them. On TC3xx devices it also lists:
 
-For the TC3xx devices the view also shows the HSM, as the `HSM_*` peripherals merged in from `bin/svd/HSM_TC3xx.svd.gz`:
+- the HSM's peripherals (`HSM_*`). The HSM-internal ones can only be read while the HSM firmware allows debugging.
+- the SCR's registers (`SCR_*`), read while the SCR target is enabled and halted.
 
-- `HSM_BRIDGE` holds the host-side bridge registers. They are always readable.
-- The HSM-internal peripherals are AES, hash, PKC, timers, watchdog, TRNG, cache and the Cortex-M3 SCB, NVIC, SysTick, MPU, DWT and FPB. The server reads them through the HSM debug window. That only works while the HSM firmware has enabled HSM debugging (`DBGCTRL.HSM`) and the HSM target is configured. Otherwise they show a read error.
-- Registers with destructive reads are not read automatically: `TRNG_DATA32` and `HASH_VAL`.
-- Only expand `HSM_PKC_SCM` while `PKC_STATUS.BUSY` is 0.
-- The run-control and breakpoint registers (DHCSR, FPB and DWT comparators, DBGBASE) are read-only here because the debug server owns them.
+Registers that change when read (e.g. `TRNG_DATA32`) are not read automatically.
 
-For the TC3xx devices the view also shows the SCR's SFRs, as the `SCR_*` peripherals merged in from `bin/svd/SCR_TC3xx.svd.gz` (one per module: `SCR_SCU`, `SCR_PORT`, `SCR_T2CCU`, `SCR_WCAN`, ...):
+![Peripheral view](vscode-aurix-tcf-debugger/media/readme/peripheral-view.gif)
 
-- They need the SCR target (`set tc3xx_scr_target 1`), and they are read only while the SCR is halted. While it runs they show a read error.
-- Paged SFRs show every page, e.g. `NMICON` (SCU_PAGE page 1) next to `TCINTEXCHG` (page 0). The SCR's debug monitor selects the page for each access and restores the program's page afterwards.
-- The addresses are those of the monitor's virtual address map (TC3xx UM, Table 558): `0x40000 | page << 15 | (page register & 0x7F) << 8 | (SFR & 0x7F)`. They lie in the TriCore's reserved segment 0, so the server sends them to the SCR from any core.
-- The manual's write-only bits (e.g. `STNR` and `OP` of the page registers) are shown read-write; the field description gives the manual's access type in brackets.
+### Memory and disassembly
 
-The SCR SVD file comes from the user manual (TC3xx UM part 2, chapter 49): `scripts/scr-svd/extract-scr-registers.py` and `extract-scr-fields.py` extract the registers and bit fields from the manual into `scr_registers.json` and `scr_fields.json`, and `npm run svd:scr` (`scripts/gen-scr-svd.js`) writes the SVD file and a readable copy, `scripts/scr-svd/SCR_TC3xx.svd`. `scripts/scr-svd/SCR_REGISTERS.md` lists the registers and what differs from the SCR firmware's own headers.
+- **Memory Inspector:** run **Memory Inspector: Show Memory Inspector** and enter an address or expression while the target is paused.
+- **Disassembly:** opens beside the source and follows the selected frame. The toolbar's **Enable Instruction Stepping** button makes the step buttons step instructions; instruction breakpoints are set like line breakpoints. The search icon in its title bar (`Ctrl+G`) shows any function, address or `symbol+offset`.
 
-The HSM SVD file is generated from `scripts/hsm-svd/hsm_tc3xx.json` with `npm run svd:hsm`. That also writes a readable copy, `scripts/hsm-svd/HSM_TC3xx.svd`, which works as a standalone Cortex-M3 SVD for the HSM. The standalone copy also contains `HSM_BRIDGE_HSMSIDE`, the bridge registers only the HSM can access (DBGCTRL, ERRCTRL, ...). This peripheral is not merged into the view.
+![Disassembly view](vscode-aurix-tcf-debugger/media/readme/disassembly.png)
 
-![peripheral-view](vscode-aurix-tcf-debugger/media/peripheral-view.gif)
+### Flashing and reset
 
-### Memory Inspector
+With `enableFlashing`, `flashFiles` are programmed when the session starts; the **Flash Target** toolbar button programs them again during the session, e.g. after a rebuild. Afterwards, and with the **Reset** button, the target is reset with `resetType` and runs, or halts at the reset vector with `resetSuspend: true`. More: [Flashing and UCBs](docs/flashing-and-ucbs.md).
 
-The extension depends on `eclipse-cdt.memory-inspector`. Use the Command Palette and run
-`Memory Inspector: Show Memory Inspector` to open the view, then enter an
-address or expression once the target is paused.
+### UCBs
 
-![memory-view](vscode-aurix-tcf-debugger/media/memory-view.gif)
+**AURIX: Show UCBs** reads the TC3xx user configuration blocks from the device and shows every field by name and meaning. It highlights what differs from the delivery state, where ORIG and COPY differ, and what takes effect only at the next reset.
 
-### Disassembly View & Instruction Stepping Mode
+![UCBs panel](vscode-aurix-tcf-debugger/media/readme/ucb-panel.png)
 
-The disassembly view opens automatically side-by-side with the source code and stays synchronized with the currently selected frame. The toolbar includes an `Enable Instruction Stepping` button, which allows stepping through the program's disassembly instructions.
+- **Compare with HEX…** compares the device with the UCB records of an image, e.g. a post-build HEX, and takes over all, one UCB or single fields.
+- **Export** writes a selection of UCBs to an Intel HEX file.
+- Fields can be edited in place. Writing needs `"ucbWrite": true` in the launch configuration and your confirmation after the debug server's review: blocking problems and warnings first, and the device name typed for changes that can't be undone. A backup of all UCBs is saved first.
 
-![enable-instruction-stepping](vscode-aurix-tcf-debugger/media/enable-instruction-stepping.gif)
+A wrong UCB can lock the device for good. More: [Flashing and UCBs](docs/flashing-and-ucbs.md#ucbs).
 
-**Note:** If the `Enable Instruction Stepping` icon is grayed out, it indicates that instruction stepping is already enabled. To switch back to source code stepping, click the icon `Disable Instruction Stepping` again to disable instruction stepping.
+### Target health
 
-![set-instruction-bp](vscode-aurix-tcf-debugger/media/set-instruction-bp.gif)
+When something is wrong with the connection, the status bar says so: **Target unpowered**, **Target reset** (while reconnecting), **No debug access**, **No device** or **Probe lost**; the tooltip has the details and the target voltage. A reset or a power cycle of the board is recovered without ending the session. When the probe is unplugged, the session ends with "Debug probe lost".
 
-Instruction breakpoints can be set in the same way as in the source code.
-
-If the disassembly view is closed, use the Command Palette and run `Open Disassembly View` to open the view.
-
-The setting `aurix-debugger.disassembly.opcodeBytes` places the opcode bytes of each instruction `left` (between address and instruction, default), `right` (after the instruction) or `hidden`. A change applies to instructions loaded after the next stop.
-
-To show any other code location while the target is halted, click the search icon in the disassembly view's title bar (or press `Ctrl+G` in the view) and pick a function or enter an address (`0x80001234`) or `symbol+offset`. VS Code's disassembly view can only follow the selected stack frame, so the target appears as a `[Disassembly] ...` frame at the bottom of the call stack; it disappears when the target resumes.
-
-### Debug layout
-
-When a session ends, the extension remembers where its tabs were (Disassembly, Live Watch panels, AUTOSAR OS panels, Memory Inspector) and reopens them there in the next session. The setting `aurix-debugger.rememberDebugLayout` turns this off, and **Reset Debug Layout** forgets the saved layout.
+![Target health in the status bar](vscode-aurix-tcf-debugger/media/readme/target-health.png)
 
 ### Debugger Actions
 
-The launch configuration can define custom actions in `actions`. They are offered by the `Debugger Actions` toolbar button, which only appears when `actions` is set. An entry with `items` opens a submenu, an entry with `tcl` runs its command(s) in order on the debug server (the output is written to the Debug Console), and an entry with `command` runs a command of this extension, e.g. opens the UCBs panel.
+`actions` in the launch configuration adds a **Debugger Actions** toolbar button with your own commands, e.g. to erase a flash bank or read a register. An action runs Tcl commands on the debug server or a command of this extension, optionally after a confirmation:
 
-```jsonc
+```json
 "actions": [
-  {
-    "label": "Mass Erase",
-    "icon": "trash",
-    "items": [
-      {
-        "id": "erasePflash",
-        "label": "Erase PFlash",
-        "tcl": "<tcl command for pflash mass erase>",
-        "confirm": "Erase the complete PFlash?",
-        "resetAfter": true
-      },
-      {
-        "id": "eraseDflash",
-        "label": "Erase DFlash",
-        "tcl": ["reset init", "flash erase_sector dfls0 0 last"],
-        "confirm": "Erase the complete DFlash?",
-        "resetAfter": true
-      }
-    ]
-  },
-  {
-    "label": "Read Device ID",
-    "icon": "info",
-    "tcl": "<tcl command>",
-    "showOutput": true
-  },
-  {
-    "id": "ucbs",
-    "label": "Show UCBs",
-    "icon": "shield",
-    "command": "aurix-debugger.showUcbs"
-  }
+  { "label": "Erase DFlash", "tcl": ["reset init", "flash erase_sector dfls0 0 last"], "confirm": "Erase the DFlash?", "resetAfter": true },
+  { "label": "Show UCBs", "icon": "shield", "command": "aurix-debugger.showUcbs" }
 ]
 ```
 
-| Property | Description |
-|---|---|
-| `label` | Name shown in the list (required) |
-| `description`, `detail`, `icon` | Additional text and codicon name |
-| `items` | Submenu entries (same format) |
-| `tcl` | Tcl command or list of commands; stops at the first error |
-| `command` | A command of this extension (`aurix-debugger.*`), e.g. `aurix-debugger.showUcbs`; runs after `tcl` if both are given |
-| `args` | Argument for `command` |
-| `confirm` | Confirmation text shown before running |
-| `resetAfter` | Reset the target afterwards like the Reset button |
-| `showOutput` | Show the Tcl output in a notification |
-| `timeout` | Timeout per command in seconds (default 900) |
-| `id` | Lets you run the action from a keybinding |
+More: [Debugger Actions](docs/debugger-actions.md).
 
-The action is responsible for the target state it needs (e.g. halting the cores first). To run an action from a keybinding:
+### Debug Console
+
+`monitor <command>` runs a Tcl command of the debug server, e.g. `monitor reset halt`. `monitor help` lists the commands, `monitor help <command>` describes one and `monitor help <word>` searches them. All commands are in the [Tcl command reference](aurix-debugger/server/docs/commands.md).
+
+### Debug layout
+
+When a session ends, the extension remembers where its tabs were (Disassembly, Live Watch panels, AUTOSAR OS panels, Memory Inspector) and reopens them there next time. **Reset Debug Layout** forgets it.
+
+## Board setup
+
+The configuration scripts tell the debugger which chip is on the board, which probe to use and how to reset the board.
+
+- `tc3xx_ocds.cfg` describes the TC3xx chips; you don't change it.
+- `tc37x_ocds_init.cfg` is an **example** board script for a TC37x board with a safety SBC (`fs26_sbc.cfg`). Start your own board script from it and keep only what your board needs.
+- **BlueBox:** add `"adapter": "bluebox"` to the launch configuration. The winIDEA 9.21.417 installation is found in the usual install folders.
+- **Password-protected devices:** `adapter debug_password -env <variable>` and `reset_config connect_assert_srst` in the board script; the password is taken from the environment variable and never logged.
+
+More: [Board setup](docs/board-setup.md).
+
+## Standby controller (SCR) and GTM MCS channels
+
+Both are off by default. Turn them on in the launch configuration:
 
 ```json
-{ "key": "ctrl+alt+e", "command": "aurix-debugger.runAction", "args": { "id": "erasePflash" }, "when": "debugType == aurixdbg" }
+"configCommands": ["set tc3xx_scr_target 1", "set tc3xx_mcs_modules {0 1}"]
 ```
 
+- The SCR and each MCS channel show as threads of their own in the Call Stack, with disassembly, registers, stepping and breakpoints. Add the SCR's `.cdb` file or the MCS `.asm` sources to `symbolFiles` for source-level debugging.
+- They are not halted together with the TriCores: the pause button and TriCore breakpoints leave them running, and their breakpoints stop only them.
+
+More: [SCR and MCS channels](docs/scr-and-mcs.md).
+
+## Debugger hub, Claude and scripts
+
+The extension runs its debug server behind `aurix-hub`, a small background process (port 3001) that holds one session per board. VS Code, Claude and scripts can all use the same session: a breakpoint set by Claude shows up in VS Code, and a halt in VS Code is seen by Claude.
+
+![A breakpoint set by Claude over MCP halts the target in VS Code](vscode-aurix-tcf-debugger/media/readme/claude-session.gif)
+
+- **AURIX: Add Debugger MCP Server to Claude Config** sets up Claude Code to open sessions, flash, set breakpoints and read variables.
+- **AURIX: Attach to Hub Session** attaches VS Code to a session that Claude or a script opened; the extension also offers this when one opens.
+- **AURIX: Start Debugger Hub at Logon** keeps the hub running; **Show Debugger Hub Status** lists its sessions.
+- **Another PC:** to use the probes of a lab PC, run `aurix-hub install --autostart --remote` there and set `aurix-debugger.hub.url` and `aurix-debugger.hub.token` here.
+
+REST, MCP and Python: see the [server README](aurix-debugger/server/README.md#rest-mcp-and-python-api).
+
+## Building from source
+
+See [Building](docs/building.md).
 
 ## Acknowledgements
 
 This work is based on [vscode-aurix-tcf-debugger](https://github.com/ZeZhan/vscode-aurix-tcf-debugger) by ZeZhan. Many thanks for creating it and making it available.
-
 
 ## License
 

@@ -14,3 +14,4 @@ docs/
 !bin/**
 bin/llvm-dwarfdump.exe
 media/*.gif
+media/readme/**

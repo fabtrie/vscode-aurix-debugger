@@ -40,6 +40,9 @@ pub struct SimDmu {
     pub cut_after: Option<usize>,
     /// Logical PFLASH sectors (non-cached address) that hold data, for "verify erased".
     pub programmed_sectors: std::collections::BTreeSet<u32>,
+    /// Data of the PFLASH pages programmed since (non-cached page address, 32 bytes each); it
+    /// reads back at both the cached and the non-cached address, other PFLASH reads as zero.
+    pub pflash_pages: std::collections::BTreeMap<u32, Vec<u8>>,
 }
 
 impl Default for SimDmu {
@@ -95,6 +98,7 @@ impl SimDmu {
             commands: 0,
             cut_after: None,
             programmed_sectors: [0xA000_0000].into(),
+            pflash_pages: Default::default(),
         };
         s.install();
         s
@@ -158,6 +162,17 @@ impl SimDmu {
         self.errsr = 0;
         self.page_mode = false;
         self.seq_step = 0;
+    }
+
+    /// Word of a programmed PFLASH page at `addr` (cached or non-cached address), if any.
+    pub fn pflash_word(&self, addr: u32) -> Option<u32> {
+        if !matches!(addr >> 28, 0x8 | 0xA) || addr & 0x0FFF_FFFF >= CMD_LO & 0x0FFF_FFFF {
+            return None;
+        }
+        let a = (addr & 0x0FFF_FFFF & !3) | 0xA000_0000;
+        let page = self.pflash_pages.get(&(a & !31))?;
+        let off = (a & 31) as usize;
+        Some(u32::from_le_bytes(page[off..off + 4].try_into().unwrap()))
     }
 
     pub fn claims(addr: u32) -> bool {
@@ -383,7 +398,9 @@ impl SimDmu {
             // PFLASH erase and program: only which sectors hold data is modelled.
             0x50 if (a >> 28) == 0xA && a < 0xAF00_0000 => {
                 for k in 0..self.seq_count.max(1) {
-                    self.programmed_sectors.remove(&(((a & !0x3FFF) | 0xA000_0000) + k * 0x4000));
+                    let sector = ((a & !0x3FFF) | 0xA000_0000) + k * 0x4000;
+                    self.programmed_sectors.remove(&sector);
+                    self.pflash_pages.retain(|&p, _| !(sector..sector + 0x4000).contains(&p));
                 }
             }
             0xAA | 0xA6 if (a >> 28) == 0xA && a < 0xAF00_0000 => {
@@ -393,6 +410,9 @@ impl SimDmu {
                     self.errsr |= SQER;
                 } else {
                     self.programmed_sectors.insert((a & !0x3FFF) | 0xA000_0000);
+                    for (k, p) in page.chunks(32).enumerate() {
+                        self.pflash_pages.insert(((a & !31) | 0xA000_0000) + 32 * k as u32, p.to_vec());
+                    }
                 }
             }
             _ => self.errsr |= SQER,

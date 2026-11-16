@@ -333,6 +333,74 @@ fn write_images_places_each_file_by_its_own_options() {
 }
 
 #[test]
+fn non_cached_pflash_data_is_written_to_the_cached_bank() {
+    use aurix_core::image::{Image, Section};
+    let s = server();
+    s.interp.eval("init").unwrap();
+    let tmp = |name: &str, img: &Image| {
+        let p = std::env::temp_dir().join(format!("aurix-nc-{name}-{}.hex", std::process::id()));
+        std::fs::write(&p, img.to_ihex()).unwrap();
+        p
+    };
+    let words = |n: u32, seed: u32| (0..n).flat_map(|i| (seed + i).to_le_bytes()).collect::<Vec<u8>>();
+    // An iLLD project: startup code at the non-cached starts of CPU0 (0xA0000000) and CPU1/2
+    // (0xA0300200), the rest at cached addresses, initialized data in the non-cached LMU.
+    let app = tmp(
+        "app",
+        &Image::from_sections(vec![
+            Section { addr: 0xA000_0000, data: words(8, 0x1000) },
+            Section { addr: 0x8000_0100, data: words(8, 0x2000) },
+            Section { addr: 0xA030_0200, data: words(14, 0x3000) },
+            Section { addr: 0xB004_0000, data: words(1, 0x4000) },
+        ]),
+    );
+    let out = s.interp.eval(&format!("flash write_images erase verify {}", jim::quote(&tcl_path(app.clone())))).unwrap();
+    // Only the LMU data is skipped; the verify reads the startup code back.
+    assert!(out.contains("wrote 120 bytes from 1 files") && out.contains("4 bytes outside the flash banks skipped"), "{out}");
+    assert!(out.contains("verified 120 bytes"), "{out}");
+    assert_eq!((mem(&s, 0x8000_0000), mem(&s, 0x8000_001C)), (0x1000, 0x1007));
+    assert_eq!((mem(&s, 0x8030_0200), mem(&s, 0x8030_0234)), (0x3000, 0x300D));
+    assert_eq!(mem(&s, 0x8000_0100), 0x2000);
+    // So does program.
+    let p = s.interp.eval(&format!("program {} verify", jim::quote(&tcl_path(app.clone())))).unwrap();
+    assert!(p.contains("** Verified OK ** (120 bytes)"), "{p}");
+
+    // The same bytes at both addresses are fine and written once.
+    let same = tmp(
+        "same",
+        &Image::from_sections(vec![Section { addr: 0x8000_0000, data: words(8, 0x5000) }, Section { addr: 0xA000_0000, data: words(8, 0x5000) }]),
+    );
+    let out = s.interp.eval(&format!("flash write_image erase {}", jim::quote(&tcl_path(same.clone())))).unwrap();
+    assert!(out.contains("wrote 32 bytes") && !out.contains("skipped"), "{out}");
+    assert_eq!(mem(&s, 0x8000_0000), 0x5000);
+    // verify_image compares the file as it is: both addresses read the same flash.
+    let v = s.interp.eval(&format!("verify_image {}", jim::quote(&tcl_path(same.clone())))).unwrap();
+    assert_eq!(v, "verified 64 bytes in 2 sections");
+    // Different bytes for the same flash in one file are an error...
+    let clash = tmp(
+        "clash",
+        &Image::from_sections(vec![Section { addr: 0x8000_0004, data: words(1, 0x6000) }, Section { addr: 0xA000_0000, data: words(8, 0x7000) }]),
+    );
+    let err = s.interp.eval(&format!("catch {{flash write_images erase {}}} err; set err", jim::quote(&tcl_path(clash.clone())))).unwrap();
+    assert!(err.contains("different data at 0xa0000004") && err.contains("0x80000004"), "{err}");
+    // ...while across files the later file wins, at either address (`app` covers all of `same`).
+    let out = s
+        .interp
+        .eval(&format!(
+            "flash write_images erase verify {} {}",
+            jim::quote(&tcl_path(same.clone())),
+            jim::quote(&tcl_path(app.clone()))
+        ))
+        .unwrap();
+    assert!(out.contains("wrote 120 bytes from 2 files"), "{out}");
+    assert!(out.contains("verified 120 bytes"), "{out}");
+    assert_eq!(mem(&s, 0x8000_0000), 0x1000);
+    for p in [app, same, clash] {
+        std::fs::remove_file(p).unwrap();
+    }
+}
+
+#[test]
 fn reset_halt_runs_reset_sequence() {
     let s = server();
     s.interp.eval("init").unwrap();

@@ -913,7 +913,9 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             if flash_by_download(cx, std::slice::from_ref(&file))? {
                 return Ok(format!("downloaded {}", file.path));
             }
-            let img = file.load()?;
+            // Folded here already (write_image_with does it too), so that the byte count below
+            // counts data at both PFLASH addresses once.
+            let img = flash::fold_non_cached_cx(cx, &file.load()?).map_err(e2s)?;
             let stats = flash::write_image_with(cx, &img, erase, incremental, unlock).map_err(e2s)?;
             Ok(format!("wrote {} bytes from file {}: {stats}", img.size() - stats.ucb_skipped - stats.unbanked_skipped, file.path))
         }
@@ -957,7 +959,9 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
             }
             let mut img = Image::default();
             for file in &files {
-                let (merged, changed) = img.overlay(&file.load()?);
+                // Non-cached PFLASH data goes to its cached address first, so a later file wins
+                // over an earlier one at either address, as for any other overlap.
+                let (merged, changed) = img.overlay(&flash::fold_non_cached_cx(cx, &file.load()?).map_err(e2s)?);
                 if changed > 0 {
                     crate::log_warn!("flash write_images: {} replaces {changed} bytes of earlier files", file.path);
                 }
@@ -972,7 +976,7 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
                     let parts = stats.programmed.iter().flat_map(|&s| img.within(s, s as u64 + flash::SECTOR_SIZE as u64).sections);
                     (Image::from_sections(parts.collect()), format!(" of the {} programmed sectors", stats.programmed.len()))
                 } else {
-                    (flash::flash_part(cx, &img), String::new())
+                    (flash::flash_part(cx, &img).map_err(e2s)?, String::new())
                 };
                 let n = flash::verify_image(cx, &check).map_err(e2s)?;
                 out += &format!("\nverified {n} bytes{what}");
@@ -1030,7 +1034,7 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
         let mut needs_flash = true;
         if preverify {
             out.push("**pre-verifying**".to_string());
-            if flash::verify_image(cx, &flash::flash_part(cx, &img)).is_ok() {
+            if flash::flash_part(cx, &img).and_then(|part| flash::verify_image(cx, &part)).is_ok() {
                 out.push("**Verified OK - No flashing**".into());
                 needs_flash = false;
             }
@@ -1051,7 +1055,9 @@ fn cmd_program(cx: &Cx, a: &[&str]) -> CmdResult {
             if verify {
                 out.push("** Verify Started **".into());
                 // Data outside the flash banks is not written (see flash::skip_unbanked).
-                let n = flash::verify_image(cx, &flash::flash_part(cx, &img)).map_err(|e| format!("**Verify Failed**: {e}"))?;
+                let n = flash::flash_part(cx, &img)
+                    .and_then(|part| flash::verify_image(cx, &part))
+                    .map_err(|e| format!("**Verify Failed**: {e}"))?;
                 out.push(format!("** Verified OK ** ({n} bytes)"));
             }
         }

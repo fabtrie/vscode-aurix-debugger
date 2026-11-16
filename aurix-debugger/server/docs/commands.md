@@ -766,7 +766,7 @@ flash write_image [erase] [incremental] [unlock] <file> [<offset> [<type>]]
 
 Program an image (ELF, HEX, S-record, binary).
 
-`incremental` only programs the sectors that differ. On the winIDEA adapter the file goes to winIDEA's own download.
+`incremental` only programs the sectors that differ. Non-cached PFLASH data, UCB data and data outside the flash banks are handled as for `flash write_images`. On the winIDEA adapter the file goes to winIDEA's own download.
 
 ### `flash write_images`
 
@@ -776,9 +776,7 @@ flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-
 
 Program several images in one go.
 
-The files are merged first (later files win), so a file cannot erase what an earlier one programmed into a shared sector. `-offset` and `-type` apply to the file that follows them. UCB data and data outside the 
-         flash banks (e.g. initialized RAM sections in a post-build HEX) are skipped with a warning; an image with no data 
-         in any flash bank is an error.
+The files are merged first (later files win), so a file cannot erase what an earlier one programmed into a shared sector. `-offset` and `-type` apply to the file that follows them. Data linked to the non-cached PFLASH addresses (segment 0xA, e.g. the iLLD startup code at 0xA0000000) is programmed and verified at the cached address of its bank (0x8...); the same bytes at both addresses are fine, different ones in one file are an error. UCB data and data outside the flash banks (e.g. initialized RAM sections in a post-build HEX) are skipped with a warning; an image with no data in any flash bank is an error.
 
 ### `flash verify_image`
 

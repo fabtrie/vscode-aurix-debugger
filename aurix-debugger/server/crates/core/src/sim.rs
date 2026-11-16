@@ -561,6 +561,9 @@ impl SimAdapter {
     }
 
     fn read32(&mut self, addr: u32) -> u32 {
+        if let Some(v) = self.dmu.pflash_word(addr) {
+            return v;
+        }
         if addr == OSTATE {
             return self.ostate;
         }

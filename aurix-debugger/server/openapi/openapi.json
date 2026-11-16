@@ -4833,7 +4833,7 @@
     },
     "/api/v1/sessions/{session}/flash/write": {
       "post": {
-        "description": "Program image files into flash (`flash write_images`).\n\nNeeds a preceding halting reset (`reset` with mode `halt`): the flash is protected\notherwise. UCB data and data outside the flash banks (e.g. linked to RAM) in the images\nare skipped with a warning. Only the sectors the images touch are erased. Blocks the debug\nserver while it runs.",
+        "description": "Program image files into flash (`flash write_images`).\n\nNeeds a preceding halting reset (`reset` with mode `halt`): the flash is protected\notherwise. Data linked to the non-cached PFLASH addresses (0xA...) is programmed at the\ncached ones (0x8...). UCB data and data outside the flash banks (e.g. linked to RAM) in the\nimages are skipped with a warning. Only the sectors the images touch are erased. Blocks the debug\nserver while it runs.",
         "operationId": "flash_write",
         "parameters": [
           {

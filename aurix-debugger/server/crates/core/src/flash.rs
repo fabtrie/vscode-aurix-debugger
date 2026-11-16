@@ -17,7 +17,7 @@ use tas::Batch;
 
 use crate::adapter::{check, Io};
 use crate::error::{other, usage, Error, Result};
-use crate::image::Image;
+use crate::image::{Image, Section};
 use crate::target::TargetState;
 use crate::{log_info, log_warn, ops, Cx};
 
@@ -497,6 +497,49 @@ pub fn skip_ucbs(img: &Image, unlock: bool, what: &str) -> Result<(Image, usize)
     Ok((rest, n))
 }
 
+/// Distance from a cached PFLASH address (segment 0x8) to its non-cached alias (segment 0xA).
+const NON_CACHED: u32 = 0x2000_0000;
+
+/// The image with its data at the non-cached PFLASH addresses (segment 0xA) moved to the cached
+/// ones (segment 0x8), wherever a flash bank covers the cached address: the same physical flash,
+/// and the cfg's banks only cover the cached addresses. iLLD linker scripts put the startup code
+/// there (e.g. `LCF_STARTPTR_NC_CPU0 = 0xA0000000`). Data in segment 0xA without a bank at its
+/// cached address (DFLASH and UCBs at 0xAF000000 and up) stays where it is. The same bytes at
+/// both addresses are fine; different bytes are an error, since the flash can only hold one.
+pub fn fold_non_cached(img: &Image, banks: &[FlashBank]) -> Result<Image> {
+    let mut img = img.clone();
+    for b in banks.iter().filter(|b| b.base >> 28 == 0x8) {
+        let lo = b.base | NON_CACHED;
+        let hi = lo as u64 + b.size as u64;
+        if !img.touches(lo, hi) {
+            continue;
+        }
+        let (rest, _) = img.without(lo, hi);
+        let moved = Image::from_sections(
+            img.within(lo, hi).sections.into_iter().map(|s| Section { addr: s.addr - NON_CACHED, data: s.data }).collect(),
+        );
+        for s in moved.sections.iter().filter(|s| rest.touches(s.addr, s.end())) {
+            for (i, &want) in s.data.iter().enumerate() {
+                let a = s.addr + i as u32;
+                if let Some(have) = rest.byte_at(a).filter(|&have| have != want) {
+                    return Err(other(format!(
+                        "image has different data at 0x{:08x} (0x{want:02x}) and at its cached address 0x{a:08x} (0x{have:02x}), the same flash",
+                        a | NON_CACHED
+                    )));
+                }
+            }
+        }
+        img = rest.overlay(&moved).0;
+    }
+    Ok(img)
+}
+
+/// [`fold_non_cached`] with the session's flash banks.
+pub fn fold_non_cached_cx(cx: &Cx, img: &Image) -> Result<Image> {
+    let banks = cx.with(|c| c.flash_banks.clone());
+    fold_non_cached(img, &banks)
+}
+
 /// The image split at the flash banks: its data inside some bank, and its data outside all of them.
 pub fn split_by_banks(img: &Image, banks: &[FlashBank]) -> (Image, Image) {
     let range = |b: &FlashBank| (b.base, b.base as u64 + b.size as u64);
@@ -527,14 +570,15 @@ pub fn skip_unbanked(cx: &Cx, img: &Image, what: &str) -> Result<(Image, usize)>
     Ok((inside, n))
 }
 
-/// What a flash write programs of the image (its data inside the flash banks), for verifying
-/// it. Unchanged without flash banks (a probe that programs from its own download list).
-pub fn flash_part(cx: &Cx, img: &Image) -> Image {
+/// What a flash write programs of the image (its data inside the flash banks, non-cached PFLASH
+/// data at its cached address, see [`fold_non_cached`]), for verifying it. Unchanged without flash
+/// banks (a probe that programs from its own download list).
+pub fn flash_part(cx: &Cx, img: &Image) -> Result<Image> {
     let banks = cx.with(|c| c.flash_banks.clone());
     if banks.is_empty() {
-        return img.clone();
+        return Ok(img.clone());
     }
-    split_by_banks(img, &banks).0
+    Ok(split_by_banks(&fold_non_cached(img, &banks)?, &banks).0)
 }
 
 /// Programs the image into the flash banks (`flash write_image`): erased sectors are
@@ -549,6 +593,7 @@ pub fn write_image(cx: &Cx, img: &Image, erase: bool) -> Result<WriteStats> {
 /// SMU configuration may turn into a reset (seen on the TC377 board). `unlock`: see [`skip_ucbs`].
 pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, unlock: bool) -> Result<WriteStats> {
     let (img, ucb_skipped) = skip_ucbs(img, unlock, "flash write_image")?;
+    let img = fold_non_cached_cx(cx, &img)?;
     // A section may span adjacent banks (merged images, e.g. pfls0 into pfls1): the loop below
     // writes each bank's part of the image.
     let (img, unbanked_skipped) = skip_unbanked(cx, &img, "flash write_image")?;
@@ -707,6 +752,42 @@ mod tests {
         // A bank boundary inside a section keeps the bytes on both sides.
         let (inside, _) = split_by_banks(&img, &banks[..1]);
         assert_eq!(inside.sections[1].data.len(), 8);
+    }
+
+    #[test]
+    fn non_cached_pflash_data_goes_to_the_cached_bank() {
+        let bank = |name: &str, base, size| FlashBank { name: name.into(), base, size, ..Default::default() };
+        let banks = [bank("pfls0", 0x8000_0000, 0x30_0000), bank("pfls1", 0x8030_0000, 0x30_0000), bank("dfls0", 0xAF00_0000, 0x4_0000)];
+        let spans = |img: &Image| img.sections.iter().map(|s| (s.addr, s.data.clone())).collect::<Vec<_>>();
+        // iLLD startup code at the non-cached starts of CPU0 and CPU1/2, next to cached code, DFLASH
+        // and RAM data.
+        let img = Image::from_sections(vec![
+            Section { addr: 0xA000_0000, data: vec![1; 32] },
+            Section { addr: 0x8000_0020, data: vec![2; 8] },
+            Section { addr: 0xA030_0200, data: vec![3; 56] },
+            Section { addr: 0xAF00_0000, data: vec![4; 8] },
+            Section { addr: 0xB004_0000, data: vec![5; 4] },
+        ]);
+        let folded = fold_non_cached(&img, &banks).unwrap();
+        assert_eq!(
+            spans(&folded),
+            vec![
+                (0x8000_0000, [vec![1; 32], vec![2; 8]].concat()),
+                (0x8030_0200, vec![3; 56]),
+                (0xAF00_0000, vec![4; 8]),
+                (0xB004_0000, vec![5; 4]),
+            ]
+        );
+        // Folding again changes nothing.
+        assert_eq!(fold_non_cached(&folded, &banks).unwrap(), folded);
+        // Without a bank at the cached address the data stays (and is skipped as unbanked later).
+        assert!(spans(&fold_non_cached(&img, &banks[1..]).unwrap()).contains(&(0xA000_0000, vec![1; 32])));
+        // The same bytes at both addresses are written once; different bytes are an error.
+        let both = Image::from_sections(vec![Section { addr: 0x8000_0000, data: vec![1; 40] }, Section { addr: 0xA000_0000, data: vec![1; 32] }]);
+        assert_eq!(spans(&fold_non_cached(&both, &banks).unwrap()), vec![(0x8000_0000, vec![1; 40])]);
+        let clash = Image::from_sections(vec![Section { addr: 0x8000_0010, data: vec![9; 4] }, Section { addr: 0xA000_0000, data: vec![1; 32] }]);
+        let e = fold_non_cached(&clash, &banks).unwrap_err().to_string();
+        assert!(e.contains("0xa0000010") && e.contains("0x80000010"), "{e}");
     }
 
     #[test]

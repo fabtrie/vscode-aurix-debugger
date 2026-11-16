@@ -1533,8 +1533,9 @@ class GeneratedClient:
         """Program image files into flash (`flash write_images`).
 
         Needs a preceding halting reset (`reset` with mode `halt`): the flash is protected
-        otherwise. UCB data and data outside the flash banks (e.g. linked to RAM) in the images
-        are skipped with a warning. Only the sectors the images touch are erased. Blocks the debug
+        otherwise. Data linked to the non-cached PFLASH addresses (0xA...) is programmed at the
+        cached ones (0x8...). UCB data and data outside the flash banks (e.g. linked to RAM) in the
+        images are skipped with a warning. Only the sectors the images touch are erased. Blocks the debug
         server while it runs.
 
         Args:

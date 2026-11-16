@@ -1,7 +1,10 @@
 import * as assert from 'assert';
 import {
+	alignDisassemblyWindow,
 	alignInstructionAddress,
 	clampDisassemblyWindow,
+	DISASSEMBLY_PLACEHOLDER,
+	joinCodeRanges,
 	contextMachine,
 	inCodeSpace,
 	isaGeometry,
@@ -99,5 +102,52 @@ suite('Core architectures', () => {
 		assert.strictEqual(inCodeSpace(0x80000000, g), false);
 		assert.strictEqual(inCodeSpace(-1, g), false);
 		assert.strictEqual(inCodeSpace(0x80000000, isaGeometry('TRICORE')), true);
+	});
+
+	test('joins executable segments a few bytes apart, as TASKING writes one per function', () => {
+		const segments = [
+			{ start: 0x80001e08, end: 0x80001ebe }, // controlStep
+			{ start: 0x80001de8, end: 0x80001e06 },
+			{ start: 0x80001ec0, end: 0x80001f34 },
+			{ start: 0x80001f34, end: 0x80001f44 },
+			{ start: 0x80300000, end: 0x80300100 }, // another core's code, far away
+			{ start: 0x80001f50, end: 0x80001f50 }, // empty
+		];
+		assert.deepStrictEqual(joinCodeRanges(segments), [
+			{ start: 0x80001de8, end: 0x80001f44 },
+			{ start: 0x80300000, end: 0x80300100 },
+		]);
+		// More than the gap apart: two ranges.
+		assert.deepStrictEqual(joinCodeRanges([{ start: 0, end: 0x10 }, { start: 0x40, end: 0x50 }], 0x20), [
+			{ start: 0, end: 0x10 },
+			{ start: 0x40, end: 0x50 },
+		]);
+		// The input is not changed.
+		const input = [{ start: 0x10, end: 0x20 }, { start: 0x20, end: 0x30 }];
+		joinCodeRanges(input);
+		assert.deepStrictEqual(input, [{ start: 0x10, end: 0x20 }, { start: 0x20, end: 0x30 }]);
+	});
+
+	test('keeps the requested instruction at index -instructionOffset of a disassembly window', () => {
+		const ins = Array.from({ length: 60 }, (_, i) => `i${i}`);
+		const pad = () => '-';
+		// Enough instructions before the base (index 30): a plain slice.
+		assert.deepStrictEqual(alignDisassemblyWindow(ins, 30, -10, 20, pad), ins.slice(20, 40));
+		assert.deepStrictEqual(alignDisassemblyWindow(ins, 30, 5, 3, pad), ['i35', 'i36', 'i37']);
+		// VS Code asks for 50 before the PC, the window starts 25 before it: 25 placeholders, so that
+		// element 50 is still the PC (it used to be the instruction 25 after it).
+		const w = alignDisassemblyWindow(ins, 25, -50, 100, pad);
+		assert.strictEqual(w[50], 'i25');
+		assert.deepStrictEqual(w.slice(0, 25), Array(25).fill('-'));
+		assert.strictEqual(w.length, 25 + 60);
+		// Nothing but placeholders when the whole window is before the code.
+		assert.deepStrictEqual(alignDisassemblyWindow(ins, 0, -10, 4, pad), ['-', '-', '-', '-']);
+		// Without the anchor the window is returned from its start.
+		assert.deepStrictEqual(alignDisassemblyWindow(ins, -1, -10, 3, pad), ['i0', 'i1', 'i2']);
+	});
+
+	test('the placeholder is what VS Code skips but counts', () => {
+		assert.strictEqual(BigInt(DISASSEMBLY_PLACEHOLDER.address), -1n);
+		assert.strictEqual(DISASSEMBLY_PLACEHOLDER.presentationHint, 'invalid');
 	});
 });

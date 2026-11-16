@@ -108,6 +108,59 @@ export function clampDisassemblyWindow(start: number, bytes: number, geometry: I
 	return n > 0 ? { start: s, bytes: n } : undefined;
 }
 
+/** A range of code addresses, `[start, end)`. */
+export interface CodeRange {
+	start: number;
+	end: number;
+}
+
+/** The largest gap between two executable ELF segments that are still one range (alignment padding). */
+export const CODE_RANGE_JOIN_GAP = 32;
+
+/**
+ * The executable ranges of an ELF, sorted, with overlapping ones and ones at most `gap` bytes apart
+ * joined. TASKING writes one segment per function, a few bytes apart: the disassembly window must
+ * not end at the next function.
+ */
+export function joinCodeRanges(ranges: readonly CodeRange[], gap = CODE_RANGE_JOIN_GAP): CodeRange[] {
+	const sorted = ranges.filter(r => r.end > r.start).map(r => ({ ...r })).sort((a, b) => a.start - b.start);
+	const joined: CodeRange[] = [];
+	for (const r of sorted) {
+		const last = joined[joined.length - 1];
+		if (last && r.start <= last.end + gap) {
+			last.end = Math.max(last.end, r.end);
+		} else {
+			joined.push(r);
+		}
+	}
+	return joined;
+}
+
+/** What VS Code skips in a disassembly response while still counting it (`address` "-1"). */
+export const DISASSEMBLY_PLACEHOLDER = { address: '-1', instruction: '', presentationHint: 'invalid' as const };
+
+/**
+ * The part of a disassembled window a DAP `disassemble` request asks for: `count` instructions
+ * from `instructionOffset` instructions after the one at `baseIndex`.
+ *
+ * VS Code takes the element at index `-instructionOffset` as the instruction at the requested
+ * address and places the current-instruction marker by it. When the window has fewer
+ * instructions before the base (the start of the code, memory that cannot be read), the front
+ * is filled with placeholders, which VS Code counts but does not show. Without the anchor
+ * (`baseIndex` < 0) the window is returned from its start.
+ */
+export function alignDisassemblyWindow<T>(instructions: readonly T[], baseIndex: number, instructionOffset: number, count: number, placeholder: () => T): T[] {
+	if (baseIndex < 0) {
+		return instructions.slice(0, count);
+	}
+	const start = baseIndex + instructionOffset;
+	if (start >= 0) {
+		return instructions.slice(start, start + count);
+	}
+	const pad = Math.min(-start, count);
+	return [...Array.from({ length: pad }, placeholder), ...instructions.slice(0, count - pad)];
+}
+
 /** Whether `addr` is in the code space of `geometry`; any address is when it has none of its own. */
 export function inCodeSpace(addr: number, geometry: IsaGeometry): boolean {
 	return geometry.codeEnd === undefined || (addr >= 0 && addr < geometry.codeEnd);

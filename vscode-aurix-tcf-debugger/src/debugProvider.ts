@@ -66,6 +66,8 @@ import { LiveWatchEvaluator, LiveWatchRequestItem, splitLiveWatchCore } from './
 import { BreakpointUi, ExternalBreakpoint, ExternalBreakpointChange } from './breakpointUi';
 import { CoreRef, describeCores, capitalize, parseBreakpointCondition, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
 import * as arch from './coreArchitecture';
+import { SerialQueue } from './serialQueue';
+import { BreakpointsManager, sourceKey } from './breakpointsManager';
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 import { cppVariableName } from './cppNames';
 
@@ -279,78 +281,10 @@ class DebugLogger implements TCFLogger {
 	}
 }
 
-type BreakpointTuple = { id: number; file: string; line: number; verified: boolean };
 /** `contextId` is the core whose disassembly the breakpoint was set in: an MCS program address
  *  means nothing to a TriCore, so the breakpoint has to be planted on that core only. */
 type InstructionBreakpointTuple = { id: number; address: number; verified: boolean; contextId?: string };
 type WatchExpressionState = { result: string };
-
-class BreakpointsManager {
-	configured = false;
-	private counter = 1;
-	private byFile = new Map<string, Map<number, BreakpointTuple>>();
-	private byId = new Map<number, BreakpointTuple>();
-
-	setConfigured() {
-		this.configured = true;
-	}
-
-	setVerified(id: number, verified: boolean) {
-		const b = this.byId.get(id);
-		if (b) {
-			b.verified = verified;
-		}
-	}
-
-	allocateId(): number {
-		return this.counter++;
-	}
-
-	/** Returns whether the breakpoint was still known. */
-	deleteById(id: number): boolean {
-		const b = this.byId.get(id);
-		if (!b) {
-			return false;
-		}
-		this.byId.delete(id);
-		this.byFile.get(b.file)?.delete(b.line);
-		return true;
-	}
-
-	updateFile(file: string, lines: number[]): BreakpointTuple[] {
-		let map = this.byFile.get(file);
-		if (!map) {
-			map = new Map();
-			this.byFile.set(file, map);
-		}
-
-		const nextLines = new Set(lines);
-		// Remove deleted lines
-		for (const [line, tuple] of Array.from(map.entries())) {
-			if (!nextLines.has(line)) {
-				map.delete(line);
-				this.byId.delete(tuple.id);
-			}
-		}
-		// Add new lines
-		for (const line of lines) {
-			if (!map.has(line)) {
-				const tuple: BreakpointTuple = { id: this.allocateId(), file, line, verified: false };
-				map.set(line, tuple);
-				this.byId.set(tuple.id, tuple);
-			}
-		}
-		return Array.from(map.values()).sort((a, b) => a.line - b.line);
-	}
-
-	getAll(): BreakpointTuple[] {
-		return Array.from(this.byId.values());
-	}
-
-	getById(id: number): BreakpointTuple | undefined {
-		return this.byId.get(id);
-	}
-}
 
 class InstructionBreakpointsManager {
 	private byAddress = new Map<number, InstructionBreakpointTuple>();
@@ -2306,15 +2240,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				instructions = list.map((l: any) => toInstruction(l, alignedBaseAddress));
 				baseIndex = instructions.findIndex((i) => parseAddr(i.address) === alignedBaseAddress);
 			}
-			let startIndex = 0;
-			if (baseIndex >= 0) {
-				startIndex = baseIndex + instructionOffset;
-			}
-			if (startIndex < 0) {
-				startIndex = 0;
-			}
-
-			instructions = instructions.slice(startIndex, startIndex + instructionCount);
+			// VS Code takes the element at -instructionOffset as the instruction at the requested
+			// address: fewer instructions before it (start of the code) are made up with placeholders.
+			instructions = arch.alignDisassemblyWindow(instructions, baseIndex, instructionOffset, instructionCount, () => ({ ...arch.DISASSEMBLY_PLACEHOLDER }));
 
 			response.body = { instructions: await this.withDisassemblySource(ctx, instructions, isa === 'TRICORE') };
 			this.sendResponse(response);
@@ -2437,6 +2365,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				this.tcfLogger.error(`Failed to parse ELF executable ranges of ${elf}: ${String(e)}`);
 			}
 		}
+		// TASKING writes one segment per function: joined, a disassembly window can reach the
+		// functions before and after the one it shows.
+		this.execRanges = arch.joinCodeRanges(this.execRanges);
 		if (this.execRanges.length > 0) {
 			this.tcfLogger.log(
 				`ELF executable ranges: ${this.execRanges.map(r => `0x${r.start.toString(16)}-0x${r.end.toString(16)}`).join(', ')}`
@@ -3984,7 +3915,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	/** A source file path as compared between VS Code and the line tables. */
 	private static sourceKey(file: string): string {
-		return process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+		return sourceKey(file);
 	}
 
 	/** External source breakpoints in `file` by line. */
@@ -4120,13 +4051,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			if (c.removed) {
 				this.externalBreakpoints.delete(c.id);
 				this.liveWatchBreakpoints.delete(c.id);
-				await this.tcfClient.sendCommand(new RemoveBreakpointsCommand([c.id]));
+				await this.serializeBreakpoints(() => this.tcfClient.sendCommand(new RemoveBreakpointsCommand([c.id])));
 			} else {
 				// The server keeps the breakpoint with the client that set it.
 				ext.shown = { ...ext.shown, enabled: c.enabled };
 				// eslint-disable-next-line @typescript-eslint/naming-convention
 				ext.props = { ...ext.props, Enabled: c.enabled };
-				await this.tcfClient.sendCommand(new AddBreakpointsCommand(ext.props));
+				const props = ext.props;
+				await this.serializeBreakpoints(() => this.tcfClient.sendCommand(new AddBreakpointsCommand(props)));
 			}
 		} catch (e) {
 			this.tcfLogger.log(`[breakpoints] cannot change ${c.id}: ${String(e)}`);
@@ -4145,7 +4077,25 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		return Number.isFinite(num) ? num : BREAKPOINT_INVALID;
 	}
 
-	private async syncAllBreakpoints(): Promise<void> {
+	/** The breakpoint commands to the server, one after the other (see `serializeBreakpoints`). */
+	private readonly breakpointQueue = new SerialQueue();
+
+	/**
+	 * Runs `job` after the breakpoint commands before it. VS Code sends its breakpoint requests
+	 * without waiting for the answers, and `Breakpoints.set` replaces all of this client's
+	 * breakpoints: two syncs that overlap could let the older list arrive last and plant a
+	 * breakpoint again that was just removed.
+	 */
+	private serializeBreakpoints<T>(job: () => Promise<T>): Promise<T> {
+		return this.breakpointQueue.run(job);
+	}
+
+	/** Sends all of this client's breakpoints, as they are when it is this sync's turn. */
+	private syncAllBreakpoints(): Promise<void> {
+		return this.serializeBreakpoints(() => this.sendAllBreakpoints());
+	}
+
+	private async sendAllBreakpoints(): Promise<void> {
 		const all = this.breakpointsManager.getAll();
 		const data: BreakpointData[] = all.map(b => ({
 			ID: this.breakpointIdToTcfId(b.id),
@@ -5347,15 +5297,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			...where,
 		};
 		/* eslint-enable */
-		this.liveWatchBreakpoints.set(props.ID, props);
-		await this.tcfClient.sendCommand(new AddBreakpointsCommand(props));
-		const st = await this.tcfClient.sendCommand(new GetStatusBreakpointsCommand(props.ID)).catch(() => undefined);
-		const inst = st?.Instances ?? [];
-		if (!inst.some(i => !i.Error)) {
-			this.liveWatchBreakpoints.delete(props.ID);
-			await this.tcfClient.sendCommand(new RemoveBreakpointsCommand([props.ID])).catch(() => undefined);
-			throw new Error(st?.Error ?? inst.find(i => i.Error)?.Error ?? 'not planted');
-		}
-		return { id: props.ID, name };
+		// In the breakpoint queue: a sync running meanwhile would send its list without it.
+		return await this.serializeBreakpoints(async () => {
+			this.liveWatchBreakpoints.set(props.ID, props);
+			await this.tcfClient.sendCommand(new AddBreakpointsCommand(props));
+			const st = await this.tcfClient.sendCommand(new GetStatusBreakpointsCommand(props.ID)).catch(() => undefined);
+			const inst = st?.Instances ?? [];
+			if (!inst.some(i => !i.Error)) {
+				this.liveWatchBreakpoints.delete(props.ID);
+				await this.tcfClient.sendCommand(new RemoveBreakpointsCommand([props.ID])).catch(() => undefined);
+				throw new Error(st?.Error ?? inst.find(i => i.Error)?.Error ?? 'not planted');
+			}
+			return { id: props.ID, name };
+		});
 	}
 }

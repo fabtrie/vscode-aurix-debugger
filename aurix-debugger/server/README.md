@@ -90,7 +90,7 @@ Ports:
 
 ## VS Code
 
-Use a launch configuration of type `aurixdbg`; the extension's [README](../../vscode-aurix-tcf-debugger/README.md#launch-configuration) has an example. The extension opens the session through the hub (starting the hub when needed) and connects to the worker's TCF port.
+Use a launch configuration of type `aurixdbg`; the extension's [README](../../README.md#launch-configuration) has an example. The extension opens the session through the hub (starting the hub when needed) and connects to the worker's TCF port.
 
 | Attribute | Meaning |
 |---|---|

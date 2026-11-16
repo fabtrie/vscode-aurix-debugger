@@ -14,3 +14,5 @@ bin/aurix-dbg.exe
 bin/aurix-hub.exe
 bin/openocd/
 bin/THIRD_PARTY_LICENSES.txt
+# Copied from the repository root by scripts/copy-readme.js when packaging
+/README.md

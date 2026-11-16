@@ -4,7 +4,7 @@
 
 VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3) and the GTM MCS channels.
 
-The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts, behind `aurix-hub`, the always-on front door that serves VS Code, Claude (MCP) and scripts (REST, Python) and opens one `aurix-dbg` session per board. Their source is in the [`aurix-debugger`](https://github.com/fabtrie/vscode-aurix-debugger/tree/main/aurix-debugger) folder of this repository; both are bundled with the extension, which installs them to `%LOCALAPPDATA%\aurix-dbg` and starts the hub when needed (see [Debugger hub](#debugger-hub)).
+The extension uses `aurix-dbg`, a debug server that reaches the target through Infineon's `tas_server` and runs the OpenOCD configuration scripts, behind `aurix-hub`, the always-on front door that serves VS Code, Claude (MCP) and scripts (REST, Python) and opens one `aurix-dbg` session per board. Their source is in the [`aurix-debugger`](aurix-debugger) folder of this repository; both are bundled with the extension, which installs them to `%LOCALAPPDATA%\aurix-dbg` and starts the hub when needed (see [Debugger hub](#debugger-hub)).
 
 ## Features
 
@@ -33,7 +33,7 @@ The extension uses `aurix-dbg`, a debug server that reaches the target through I
 - Peripheral Inspector extension (installed automatically as a dependency)
 - Memory Inspector extension (installed automatically as a dependency)
 
-## Bundled files (`bin/`)
+## Bundled files (`vscode-aurix-tcf-debugger/bin/`)
 
 - `aurix-hub.exe` — the debugger hub (MCP, REST, sessions)
 - `aurix-dbg.exe` — the debug server of one board, started by the hub
@@ -52,7 +52,7 @@ npm install
 npm run package
 ```
 
-In this folder, `npm run package` only compiles the TypeScript sources, copies the static assets, `aurix-dbg.exe` and the OpenOCD scripts, and produces `aurix-debugger.vsix`. `aurix-dbg.exe` is taken from the environment variable `AURIX_DBG_EXE` if set, otherwise from `../aurix-debugger/server/target/release/` or `../aurix-debugger/server/target/debug/`. See the [server README](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/README.md) for building the server.
+In `vscode-aurix-tcf-debugger`, `npm run package` only compiles the TypeScript sources, copies the static assets, `aurix-dbg.exe` and the OpenOCD scripts, and produces `aurix-debugger.vsix`. `aurix-dbg.exe` is taken from the environment variable `AURIX_DBG_EXE` if set, otherwise from `aurix-debugger/server/target/release/` or `aurix-debugger/server/target/debug/`. See the [server README](aurix-debugger/server/README.md) for building the server.
 
 ## Installation
 
@@ -114,7 +114,7 @@ Here `debug/` holds `tc3xx_ocds.cfg`, `fs26_sbc.cfg` and `tc37x_ocds_init.cfg`, 
 - *AURIX: Add Debugger MCP Server to Claude Config* writes the workspace `.mcp.json` so that Claude Code can open sessions, flash, set breakpoints and read variables: through `aurix-hub stdio` (Claude starts the hub when needed) or `http://127.0.0.1:3001/mcp`.
 - A hub on another machine (the PC with the probes): run `aurix-hub install --autostart --remote` there (it creates a token in `%APPDATA%\aurix-dbg\hub.toml`), and set `aurix-debugger.hub.url` and `aurix-debugger.hub.token` here. With VS Code Remote-SSH the extension runs on that PC and does this there.
 
-Details: the [server README](https://github.com/fabtrie/vscode-aurix-debugger/blob/main/aurix-debugger/server/README.md#run).
+Details: the [server README](aurix-debugger/server/README.md#run).
 
 ### Standby controller (SCR)
 
@@ -180,7 +180,7 @@ Right-click a variable in the Variables or Watch view and choose **Break on Valu
 
 Variables and expressions can be watched in the Run and Debug view's **WATCH** section.
 
-![add-to-watch](media/add-to-watch.gif)
+![add-to-watch](vscode-aurix-tcf-debugger/media/add-to-watch.gif)
 
 ### Live Watch View
 
@@ -205,7 +205,7 @@ Debugging needs room, so a Live Watch can also be opened as an editor tab: click
 - A panel that is not on screen (a tab in the background) reads nothing from the target. Each visible Live Watch reads at its own rate, so the load on the target adds up.
 - **Add to Live Watch** in the XPeripherals view asks which Live Watch to add to when panels are open.
 
-![live-watch](media/live-watch.gif)
+![live-watch](vscode-aurix-tcf-debugger/media/live-watch.gif)
 
 ### AUTOSAR OS
 
@@ -234,7 +234,7 @@ The SCR SVD file comes from the user manual (TC3xx UM part 2, chapter 49): `scri
 
 The HSM SVD file is generated from `scripts/hsm-svd/hsm_tc3xx.json` with `npm run svd:hsm`. That also writes a readable copy, `scripts/hsm-svd/HSM_TC3xx.svd`, which works as a standalone Cortex-M3 SVD for the HSM. The standalone copy also contains `HSM_BRIDGE_HSMSIDE`, the bridge registers only the HSM can access (DBGCTRL, ERRCTRL, ...). This peripheral is not merged into the view.
 
-![peripheral-view](media/peripheral-view.gif)
+![peripheral-view](vscode-aurix-tcf-debugger/media/peripheral-view.gif)
 
 ### Memory Inspector
 
@@ -242,17 +242,17 @@ The extension depends on `eclipse-cdt.memory-inspector`. Use the Command Palette
 `Memory Inspector: Show Memory Inspector` to open the view, then enter an
 address or expression once the target is paused.
 
-![memory-view](media/memory-view.gif)
+![memory-view](vscode-aurix-tcf-debugger/media/memory-view.gif)
 
 ### Disassembly View & Instruction Stepping Mode
 
 The disassembly view opens automatically side-by-side with the source code and stays synchronized with the currently selected frame. The toolbar includes an `Enable Instruction Stepping` button, which allows stepping through the program's disassembly instructions.
 
-![enable-instruction-stepping](media/enable-instruction-stepping.gif)
+![enable-instruction-stepping](vscode-aurix-tcf-debugger/media/enable-instruction-stepping.gif)
 
 **Note:** If the `Enable Instruction Stepping` icon is grayed out, it indicates that instruction stepping is already enabled. To switch back to source code stepping, click the icon `Disable Instruction Stepping` again to disable instruction stepping.
 
-![set-instruction-bp](media/set-instruction-bp.gif)
+![set-instruction-bp](vscode-aurix-tcf-debugger/media/set-instruction-bp.gif)
 
 Instruction breakpoints can be set in the same way as in the source code.
 
@@ -337,4 +337,4 @@ This work is based on [vscode-aurix-tcf-debugger](https://github.com/ZeZhan/vsco
 
 The code in this repository, the extension and the `aurix-dbg` debug server, is released under the MIT License - see [`LICENSE`](LICENSE).
 
-The Infineon SVD files and the OpenOCD scripts under `bin/`, and the third-party code built into `aurix-dbg.exe`, keep their own licenses - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The Infineon SVD files and the OpenOCD scripts under `vscode-aurix-tcf-debugger/bin/`, and the third-party code built into `aurix-dbg.exe`, keep their own licenses - see [`THIRD_PARTY_NOTICES.md`](vscode-aurix-tcf-debugger/THIRD_PARTY_NOTICES.md).

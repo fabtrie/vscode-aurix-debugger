@@ -4604,9 +4604,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	// Async because a task-filtered breakpoint has to read the running task before it can decide
 	// whether this stop is one the user asked for.
 	private async onContextSuspendedAsync(info: ContextSuspendedData): Promise<void> {
-		// Ignore duplicate suspend events for the same context.
+		// Ignore duplicate suspend events for the same context - except a reset's: a core halted at
+		// a breakpoint is halted at the reset vector afterwards without ever showing as running, and
+		// the server reports that with this one suspend ("Reset").
 		const contextId = info.id;
 		if (this.suspendedContextIds.has(contextId)) {
+			if ((info.reason || '').toLowerCase() === 'reset') {
+				this.onResetWhileHalted(contextId);
+			}
 			return;
 		}
 		this.suspendedContextIds.add(contextId);
@@ -4776,6 +4781,22 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		this.sendStoppedEvent(reason, threadId, { preserveFocus: !takesFocus });
 		this.invalidateLiveWatchContext();
+		if (takesFocus) {
+			void this.emitSourceLocation(contextId);
+		}
+	}
+
+	/**
+	 * A reset of a core that was halted and is halted again (reset button, Tcl or the API with the
+	 * cores at a breakpoint): its call stack, variables and source location are those of the old stop
+	 * until VS Code is told it stopped anew. The launch core takes the focus, as for a TL1 stop.
+	 */
+	private onResetWhileHalted(contextId: string): void {
+		const threadId = this.getOrAssignThreadId(contextId);
+		this.focusLog(`reset while halted: ${contextId} (threadId=${threadId}) stopped anew`);
+		this.onThreadSuspended(threadId);
+		const takesFocus = this.isLaunchCoreContext(contextId);
+		this.sendStoppedEvent(StoppedEventReason.pause, threadId, { preserveFocus: !takesFocus, description: 'Reset' });
 		if (takesFocus) {
 			void this.emitSourceLocation(contextId);
 		}

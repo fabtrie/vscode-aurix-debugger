@@ -15,11 +15,12 @@ const SIDEBAR_ID = 'sidebar';
 /** The sidebar keeps the key the single Live Watch always used, so its expressions survive. */
 const SIDEBAR_EXPRESSIONS_KEY = 'aurix-debugger.liveWatch.expressions';
 const SIDEBAR_INTERVAL_KEY = 'aurix-debugger.liveWatch.sidebarIntervalMs';
+const SIDEBAR_TRACE_KEY = 'aurix-debugger.liveWatch.sidebarTrace';
 const PANELS_KEY = 'aurix-debugger.liveWatch.panels';
 const INTERVAL_OPTIONS = [200, 500, 1000, 2000];
 
 /** A named panel's settings; its expressions are stored under expressionsKey(id). */
-type SavedPanel = { id: string; name: string; intervalMs?: number };
+type SavedPanel = { id: string; name: string; intervalMs?: number; trace?: boolean };
 
 function expressionsKey(id: string): string {
 	return `${SIDEBAR_EXPRESSIONS_KEY}.${id}`;
@@ -45,12 +46,13 @@ export class LiveWatchManager implements vscode.Disposable {
 	constructor(private readonly context: vscode.ExtensionContext) {
 		const stored = context.workspaceState.get<unknown[]>(PANELS_KEY, []);
 		this.saved = (Array.isArray(stored) ? stored : []).filter(isSavedPanel)
-			.map((p) => ({ id: p.id, name: p.name, intervalMs: typeof p.intervalMs === 'number' ? normalizeIntervalMs(p.intervalMs) : undefined }));
+			.map((p) => ({ id: p.id, name: p.name, intervalMs: typeof p.intervalMs === 'number' ? normalizeIntervalMs(p.intervalMs) : undefined, trace: p.trace === true }));
 		const sidebarInterval = context.workspaceState.get<number>(SIDEBAR_INTERVAL_KEY);
 		this.sidebar = new LiveWatchInstance(context, {
 			id: SIDEBAR_ID,
 			storageKey: SIDEBAR_EXPRESSIONS_KEY,
 			intervalMs: typeof sidebarInterval === 'number' ? sidebarInterval : undefined,
+			trace: context.workspaceState.get<boolean>(SIDEBAR_TRACE_KEY) === true,
 			onDidFocus: () => (this.lastUsedId = SIDEBAR_ID),
 		});
 		this.disposables.push(
@@ -283,6 +285,34 @@ export class LiveWatchManager implements vscode.Disposable {
 		await this.context.workspaceState.update(expressionsKey(id), undefined);
 	}
 
+	/**
+	 * Switches an instance to tracing every write (miniMCDS) or back to reading at its interval.
+	 * One trace at a time: switching one instance on switches the others off.
+	 */
+	async setTrace(instance: LiveWatchInstance, on: boolean): Promise<void> {
+		const all = [this.sidebar, ...Array.from(this.panels.values()).map((p) => p.instance)];
+		for (const other of all) {
+			if (on && other !== instance && other.trace) {
+				other.setTrace(false);
+				await this.saveTrace(other, false);
+			}
+		}
+		instance.setTrace(on);
+		await this.saveTrace(instance, on);
+	}
+
+	private async saveTrace(instance: LiveWatchInstance, on: boolean): Promise<void> {
+		if (instance === this.sidebar) {
+			await this.context.workspaceState.update(SIDEBAR_TRACE_KEY, on || undefined);
+			return;
+		}
+		const saved = this.saved.find((p) => p.id === instance.id);
+		if (saved) {
+			saved.trace = on || undefined;
+			await this.save();
+		}
+	}
+
 	/** Gives an instance its own refresh interval, or makes it follow the global one again. */
 	async configureInterval(instance: LiveWatchInstance): Promise<void> {
 		const picked = await pickIntervalMs({
@@ -290,10 +320,16 @@ export class LiveWatchManager implements vscode.Disposable {
 			placeHolder: 'How often this Live Watch re-reads the target while it runs',
 			current: instance.intervalOverrideMs,
 			globalMs: liveUpdateIntervalMs(),
+			trace: instance.trace,
 		});
 		if (picked === undefined) {
 			return;
 		}
+		if (picked === 'trace') {
+			await this.setTrace(instance, true);
+			return;
+		}
+		await this.setTrace(instance, false);
 		const intervalMs = picked === 'global' ? undefined : picked;
 		instance.setIntervalOverride(intervalMs);
 		if (instance === this.sidebar) {
@@ -332,6 +368,7 @@ export class LiveWatchManager implements vscode.Disposable {
 			id: saved.id,
 			storageKey: expressionsKey(saved.id),
 			intervalMs: saved.intervalMs,
+			trace: saved.trace === true,
 			onDidFocus: () => (this.lastUsedId = saved.id),
 		});
 		const open = new LiveWatchPanel(panel, instance, saved.name, () => (this.lastUsedId = saved.id), () => {
@@ -444,9 +481,13 @@ export async function pickIntervalMs(options: {
 	placeHolder: string;
 	current: number | undefined;
 	globalMs?: number;
-}): Promise<number | 'global' | undefined> {
-	const { current, globalMs } = options;
-	type Item = vscode.QuickPickItem & { intervalMs?: number; global?: boolean; custom?: boolean };
+	/** Offer "Trace every write"; true when it is the current mode. */
+	trace?: boolean;
+}): Promise<number | 'global' | 'trace' | undefined> {
+	const { globalMs } = options;
+	// In trace mode no interval is "current".
+	const current = options.trace ? -1 : options.current;
+	type Item = vscode.QuickPickItem & { intervalMs?: number; global?: boolean; custom?: boolean; trace?: boolean };
 	const items: Item[] = [];
 	if (globalMs !== undefined) {
 		items.push({
@@ -468,6 +509,17 @@ export async function pickIntervalMs(options: {
 			custom: true,
 		},
 	);
+	if (options.trace !== undefined) {
+		items.push(
+			{ label: '', kind: vscode.QuickPickItemKind.Separator },
+			{
+				label: 'Trace every write',
+				description: options.trace ? 'Current' : '',
+				detail: 'miniMCDS data trace (TC37x, CPU0): every write with its target time; one Live Watch at a time. Expressions the trace cannot take are read at the interval.',
+				trace: true,
+			},
+		);
+	}
 	const picked = await vscode.window.showQuickPick(items, {
 		title: options.title,
 		placeHolder: `${options.placeHolder} (minimum 200 ms)`,
@@ -478,6 +530,9 @@ export async function pickIntervalMs(options: {
 	}
 	if (picked.global) {
 		return 'global';
+	}
+	if (picked.trace) {
+		return 'trace';
 	}
 	if (!picked.custom) {
 		return picked.intervalMs;

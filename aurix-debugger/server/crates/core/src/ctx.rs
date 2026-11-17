@@ -104,6 +104,9 @@ pub struct Ctx {
     pub ucb: crate::ucb_write::UcbState,
     /// Who runs the current Tcl command: the UCB write commands refuse the REST/MCP API.
     pub tcl_origin: crate::ucb_write::Origin,
+    /// The miniMCDS trace: armed configuration and the last recording (`mcds ...`, traced DAQ
+    /// points, the trace API).
+    pub mcds: crate::mcds_trace::TraceState,
 }
 
 /// See [`Ctx::probe_lost_timeout_ms`].
@@ -154,6 +157,7 @@ impl Ctx {
             probe_lost_timeout_ms: DEFAULT_PROBE_LOST_TIMEOUT_MS,
             user_help: Default::default(),
             ucb: Default::default(),
+            mcds: Default::default(),
             tcl_origin: Default::default(),
         }
     }

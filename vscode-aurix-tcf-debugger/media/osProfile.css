@@ -100,7 +100,7 @@ h2.h .sub { text-transform: none; letter-spacing: 0; opacity: 0.8; }
 }
 
 .lane .name {
-	width: 52px;
+	width: 72px;
 	flex: 0 0 auto;
 	font-family: var(--vscode-editor-font-family);
 	font-size: 0.86em;
@@ -208,3 +208,44 @@ h2.h .sub { text-transform: none; letter-spacing: 0; opacity: 0.8; }
 .gauge .who { font-family: var(--vscode-editor-font-family); font-size: 0.82em; color: var(--vscode-descriptionForeground); padding-top: 5px; }
 
 code { font-family: var(--vscode-editor-font-family); }
+
+/* Per-lane rate and how the lane is recorded. */
+.lane .rate {
+	flex: 0 0 auto;
+	font-size: 0.86em;
+	color: var(--vscode-dropdown-foreground);
+	background: var(--vscode-dropdown-background);
+	border: 1px solid var(--vscode-dropdown-border, transparent);
+	border-radius: 2px;
+}
+
+.lane .src {
+	flex: 0 0 auto;
+	width: 54px;
+	font-size: 0.8em;
+	text-align: center;
+	border-radius: 3px;
+	padding: 0 4px;
+	color: var(--vscode-descriptionForeground);
+	border: 1px solid var(--vscode-descriptionForeground);
+}
+
+.lane .src.trace {
+	color: var(--vscode-badge-foreground);
+	background: var(--vscode-badge-background);
+	border-color: transparent;
+}
+
+.lane .src.warn {
+	color: var(--vscode-editorWarning-foreground);
+	border-color: var(--vscode-editorWarning-foreground);
+}
+
+.lane.off .track {
+	opacity: 0.35;
+}
+
+#toolbar .lbl {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.9em;
+}

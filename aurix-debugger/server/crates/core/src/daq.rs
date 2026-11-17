@@ -37,6 +37,10 @@ use tas::{Batch, OpResult};
 use crate::ctx::{Ctx, Cx};
 use crate::error::{Error, Result};
 
+#[path = "daq_trace.rs"]
+mod trace;
+pub use trace::{TRACE_DEBOUNCE, TRACE_MAX_SPAN, TRACE_POLL};
+
 pub type SessionId = u64;
 pub type PointId = u32;
 
@@ -120,6 +124,8 @@ pub enum Source {
     /// A `probe_only` point the probe cannot take (no sampler, not eligible, never answered). It
     /// is neither sampled nor read: its owner reads it itself.
     Refused,
+    /// Every write is recorded by the miniMCDS data trace; the registry drains the trace RAM.
+    Trace,
 }
 
 impl Source {
@@ -129,6 +135,7 @@ impl Source {
             Source::Probe => "probe",
             Source::Pending => "pending",
             Source::Refused => "refused",
+            Source::Trace => "trace",
         }
     }
 }
@@ -161,12 +168,15 @@ pub struct PointCfg {
     /// Sample this point on the probe or not at all, never by host reads: for a consumer that
     /// reads it itself when the probe cannot take it ([`Source::Refused`]).
     pub probe_only: bool,
+    /// Record every write with the miniMCDS data trace instead of reading the point. Points that
+    /// cannot be traced (see [`Point::trace_reason`]) are read at their period.
+    pub trace: bool,
 }
 
 impl PointCfg {
     /// A point read every tick, with no change filter.
     pub fn new(addr: u32, len: u32, space: Space, interval_us: u32) -> PointCfg {
-        PointCfg { addr, len, space, interval_us, mode: SampleMode::EveryTick, cmp_mask: None, resend_after_us: 0, probe_only: false }
+        PointCfg { addr, len, space, interval_us, mode: SampleMode::EveryTick, cmp_mask: None, resend_after_us: 0, probe_only: false, trace: false }
     }
 }
 
@@ -223,6 +233,10 @@ pub struct Point {
     pub source: Source,
     pub probe_only: bool,
     probe: Option<ProbeSlot>,
+    /// The client asked for every write ([`PointCfg::trace`]).
+    pub trace: bool,
+    /// Why a point asked to be traced is read instead.
+    pub trace_reason: Option<String>,
 }
 
 impl Point {
@@ -267,7 +281,7 @@ impl Point {
         match self.source {
             Source::Polled => true,
             Source::Probe => self.mode == SampleMode::EveryTick || self.resend_after.is_some(),
-            Source::Pending | Source::Refused => false,
+            Source::Pending | Source::Refused | Source::Trace => false,
         }
     }
 
@@ -293,6 +307,14 @@ pub enum DaqMsg {
     /// A point could not be read. `muted` means it is no longer scheduled.
     PointError { point: PointId, err: String, muted: bool },
     State { state: DaqState, t_us: u64 },
+    /// Writes recorded by the data trace since the last drain: per write the point, the target
+    /// time in nanoseconds since the trace started (if known) and the point's bytes after it.
+    Trace { t_us: u64, values: Vec<(PointId, Option<u64>, Vec<u8>)> },
+    /// The data trace lost messages (hardware error messages) or whole paragraphs (the drain fell
+    /// a lap behind); the writes in between are missing.
+    TraceLost { t_us: u64, messages: u64, laps: u64 },
+    /// A point's source changed (traced / read), with the reason when a trace was refused.
+    SourceChanged { point: PointId, source: Source, reason: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -402,6 +424,7 @@ pub struct Registry {
     rotate: usize,
     retry_after: Option<Instant>,
     probe: ProbeState,
+    trace: trace::TraceDaq,
 }
 
 /// The registry's side of a probe sampler. Untouched (all `None`/empty) unless the adapter offers
@@ -430,6 +453,20 @@ impl Registry {
     /// Where a point's values come from.
     pub fn source(&self, id: SessionId, p: PointId) -> Option<Source> {
         self.get(id)?.points.iter().find(|x| x.id == p).map(|x| x.source)
+    }
+
+    /// The traced point set changed: set the data trace up again after [`TRACE_DEBOUNCE`].
+    fn trace_dirty(&mut self, now: Instant) {
+        // Only while something is or was traced: a registry without traced points never wakes for it.
+        let wanted = self.sessions.iter().any(|s| s.points.iter().any(|p| p.trace));
+        if wanted || self.trace.owner.is_some() || self.trace.armed {
+            self.trace.dirty_at.get_or_insert(now + TRACE_DEBOUNCE);
+        }
+    }
+
+    /// The session owning the data trace, and its range (start, length).
+    pub fn trace_owner(&self) -> Option<(SessionId, Option<(u32, u32)>)> {
+        self.trace.owner.map(|o| (o, self.trace.range))
     }
 
     /// The point set changed: configure the probe again after [`PROBE_DEBOUNCE`].
@@ -477,6 +514,7 @@ impl Registry {
         if removed {
             self.probe.demoted.retain(|(s, _)| *s != id);
             self.probe_dirty(Instant::now());
+            self.trace_dirty(Instant::now());
         }
         self.reseat();
         removed
@@ -536,8 +574,13 @@ impl Registry {
                 source: if cfg.probe_only { Source::Pending } else { Source::Polled },
                 probe_only: cfg.probe_only,
                 probe: None,
+                trace: cfg.trace && !cfg.probe_only,
+                trace_reason: None,
             });
             out.push((pid, interval_us));
+        }
+        if pts.iter().any(|p| p.trace) {
+            self.trace_dirty(now);
         }
         self.probe_dirty(now);
         self.reseat();
@@ -549,6 +592,7 @@ impl Registry {
         s.points.retain(|p| !pts.contains(&p.id));
         self.probe.demoted.retain(|(s, p)| *s != id || !pts.contains(p));
         self.probe_dirty(Instant::now());
+        self.trace_dirty(Instant::now());
         self.reseat();
         Ok(())
     }
@@ -597,6 +641,7 @@ impl Registry {
         }
         // A paused session's points come off the probe, and go back on when it resumes.
         self.probe_dirty(now);
+        self.trace_dirty(now);
         self.reseat();
         Ok(())
     }
@@ -607,6 +652,7 @@ impl Registry {
         self.sessions.retain(|s| !s.closing);
         if self.sessions.len() != n {
             self.probe_dirty(Instant::now());
+            self.trace_dirty(Instant::now());
         }
         let live = self.sessions.iter().filter(|s| !s.paused).flat_map(|s| s.points.iter().filter(|p| !p.muted && p.ticks()));
         self.next_due = live.map(|p| p.next_due).min();
@@ -618,6 +664,10 @@ impl Registry {
             for d in [self.probe.dirty_at, drain].into_iter().flatten() {
                 self.next_due = Some(self.next_due.map_or(d, |n| n.min(d)));
             }
+        }
+        let poll = self.trace.armed.then_some(self.trace.next_poll).flatten();
+        for d in [self.trace.dirty_at, poll].into_iter().flatten() {
+            self.next_due = Some(self.next_due.map_or(d, |n| n.min(d)));
         }
         if let (Some(due), Some(retry)) = (self.next_due, self.retry_after) {
             self.next_due = Some(due.max(retry));
@@ -670,6 +720,7 @@ pub fn on_reset(c: &mut Ctx, now: Instant) {
     if c.daq.probe.capable {
         c.daq.probe.dirty_at = Some(retry);
     }
+    trace::on_reset(c, retry);
     c.daq.reseat();
 }
 
@@ -1277,6 +1328,8 @@ fn probe_demote_silent(c: &mut Ctx, now: Instant) {
 }
 
 fn tick_inner(c: &mut Ctx, now: Instant, stamp: Option<Instant>) {
+    trace::step(c, now);
+    c.daq.reseat();
     probe_step(c, now, stamp);
     let mut b = Batch::new();
     let Some(plan) = queue_due(c, now, &mut b) else { return };
@@ -1325,6 +1378,8 @@ mod tests {
             source: Source::Polled,
             probe_only: false,
             probe: None,
+            trace: false,
+            trace_reason: None,
         }
     }
 

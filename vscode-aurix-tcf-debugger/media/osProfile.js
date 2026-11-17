@@ -21,6 +21,10 @@
 	const legendEl = /** @type {HTMLElement} */ (document.getElementById('legend'));
 	const sharesEl = /** @type {HTMLElement} */ (document.getElementById('shares'));
 	const loadEl = /** @type {HTMLElement} */ (document.getElementById('load'));
+	const kindEl = /** @type {HTMLElement} */ (document.getElementById('kind'));
+
+	/** Rates a lane can be given; numbers are periods in µs. */
+	const LANE_MODES = [['off', 'off'], [100, '100 µs'], [250, '250 µs'], [1000, '1 ms'], [5000, '5 ms'], [10000, '10 ms'], ['trace', 'trace']];
 
 	/** Hues available before everything else folds into "other". */
 	const SLOTS = 5;
@@ -86,7 +90,12 @@
 		if (view.missed) {
 			bits.push(view.missed + ' missed ticks');
 		}
+		if (view.traceLost) {
+			bits.push('trace lost data ' + view.traceLost + '×');
+		}
 		statsEl.textContent = bits.join(' · ');
+		const traced = view.lanes.filter(l => l.source === 'trace').map(l => l.label);
+		kindEl.textContent = traced.length ? 'traced: ' + traced.join(', ') + (view.lanes.some(l => l.source === 'host') ? ' · others sampled' : '') : 'sampled, not traced';
 
 		renderLanes();
 		renderAxis();
@@ -107,11 +116,34 @@
 		}
 		for (const lane of view.lanes) {
 			const row = document.createElement('div');
-			row.className = 'lane';
+			row.className = 'lane' + (lane.source === 'off' ? ' off' : '');
 			const name = document.createElement('span');
 			name.className = 'name';
-			name.textContent = 'cpu' + lane.core;
+			name.textContent = lane.label;
 			row.appendChild(name);
+			const sel = document.createElement('select');
+			sel.className = 'rate';
+			sel.title = 'How this lane is recorded';
+			for (const [v, label] of LANE_MODES) {
+				const o = document.createElement('option');
+				o.value = String(v);
+				o.textContent = label;
+				sel.appendChild(o);
+			}
+			if (typeof lane.mode === 'number' && !LANE_MODES.some(m => m[0] === lane.mode)) {
+				const o = document.createElement('option');
+				o.value = String(lane.mode);
+				o.textContent = us(lane.mode);
+				sel.appendChild(o);
+			}
+			sel.value = String(lane.mode);
+			sel.addEventListener('change', () => vscode.postMessage({ type: 'laneMode', key: lane.key, mode: sel.value }));
+			row.appendChild(sel);
+			const tag = document.createElement('span');
+			tag.className = 'src ' + lane.source + (lane.reason ? ' warn' : '');
+			tag.textContent = lane.source === 'trace' ? 'traced' : lane.source === 'host' ? 'sampled' : 'off';
+			tag.title = lane.reason || (lane.source === 'trace' ? 'Every write, with the target time stamp' : lane.source === 'host' ? 'Read every ' + us(lane.mode === 'trace' ? view.periodUs : lane.mode) + '; shorter switches are missed' : 'Not recorded');
+			row.appendChild(tag);
 			const track = document.createElement('div');
 			track.className = 'track';
 			for (const b of lane.blocks) {
@@ -169,15 +201,15 @@
 
 	function renderShares() {
 		sharesEl.textContent = '';
-		let core = -1;
+		let lane = -1;
 		for (const s of view.shares) {
-			if (s.core !== core) {
-				core = s.core;
+			if (s.lane !== lane) {
+				lane = s.lane;
 				const h = document.createElement('div');
 				h.className = 'share head';
 				const n = document.createElement('span');
 				n.className = 'n';
-				n.textContent = 'CORE ' + core;
+				n.textContent = s.label.toUpperCase();
 				h.appendChild(n);
 				h.appendChild(document.createElement('span'));
 				h.appendChild(document.createElement('span'));
@@ -229,7 +261,7 @@
 			g.appendChild(meter);
 			const who = document.createElement('div');
 			who.className = 'who';
-			who.textContent = 'cpu' + l.core;
+			who.textContent = l.label;
 			g.appendChild(who);
 			loadEl.appendChild(g);
 		}

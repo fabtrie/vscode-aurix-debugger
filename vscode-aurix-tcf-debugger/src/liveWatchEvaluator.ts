@@ -17,7 +17,7 @@
 
 import { CoreRef, parseCoreRef } from './breakpointCondition';
 import { TCFClient, decodeEvaluatedValue } from './tcfclient';
-import { ClearLiveSetAurixTargetCommand, GetLiveValuesAurixTargetCommand, LiveRegion, SetLiveSetAurixTargetCommand } from './tcf/aurixtarget';
+import { ClearLiveSetAurixTargetCommand, GetLiveValuesAurixTargetCommand, LiveRegion, LiveValue, SetLiveSetAurixTargetCommand } from './tcf/aurixtarget';
 import { TCFErrorCodes } from './tcf/error';
 import { CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, EvaluateResult, GetContextExpressionsCommand } from './tcf/expressions';
 import { GetMemoryCommand } from './tcf/memory';
@@ -40,9 +40,21 @@ export type LiveWatchNode = {
 	children?: LiveWatchNode[];
 };
 
+/** How a root of a Live Watch in trace mode got its value. */
+export type LiveWatchTraceInfo = {
+	/** "trace": every write recorded; anything else: read at the interval (see `reason`). */
+	source: string;
+	writes?: number;
+	tTargetNs?: number;
+	lost?: number;
+	reason?: string;
+};
+
 export type LiveWatchRootResult = LiveWatchNode & {
 	available: boolean;
 	error?: string;
+	/** Set for a Live Watch in trace mode. */
+	trace?: LiveWatchTraceInfo;
 	/**
 	 * The read was not done because the target started running (the server drops reads queued
 	 * before a resume, step or reset). The view keeps the value it has.
@@ -77,7 +89,7 @@ export type LiveWatchRequestItem = {
  * Set for a view's periodic refresh: the roots' regions are the live set of `viewId`, sampled
  * every `intervalMs`.
  */
-export type LiveWatchLiveOptions = { viewId: string; intervalMs: number };
+export type LiveWatchLiveOptions = { viewId: string; intervalMs: number; trace?: boolean };
 
 type ResolvedRoot = {
 	ctx: string;
@@ -219,7 +231,8 @@ export class LiveWatchEvaluator {
 		// Pass 2: every region in one request.
 		const regions: LiveRegion[] = [];
 		const regionIndex = resolved.map((r) => (r.kind === 'region' ? regions.push(r.region) - 1 : -1));
-		const values = await this.readLive(live, regions);
+		const metas: LiveValue[] = [];
+		const values = await this.readLive(live, regions, metas);
 		return Promise.all(resolved.map(async (r, index): Promise<LiveWatchRootResult> => {
 			const item = items[index];
 			if (r.kind === 'error') {
@@ -237,7 +250,11 @@ export class LiveWatchEvaluator {
 					}
 					throw value;
 				}
-				return { ...(await r.build(value)), available: true };
+				const meta = metas[regionIndex[index]];
+				const trace = live.trace && meta
+					? { source: meta.source ?? 'read', writes: meta.writes, tTargetNs: meta.tTargetNs, lost: meta.lost, reason: meta.reason }
+					: undefined;
+				return { ...(await r.build(value)), available: true, ...(trace ? { trace } : {}) };
 			} catch (e) {
 				return errorResult(item, e);
 			}
@@ -306,7 +323,7 @@ export class LiveWatchEvaluator {
 	 * value or error per region, or undefined when there is no live set to read with: an older
 	 * server (remembered for the session), or setting or reading the set failed this time.
 	 */
-	private async readLive(live: LiveWatchLiveOptions, regions: LiveRegion[]): Promise<Array<Buffer | Error> | undefined> {
+	private async readLive(live: LiveWatchLiveOptions, regions: LiveRegion[], metas: LiveValue[] = []): Promise<Array<Buffer | Error> | undefined> {
 		// A register and its fields, or a variable watched twice, are one region of the set.
 		const unique: LiveRegion[] = [];
 		const uniqueIndex = new Map<string, number>();
@@ -325,18 +342,20 @@ export class LiveWatchEvaluator {
 			return [];
 		}
 		const periodUs = Math.max(1, Math.round(live.intervalMs * 1000));
-		const signature = JSON.stringify([periodUs, unique]);
+		const trace = live.trace === true;
+		const signature = JSON.stringify([periodUs, trace, unique]);
 		try {
 			if (this.liveSets.get(live.viewId) !== signature) {
 				// Until the server confirms, it may or may not have the set: stopLive still clears it.
 				this.liveSets.set(live.viewId, undefined);
-				await this.client.sendCommand(new SetLiveSetAurixTargetCommand(live.viewId, unique, periodUs));
+				await this.client.sendCommand(new SetLiveSetAurixTargetCommand(live.viewId, unique, periodUs, trace));
 				this.liveSets.set(live.viewId, signature);
 			}
 			const values = await this.client.sendCommand(new GetLiveValuesAurixTargetCommand(live.viewId));
 			if (values.length !== unique.length) {
 				throw new Error(`AurixTarget.getLiveValues returned ${values.length} values for ${unique.length} regions`);
 			}
+			slots.forEach((i, k) => (metas[k] = values[i]));
 			const decoded = values.map((v) => v.error !== undefined
 				? new Error(v.error)
 				: v.data !== undefined ? Buffer.from(v.data, 'base64') : new Error('No value'));

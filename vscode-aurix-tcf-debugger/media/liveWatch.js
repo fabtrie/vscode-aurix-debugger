@@ -136,13 +136,19 @@
 				expression.innerHTML = '<span class="group-label"></span><span class="description"></span>';
 			} else {
 				expression.className = 'expression';
-				expression.innerHTML = '<span class="name"><span class="monaco-highlighted-label"></span></span><span class="value"></span>';
+				expression.innerHTML = '<span class="name"><span class="monaco-highlighted-label"></span></span><span class="value"></span><span class="badge" hidden></span>';
 			}
 		}
 		if (row.kind === 'group') {
 			setText(expression.querySelector('.group-label'), row.name);
 			setText(expression.querySelector('.description'), row.value);
 		} else {
+			const badge = /** @type {HTMLElement | null} */ (expression.querySelector('.badge'));
+			if (badge && (old?.badge !== row.badge || old?.badgeKind !== row.badgeKind || old?.kind !== row.kind)) {
+				badge.hidden = !row.badge;
+				badge.textContent = row.badge ?? '';
+				badge.className = `badge ${row.badgeKind ?? ''}`;
+			}
 			setText(expression.querySelector('.monaco-highlighted-label'), row.kind === 'more' ? row.name : `${row.name}:`);
 			if (editing?.id !== row.id) {
 				const valueEl = /** @type {HTMLElement} */ (expression.querySelector('.value'));

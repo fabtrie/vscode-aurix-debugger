@@ -213,3 +213,28 @@ body {
 	color: var(--vscode-descriptionForeground);
 	white-space: normal;
 }
+
+/* Trace mode: writes recorded, data lost, or read instead of traced. */
+.expression .badge {
+	flex-shrink: 0;
+	margin-left: 6px;
+	padding: 0 5px;
+	border-radius: 3px;
+	font-size: 0.85em;
+	line-height: 16px;
+	color: var(--vscode-badge-foreground);
+	background-color: var(--vscode-badge-background);
+	opacity: 0.85;
+}
+
+.expression .badge.warn {
+	color: var(--vscode-editorWarning-foreground);
+	background-color: transparent;
+	border: 1px solid var(--vscode-editorWarning-foreground);
+}
+
+.expression .badge.muted {
+	color: var(--vscode-descriptionForeground);
+	background-color: transparent;
+	border: 1px dashed var(--vscode-descriptionForeground);
+}

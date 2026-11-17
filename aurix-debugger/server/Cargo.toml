@@ -12,6 +12,7 @@ members = [
     "crates/isa",
     "crates/jim",
     "crates/jimtcl",
+    "crates/mcds",
     "crates/openocd-tcl",
     "crates/orti",
     "crates/symbols",
@@ -34,6 +35,7 @@ tcf = { path = "crates/tcf" }
 symbols = { path = "crates/symbols" }
 orti = { path = "crates/orti" }
 isa = { path = "crates/isa" }
+mcds = { path = "crates/mcds" }
 api-spec = { path = "crates/api-spec" }
 api = { path = "crates/api" }
 hub = { path = "crates/hub" }

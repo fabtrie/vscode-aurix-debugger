@@ -306,6 +306,8 @@ pub struct SimAdapter {
     stm_epoch: Instant,
     pub hsm: SimHsm,
     pub gtm: SimGtm,
+    /// The miniMCDS trace unit and trace RAM.
+    pub mcds: crate::sim_mcds::SimMcds,
     /// The standby controller (SCR), reached through [`Adapter::scr_debug`].
     pub scr: SimScr,
     initialized: bool,
@@ -367,6 +369,7 @@ impl SimAdapter {
             device_id: 0x1020_7083,
             hsm: SimHsm::new(),
             gtm: SimGtm::new(),
+            mcds: crate::sim_mcds::SimMcds::new(),
             scr: SimScr::new(),
             initialized: false,
             srst: false,
@@ -449,6 +452,7 @@ impl SimAdapter {
     /// reset vector (the application starts when it is resumed).
     fn power_on_reset(&mut self, halt: bool) {
         self.ostate = 0;
+        self.mcds.reset();
         self.dmu.install();
         self.halted = [halt, false, false];
         self.pc = [0x800A_8000, 0x8010_0000, 0x8020_0000];
@@ -723,6 +727,42 @@ impl SimAdapter {
         }
     }
 
+    /// miniMCDS register and trace RAM accesses (word access); `None` for other addresses.
+    fn mcds_access(&mut self, op: &BatchOp) -> Option<OpResult> {
+        use crate::sim_mcds::SimMcds;
+        match *op {
+            BatchOp::Read { addr, len, addr_map: 0 } if SimMcds::claims(addr as u32) => {
+                let mut data = Vec::with_capacity(len + 4);
+                let mut k = 0;
+                while k < len {
+                    match self.mcds.read(addr as u32 + k as u32) {
+                        Ok(v) => data.extend_from_slice(&v.to_le_bytes()),
+                        Err(()) => {
+                            data.resize(len, 0);
+                            return Some(OpResult { err: PL0_ERR_DATA, bytes_ok: k, data });
+                        }
+                    }
+                    k += 4;
+                }
+                data.truncate(len);
+                Some(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: len, data })
+            }
+            BatchOp::Write { addr, data, addr_map: 0 } if SimMcds::claims(addr as u32) => {
+                for (k, chunk) in data.chunks(4).enumerate() {
+                    let mut w = [0u8; 4];
+                    w[..chunk.len()].copy_from_slice(chunk);
+                    let (a, v) = (addr as u32 + 4 * k as u32, u32::from_le_bytes(w));
+                    self.writes.push((a, v));
+                    if self.mcds.write(a, v).is_err() {
+                        return Some(OpResult { err: PL0_ERR_DATA, bytes_ok: 4 * k, data: Vec::new() });
+                    }
+                }
+                Some(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: data.len(), data: Vec::new() })
+            }
+            _ => None,
+        }
+    }
+
     /// GTM register and MCS RAM accesses (word access); `None` for other addresses.
     fn gtm_access(&mut self, op: &BatchOp) -> Option<OpResult> {
         match *op {
@@ -824,6 +864,7 @@ impl Adapter for SimAdapter {
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         self.tick();
         self.execs += 1;
+        self.mcds.observe(self.halted[0]);
         let mut out = Vec::with_capacity(batch.len());
         // As on the chip, a failing bridge access fails the bridge accesses after it in the batch.
         let mut bridge_failed = false;
@@ -846,6 +887,10 @@ impl Adapter for SimAdapter {
                 continue;
             }
             if let Some(r) = self.gtm_access(&op) {
+                out.push(r);
+                continue;
+            }
+            if let Some(r) = self.mcds_access(&op) {
                 out.push(r);
                 continue;
             }
@@ -886,7 +931,9 @@ impl Adapter for SimAdapter {
                         for (k, chunk) in data.chunks(4).enumerate() {
                             let mut w = [0u8; 4];
                             w[..chunk.len()].copy_from_slice(chunk);
-                            self.write32(addr as u32 + 4 * k as u32, u32::from_le_bytes(w));
+                            let (a, v) = (addr as u32 + 4 * k as u32, u32::from_le_bytes(w));
+                            self.write32(a, v);
+                            self.mcds.on_store(a, v);
                         }
                     }
                     out.push(OpResult { err: PL0_ERR_NO_ERROR, bytes_ok: data.len(), data: Vec::new() });

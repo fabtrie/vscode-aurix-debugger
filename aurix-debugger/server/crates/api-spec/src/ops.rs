@@ -149,6 +149,30 @@ api! {
     /// UCBs are reported but cannot be applied.
     op ucb_compare [ucb]: POST "/api/v1/ucb/compare" (UcbCompareRequest) -> UcbData;
 
+    /// Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow
+    /// (optionally only while the PC is inside a function or address range) or every write into an
+    /// address range. Stop: `halt` (the last 8 KB before the core halts, stopped in hardware),
+    /// `full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds
+    /// about 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they
+    /// use it.
+    op trace_arm [trace]: POST "/api/v1/trace/arm" (TraceConfigRequest) -> TraceData;
+
+    /// Check a trace configuration without arming: the resources it takes and the window to
+    /// expect, or why it cannot be armed.
+    op trace_check [trace]: POST "/api/v1/trace/check" (TraceConfigRequest) -> TraceData;
+
+    /// Whether a trace is armed, by whom, how full the trace RAM is and whether it finished (a
+    /// trace stopped on halt finishes when the core halts), and the last recording.
+    op trace_status [trace]: GET "/api/v1/trace" (NoArgs) -> TraceData;
+
+    /// Stop the armed trace (if it still runs) and read the trace RAM.
+    op trace_stop [trace]: POST "/api/v1/trace/stop" (NoArgs) -> TraceData;
+
+    /// The last recording, decoded: program flow as instructions with function, file and line
+    /// (`Columns` names the fields of each `Steps` row; gaps are objects), or data trace writes
+    /// with address, value and the variable hit. `max`: the newest rows only.
+    op trace_read [trace]: GET "/api/v1/trace/read" (TraceReadRequest) -> TraceData;
+
     /// Stage values from the compared files: everything, one UCB, one field or the password.
     /// Nothing is written; the result is the updated comparison (`taken` per field).
     op ucb_apply [ucb]: POST "/api/v1/ucb/apply" (UcbApplyRequest) -> UcbData;

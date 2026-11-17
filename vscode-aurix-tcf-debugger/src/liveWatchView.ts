@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { LiveUpdater } from './liveUpdate';
-import type { LiveWatchNode, LiveWatchRootResult } from './liveWatchEvaluator';
+import type { LiveWatchNode, LiveWatchRootResult, LiveWatchTraceInfo } from './liveWatchEvaluator';
 import { isLiveWatchPeripheral, LiveWatchPeripheral, peripheralExpression, PeripheralWatchEntry } from './peripheralLiveWatch';
 
 type LiveWatchStoredExpression = {
@@ -30,6 +30,9 @@ type LiveWatchRow = {
 	/** The expression can be edited (not for peripheral registers and fields). */
 	renamable: boolean;
 	tooltip: string;
+	/** A small tag after the value (trace mode: writes, lost, polled). */
+	badge?: string;
+	badgeKind?: 'trace' | 'warn' | 'muted';
 	/** data-vscode-context of the row, selects the context menu entries. */
 	context: string;
 };
@@ -62,6 +65,8 @@ export interface LiveWatchInstanceOptions {
 	storageKey: string;
 	/** The instance's own refresh interval; the global one when missing. */
 	intervalMs?: number;
+	/** Every write by the miniMCDS data trace instead of reading at the interval. */
+	trace?: boolean;
 	/** The webview got the focus, so it is the one "Add to Live Watch" offers first. */
 	onDidFocus?: () => void;
 	/** The debug session to read with; the active one when missing (tests replace it). */
@@ -108,8 +113,12 @@ export class LiveWatchInstance implements vscode.Disposable {
 		},
 	});
 
+	/** Every write by the miniMCDS data trace (the interval reads what the trace cannot take). */
+	private traceMode = false;
+
 	constructor(private readonly context: vscode.ExtensionContext, private readonly options: LiveWatchInstanceOptions) {
 		this.id = options.id;
+		this.traceMode = options.trace === true;
 		this.loadExpressions();
 		if (options.intervalMs !== undefined) {
 			this.live.setIntervalOverride(options.intervalMs);
@@ -169,6 +178,22 @@ export class LiveWatchInstance implements vscode.Disposable {
 
 	setIntervalOverride(ms: number | undefined): void {
 		this.live.setIntervalOverride(ms);
+	}
+
+	/** Whether this Live Watch traces every write (miniMCDS) instead of reading at its interval. */
+	get trace(): boolean {
+		return this.traceMode;
+	}
+
+	setTrace(on: boolean): void {
+		if (this.traceMode === on) {
+			return;
+		}
+		this.traceMode = on;
+		// The server sets the live set up again in the other mode with the next refresh.
+		this.results.forEach((r) => delete r.trace);
+		this.updateDescription();
+		this.render(true);
 	}
 
 	dispose(): void {
@@ -493,7 +518,7 @@ export class LiveWatchInstance implements vscode.Disposable {
 		}
 		let values: LiveWatchRootResult[];
 		try {
-			const response = await session.customRequest('aurix/liveWatchEvaluate', { items, viewId: this.id, intervalMs: this.live.intervalMs, live }) as { values?: LiveWatchRootResult[] } | undefined;
+			const response = await session.customRequest('aurix/liveWatchEvaluate', { items, viewId: this.id, intervalMs: this.live.intervalMs, live, trace: this.traceMode }) as { values?: LiveWatchRootResult[] } | undefined;
 			values = response?.values ?? [];
 		} catch (e) {
 			const error = e instanceof Error ? e.message : String(e);
@@ -597,7 +622,8 @@ export class LiveWatchInstance implements vscode.Disposable {
 			paused,
 			readOnly: this.isReadOnly(target),
 			renamable: kind === 'root' && !peripheral,
-			tooltip: kind === 'more' ? '' : tooltipOf(root, node, value, error, peripheral),
+			tooltip: kind === 'more' ? '' : tooltipOf(root, node, value, error, peripheral) + (kind === 'root' ? traceTooltip(this.results.get(root)?.trace, this.live.intervalMs) : ''),
+			...(kind === 'root' ? traceBadge(this.results.get(root)?.trace) : {}),
 			context: JSON.stringify(section
 				? { webviewSection: section, rowId: id, instanceId: this.id, preventDefaultContextMenuItems: true }
 				: { preventDefaultContextMenuItems: true }),
@@ -632,7 +658,7 @@ export class LiveWatchInstance implements vscode.Disposable {
 	}
 
 	private updateDescription(): void {
-		this.host?.setDescription(this.live.description);
+		this.host?.setDescription(this.traceMode ? `trace every write \u00b7 ${this.live.description}` : this.live.description);
 	}
 
 	private getHtml(webview: vscode.Webview, mediaRoot: vscode.Uri): string {
@@ -684,6 +710,32 @@ function tooltipOf(root: string, node: LiveWatchNode, value: string, error: stri
 		heading = `${root} @ 0x${peripheral.address.toString(16)}, ${bits}`;
 	}
 	return error ? `${heading}\n${error}` : `${heading} = ${value}`;
+}
+
+/** The tag a root of a Live Watch in trace mode shows after its value. */
+function traceBadge(t: LiveWatchTraceInfo | undefined): Pick<LiveWatchRow, 'badge' | 'badgeKind'> {
+	if (!t) {
+		return {};
+	}
+	if (t.source === 'trace') {
+		if (t.lost) {
+			return { badge: `${t.lost} lost`, badgeKind: 'warn' };
+		}
+		return { badge: `${(t.writes ?? 0).toLocaleString()} writes`, badgeKind: 'trace' };
+	}
+	return { badge: 'polled', badgeKind: t.reason ? 'warn' : 'muted' };
+}
+
+function traceTooltip(t: LiveWatchTraceInfo | undefined, intervalMs: number): string {
+	if (!t) {
+		return '';
+	}
+	if (t.source === 'trace') {
+		const last = t.tTargetNs !== undefined ? `, last write at ${(t.tTargetNs / 1e6).toFixed(3)} ms target time` : '';
+		const lost = t.lost ? `\nThe trace lost data ${t.lost} times: writes in between are missing.` : '';
+		return `\nTraced: every write (miniMCDS data trace), ${t.writes ?? 0} so far${last}.${lost}`;
+	}
+	return `\nRead every ${intervalMs} ms instead of traced${t.reason ? `: ${t.reason}` : ''}.`;
 }
 
 function rootRowId(expression: string, paused: boolean): string {

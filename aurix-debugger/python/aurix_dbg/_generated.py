@@ -1046,6 +1046,37 @@ class TargetList:
 
 
 @dataclass
+class TraceData:
+    """Trace data as the trace service answers: a plan, a status, a recording or a decoded trace."""
+
+    data: Any
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TraceData:
+        return cls(
+            data=d.get("data"),
+        )
+
+
+@dataclass
+class TraceRange:
+    """A trace range: a function (by name, its whole code) or an address range."""
+
+    function: str | None = None
+    len: int | None = None
+    start: Any | None = None
+    """Start address (number or `0x` string)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TraceRange:
+        return cls(
+            function=d.get("function"),
+            len=d.get("len"),
+            start=d.get("start"),
+        )
+
+
+@dataclass
 class UcbChange:
     """One staged UCB change."""
 
@@ -1606,6 +1637,57 @@ class GeneratedClient:
             files: Image files with UCB records (e.g. a post-build HEX) on the debug server's machine; empty: compare again with the files of the last comparison.
         """
         return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/compare", None, _args({"files": files})))
+
+    def trace_arm(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
+        """Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow
+        (optionally only while the PC is inside a function or address range) or every write into an
+        address range. Stop: `halt` (the last 8 KB before the core halts, stopped in hardware),
+        `full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds
+        about 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they
+        use it.
+
+        Args:
+            core: Observed core; only 0 (CPU0) so far.
+            kind: `program` (default) or `data`.
+            ranges: Program: at most one range the PC must be inside; data: exactly one range.
+            stop: `halt` (default for program), `full`, `manual` (default for data), or a function name to stop at.
+            timestamps: `tsu` (default: time stamps with messages) or `ticks`.
+        """
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/arm", None, _args({"core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
+
+    def trace_check(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
+        """Check a trace configuration without arming: the resources it takes and the window to
+        expect, or why it cannot be armed.
+
+        Args:
+            core: Observed core; only 0 (CPU0) so far.
+            kind: `program` (default) or `data`.
+            ranges: Program: at most one range the PC must be inside; data: exactly one range.
+            stop: `halt` (default for program), `full`, `manual` (default for data), or a function name to stop at.
+            timestamps: `tsu` (default: time stamps with messages) or `ticks`.
+        """
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/check", None, _args({"core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
+
+    def trace_status(self) -> TraceData:
+        """Whether a trace is armed, by whom, how full the trace RAM is and whether it finished (a
+        trace stopped on halt finishes when the core halts), and the last recording.
+        """
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace", None, None))
+
+    def trace_stop(self) -> TraceData:
+        """Stop the armed trace (if it still runs) and read the trace RAM.
+        """
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/stop", None, None))
+
+    def trace_read(self, *, max: int | None = None) -> TraceData:
+        """The last recording, decoded: program flow as instructions with function, file and line
+        (`Columns` names the fields of each `Steps` row; gaps are objects), or data trace writes
+        with address, value and the variable hit. `max`: the newest rows only.
+
+        Args:
+            max: The newest rows only (default 20000).
+        """
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/read", _args({"max": max}), None))
 
     def ucb_apply(self, *, target: str) -> UcbData:
         """Stage values from the compared files: everything, one UCB, one field or the password.

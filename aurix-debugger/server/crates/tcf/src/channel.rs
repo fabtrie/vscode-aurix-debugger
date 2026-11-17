@@ -23,7 +23,7 @@ use crate::contexts::{chip_name, cores, find_core, owning_core, read_pc, reason_
 use crate::symstore::elf_id;
 use crate::queue::{self, Queue};
 use crate::wire::{self, Reader};
-use crate::{live, osaware, profile, Shared, SERVICES};
+use crate::{live, osaware, profile, trace, Shared, SERVICES};
 
 // TCF standard error codes
 const ERR_OTHER: i64 = 1;
@@ -212,7 +212,34 @@ impl Channel {
             }
             ("AurixOS", "startProfile") => {
                 let period = a.value(0).ok().and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
-                let v = profile::start_cmd(&self.shared, period).map_err(|e| err(ERR_OTHER, e))?;
+                let lanes = a.value(1).ok();
+                let v = profile::start_cmd(&self.shared, period, lanes.as_ref()).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            // miniMCDS trace: arm, status, stop (reads the trace RAM), read (decoded), check.
+            ("AurixTrace", "arm") => {
+                let v = trace::arm_cmd(&self.shared, &a.value(0)?).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "check") => {
+                let v = trace::check_cmd(&self.shared, &a.value(0)?).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "status") => {
+                let v = trace::status_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "stop") => {
+                let v = trace::stop_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "read") => {
+                let opts = a.value(0).unwrap_or(Value::Null);
+                let v = trace::read_cmd(&self.shared, &opts).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixOS", "getProfileLanes") => {
+                let v = profile::lanes_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
             ("AurixOS", "stopProfile") => Ok(vec![String::new(), profile::stop_cmd(&self.shared).to_string()]),
@@ -407,7 +434,8 @@ impl Channel {
                 let key = a.string(0)?;
                 let regions = live::parse_regions(&a.value(1)?).map_err(|e| err(ERR_JSON_SYNTAX, e))?;
                 let period_us = a.u64(2)?.min(u32::MAX as u64) as u32;
-                live::set(&self.shared, self.id, &key, regions, period_us).map_err(|e| err(ERR_OTHER, e))?;
+                let trace = matches!(a.value(3), Ok(Value::Bool(true)));
+                live::set(&self.shared, self.id, &key, regions, period_us, trace).map_err(|e| err(ERR_OTHER, e))?;
                 // No result, only the error field (as `ContextReset.reset`).
                 Ok(vec![String::new()])
             }

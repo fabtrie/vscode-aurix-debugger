@@ -13,11 +13,19 @@ import * as vscode from 'vscode';
 import type { PanelPlacement } from './debugLayout';
 import { LiveUpdater } from './liveUpdate';
 import { describeOsError } from './tcf/osaware';
-import type { OsProfile, OsTransition } from './tcf/osaware';
+import type { OsLane, OsLaneSetting, OsProfile, OsTransition } from './tcf/osaware';
 
 /** One lane's blocks, as the webview draws them. */
 type Lane = {
+	lane: number;
 	core: number;
+	label: string;
+	key: string;
+	/** "off", "trace" or a period in µs, as set for the lane. */
+	mode: 'off' | 'trace' | number;
+	/** "trace", "host" or "off": how it is recorded now. */
+	source: string;
+	reason?: string;
 	blocks: Array<{ task: string; t: number; us: number }>;
 };
 
@@ -34,10 +42,12 @@ type View = {
 	/** Right-hand edge of the window. */
 	nowUs: number;
 	lanes: Lane[];
-	/** Share of the window per task, per core, most first. */
-	shares: Array<{ core: number; task: string; us: number; percent: number }>;
-	/** Non-idle share per core. */
-	load: Array<{ core: number; percent: number }>;
+	/** Share of the window per task, per lane, most first. */
+	shares: Array<{ lane: number; label: string; task: string; us: number; percent: number }>;
+	/** Non-idle share per lane. */
+	load: Array<{ lane: number; label: string; percent: number }>;
+	/** Data trace losses (traced lanes). */
+	traceLost: number;
 	/** Colour index per task, assigned in first-seen order and then kept. */
 	colors: Array<{ task: string; index: number }>;
 	samples: number;
@@ -52,6 +62,8 @@ const IDLE = /^(INVALID_TASK|IdleTask|.*_?Idle(Task)?(_.*)?)$/i;
 export class OsProfilePanel {
 	static readonly viewType = 'aurixOsProfile';
 	private static current: OsProfilePanel | undefined;
+	/** Rate per lane (`core:attr`), kept while VS Code runs so reopening the panel keeps it. */
+	private static readonly laneModes = new Map<string, 'off' | 'trace' | number>();
 
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly live: LiveUpdater;
@@ -59,8 +71,11 @@ export class OsProfilePanel {
 	private running = false;
 	private periodUs = 1000;
 	private windowUs = 200_000;
-	/** Every transition seen, per core, oldest first. Trimmed to the window plus a margin. */
+	/** Every transition seen, per lane, oldest first. Trimmed to the window plus a margin. */
 	private readonly perCore = new Map<number, OsTransition[]>();
+	/** The lanes the server reports (all of them, recorded or off). */
+	private lanes: OsLane[] = [];
+	private traceLost = 0;
 	private lastT = 0;
 	private nowUs = 0;
 	private samples = 0;
@@ -129,6 +144,18 @@ export class OsProfilePanel {
 		if (m?.type === "period") {
 			this.periodUs = Number(m.periodUs) || this.periodUs;
 			await this.restartSampling();
+		} else if (m?.type === 'laneMode' && typeof m.key === 'string') {
+			const mode = m.mode === 'off' || m.mode === 'trace' ? m.mode : Number(m.mode);
+			if (mode === 'trace') {
+				// One data trace: tracing this lane takes it from any other.
+				for (const [k, v] of OsProfilePanel.laneModes) {
+					if (v === 'trace' && k !== m.key) {
+						OsProfilePanel.laneModes.delete(k);
+					}
+				}
+			}
+			OsProfilePanel.laneModes.set(m.key, typeof mode === 'number' && !(mode > 0) ? this.periodUs : mode);
+			await this.restartSampling();
 		} else if (m?.type === "pause") {
 			// Pause here stops the sampler outright, not just the drawing.
 			this.live.togglePaused();
@@ -150,8 +177,13 @@ export class OsProfilePanel {
 			return;
 		}
 		try {
-			const r = (await session.customRequest('aurix/osProfileStart', { periodUs: this.periodUs })) as { PeriodUs: number; Cores: number };
+			const lanes: OsLaneSetting[] = [...OsProfilePanel.laneModes].map(([k, Mode]) => {
+				const [core, Attr] = k.split(':');
+				return { Core: Number(core), Attr, Mode };
+			});
+			const r = (await session.customRequest('aurix/osProfileStart', { periodUs: this.periodUs, lanes })) as { PeriodUs: number; Cores: number; Lanes?: OsLane[] };
 			this.periodUs = r.PeriodUs;
+			this.lanes = r.Lanes ?? [];
 			this.running = true;
 			this.message = undefined;
 			this.perCore.clear();
@@ -204,6 +236,10 @@ export class OsProfilePanel {
 			this.periodUs = p.PeriodUs ?? this.periodUs;
 			this.dropped = p.Dropped ?? 0;
 			this.missed = p.Missed ?? 0;
+			this.traceLost = p.TraceLost ?? 0;
+			if (p.Lanes) {
+				this.lanes = p.Lanes;
+			}
 			this.message = p.Error;
 			for (const t of p.Transitions ?? []) {
 				this.lastT = Math.max(this.lastT, t.T);
@@ -211,9 +247,10 @@ export class OsProfilePanel {
 				if (!this.colorOf.has(t.Task) && !IDLE.test(t.Task)) {
 					this.colorOf.set(t.Task, this.colorOf.size);
 				}
-				const lane = this.perCore.get(t.Core) ?? [];
+				const key = t.Lane ?? t.Core;
+				const lane = this.perCore.get(key) ?? [];
 				lane.push(t);
-				this.perCore.set(t.Core, lane);
+				this.perCore.set(key, lane);
 			}
 			this.trim();
 			this.post();
@@ -251,9 +288,16 @@ export class OsProfilePanel {
 		const shares: View['shares'] = [];
 		const load: View['load'] = [];
 
-		for (const core of [...this.perCore.keys()].sort((a, b) => a - b)) {
+		// Every lane the server reports (off ones too, so they can be switched on); an older server
+		// reports none: one lane per core then.
+		const known: OsLane[] = this.lanes.length > 0
+			? this.lanes
+			: [...this.perCore.keys()].map((core) => ({ Lane: core, Core: core, Attr: 'RUNNINGTASK', Mode: this.periodUs, PeriodUs: this.periodUs, Source: 'host' }));
+		for (const info of [...known].sort((a, b) => a.Core - b.Core || a.Lane - b.Lane)) {
+			const core = info.Lane;
 			const lane = this.perCore.get(core) ?? [];
 			const blocks: Lane['blocks'] = [];
+			const label = `cpu${info.Core}` + (info.Attr === 'RUNNINGTASK' ? '' : ` ${info.Attr.replace(/^RUNNING/, '').toLowerCase()}`);
 			for (let i = 0; i < lane.length; i++) {
 				const start = Math.max(lane[i].T, from);
 				const end = i + 1 < lane.length ? lane[i + 1].T : this.nowUs;
@@ -262,7 +306,13 @@ export class OsProfilePanel {
 				}
 				blocks.push({ task: lane[i].Task, t: start - from, us: Math.max(0, end - start) });
 			}
-			lanes.push({ core, blocks });
+			lanes.push({
+				lane: info.Lane, core: info.Core, label, key: `${info.Core}:${info.Attr}`,
+				mode: info.Mode, source: info.Source, reason: info.Reason ?? undefined, blocks,
+			});
+			if (info.Source === 'off') {
+				continue;
+			}
 
 			const total = blocks.reduce((s, b) => s + b.us, 0);
 			const byTask = new Map<string, number>();
@@ -271,14 +321,14 @@ export class OsProfilePanel {
 			}
 			let busy = 0;
 			for (const [task, us] of byTask) {
-				shares.push({ core, task, us, percent: total > 0 ? (us * 100) / total : 0 });
+				shares.push({ lane: info.Lane, label, task, us, percent: total > 0 ? (us * 100) / total : 0 });
 				if (!IDLE.test(task)) {
 					busy += us;
 				}
 			}
-			load.push({ core, percent: total > 0 ? (busy * 100) / total : 0 });
+			load.push({ lane: info.Lane, label, percent: total > 0 ? (busy * 100) / total : 0 });
 		}
-		shares.sort((a, b) => a.core - b.core || b.us - a.us);
+		shares.sort((a, b) => a.lane - b.lane || b.us - a.us);
 
 		return {
 			running: this.running,
@@ -294,6 +344,7 @@ export class OsProfilePanel {
 			samples: this.samples,
 			dropped: this.dropped,
 			missed: this.missed,
+			traceLost: this.traceLost,
 			message: this.message,
 		};
 	}
@@ -317,7 +368,7 @@ export class OsProfilePanel {
 <body>
 <div id="toolbar">
   <button id="run" type="button">Pause</button>
-  <label class="sr" for="period">Sampling period</label>
+  <label for="period" class="lbl" title="Rate of the lanes without one of their own">Default rate</label>
   <select id="period">
     <option value="100">100 µs</option>
     <option value="250">250 µs</option>
@@ -332,11 +383,11 @@ export class OsProfilePanel {
   </select>
   <span id="stats"></span>
   <span class="spacer"></span>
-  <span class="note">sampled, not traced</span>
+  <span class="note" id="kind">sampled, not traced</span>
   <button id="clear" type="button">Clear</button>
 </div>
 <div id="message"></div>
-<h2 class="h">Running task per core</h2>
+<h2 class="h">Running task per core <span class="sub">rate per lane: off, a period, or trace (every write, CPU0)</span></h2>
 <div id="lanes"></div>
 <div id="axis"></div>
 <div id="legend"></div>
@@ -348,7 +399,7 @@ export class OsProfilePanel {
   <div id="loadBox">
     <h2 class="h">CPU load <span class="sub">non-idle share</span></h2>
     <div id="load"></div>
-    <p class="note wrap">The sampler reads <code>RUNNINGTASK</code> for every core in one coalesced bus access and reports only the changes. A switch shorter than the sampling period is not seen at all, so this is a statistical profile — not an MCDS trace.</p>
+    <p class="note wrap">A sampled lane reads its OS variable at its rate and reports only the changes: a switch shorter than the rate is not seen at all, so it is a statistical profile. A traced lane records every write with the miniMCDS data trace and the target's time stamp: exact, for one lane of CPU0 at a time. Hatched: the trace lost data.</p>
   </div>
 </div>
 <script nonce="${nonce}" src="${js}"></script>

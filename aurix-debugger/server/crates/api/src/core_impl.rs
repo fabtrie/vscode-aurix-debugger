@@ -76,6 +76,32 @@ fn api_err(e: aurix_core::Error) -> ApiError {
     ApiError::new(code, e.to_string())
 }
 
+/// A trace service error (configuration, resources, the target).
+fn api_msg(e: String) -> ApiError {
+    let code = if e.contains("in use") || e.contains("no miniMCDS") { ErrorCode::Resource } else if e.starts_with("no recording") || e.starts_with("no trace") { ErrorCode::NotFound } else { ErrorCode::BadRequest };
+    ApiError::new(code, e)
+}
+
+/// The trace service's configuration JSON from the REST/MCP request.
+fn trace_config(r: &TraceConfigRequest) -> serde_json::Value {
+    let range = |x: &TraceRange| match &x.function {
+        Some(f) => serde_json::json!({ "Function": f }),
+        None => serde_json::json!({ "Start": x.start, "Len": x.len }),
+    };
+    let stop = match r.stop.as_deref() {
+        None => serde_json::Value::Null,
+        Some(s @ ("halt" | "full" | "manual")) => serde_json::json!(s),
+        Some(f) => serde_json::json!({ "Function": f }),
+    };
+    serde_json::json!({
+        "Kind": r.kind.clone().unwrap_or_else(|| "program".into()),
+        "Core": r.core.unwrap_or(0),
+        "Ranges": r.ranges.iter().map(range).collect::<Vec<_>>(),
+        "Stop": stop,
+        "Timestamps": r.timestamps.clone().unwrap_or_else(|| "tsu".into()),
+    })
+}
+
 fn busy(target: &str) -> ApiError {
     ApiError::new(ErrorCode::Busy, format!("[{target}] a source-level step of a debugger client is in progress"))
 }
@@ -887,6 +913,33 @@ impl DebuggerApi for CoreApi {
     fn tcl(&self, req: TclRequest) -> Result<CommandOutput, ApiError> {
         self.check_control()?;
         self.tcl_command(&req.command)
+    }
+
+    fn trace_arm(&self, req: TraceConfigRequest) -> Result<TraceData, ApiError> {
+        self.check_control()?;
+        let v = tcf::trace::arm_cmd(&self.session, &trace_config(&req)).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_check(&self, req: TraceConfigRequest) -> Result<TraceData, ApiError> {
+        let v = tcf::trace::check_cmd(&self.session, &trace_config(&req)).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_status(&self, _req: NoArgs) -> Result<TraceData, ApiError> {
+        let v = tcf::trace::status_cmd(&self.session).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_stop(&self, _req: NoArgs) -> Result<TraceData, ApiError> {
+        self.check_control()?;
+        let v = tcf::trace::stop_cmd(&self.session).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_read(&self, req: TraceReadRequest) -> Result<TraceData, ApiError> {
+        let v = tcf::trace::read_cmd(&self.session, &serde_json::json!({ "Max": req.max })).map_err(api_msg)?;
+        Ok(TraceData { data: v })
     }
 
     fn ucb_read(&self, req: UcbReadRequest) -> Result<UcbData, ApiError> {

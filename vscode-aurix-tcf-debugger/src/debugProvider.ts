@@ -10,6 +10,7 @@
  * disassembly, memory access, multi-core coordination, etc.
  */
 
+import { TraceCommand, TraceConfig, TraceOp } from './tcf/trace';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
@@ -138,6 +139,8 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	// The ORTI file the AUTOSAR OS generator wrote beside the ELF. Loaded after the symbols, so
 	// the AUTOSAR OS view and task-aware thread names work without any further setup.
 	ortiFile?: string;
+	/** miniMCDS trace armed once the session is set up (TraceConfig). */
+	trace?: TraceConfig;
 
 	// Optional reset behavior (no GUI; can be set in launch.json)
 	resetType?: string;
@@ -2566,6 +2569,20 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		void this.showExistingExternalBreakpoints();
 		// After the symbols are in place: the attribute expressions are resolved against them.
 		void this.loadOrtiFromLaunchConfig(this.launchArgs?.ortiFile);
+		void this.armTraceFromLaunchConfig(this.launchArgs?.trace);
+	}
+
+	/** Launch configuration `trace`: arms that trace configuration once the session is set up. */
+	private async armTraceFromLaunchConfig(cfg: unknown): Promise<void> {
+		if (!cfg || typeof cfg !== 'object') {
+			return;
+		}
+		try {
+			await this.tcfClient.sendCommand(new TraceCommand('arm', cfg));
+			this.sendEvent(new OutputEvent('Trace armed from the launch configuration.\n', 'console'));
+		} catch (e) {
+			this.sendEvent(new OutputEvent(`Trace from the launch configuration not armed: ${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
+		}
 	}
 
 	protected override async threadsRequestAsync(response: DebugProtocol.ThreadsResponse): Promise<void> {
@@ -4864,9 +4881,26 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
+		if (command === 'aurix/trace') {
+			// miniMCDS trace (AurixTrace): `op` arm | check | status | stop | read, with `config` or `max`.
+			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read'];
+			const op = ops.find((o) => o === args?.op);
+			try {
+				if (!op) {
+					throw new Error(`unknown trace operation '${args?.op}'`);
+				}
+				const arg = op === 'arm' || op === 'check' ? args?.config ?? {} : op === 'read' ? { Max: args?.max } : undefined;
+				response.body = await this.tcfClient.sendCommand(new TraceCommand(op, arg));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
 		if (command === 'aurix/osProfileStart') {
 			try {
-				response.body = await this.tcfClient.sendCommand(new StartProfileOsCommand(Number(args?.periodUs ?? 1000)));
+				const lanes = Array.isArray(args?.lanes) ? args.lanes : undefined;
+				response.body = await this.tcfClient.sendCommand(new StartProfileOsCommand(Number(args?.periodUs ?? 1000), lanes));
 				this.sendResponse(response);
 			} catch (e) {
 				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
@@ -5166,7 +5200,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			// the instance's live set on the server, sampled every `intervalMs`.
 			const viewId = typeof args?.viewId === 'string' && args.viewId !== '' ? args.viewId : undefined;
 			const intervalMs = typeof args?.intervalMs === 'number' && Number.isFinite(args.intervalMs) && args.intervalMs > 0 ? args.intervalMs : 1000;
-			const live = viewId !== undefined && args?.live !== false ? { viewId, intervalMs } : undefined;
+			const live = viewId !== undefined && args?.live !== false ? { viewId, intervalMs, trace: args?.trace === true } : undefined;
 			let ctx: string | undefined;
 			try {
 				ctx = await this.pickLiveWatchContextId();

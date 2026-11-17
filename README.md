@@ -14,6 +14,7 @@ VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore
 - **Watching data:** Call Stack and Variables, the Watch view, and a **Live Watch** that keeps updating while the target runs, in the sidebar or in editor tabs; C++ names are supported
 - **Peripherals and memory:** read and write SVD registers in the Peripheral view (HSM and SCR peripherals included), the Memory Inspector, the Disassembly view with Go to Address or Symbol
 - **AUTOSAR OS:** from the ORTI file: the running task per core, task names in the Call Stack, tasks, stacks and alarms, task profiling
+- **On-chip trace (TC37x):** program flow and every write to a variable, recorded by the chip's miniMCDS over the miniWiggler
 - **Flash and UCBs:** program ELF, HEX, S-record and binary images; read, compare, edit, export and write the TC3xx UCBs
 - **Target health** in the status bar: no power, reset, no debug access, probe lost
 - **Automation:** custom toolbar actions, `monitor` Tcl commands, and the debugger hub that serves VS Code, Claude (MCP), REST and Python
@@ -147,10 +148,22 @@ The **Live Watch** view in the Run and Debug sidebar keeps reading variables and
 - **Add to Live Watch** on a register in the Peripheral view adds the register.
 - **Pause Updates** keeps an entry from being refreshed while the target runs.
 - The refresh interval is set from the status bar or per view with its gear button. A view that is not visible reads nothing.
+- **Trace every write** in a view's interval menu records its variables with the chip's trace instead of reading them: every change with target time, nothing missed between refreshes (TC37x, variables written by CPU0; see [On-chip trace](#on-chip-trace)). One view at a time can trace; an entry that cannot be traced is read as usual and its badge says why.
 
 ### AUTOSAR OS
 
-With `ortiFile` set (or **Load ORTI File…**), the **AUTOSAR OS** view shows per core the running task, its priority, the running ISR and the last OS error, and the Call Stack names each core's thread after its running task. **Show AUTOSAR OS Objects** opens tables of tasks, stacks with their usage, alarms, resources and more. **Show OS Profile** samples which task runs on each core while the target runs.
+With `ortiFile` set (or **Load ORTI File…**), the **AUTOSAR OS** view shows per core the running task, its priority, the running ISR and the last OS error, and the Call Stack names each core's thread after its running task. **Show AUTOSAR OS Objects** opens tables of tasks, stacks with their usage, alarms, resources and more. **Show OS Profile** samples which task runs on each core while the target runs; each lane (core, ISR) has its own rate, and CPU0's lanes can be traced instead of sampled, which catches every switch.
+
+### On-chip trace
+
+On a TC37x the debugger uses the chip's small trace unit (miniMCDS, 8 KB) over the ordinary miniWiggler connection. **Show Trace** opens the Trace panel:
+
+- **Record** all code of CPU0, only inside one function or address range, or every write into a variable range.
+- **Stop** when the core halts (the trace then ends exactly at the halt, e.g. a breakpoint), when the buffer is full, manually, or at a function.
+- The panel checks the configuration as you type and shows the resources it takes; configurations can be saved by name, and a launch configuration `trace` object arms one when the session starts.
+- The result lists the executed code grouped by function with source lines and target times; a click opens the source. **Export CSV** saves it.
+
+8 KB holds about 80 µs of unfiltered program flow, more with a filter. Only CPU0 can be traced, and the data trace sees only CPU0's writes. A trace that stops on a halt runs right up to the breakpoint or halt point.
 
 ### Peripheral view
 

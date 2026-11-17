@@ -103,7 +103,7 @@ fn without_a_sampler_every_region_is_read_as_memory_get_reads_it() {
     let core0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
     set_mem(&h, A, 0x1234_5678);
     let regions = vec![region(&core0, A, 4), region(&core0, A, 128), region(&core0, SIM_UNMAPPED.start, 4), region(&core0, HSM_PERI, 4)];
-    live::set(&sh, 1, "view", regions.clone(), 200_000).unwrap();
+    live::set(&sh, 1, "view", regions.clone(), 200_000, false).unwrap();
     assert_eq!(daq_sessions(&h), 0, "no DAQ session without a sampler");
     for _ in 0..3 {
         let v = live::values(&sh, 1, "view").unwrap();
@@ -131,7 +131,7 @@ fn with_a_sampler_plain_bus_regions_come_from_the_probe() {
     let core0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
     set_mem(&h, A, 0x0000_0011);
     let regions = vec![region(&core0, A, 4), region(&core0, A + 0x100, 128), region(&core0, HSM_PERI, 4)];
-    live::set(&sh, 1, "view", regions, 100_000).unwrap();
+    live::set(&sh, 1, "view", regions, 100_000, false).unwrap();
     assert_eq!(daq_sessions(&h), 1);
     // Before the probe sends a value the client still gets one, read.
     let first = live::values(&sh, 1, "view").unwrap();
@@ -151,17 +151,17 @@ fn the_period_and_the_regions_follow_the_last_set() {
     let h = server(true);
     let sh = tcf::session(h.clone());
     let core0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
-    live::set(&sh, 1, "view", vec![region(&core0, A, 4)], 200_000).unwrap();
+    live::set(&sh, 1, "view", vec![region(&core0, A, 4)], 200_000, false).unwrap();
     let periods = |h: &ServerHandle| h.call(|cx| cx.with(|c| c.daq.sessions().flat_map(|s| s.points.iter().map(|p| (p.addr, p.interval_us()))).collect::<Vec<_>>())).unwrap();
     assert_eq!(periods(&h), vec![(A, 200_000)]);
     // The interval picker moved to 1 s: the same point, retimed.
-    live::set(&sh, 1, "view", vec![region(&core0, A, 4)], 1_000_000).unwrap();
+    live::set(&sh, 1, "view", vec![region(&core0, A, 4)], 1_000_000, false).unwrap();
     assert_eq!(periods(&h), vec![(A, 1_000_000)]);
     // An expression added and the first removed.
-    live::set(&sh, 1, "view", vec![region(&core0, A + 8, 4)], 1_000_000).unwrap();
+    live::set(&sh, 1, "view", vec![region(&core0, A + 8, 4)], 1_000_000, false).unwrap();
     assert_eq!(periods(&h), vec![(A + 8, 1_000_000)]);
     // Two views keep their own sets.
-    live::set(&sh, 1, "other", vec![region(&core0, A, 4)], 500_000).unwrap();
+    live::set(&sh, 1, "other", vec![region(&core0, A, 4)], 500_000, false).unwrap();
     assert_eq!(daq_sessions(&h), 2);
     live::clear(&sh, 1, "view");
     live::clear_owner(&sh, 1);
@@ -174,7 +174,7 @@ fn a_region_the_probe_cannot_read_becomes_a_plain_read_with_its_error() {
     let sh = tcf::session(h.clone());
     let core0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
     let bad = SIM_UNMAPPED.start;
-    live::set(&sh, 1, "view", vec![region(&core0, bad, 4), region(&core0, A, 4)], 100_000).unwrap();
+    live::set(&sh, 1, "view", vec![region(&core0, bad, 4), region(&core0, A, 4)], 100_000, false).unwrap();
     // The probe never answers for it: after its wait it is refused and read, which reports why.
     wait_for(|| {
         let still = h.call(|cx| cx.with(|c| c.daq.sessions().flat_map(|s| s.points.iter().map(|p| p.addr)).any(|a| a == SIM_UNMAPPED.start))).unwrap();

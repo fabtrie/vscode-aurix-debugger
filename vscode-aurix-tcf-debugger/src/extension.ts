@@ -18,6 +18,7 @@ import { LiveWatchManager, pickIntervalMs } from './liveWatchManager';
 import { OsObjectsPanel } from './osObjectsPanel';
 import { UcbPanel } from './ucbPanel';
 import { OsProfilePanel } from './osProfilePanel';
+import { registerTraceStatus, TracePanel } from './tracePanel';
 import { DebugLayout, focusEditorGroup } from './debugLayout';
 import { describeOsError } from './tcf/osaware';
 import {
@@ -390,6 +391,7 @@ export function activate(context: vscode.ExtensionContext) {
 	instructionStepStatusItem.command = 'aurix-debugger.toggleInstructionStepping';
 	instructionStepStatusItem.tooltip = 'Toggle instruction-level stepping';
 	context.subscriptions.push(instructionStepStatusItem);
+	registerTraceStatus(context);
 	liveWatchStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
 	liveWatchStatusItem.command = 'aurix-debugger.configureLiveWatch';
 	liveWatchStatusItem.tooltip = 'Configure the global live update interval';
@@ -439,6 +441,7 @@ export function activate(context: vscode.ExtensionContext) {
 			void vscode.window.showInformationMessage('Debug layout forgotten: the next session opens the default layout.');
 		}),
 		vscode.commands.registerCommand('aurix-debugger.osShowProfile', () => OsProfilePanel.show(context.extensionUri)),
+		vscode.commands.registerCommand('aurix-debugger.showTrace', () => TracePanel.show(context)),
 		vscode.commands.registerCommand('aurix-debugger.showUcbs', () => UcbPanel.show(context.extensionUri)),
 		vscode.commands.registerCommand('aurix-debugger.osShowObjects', (kind?: string) =>
 			OsObjectsPanel.show(context.extensionUri, typeof kind === 'string' ? kind : undefined),

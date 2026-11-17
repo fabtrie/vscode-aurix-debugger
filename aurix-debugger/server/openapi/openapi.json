@@ -3070,6 +3070,109 @@
         ],
         "type": "object"
       },
+      "TraceConfigRequest": {
+        "additionalProperties": false,
+        "description": "A trace configuration.",
+        "properties": {
+          "core": {
+            "default": null,
+            "description": "Observed core; only 0 (CPU0) so far.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "default": null,
+            "description": "`program` (default) or `data`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ranges": {
+            "default": [],
+            "description": "Program: at most one range the PC must be inside; data: exactly one range.",
+            "items": {
+              "$ref": "#/components/schemas/TraceRange"
+            },
+            "type": "array"
+          },
+          "stop": {
+            "default": null,
+            "description": "`halt` (default for program), `full`, `manual` (default for data), or a function name to\nstop at.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamps": {
+            "default": null,
+            "description": "`tsu` (default: time stamps with messages) or `ticks`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TraceData": {
+        "description": "Trace data as the trace service answers: a plan, a status, a recording or a decoded trace.",
+        "properties": {
+          "data": true
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "TraceRange": {
+        "additionalProperties": false,
+        "description": "A trace range: a function (by name, its whole code) or an address range.",
+        "properties": {
+          "function": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "len": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "start": {
+            "default": null,
+            "description": "Start address (number or `0x` string)."
+          }
+        },
+        "type": "object"
+      },
+      "TraceReadRequest": {
+        "additionalProperties": false,
+        "description": "Reading a recording.",
+        "properties": {
+          "max": {
+            "default": null,
+            "description": "The newest rows only (default 20000).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "UcbApplyRequest": {
         "additionalProperties": false,
         "description": "Staging UCB values from the compared image files.",
@@ -6664,6 +6767,348 @@
         "summary": "Run a command of the OpenOCD-compatible Tcl console (like the telnet console).",
         "tags": [
           "tcl"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace": {
+      "get": {
+        "description": "Whether a trace is armed, by whom, how full the trace RAM is and whether it finished (a\ntrace stopped on halt finishes when the core halts), and the last recording.",
+        "operationId": "trace_status",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Whether a trace is armed, by whom, how full the trace RAM is and whether it finished (a trace stopped on halt finishes when the core halts), and the last recording.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/arm": {
+      "post": {
+        "description": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow\n(optionally only while the PC is inside a function or address range) or every write into an\naddress range. Stop: `halt` (the last 8 KB before the core halts, stopped in hardware),\n`full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds\nabout 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they\nuse it.",
+        "operationId": "trace_arm",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "A trace configuration.",
+                "properties": {
+                  "core": {
+                    "default": null,
+                    "description": "Observed core; only 0 (CPU0) so far.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "default": null,
+                    "description": "`program` (default) or `data`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "ranges": {
+                    "default": [],
+                    "description": "Program: at most one range the PC must be inside; data: exactly one range.",
+                    "items": {
+                      "$ref": "#/components/schemas/TraceRange"
+                    },
+                    "type": "array"
+                  },
+                  "stop": {
+                    "default": null,
+                    "description": "`halt` (default for program), `full`, `manual` (default for data), or a function name to\nstop at.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "timestamps": {
+                    "default": null,
+                    "description": "`tsu` (default: time stamps with messages) or `ticks`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow (optionally only while the PC is inside a function or address range) or every write into an address range.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/check": {
+      "post": {
+        "description": "Check a trace configuration without arming: the resources it takes and the window to\nexpect, or why it cannot be armed.",
+        "operationId": "trace_check",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "A trace configuration.",
+                "properties": {
+                  "core": {
+                    "default": null,
+                    "description": "Observed core; only 0 (CPU0) so far.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "default": null,
+                    "description": "`program` (default) or `data`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "ranges": {
+                    "default": [],
+                    "description": "Program: at most one range the PC must be inside; data: exactly one range.",
+                    "items": {
+                      "$ref": "#/components/schemas/TraceRange"
+                    },
+                    "type": "array"
+                  },
+                  "stop": {
+                    "default": null,
+                    "description": "`halt` (default for program), `full`, `manual` (default for data), or a function name to\nstop at.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "timestamps": {
+                    "default": null,
+                    "description": "`tsu` (default: time stamps with messages) or `ticks`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Check a trace configuration without arming: the resources it takes and the window to expect, or why it cannot be armed.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/read": {
+      "get": {
+        "description": "The last recording, decoded: program flow as instructions with function, file and line\n(`Columns` names the fields of each `Steps` row; gaps are objects), or data trace writes\nwith address, value and the variable hit. `max`: the newest rows only.",
+        "operationId": "trace_read",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The newest rows only (default 20000).",
+            "in": "query",
+            "name": "max",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The last recording, decoded: program flow as instructions with function, file and line (`Columns` names the fields of each `Steps` row; gaps are objects), or data trace writes with address, value and the variable hit.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/stop": {
+      "post": {
+        "description": "Stop the armed trace (if it still runs) and read the trace RAM.",
+        "operationId": "trace_stop",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Stop the armed trace (if it still runs) and read the trace RAM.",
+        "tags": [
+          "trace"
         ]
       }
     },

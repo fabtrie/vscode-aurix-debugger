@@ -321,6 +321,12 @@
 				"category": "AURIX™ Debugger"
 			},
 			{
+				"command": "aurix-debugger.showTrace",
+				"title": "Show Trace",
+				"category": "AURIX™ Debugger",
+				"icon": "$(pulse)"
+			},
+			{
 				"command": "aurix-debugger.osShowProfile",
 				"title": "Show OS Profile",
 				"category": "AURIX™ Debugger",
@@ -1173,6 +1179,21 @@
 							"ortiFile": {
 								"type": "string",
 								"description": "ORTI file (.ORT) the AUTOSAR OS generator wrote beside the ELF. Loaded after the symbols; enables the AUTOSAR OS view and task names in the Call Stack."
+							},
+							"trace": {
+								"type": "object",
+								"description": "Arms a miniMCDS trace once the session is set up (the Trace panel reads it). Same keys as the panel configuration.",
+								"properties": {
+									"Core": { "type": "number", "default": 0, "description": "Traced core; only CPU0 is supported." },
+									"Kind": { "type": "string", "enum": ["program", "data"], "default": "program" },
+									"Ranges": {
+										"type": "array",
+										"description": "Program trace: one function or address range to record (empty: all code). Data trace: the range whose writes are recorded.",
+										"items": { "type": "object", "properties": { "Function": { "type": "string" }, "Start": { "type": ["string", "number"] }, "Len": { "type": "number" } } }
+									},
+									"Stop": { "description": "\"halt\", \"full\", \"manual\" or { \"Function\": name }", "default": "halt" },
+									"Timestamps": { "type": "string", "enum": ["tsu", "ticks"], "default": "tsu" }
+								}
 							},
 							"profile": {
 								"type": "string",

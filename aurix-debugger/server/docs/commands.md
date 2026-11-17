@@ -21,6 +21,7 @@ Notation: `<value>` is a value to fill in, `[...]` is optional, `a|b` is one of 
 - [Core-specific (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`)](#core-specific-tricore-cortex_m-gtm_mcs-xc800)
 - [Flash](#flash)
 - [User configuration blocks (`ucb`, TC3xx)](#user-configuration-blocks-ucb-tc3xx)
+- [Trace (`mcds`, TC37x miniMCDS)](#trace-mcds-tc37x-minimcds)
 - [Server, ports and logging](#server-ports-and-logging)
 - [Scripting](#scripting)
 - [TAS adapter (`adapter driver tas_client`)](#tas-adapter-adapter-driver-tas_client)
@@ -985,6 +986,68 @@ ucb status [-json]
 ```
 
 Whether writing is enabled, what is staged.
+
+## Trace (`mcds`, TC37x miniMCDS)
+
+### `mcds arm`
+
+```
+mcds arm [-json] [-core 0] -data <addr> <len> | -program [-filter <addr> <len>] [-stop full|halt|manual | -stopat <addr> <len>] [-ticks|-tsu]
+```
+
+Arm a miniMCDS trace of one core: every write into an address range (data), or the program flow, optionally only inside a range.
+
+Switches the MCDS on, writes the setup, clears the 8 KB trace RAM and starts. `-stop full` keeps the first 8 KB, `halt` and `manual` keep the last 8 KB before the core halts (the debugger stops it when it sees the halt) or before `mcds stop`; `-stopat` stops when the PC enters a range. Time stamps: `-tsu` (default) only with messages, `-ticks` a tick message per step (exact, but fills the buffer in milliseconds). Only CPU0 so far. The trace is shared with traced DAQ points.
+
+### `mcds plan`
+
+```
+mcds plan [-json] <options of mcds arm>
+```
+
+Show the register writes `mcds arm` would make, without touching the target.
+
+### `mcds status`
+
+```
+mcds status [-json]
+```
+
+Whether a trace is armed, its owner, the write pointer, how full the 8 KB are (a ring stays full after its first lap) and whether it finished.
+
+### `mcds stop`
+
+```
+mcds stop [-json]
+```
+
+Stop the trace (if it still runs) and read the trace RAM.
+
+### `mcds decode`
+
+```
+mcds decode [-json] [<max>]
+```
+
+List the events of the last recording: data trace writes with address, value and time; program trace messages raw.
+
+Program flow with source lines needs the code and the symbols: the trace panel and the REST/MCP trace operations decode it.
+
+### `mcds dump`
+
+```
+mcds dump <file>
+```
+
+Save the last recording (8 KB trace RAM with a winIDEA-style 60-byte header).
+
+### `mcds init`
+
+```
+mcds init
+```
+
+Switch the MCDS on (clock, enable bits); `mcds arm` does this itself.
 
 ## Server, ports and logging
 

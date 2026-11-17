@@ -252,7 +252,7 @@ A `condition` works as for breakpoints (see [Shared session](#rest-mcp-and-pytho
 
 ### Periodic sampling (DAQ)
 
-`ws://127.0.0.1:3001/api/v1/sessions/{session}/daq` (or `/api/v1/session/daq`) samples variables while the target runs, **each at its own rate**, and streams their decoded values. There is no hardware DAQ behind this: TAS offers only MCDS trace (which needs an ED device, not a miniWiggler) and a channel that the target firmware would have to serve. The sampler is host-side polled reads, merged into one batch per tick on the core thread.
+`ws://127.0.0.1:3001/api/v1/sessions/{session}/daq` (or `/api/v1/session/daq`) samples variables while the target runs, **each at its own rate**, and streams their decoded values. The sampler is host-side polled reads, merged into one batch per tick on the core thread. A point in `"mode":"trace"` is recorded by the chip instead: every write into it, with target time, through the [miniMCDS](#on-chip-trace-minimcds).
 
 **Sampling runs only while the socket is open.** Configuration travels on the same socket, so a session cannot outlive its client: close the socket, or crash, and the session is removed and the target is left alone. There is no reaper and no idle timeout.
 
@@ -412,6 +412,62 @@ with dbg.daq(("g_motor.speed_rpm", 1000),                # 1 kHz, every tick
 # leaving the `with` closes the socket, which stops the sampling
 ```
 
+## On-chip trace (miniMCDS)
+
+The TC37x production device has a small trace unit, the **miniMCDS**: 8 KB of trace RAM at `0x98000000` that the chip fills by itself while the core runs. The debugger configures it and reads it over the ordinary DAP connection, so it works with a **miniWiggler** — no ED device and no trace probe. 8 KB is small, so a trace is a window: about 80 µs of unfiltered program flow, about 600 writes of a data trace, much longer when filtered. The register setup and the message format were reverse engineered against winIDEA on a BlueBox (the documentation that describes them is not public); the decoders are checked against those recordings.
+
+Two kinds:
+
+- **Program trace** of CPU0: the executed instructions, reconstructed from branch messages and the code in the ELF, with function, source line and target time per instruction. Optionally only inside one function or address range (outside, the trace is off and the result shows a gap).
+- **Data trace**: every write into an address range (up to `0x1000` bytes), with value, size and target time. **Only CPU0's stores are seen**: the MCDS taps CPU0's bus port, so a variable written by another core does not show up.
+
+When it stops:
+
+| `Stop` | Buffer | Keeps |
+|---|---|---|
+| `halt` | ring | the last 8 KB up to the core's halt, whatever halted it (its breakpoint, a debugger halt, another core's halt over trigger line 1); the debugger stops it when it sees the halt |
+| `full` | linear | the first 8 KB after arming |
+| `manual` | ring | the last 8 KB before `trace_stop` (nothing is recorded while the core is halted) |
+| a function name | ring | until the PC enters the function (PTU comparator 1; works together with a filter range on comparator 0) |
+
+Time stamps: `tsu` (default) stamps messages with the 150 MHz trace clock (6.67 ns): a program trace gets a stamp every ~160 ns while the core runs, a data trace one per write; `ticks` adds a tick per cycle, exact for every instruction but the buffer fills within milliseconds (a program trace stops the ticks while the core is halted).
+
+**REST/MCP.** `trace_check` (POST `/api/v1/trace/check`) validates a configuration and reports the comparators and events it takes, without touching the target; `trace_arm` arms it; `trace_status` (GET `/api/v1/trace`) reports `{Armed, Owner, Done, Fill, LostByReset, Last}` (`Fill`: how much of the 8 KB holds data, 0 to 1; a ring rises to 1 and stays there after its first lap); `trace_stop` stops it and reads the trace RAM; `trace_read` (GET `/api/v1/trace/read?max=N`) decodes the last recording:
+
+```json
+{"core":0,"kind":"program","ranges":[{"function":"Os_Task_10ms"}],"stop":"halt","timestamps":"tsu"}
+{"kind":"data","ranges":[{"start":"0x70001000","len":16}],"stop":"manual"}
+{"kind":"program","ranges":[{"function":"Fee_MainFunction"}],"stop":"Os_Task_5ms"}
+```
+
+(The TCF service `AurixTrace` takes the same object with capitalized keys, `{"Stop":{"Function":…}}` for a function.)
+
+A program trace reads back as `Functions` and `Files` tables and `Steps` rows `[addr, t_ns, function, file, line]` (indices into the tables; gaps are objects `{"Gap":"trace_off"|"lost"|"no_code"|"inconsistent"|"untraced","T":…}`), the newest `max` rows; a data trace as `Events [{T, Addr, Value, Size, Access, Symbol}]`. Times are nanoseconds from the first time stamp of the recording, `StartNs` is that stamp on the trace clock.
+
+What the hardware reports, measured on a TC377:
+
+- **The last 32-byte word stays in the unit.** The MCDS writes the trace RAM in 32-byte words, and the PTU reports a stretch of code only at the next discontinuity. Stopped in hardware at a halt (`trace_done`), the last word, the last few hundred nanoseconds of program flow, never reaches the RAM. So a stop-on-halt trace keeps recording through the halt (nothing is recorded while the core is halted: the time stamps are gated with `dcu_sus`), and when the poll sees the halt the debugger forces a few time stamps to push the last word out (`Plan::flush`) and then stops it. The decoder fills in the straight code from the last report to the halt PC, and a final `ret` whose target was not reported returns to the address its call left. The result reaches the halt (`ReachesHalt`; measured on breakpoints in 10 functions, debugger halts and CPU1 breakpoints); `Halt` gives the halt point with function and line. If it does not (data lost), the flow ends with an `untraced` gap. The same flush runs before every manual stop, and a DAQ trace flushes after 100 ms without new data, so the last write of a quiet variable arrives too.
+- **Leaving a filter range is reported one instruction late:** each exit adds the first instruction outside the range (the callee's entry or the return address), then a `trace_off` gap.
+- **A data trace stamps accesses, not only writes:** a range the application reads often costs more trace RAM per write (12 instead of 5 messages per write measured on a much-read range).
+- **Ring laps.** The stack of a busy core is written ~350,000 times per second: the 8 KB last ~3 ms there.
+
+**DAQ trace points.** A [DAQ](#periodic-sampling-daq) point with `"mode":"trace"` is recorded instead of polled: the session arms a data trace over the traced points (manual stop, ring buffer), drains the trace RAM every 2 ms while the target runs and sends every write:
+
+```json
+{"op":"add","id":9,"points":[{"expression":"g_state","mode":"trace"}]}
+{"type":"trace","points":[4,4],"values":[1,2],"t_target_ns":[118200,118650]}
+{"type":"trace_lost","t_us":130000,"messages":12,"laps":1}
+{"type":"source","point":4,"source":"host","reason":"another client is tracing"}
+```
+
+A traced point that cannot be traced falls back to polling at its rate and says why in a `source` frame: the trace is in use (there is one MCDS, owned by the first session that traces, or by a `trace_arm`), or the points span more than `0x1000` bytes. A reset ends a running trace (`LostByReset`). The range from the lowest to the highest traced point is recorded, so writes between the points cost trace RAM too; when the writes come faster than the drain reads them, `trace_lost` reports the lost messages and ring laps (seen on a range over a core's stack: 118 laps in 3 s).
+
+**Tcl.** `mcds arm|plan|status|stop|decode|dump|init` (see [docs/commands.md](docs/commands.md)): `mcds plan` prints the register writes without touching the target, `mcds dump` saves the trace RAM with a winIDEA-compatible header.
+
+**In VS Code**: the *Show Trace* command opens the Trace panel (configuration, resources, arm, result grouped by function with source links, CSV export) and a status-bar item shows a running trace; a Live Watch instance can trace its expressions (interval menu → *Trace every write*); the OS Profile panel sets a rate or trace per lane. A launch configuration `trace` object arms a trace when the session starts.
+
+**Verified on a TC377 over the miniWiggler** (application running, 2026-11-17): program trace unfiltered (~11,000 instructions in 63–73 µs, no inconsistency), filtered to a function, stopped when full, manually, on a halt (by a CPU0 breakpoint, a debugger halt, a CPU1 breakpoint) and at a function, filter and stop comparators together; data trace of a 13.3 ms counter (every write, target times 13.33 ms apart); DAQ trace points streaming every write, across a halt, and reporting laps under overflow. Where the setup differs from winIDEA's (stop on halt on `dcu_sus` instead of `dcu_halt`, gated time stamps, stop before the end pulse) the hardware showed why: see `crates/mcds/src/config.rs`. The simulator implements the unit for the tests (`core/tests/mcds_sim.rs`, the trace part of `api/tests/sim_http.rs`).
+
 ## AUTOSAR OS awareness (ORTI)
 
 An AUTOSAR/OSEK generator writes an **ORTI file** beside the ELF describing the OS objects: tasks, ISRs, stacks, alarms, resources, spinlocks, events. `load_orti` reads one and the debugger can then show them.
@@ -464,7 +520,7 @@ A stack the debugger cannot read is reported with its `error` rather than as unu
 
 **Sampled task profiling.** `startProfile` puts one [DAQ](#periodic-sampling-daq) point per core on `RUNNINGTASK` in on-change mode: the point is still *read* every period, but only *delivered* when the value differs. Two cores at 100 µs is two reads per tick, coalesced into one bus access, and the stream carries only the switches. `getProfile <sinceUs>` then returns the transitions since the caller last asked, plus the occupancy each task has accumulated — so a panel redrawing four times a second is independent of the sampling rate.
 
-This is **not a trace**. There is no MCDS on a miniWiggler, so a switch shorter than the sampling period is not seen at all, and one that straddles a sample is attributed to whichever task the sample caught. The result is a statistical profile, and the panel says so on its face.
+A sampled lane is **not a trace**: a switch shorter than the sampling period is not seen at all, and one that straddles a sample is attributed to whichever task the sample caught. The result is a statistical profile, and the panel says so on its face. Each lane (RUNNINGTASK per core, the ISR variables) has its own rate, `startProfile <periodUs> <lanes>` with `[{"Core":0,"Attr":"RUNNINGTASK","Mode":"trace"|"off"|<periodUs>}]`: a lane in `trace` is recorded by the [miniMCDS](#on-chip-trace-minimcds), every switch exact in target time. Only CPU0's stores reach the data trace, so trace is refused for the lanes of other cores, which stay sampled.
 
 The other views do *not* use DAQ, deliberately. A task table is 613 single-address attributes — well past the 256-point session cap — and refreshing it once a second costs about as much as the sampler would. Sampling is worth its machinery where the rate has to be high; for a table, a one-shot read per refresh is simpler and no more expensive.
 
@@ -484,6 +540,7 @@ A conditional attribute's read set depends on which branch is live, so an attrib
 | `openocd-tcl` | Fetches OpenOCD's Tcl scripts (pinned commit of the tricore-oss fork) into `target/openocd-tcl/`; used by the tests and packaged with the VS Code extension. |
 | `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, periodic sampling (DAQ), CSA unwinder, flash driver and image loader. |
 | `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
+| `mcds` | miniMCDS trace: the register setup (as winIDEA writes it), the message framing, the data and program trace decoders, program flow reconstruction from the code. |
 | `orti` | ORTI files: the AUTOSAR/OSEK OS awareness description a generator emits. Parser (generic over the object types a file declares), and planning each attribute into the reads it costs. |
 | `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
 | `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
@@ -651,7 +708,7 @@ Unknown commands fail with `not supported by aurix-dbg`.
 
 ## TCF services
 
-Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line; data breakpoints with `AccessMode` and `Size` on an address or expression; `Condition`), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS ([OS awareness](#autosar-os-awareness-orti)), and Tcl (the debug console `monitor` command).
+Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line; data breakpoints with `AccessMode` and `Size` on an address or expression; `Condition`), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS ([OS awareness](#autosar-os-awareness-orti)), AurixTrace ([miniMCDS trace](#on-chip-trace-minimcds): `arm`/`check <config>`, `status`, `stop`, `read <{Max}>`, the same JSON as the REST operations), and Tcl (the debug console `monitor` command).
 
 `AurixOS` carries the ORTI objects on the connection the debug adapter already has, so the extension needs no second port and the awareness dies with the session:
 
@@ -661,9 +718,10 @@ Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps)
 | `getInfo` | — | `{Loaded, File, Implementation, Version, Cores, Types[{Name, Description, Count, Attributes[{Name, Description, Kind, PerCore, Live}]}], Errors}` |
 | `getObjects` | `<kind>`, `<name>` or null, `<liveOnly>` | `{Kind, Objects[{Name, Attributes[{Name, Core?, Value, Number?, Link?, Error?}]}], Reads}` |
 | `getRunning` | — | `{Cores[{Core, CoreId, Task, Priority, Isr, LastError}], Reads}` |
-| `startProfile` | `<periodUs>` | `{PeriodUs, Cores}` |
+| `startProfile` | `<periodUs>`, `<lanes>` or null | `{PeriodUs, Cores, Lanes}` |
+| `getProfileLanes` | — | the lanes the loaded ORTI file offers |
 | `stopProfile` | — | `{Stopped}` |
-| `getProfile` | `<sinceUs>` | `{Running, PeriodUs, NowUs, Transitions[{T, Core, Task}], Totals[{Core, Task, Us}], Dropped, Missed}` |
+| `getProfile` | `<sinceUs>` | `{Running, PeriodUs, NowUs, Lanes, Transitions[{T, Core, Lane, Task}], Totals[{Core, Lane, Task, Us}], Dropped, Missed, TraceLost}` |
 | `getStacks` | `<names>` or null | `{Stacks[{Name, Base, Size, Direction, Pattern, Used?, Free?, Percent?, Error?}], Reads}` |
 
 `getRunning` is the one the adapter calls on every stop, to name each thread after the task it is running; it is a handful of reads.
@@ -707,5 +765,5 @@ The driver runs the DMU command sequences over the debug interface, without a RA
 - A TCF Flash service; flashing goes through the Tcl `program` command.
 - Frame names for code without DWARF functions (the frame ID is shown).
 - Memory writes to SMPU-protected RAM.
-- Target-side DAQ timestamps. Sampling is timed on the host; reading the STM in the same batch would let a client correlate the two clocks and measure the read latency. Jitter-free sampling would need MCDS trace (an ED device) or an agent on the target.
+- Target-side DAQ timestamps. Sampling is timed on the host; reading the STM in the same batch would let a client correlate the two clocks and measure the read latency. Jitter-free values come from the [miniMCDS trace](#on-chip-trace-minimcds) (CPU0's writes only).
 - A DAQ point that follows a pointer. Addresses are resolved once at subscribe time, so `p->x` samples wherever `p` pointed then.

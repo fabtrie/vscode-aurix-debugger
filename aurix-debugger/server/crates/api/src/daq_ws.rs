@@ -97,7 +97,12 @@ fn point_json(r: &Resolved, id: Option<PointId>) -> Value {
     m.insert("interval_us".into(), json!(granted));
     m.insert("rate_hz".into(), json!(if granted > 0 { 1_000_000.0 / granted as f64 } else { 0.0 }));
     m.insert("encoding".into(), json!(r.decoder.name()));
-    m.insert("mode".into(), json!(mode_name(r.cfg.as_ref().map(|c| c.mode).unwrap_or(SampleMode::EveryTick))));
+    let traced = r.cfg.as_ref().is_some_and(|c| c.trace);
+    m.insert("mode".into(), json!(if traced { "trace" } else { mode_name(r.cfg.as_ref().map(|c| c.mode).unwrap_or(SampleMode::EveryTick)) }));
+    if traced {
+        // Read until the data trace is set up; a `source` frame reports the change.
+        m.insert("source".into(), json!("host"));
+    }
     if let Some(e) = &r.error {
         m.insert("error".into(), json!(e));
     }
@@ -121,12 +126,15 @@ fn reject_pacing(v: &serde_json::Map<String, Value>) -> Result<(), String> {
     }
 }
 
-fn parse_mode(v: Option<&Value>, dflt: SampleMode) -> Result<SampleMode, String> {
+/// A delivery mode; `trace` = every write, recorded by the miniMCDS data trace (delivered like
+/// `on_change` while the point has to be read instead).
+fn parse_mode(v: Option<&Value>, dflt: (SampleMode, bool)) -> Result<(SampleMode, bool), String> {
     match v.and_then(Value::as_str) {
         None => Ok(dflt),
-        Some("every_tick") => Ok(SampleMode::EveryTick),
-        Some("on_change") => Ok(SampleMode::OnChange),
-        Some(other) => Err(format!("unknown mode '{other}' (every_tick or on_change)")),
+        Some("every_tick") => Ok((SampleMode::EveryTick, false)),
+        Some("on_change") => Ok((SampleMode::OnChange, false)),
+        Some("trace") => Ok((SampleMode::OnChange, true)),
+        Some(other) => Err(format!("unknown mode '{other}' (every_tick, on_change or trace)")),
     }
 }
 
@@ -145,9 +153,10 @@ fn parse_addr(v: &Value) -> Option<u32> {
 }
 
 /// One point of a `subscribe` or `add` frame.
-fn parse_spec(v: &Value, dflt_mode: SampleMode, dflt_interval: u32) -> Result<Spec, String> {
+fn parse_spec(v: &Value, dflt_mode: (SampleMode, bool), dflt_interval: u32) -> Result<Spec, String> {
     let o = v.as_object().ok_or("each point must be an object")?;
     reject_pacing(o)?;
+    let mode = parse_mode(o.get("mode"), dflt_mode)?;
     let interval_us = match (o.get("interval_us").and_then(Value::as_u64), o.get("rate_hz").and_then(Value::as_f64)) {
         (Some(_), Some(_)) => return Err("give either `interval_us` or `rate_hz`, not both".into()),
         (Some(us), None) => us as u32,
@@ -162,7 +171,8 @@ fn parse_spec(v: &Value, dflt_mode: SampleMode, dflt_interval: u32) -> Result<Sp
         interval_us,
         target: o.get("target").and_then(Value::as_str).map(str::to_string),
         name: o.get("name").and_then(Value::as_str).map(str::to_string),
-        mode: parse_mode(o.get("mode"), dflt_mode)?,
+        mode: mode.0,
+        trace: mode.1,
         resend_after_us: o.get("resend_after_us").and_then(Value::as_u64).unwrap_or(0) as u32,
         decode: o.get("decode").and_then(Value::as_bool).unwrap_or(true),
     })
@@ -237,6 +247,28 @@ fn frame(msg: DaqMsg, live: &[Live]) -> Option<String> {
         DaqMsg::Gap { missed, t_us } => Some(json!({ "type": "gap", "t_us": t_us, "missed": missed }).to_string()),
         DaqMsg::PointError { point, err, muted } => {
             Some(json!({ "type": "point_error", "point": point, "message": err, "muted": muted }).to_string())
+        }
+        DaqMsg::Trace { t_us, values } => {
+            let mut points = Vec::with_capacity(values.len());
+            let mut out = Vec::with_capacity(values.len());
+            let mut times = Vec::with_capacity(values.len());
+            for (id, t, data) in values {
+                let Some(l) = live.iter().find(|l| l.id == id) else { continue };
+                points.push(id);
+                out.push(l.decoder.decode(&data));
+                times.push(t);
+            }
+            if points.is_empty() {
+                return None;
+            }
+            Some(json!({ "type": "trace", "t_us": t_us, "points": points, "values": out, "t_target_ns": times }).to_string())
+        }
+        DaqMsg::TraceLost { t_us, messages, laps } => {
+            Some(json!({ "type": "trace_lost", "t_us": t_us, "messages": messages, "laps": laps }).to_string())
+        }
+        DaqMsg::SourceChanged { point, source, reason } => {
+            let src = if source == daq::Source::Trace { "trace" } else { "host" };
+            Some(json!({ "type": "source", "point": point, "source": src, "reason": reason }).to_string())
         }
         DaqMsg::State { state, t_us } => {
             let s = match state {
@@ -357,7 +389,7 @@ fn handle_op(api: &Arc<CoreApi>, state: &mut State, op: &str, v: &Value, req_id:
             if state.is_some() {
                 return err_frame(req_id, "busy", "this socket already has a session; use add, remove or set_rate");
             }
-            let dflt_mode = match parse_mode(v.get("mode"), SampleMode::EveryTick) {
+            let dflt_mode = match parse_mode(v.get("mode"), (SampleMode::EveryTick, false)) {
                 Ok(m) => m,
                 Err(e) => return err_frame(req_id, "bad_request", e),
             };
@@ -413,7 +445,7 @@ fn handle_op(api: &Arc<CoreApi>, state: &mut State, op: &str, v: &Value, req_id:
                 Some(a) => {
                     let mut out = Vec::with_capacity(a.len());
                     for p in a {
-                        match parse_spec(p, SampleMode::EveryTick, 10_000) {
+                        match parse_spec(p, (SampleMode::EveryTick, false), 10_000) {
                             Ok(s) => out.push(s),
                             Err(e) => return err_frame(req_id, "bad_request", e),
                         }
@@ -469,8 +501,9 @@ fn handle_op(api: &Arc<CoreApi>, state: &mut State, op: &str, v: &Value, req_id:
             let Some(point) = v.get("point").and_then(Value::as_u64).map(|x| x as PointId) else {
                 return err_frame(req_id, "bad_request", "`point` is required");
             };
-            let mode = match parse_mode(v.get("mode"), SampleMode::EveryTick) {
-                Ok(m) => m,
+            let mode = match parse_mode(v.get("mode"), (SampleMode::EveryTick, false)) {
+                Ok((_, true)) => return err_frame(req_id, "bad_request", "`trace` is chosen when a point is subscribed or added"),
+                Ok((m, false)) => m,
                 Err(e) => return err_frame(req_id, "bad_request", e),
             };
             let id = guard.id;

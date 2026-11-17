@@ -12,12 +12,18 @@
 //!   values are asked for, through [`memory_get`], the code `Memory.get` runs: the same accesses
 //!   at the same interval as the client's `Memory.get`s were.
 //!
+//! * **`trace`** (a set in trace mode): every bus region becomes a traced DAQ point: the miniMCDS
+//!   data trace records every write. The value is the one after the last write, with the count
+//!   of writes and the target time of the last one. A region that cannot be traced (outside the
+//!   one traced range, another client tracing, no MCDS) is read at the set's period and carries
+//!   the reason.
+//!
 //! A `daq` region without a value yet (just configured, or its probe failed and it waits to be
 //! configured again) is answered with a `read` too, so the client always gets a value.
 //!
-//! Commands (`AurixTarget` service): `setLiveSet(key, [{ctx, addr, size}], periodUs)`,
-//! `getLiveValues(key)` -> `[{data, source, tUs?} | {error}]` in the set's order,
-//! `clearLiveSet(key)`. Sets belong to the connection and end with it.
+//! Commands (`AurixTarget` service): `setLiveSet(key, [{ctx, addr, size}], periodUs, trace?)`,
+//! `getLiveValues(key)` -> `[{data, source, tUs?, writes?, tTargetNs?, lost?, reason?} | {error}]`
+//! in the set's order, `clearLiveSet(key)`. Sets belong to the connection and end with it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,8 +114,27 @@ fn read_value(m: MemGet, size: usize) -> Value {
     }
 }
 
-/// Latest value per point, kept by the collector thread: bytes and session time.
-type Latest = Arc<Mutex<HashMap<PointId, (Vec<u8>, u64)>>>;
+/// What the collector thread keeps per point.
+#[derive(Clone, Debug, Default)]
+struct Val {
+    bytes: Vec<u8>,
+    /// Session time of the last delivery.
+    t_us: u64,
+    /// Writes recorded by the data trace.
+    writes: u64,
+    /// Target time of the last traced write (ns since the trace started).
+    t_target_ns: Option<u64>,
+}
+
+/// Latest value per point, the trace refusals and the trace losses, kept by the collector.
+#[derive(Default)]
+struct LiveData {
+    vals: HashMap<PointId, Val>,
+    reasons: HashMap<PointId, String>,
+    lost: u64,
+}
+
+type Latest = Arc<Mutex<LiveData>>;
 
 struct Entry {
     region: Region,
@@ -120,6 +145,8 @@ struct Entry {
 /// One live set.
 pub struct LiveSet {
     period_us: u32,
+    /// Every write of the regions, by the data trace.
+    trace: bool,
     entries: Vec<Entry>,
     /// The DAQ session of the `daq` regions, opened with the first one.
     session: Option<SessionId>,
@@ -152,8 +179,28 @@ fn collect(rx: Receiver<DaqMsg>, latest: Latest, stop: Arc<AtomicBool>) {
             Ok(DaqMsg::Samples { t_us, values, .. }) => {
                 let mut l = latest.lock().unwrap();
                 for (id, bytes) in values {
-                    l.insert(id, (bytes, t_us));
+                    let v = l.vals.entry(id).or_default();
+                    v.bytes = bytes;
+                    v.t_us = t_us;
                 }
+            }
+            Ok(DaqMsg::Trace { t_us, values }) => {
+                let mut l = latest.lock().unwrap();
+                for (id, t, bytes) in values {
+                    let v = l.vals.entry(id).or_default();
+                    v.bytes = bytes;
+                    v.t_us = t_us;
+                    v.writes += 1;
+                    v.t_target_ns = t.or(v.t_target_ns);
+                }
+            }
+            Ok(DaqMsg::TraceLost { messages, laps, .. }) => latest.lock().unwrap().lost += messages + laps,
+            Ok(DaqMsg::SourceChanged { point, reason, .. }) => {
+                let mut l = latest.lock().unwrap();
+                match reason {
+                    Some(r) => l.reasons.insert(point, r),
+                    None => l.reasons.remove(&point),
+                };
             }
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -162,18 +209,32 @@ fn collect(rx: Receiver<DaqMsg>, latest: Latest, stop: Arc<AtomicBool>) {
 }
 
 /// Replaces the set `key` of `owner`: its regions and its period.
-pub fn set(sh: &Shared, owner: u64, key: &str, regions: Vec<Region>, period_us: u32) -> Result<(), String> {
+pub fn set(sh: &Shared, owner: u64, key: &str, regions: Vec<Region>, period_us: u32, trace: bool) -> Result<(), String> {
     let period_us = daq::quantize(period_us);
-    let probe = probe_samples(sh);
-    // Which regions the probe may take; routing asks the core thread, so outside the lock.
+    let probe = !trace && probe_samples(sh);
+    // Which regions get a DAQ point (the probe's sampler, or the data trace); routing asks the
+    // core thread, so outside the lock.
     let wants: Vec<bool> = regions
         .iter()
-        .map(|r| probe && r.size > 0 && r.size as u32 <= daq::MAX_PROBE_POINT_LEN && matches!(route(sh, &r.ctx, r.addr, r.size), Route::Bus))
+        .map(|r| {
+            let bus = r.size > 0 && matches!(route(sh, &r.ctx, r.addr, r.size), Route::Bus);
+            if trace {
+                bus && r.size as u32 <= daq::MAX_POINT_LEN
+            } else {
+                probe && bus && r.size as u32 <= daq::MAX_PROBE_POINT_LEN
+            }
+        })
         .collect();
 
     let mut sets = sh.live.lock().unwrap();
     let k = (owner, key.to_string());
     let mut old = sets.0.remove(&k);
+    if old.as_ref().is_some_and(|o| o.trace != trace) {
+        // Switching between trace and sampling: start over with new points.
+        if let Some(mut o) = old.take() {
+            o.close(sh);
+        }
+    }
     let mut kept: HashMap<Region, PointId> = HashMap::new();
     if let Some(o) = &mut old {
         for e in o.entries.drain(..) {
@@ -184,9 +245,10 @@ pub fn set(sh: &Shared, owner: u64, key: &str, regions: Vec<Region>, period_us: 
     }
     let mut ls = old.unwrap_or_else(|| LiveSet {
         period_us,
+        trace,
         entries: Vec::new(),
         session: None,
-        latest: Arc::new(Mutex::new(HashMap::new())),
+        latest: Arc::new(Mutex::new(LiveData::default())),
         stop: Arc::new(AtomicBool::new(false)),
     });
     let retime = ls.period_us != period_us;
@@ -215,7 +277,7 @@ pub fn set(sh: &Shared, owner: u64, key: &str, regions: Vec<Region>, period_us: 
     if let Some(id) = ls.session {
         let cfgs: Vec<PointCfg> = add
             .iter()
-            .map(|(_, r)| PointCfg { mode: SampleMode::OnChange, probe_only: true, ..PointCfg::new(r.addr, r.size as u32, Space::Host, period_us) })
+            .map(|(_, r)| PointCfg { mode: SampleMode::OnChange, probe_only: !trace, trace, ..PointCfg::new(r.addr, r.size as u32, Space::Host, period_us) })
             .collect();
         let kept_ids: Vec<PointId> = ls.entries.iter().filter_map(|e| e.point).collect();
         let latest = ls.latest.clone();
@@ -227,7 +289,8 @@ pub fn set(sh: &Shared, owner: u64, key: &str, regions: Vec<Region>, period_us: 
                         c.daq.remove_points(id, &gone)?;
                         let mut l = latest.lock().unwrap();
                         for p in &gone {
-                            l.remove(p);
+                            l.vals.remove(p);
+                            l.reasons.remove(p);
                         }
                     }
                     if retime {
@@ -248,7 +311,7 @@ pub fn set(sh: &Shared, owner: u64, key: &str, regions: Vec<Region>, period_us: 
     if ls.entries.iter().all(|e| e.point.is_none()) {
         ls.close(sh);
         ls.stop = Arc::new(AtomicBool::new(false));
-        ls.latest = Arc::new(Mutex::new(HashMap::new()));
+        ls.latest = Arc::new(Mutex::new(LiveData::default()));
     }
     sets.0.insert(k, ls);
     Ok(())
@@ -271,9 +334,15 @@ pub fn values(sh: &Shared, owner: u64, key: &str) -> Result<Value, String> {
             .unwrap_or_default(),
         _ => HashMap::new(),
     };
-    let latest: HashMap<PointId, (Vec<u8>, u64)> = {
+    let (latest, reasons, lost): (HashMap<PointId, Val>, HashMap<PointId, String>, u64) = {
         let sets = sh.live.lock().unwrap();
-        sets.0.get(&k).map(|ls| ls.latest.lock().unwrap().clone()).unwrap_or_default()
+        sets.0
+            .get(&k)
+            .map(|ls| {
+                let l = ls.latest.lock().unwrap();
+                (l.vals.clone(), l.reasons.clone(), l.lost)
+            })
+            .unwrap_or_default()
     };
     let mut refused: Vec<PointId> = Vec::new();
     let mut out = Vec::with_capacity(plan.len());
@@ -281,10 +350,28 @@ pub fn values(sh: &Shared, owner: u64, key: &str) -> Result<Value, String> {
         if let Some(p) = point {
             match sources.get(&p) {
                 Some(Source::Probe) => {
-                    if let Some((bytes, t_us)) = latest.get(&p) {
-                        out.push(json!({ "data": B64.encode(bytes), "source": "daq", "tUs": t_us }));
+                    if let Some(v) = latest.get(&p) {
+                        out.push(json!({ "data": B64.encode(&v.bytes), "source": "daq", "tUs": v.t_us }));
                         continue;
                     }
+                }
+                Some(Source::Trace) => {
+                    if let Some(v) = latest.get(&p) {
+                        out.push(json!({
+                            "data": B64.encode(&v.bytes), "source": "trace", "tUs": v.t_us,
+                            "writes": v.writes, "tTargetNs": v.t_target_ns, "lost": lost,
+                        }));
+                        continue;
+                    }
+                }
+                Some(Source::Polled) if reasons.contains_key(&p) => {
+                    // Asked to be traced, read instead: the reason goes with the value.
+                    let mut v = read_value(memory_get(sh, &r.ctx, r.addr, r.size), r.size);
+                    if let Value::Object(m) = &mut v {
+                        m.insert("reason".into(), json!(reasons[&p]));
+                    }
+                    out.push(v);
+                    continue;
                 }
                 Some(Source::Refused) | None => refused.push(p),
                 _ => {}

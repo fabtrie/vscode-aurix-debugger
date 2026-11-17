@@ -17,6 +17,7 @@ mod queue;
 mod stack;
 mod stepping;
 mod symstore;
+pub mod trace;
 mod wire;
 
 use std::collections::HashMap;
@@ -56,6 +57,7 @@ pub enum SessionEvent {
 pub const SERVICES: &[&str] = &[
     "Locator",
     "AurixOS",
+    "AurixTrace",
     "ContextQuery",
     "RunControl",
     "Memory",

@@ -154,6 +154,8 @@ pub struct Spec {
     pub target: Option<String>,
     pub name: Option<String>,
     pub mode: SampleMode,
+    /// Every write, by the miniMCDS data trace (`mode: "trace"`).
+    pub trace: bool,
     pub resend_after_us: u32,
     /// `decode: false` streams raw hex instead of a typed value.
     pub decode: bool,
@@ -259,6 +261,7 @@ pub fn resolve(session: &tcf::Shared, target: Option<&tcf::CoreInfo>, spec: &Spe
                 cmp_mask: None,
                 resend_after_us: spec.resend_after_us,
                 probe_only: false,
+                trace: spec.trace,
             }),
             error: None,
         };
@@ -317,6 +320,7 @@ pub fn resolve(session: &tcf::Shared, target: Option<&tcf::CoreInfo>, spec: &Spe
             cmp_mask,
             resend_after_us: spec.resend_after_us,
             probe_only: false,
+                trace: spec.trace,
         }),
         decoder,
         error: None,

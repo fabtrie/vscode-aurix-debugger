@@ -241,8 +241,31 @@ export class GetStacksOsCommand extends OsCommand<OsStackList> {
 export interface OsTransition {
 	/** Microseconds since profiling started. */
 	T: number;
+	/** The lane (an OS variable of one core); missing from older servers (one lane per core). */
+	Lane?: number;
 	Core: number;
 	Task: string;
+}
+
+/** A lane of the profile: one OS variable of one core and how it is recorded. */
+export interface OsLane {
+	Lane: number;
+	Core: number;
+	Attr: string;
+	/** "off", "trace" or the sampling period in µs. */
+	Mode: 'off' | 'trace' | number;
+	PeriodUs: number;
+	/** "trace" (every write), "host" (read at the period) or "off". */
+	Source: string;
+	/** Why the lane is not recorded as asked. */
+	Reason?: string | null;
+}
+
+/** Lane setting sent with `startProfile`. */
+export interface OsLaneSetting {
+	Core: number;
+	Attr: string;
+	Mode: 'off' | 'trace' | number;
 }
 
 /** Time one task occupied one core. */
@@ -264,11 +287,14 @@ export interface OsProfile {
 	/** Samples the agent could not keep up with, and ticks the core thread missed. */
 	Dropped?: number;
 	Missed?: number;
+	/** Data trace messages or paragraphs lost (traced lanes). */
+	TraceLost?: number;
+	Lanes?: OsLane[];
 	Error?: string;
 }
 
-export class StartProfileOsCommand extends OsCommand<{ PeriodUs: number; Cores: number }> {
-	constructor(private readonly periodUs: number) {
+export class StartProfileOsCommand extends OsCommand<{ PeriodUs: number; Cores: number; Lanes?: OsLane[] }> {
+	constructor(private readonly periodUs: number, private readonly lanes?: OsLaneSetting[]) {
 		super();
 	}
 
@@ -281,12 +307,13 @@ export class StartProfileOsCommand extends OsCommand<{ PeriodUs: number; Cores: 
 	}
 
 	override toBuffer(token: string): Buffer {
-		return toBuffer(['C', token, this.service(), this.command(), JSON.stringify(this.periodUs)]);
+		const args = this.lanes ? [JSON.stringify(this.periodUs), JSON.stringify(this.lanes)] : [JSON.stringify(this.periodUs)];
+		return toBuffer(['C', token, this.service(), this.command(), ...args]);
 	}
 
-	cast(json: any): { PeriodUs: number; Cores: number } {
+	cast(json: any): { PeriodUs: number; Cores: number; Lanes?: OsLane[] } {
 		const v = asObject(json);
-		return { PeriodUs: Number(v.PeriodUs ?? 0), Cores: Number(v.Cores ?? 0) };
+		return { PeriodUs: Number(v.PeriodUs ?? 0), Cores: Number(v.Cores ?? 0), Lanes: Array.isArray(v.Lanes) ? v.Lanes as OsLane[] : undefined };
 	}
 }
 

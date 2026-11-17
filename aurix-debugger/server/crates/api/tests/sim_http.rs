@@ -474,6 +474,65 @@ fn variables(http: &Http, vs: &mut Tcf) {
 }
 
 /// The launch steps: what a VS Code launch configuration does, for any client.
+/// The miniMCDS trace over REST, TCF and the DAQ stream (the simulator records the debugger's
+/// own stores into the traced range).
+fn trace(http: &Http, vs: &mut Tcf) {
+    let cfg = json!({ "kind": "data", "ranges": [{ "start": "0x70000100", "len": 16 }] });
+    let chk = http.ok("POST", "/api/v1/trace/check", Some(cfg.clone()));
+    assert_eq!(chk["data"]["Resources"]["DtuComparators"], 1, "{chk}");
+    let (status, bad) = http.request("POST", "/api/v1/trace/check", Some(json!({ "kind": "program", "core": 1 })), &[]);
+    assert_eq!(status, 400, "{bad}");
+
+    http.ok("POST", "/api/v1/trace/arm", Some(cfg));
+    let st = http.ok("GET", "/api/v1/trace", None);
+    assert_eq!(st["data"]["Armed"], true, "{st}");
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000104", "data": "44332211" })));
+    let r = http.ok("POST", "/api/v1/trace/stop", None);
+    assert_eq!(r["data"]["ring"], true, "{r}");
+    let d = http.ok("GET", "/api/v1/trace/read", None);
+    assert_eq!(d["data"]["Kind"], "data", "{d}");
+    let ev = d["data"]["Events"].as_array().unwrap();
+    assert!(ev.iter().any(|e| e["Value"] == 0x1122_3344 && e["Addr"] == 0x7000_0104), "{d}");
+
+    // Over TCF, as the trace panel uses it.
+    let r = vs.command("AurixTrace", "status", &[]);
+    assert_eq!(r[0], "", "{r:?}");
+    assert_eq!(serde_json::from_str::<Value>(&r[1]).unwrap()["Armed"], false);
+    let r = vs.command("AurixTrace", "check", &[json!({ "Kind": "program", "Ranges": [{ "Function": "no_such_function" }] })]);
+    assert!(r[0].contains("no_such_function") || r[0].contains("symbols"), "{r:?}");
+    let r = vs.command("AurixTrace", "arm", &[json!({ "Kind": "program", "Stop": "full" })]);
+    assert_eq!(r[0], "", "{r:?}");
+    let r = vs.command("AurixTrace", "status", &[]);
+    assert_eq!(serde_json::from_str::<Value>(&r[1]).unwrap()["Done"], true, "{r:?}");
+    let r = vs.command("AurixTrace", "stop", &[]);
+    assert_eq!(r[0], "", "{r:?}");
+
+    // A traced DAQ point: read until the trace is set up, then every write with its target time.
+    let mut ws = Ws::connect(http.0, &[]).unwrap();
+    ws.send(json!({ "op": "subscribe", "id": 1, "points": [{ "address": "0x70000200", "size": 4, "mode": "trace", "interval_us": 100000 }] }));
+    let mut traced = false;
+    let mut got = None;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(5) && got.is_none() {
+        let Some(m) = ws.recv() else { continue };
+        if m["type"] == "config" {
+            assert_eq!(m["points"][0]["mode"], "trace", "{m}");
+        }
+        if m["type"] == "source" && m["source"] == "trace" {
+            traced = true;
+            http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000200", "data": "78563412" })));
+        }
+        if m["type"] == "trace" {
+            assert!(m["t_target_ns"][0].is_u64(), "{m}");
+            got = Some(m);
+        }
+    }
+    assert!(traced, "the point never became traced");
+    let m = got.expect("no trace frame");
+    // A raw address without a type streams its bytes as hex.
+    assert_eq!(m["values"][0], "78563412", "{m}");
+}
+
 fn launch_steps(http: &Http) {
     let dir = std::env::temp_dir().join(format!("aurix-launch-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1552,6 +1611,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     core_local_variables(&http, &mut vs);
     watchpoints(&http, &mut vs, &h, &sse);
     variables_of_real_elf(&http);
+    trace(&http, &mut vs);
     launch_steps(&http);
 
     // Web pages of other sites must not drive the debugger.

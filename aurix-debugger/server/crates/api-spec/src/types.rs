@@ -733,6 +733,58 @@ pub struct UcbData {
     pub data: serde_json::Value,
 }
 
+// --- Trace -----------------------------------------------------------------------------------
+
+/// A trace range: a function (by name, its whole code) or an address range.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceRange {
+    #[serde(default)]
+    pub function: Option<String>,
+    /// Start address (number or `0x` string).
+    #[serde(default)]
+    pub start: Option<serde_json::Value>,
+    #[serde(default)]
+    pub len: Option<u32>,
+}
+
+/// A trace configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceConfigRequest {
+    /// `program` (default) or `data`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Observed core; only 0 (CPU0) so far.
+    #[serde(default)]
+    pub core: Option<u32>,
+    /// Program: at most one range the PC must be inside; data: exactly one range.
+    #[serde(default)]
+    pub ranges: Vec<TraceRange>,
+    /// `halt` (default for program), `full`, `manual` (default for data), or a function name to
+    /// stop at.
+    #[serde(default)]
+    pub stop: Option<String>,
+    /// `tsu` (default: time stamps with messages) or `ticks`.
+    #[serde(default)]
+    pub timestamps: Option<String>,
+}
+
+/// Reading a recording.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceReadRequest {
+    /// The newest rows only (default 20000).
+    #[serde(default)]
+    pub max: Option<u32>,
+}
+
+/// Trace data as the trace service answers: a plan, a status, a recording or a decoded trace.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TraceData {
+    pub data: serde_json::Value,
+}
+
 // --- Symbols ---------------------------------------------------------------------------------
 
 /// Symbol files to load.

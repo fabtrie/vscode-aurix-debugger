@@ -115,6 +115,10 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
 
 /// Reports a poll transition: frontend event plus the `halted` Tcl event.
 pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
+    // Before anyone hears of the halt (and might resume): a trace that stops on it ends here.
+    if matches!(tr, Transition::Rehalted | Transition::Halted { boot: false, .. }) {
+        cx.with(|c| crate::mcds_trace::on_halted(c, t));
+    }
     match tr {
         Transition::None => {}
         Transition::Rehalted => {
@@ -293,7 +297,10 @@ pub fn poll_all(cx: &Cx) {
                 emit(Event::ResetDetected);
                 // DAQ points keep their addresses, but their change-detection baselines are now
                 // pre-reset values: drop them and back off until the device answers again.
-                cx.with(|c| crate::daq::on_reset(c, Instant::now()));
+                cx.with(|c| {
+                    crate::mcds_trace::on_reset(c);
+                    crate::daq::on_reset(c, Instant::now());
+                });
                 failed_all = true;
             }
             for i in failed {

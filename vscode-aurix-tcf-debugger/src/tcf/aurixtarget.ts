@@ -103,6 +103,14 @@ export interface LiveValue {
 	source?: string;
 	/** Time of the value in µs, when the server knows it. */
 	tUs?: number;
+	/** Trace mode: writes the data trace recorded. */
+	writes?: number;
+	/** Trace mode: target time of the last write, ns since the trace started. */
+	tTargetNs?: number;
+	/** Trace mode: messages or paragraphs the data trace lost (whole set). */
+	lost?: number;
+	/** Trace mode: why this region is read instead of traced. */
+	reason?: string;
 	/** Why the region could not be read; set instead of `data`. */
 	error?: string;
 }
@@ -129,6 +137,14 @@ export function asLiveValues(json: unknown): LiveValue[] {
 		}
 		if (typeof o.tUs === 'number' && Number.isFinite(o.tUs)) {
 			value.tUs = o.tUs;
+		}
+		for (const k of ['writes', 'tTargetNs', 'lost'] as const) {
+			if (typeof o[k] === 'number' && Number.isFinite(o[k])) {
+				value[k] = o[k] as number;
+			}
+		}
+		if (typeof o.reason === 'string') {
+			value.reason = o.reason;
 		}
 		if (typeof o.error === 'string') {
 			value.error = o.error;
@@ -161,9 +177,13 @@ abstract class AurixTargetCommand<T> extends SimpleCommand<T> {
 	}
 }
 
-/** Replaces the live set `key` (a Live Watch view) with these regions, sampled every `periodUs`. */
+/**
+ * Replaces the live set `key` (a Live Watch view) with these regions, sampled every `periodUs`,
+ * or - `trace` - every write recorded by the miniMCDS data trace (read every `periodUs` where the
+ * trace cannot take a region).
+ */
 export class SetLiveSetAurixTargetCommand extends AurixTargetCommand<undefined> {
-	constructor(readonly key: string, readonly regions: LiveRegion[], readonly periodUs: number) {
+	constructor(readonly key: string, readonly regions: LiveRegion[], readonly periodUs: number, readonly trace = false) {
 		super();
 	}
 
@@ -172,7 +192,7 @@ export class SetLiveSetAurixTargetCommand extends AurixTargetCommand<undefined> 
 	}
 
 	protected args(): unknown[] {
-		return [this.key, this.regions, this.periodUs];
+		return this.trace ? [this.key, this.regions, this.periodUs, true] : [this.key, this.regions, this.periodUs];
 	}
 
 	result(responseAll: Buffer[], success: PromiseSuccess<undefined>, error: PromiseError<undefined>): void {

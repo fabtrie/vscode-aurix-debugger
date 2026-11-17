@@ -51,8 +51,9 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// the shared session (string IDs, `owner`, `instances`), on an `expression`, with a `condition`.
 /// 5: the hub (sessions, profiles), `launch`, the control lease, clients (`client`,
 /// `end_client`). 6: `ucb_read`, `ucb_stage`, `ucb_review`, `ucb_export`, `ucb_compare`,
-/// `ucb_apply`; `ucb_write` in `connect`.
-pub const API_VERSION: u32 = 6;
+/// `ucb_apply`; `ucb_write` in `connect`. 7: `trace_arm`, `trace_check`, `trace_status`,
+/// `trace_stop`, `trace_read`; DAQ points with `mode: "trace"`.
+pub const API_VERSION: u32 = 7;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

@@ -6,6 +6,7 @@ use tas::{Batch, OpResult};
 
 use crate::cortex_m::word_only;
 use crate::error::{Error, Result};
+use crate::tricore::bus_address;
 
 #[derive(Debug, Clone, Default)]
 pub struct AdapterSettings {
@@ -377,7 +378,9 @@ pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
     }
 }
 
-/// Convenience memory access on top of an adapter.
+/// Convenience memory access on top of an adapter. Every helper but [`Self::batch`] accesses host
+/// memory at [`bus_address`] (the cached LMU/DLMU segment `0x9` through its non-cached alias
+/// `0xB`); errors name the address the caller passed.
 pub struct Io<'a> {
     pub adapter: &'a mut dyn Adapter,
 }
@@ -393,7 +396,7 @@ impl<'a> Io<'a> {
 
     pub fn read32(&mut self, addr: u32) -> Result<u32> {
         let mut b = Batch::new();
-        b.read32(addr as u64);
+        b.read32(bus_address(addr) as u64);
         let r = self.batch(&b)?;
         check(&r[0], addr as u64, false)?;
         Ok(r[0].u32())
@@ -401,7 +404,7 @@ impl<'a> Io<'a> {
 
     pub fn write32(&mut self, addr: u32, value: u32) -> Result<()> {
         let mut b = Batch::new();
-        b.write32(addr as u64, value);
+        b.write32(bus_address(addr) as u64, value);
         let r = self.batch(&b)?;
         check(&r[0], addr as u64, true)
     }
@@ -410,7 +413,7 @@ impl<'a> Io<'a> {
     pub fn write32_seq(&mut self, writes: &[(u32, u32)]) -> Result<()> {
         let mut b = Batch::new();
         for &(a, v) in writes {
-            b.write32(a as u64, v);
+            b.write32(bus_address(a) as u64, v);
         }
         let r = self.batch(&b)?;
         for (res, &(a, _)) in r.iter().zip(writes) {
@@ -422,7 +425,7 @@ impl<'a> Io<'a> {
     pub fn read32_many(&mut self, addrs: &[u32]) -> Result<Vec<u32>> {
         let mut b = Batch::new();
         for &a in addrs {
-            b.read32(a as u64);
+            b.read32(bus_address(a) as u64);
         }
         let r = self.batch(&b)?;
         r.iter().zip(addrs).map(|(res, &a)| check(res, a as u64, false).map(|_| res.u32())).collect()
@@ -460,6 +463,7 @@ impl<'a> Io<'a> {
     /// is read with one 32-bit access per word; the result then covers the requested bytes as
     /// if it were a single op (`bytes_ok` up to the first failing word).
     pub fn read_op(&mut self, addr: u32, len: usize) -> Result<OpResult> {
+        let addr = bus_address(addr);
         if !word_only(addr, len) {
             let mut b = Batch::new();
             b.read(addr as u64, len);
@@ -491,6 +495,7 @@ impl<'a> Io<'a> {
     /// access takes whole aligned words only: merging a partial word by read-modify-write would
     /// set or clear the flags of the other bytes in the bridge's flag registers.
     pub fn write_op(&mut self, addr: u32, data: &[u8]) -> Result<OpResult> {
+        let addr = bus_address(addr);
         let mut b = Batch::new();
         if !word_only(addr, data.len()) {
             b.write(addr as u64, data);

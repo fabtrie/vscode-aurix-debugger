@@ -13,7 +13,9 @@
 //! The board around the chip, modelled on a TC37x board with an FS26 SBC: STM0 counts and restarts at a
 //! reset; the peripherals in [`SIM_PERIPHS`] have CLC/ACCEN0/OCS, and an OCS write the hardware would
 //! refuse (module disabled, ACCEN0 without the debugger) fails and is recorded in
-//! [`SimAdapter::violations`] (on the board it resets it); the application ([`SimApp`]) checks for the
+//! [`SimAdapter::violations`] (on the board it resets it), as is a write to the cached LMU/DLMU
+//! alias ([`crate::tricore::CACHED_RAM`], dropped with a bus error; reads there see the
+//! non-cached alias in segment `0xB`); the application ([`SimApp`]) checks for the
 //! debugger, locks STM0/1 and enables its modules at fixed times after it starts; the FS26
 //! ([`SimFs26`]) resets the chip when a halt outlasts its watchdog window or its INIT_FS phase, and
 //! goes through deep fail-safe after `dfs_limit` faults.
@@ -301,7 +303,8 @@ pub struct SimAdapter {
     pub app: Option<SimApp>,
     /// The FS26 on the board, if any.
     pub fs26: Option<SimFs26>,
-    /// OCS writes the hardware refuses (on the board: a reset and an FS26 reset storm).
+    /// OCS writes the hardware refuses (on the board: a reset and an FS26 reset storm) and writes to
+    /// the cached LMU/DLMU alias (on the board: dropped, and a reset a few seconds later).
     pub violations: Vec<u32>,
     stm_epoch: Instant,
     pub hsm: SimHsm,
@@ -337,6 +340,12 @@ pub struct SimSampler {
     pub fail: bool,
     /// 0: 256, as the BlueBox.
     pub max_items: usize,
+}
+
+/// Whether a write to `addr..addr + len` touches the cached LMU/DLMU alias.
+fn cached_ram(addr: u32, len: usize) -> bool {
+    let r = crate::tricore::CACHED_RAM;
+    (addr as u64) < r.end as u64 && addr as u64 + len as u64 > r.start as u64
 }
 
 /// Unmapped as on the chip, so that reads into it fail: the top of segment 9, right below the
@@ -911,7 +920,7 @@ impl Adapter for SimAdapter {
                         while k < ok {
                             let a = addr as u32 + k as u32;
                             let base = a & !3;
-                            let w = self.read32(base).to_le_bytes();
+                            let w = self.read32(crate::tricore::bus_address(base)).to_le_bytes();
                             let start = (a - base) as usize;
                             let n = (4 - start).min(ok - k);
                             data[k..k + n].copy_from_slice(&w[start..start + n]);
@@ -922,7 +931,7 @@ impl Adapter for SimAdapter {
                     out.push(OpResult { err, bytes_ok: ok, data });
                 }
                 BatchOp::Write { addr, data, addr_map } => {
-                    if addr_map == 0 && !self.write_allowed(addr as u32) {
+                    if addr_map == 0 && (!self.write_allowed(addr as u32) || cached_ram(addr as u32, data.len())) {
                         self.violations.push(addr as u32);
                         out.push(OpResult { err: PL0_ERR_DATA, bytes_ok: 0, data: Vec::new() });
                         continue;

@@ -16,6 +16,7 @@ All notable changes to the "AURIX™ Debugger" extension will be documented in t
 - Continue from a breakpoint through the server's resume stopped at the same breakpoint again before executing anything; the debugger now steps past it first
 - a debug session that ended unexpectedly now says why: the session log gets the internal error or crash, and the hub the exit code; an internal error in background polling no longer ends the session
 - Tcl `after` with a negative time no longer blocks the debugger for over an hour
+- editing a global in LMU/DLMU RAM (Variables, Watch, Memory view, Tcl `mww`, REST/MCP writes) could reset the board: the debugger wrote to the cached alias `0x9…`, which the bus refuses; it now reads and writes such memory through the non-cached alias `0xB…`
 
 ## 0.4.0
 

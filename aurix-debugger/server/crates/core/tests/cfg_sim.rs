@@ -308,6 +308,41 @@ fn memory_commands() {
     assert!(e.contains("usage"), "{e}");
 }
 
+/// Debugger writes to globals linked in the cached LMU/DLMU segment `0x9` go to the non-cached
+/// alias `0xB` on every path (Tcl, `ops`, the per-core path of TCF/REST, raw `Io`): the board drops
+/// a write to `0x9` and resets (the simulator records it as a violation). Reads go there too.
+#[test]
+fn cached_lmu_writes_go_to_the_non_cached_alias() {
+    const DLMU: u32 = 0x9000_2000;
+    const ALIAS: u32 = 0xB000_2000;
+    let s = server();
+    s.interp.eval("init").unwrap();
+    take_writes(&s);
+    s.interp.eval(&format!("mww {DLMU:#x} 0x11223344")).unwrap();
+    s.interp.eval(&format!("mwb {:#x} 0x55", DLMU + 4)).unwrap();
+    s.interp.eval(&format!("write_memory {:#x} 32 {{0x66778899}}", DLMU + 8)).unwrap();
+    ops::write_memory(&s.cx(), DLMU + 12, &0xAABB_CCDDu32.to_le_bytes()).unwrap();
+    ops::write_memory_as(&s.cx(), 1, DLMU + 16, &0x0102_0304u32.to_le_bytes()).unwrap();
+    let r = s.cx().with(|c| c.io().unwrap().write_op(DLMU + 20, &0x0506_0708u32.to_le_bytes())).unwrap();
+    assert!(r.ok());
+    no_violations(&s);
+    let w = take_writes(&s);
+    assert!(w.iter().all(|&(a, _)| !aurix_core::tricore::CACHED_RAM.contains(&a)), "a write reached the cached alias: {w:08x?}");
+    assert_eq!(with_sim(&s, |sim| sim.mem_word(ALIAS)), 0x1122_3344);
+    assert_eq!(
+        s.interp.eval(&format!("mdw {DLMU:#x} 6")).unwrap(),
+        format!("{DLMU:#x}: 11223344 00000055 66778899 aabbccdd 01020304 05060708 ")
+    );
+    assert_eq!(ops::read_memory_as(&s.cx(), 0, DLMU + 12, 4).unwrap(), 0xAABB_CCDDu32.to_le_bytes());
+
+    // What the board does with a write that still goes to the cached alias.
+    let mut b = tas::Batch::new();
+    b.write32(DLMU as u64, 0);
+    let r = s.cx().with(|c| c.adapter.as_mut().unwrap().execute(&b)).unwrap();
+    assert!(!r[0].ok());
+    assert_eq!(with_sim(&s, |sim| std::mem::take(&mut sim.violations)), vec![DLMU]);
+}
+
 #[test]
 fn write_images_places_each_file_by_its_own_options() {
     let s = server();

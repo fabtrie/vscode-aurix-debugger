@@ -935,8 +935,9 @@ pub fn queue_due(c: &mut Ctx, now: Instant, b: &mut Batch) -> Option<Plan> {
     };
 
     // Handles are indices into the whole batch, so they stay valid when the batch is shared.
+    // At the bus address, as every host access (`Io`): LMU/DLMU globals through the `0xB` alias.
     for r in runs.iter_mut() {
-        r.handle = b.read(r.addr as u64, r.len as usize).0;
+        r.handle = b.read(crate::tricore::bus_address(r.addr) as u64, r.len as usize).0;
     }
     Some(Plan { host, core_pts, runs, of_point, truncated })
 }

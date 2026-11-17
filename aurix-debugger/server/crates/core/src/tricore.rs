@@ -39,6 +39,25 @@ pub fn global_address(coreid: u32, addr: u32) -> u32 {
     }
 }
 
+/// The cached LMU/DLMU addresses (segment `0x9`, TC2xx/TC3xx DLMU and LMU RAMs from
+/// `0x9000_0000`), up to the miniMCDS trace RAM at `0x9800_0000`, which the debugger accesses
+/// there (as winIDEA does; measured on a TC377). The ED devices' EMEM (`0x9900_0000`) is left out:
+/// unmeasured.
+pub const CACHED_RAM: std::ops::Range<u32> = 0x9000_0000..0x9800_0000;
+
+/// The address the debugger accesses host memory at: [`CACHED_RAM`] goes to its non-cached alias
+/// in segment `0xB` (same memory), everything else is unchanged. Globals are linked in the cached
+/// segment, but a debugger write there is dropped and, measured on a TC377, resets the board a few
+/// seconds later (bus error -> SMU safety reaction). PFLASH (`0x8`/`0xA`) keeps its own two
+/// segments. Data triggers still take the linked address: the cores store through `0x9`.
+pub fn bus_address(addr: u32) -> u32 {
+    if CACHED_RAM.contains(&addr) {
+        addr | 0x2000_0000
+    } else {
+        addr
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Trigger {
     pub enable: bool,
@@ -803,6 +822,18 @@ mod tests {
         assert_eq!(global_address(0, 0x7000_0000), 0x7000_0000);
         assert_eq!(global_address(9, 0xD000_0000), 0xD000_0000, "unknown core");
         assert!(local_address(0xD00F_FFFF) && local_address(0xC000_0000) && !local_address(0xB000_0000));
+    }
+
+    #[test]
+    fn cached_lmu_is_accessed_through_the_non_cached_alias() {
+        assert_eq!(bus_address(0x9000_2000), 0xB000_2000, "DLMU0");
+        assert_eq!(bus_address(0x9004_0000), 0xB004_0000, "LMU");
+        assert_eq!(bus_address(0x97FF_FFFC), 0xB7FF_FFFC);
+        assert_eq!(bus_address(0x9800_0000), 0x9800_0000, "miniMCDS trace RAM");
+        assert_eq!(bus_address(0x9900_0000), 0x9900_0000, "EMEM: unmeasured");
+        assert_eq!(bus_address(0x8000_0000), 0x8000_0000, "cached PFLASH");
+        assert_eq!(bus_address(0xB000_2000), 0xB000_2000);
+        assert_eq!(bus_address(0x7000_0000), 0x7000_0000);
     }
 
     #[test]

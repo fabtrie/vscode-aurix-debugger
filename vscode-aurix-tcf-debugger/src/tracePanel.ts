@@ -53,6 +53,10 @@ export function registerTraceStatus(context: vscode.ExtensionContext): void {
 					? 'miniMCDS trace. How much of the 8 KB trace buffer holds data. A recording that stops on a halt, at a function or by hand keeps running at 100 %, overwriting the oldest data, and keeps the last 8 KB. Click to open the Trace panel.'
 					: 'miniMCDS trace. Click to open the Trace panel.';
 				item.show();
+			} else if (st?.Auto) {
+				item.text = '$(pulse) Trace: on run';
+				item.tooltip = 'miniMCDS trace armed on every run and read at the halt (Step Back replays it). Click to open the Trace panel.';
+				item.show();
 			} else {
 				item.hide();
 			}
@@ -92,6 +96,9 @@ export class TracePanel {
 	private reading = false;
 	private result: any;
 	private shownLast = false;
+	/** The recording last read (its stop time): a newer one, made by arming on run, is read too. */
+	private lastRead: number | undefined;
+	private auto = false;
 
 	private constructor(
 		private readonly panel: vscode.WebviewPanel,
@@ -168,6 +175,10 @@ export class TracePanel {
 				this.config = m.config as TraceConfig;
 				await this.context.workspaceState.update(LAST_KEY, this.config);
 				await this.check();
+				if (this.auto) {
+					// Arming on run follows the form.
+					await this.request('auto', { config: { ...this.config, Stop: 'halt' } }).catch(() => undefined);
+				}
 				break;
 			case 'arm':
 				await this.arm();
@@ -201,6 +212,19 @@ export class TracePanel {
 				break;
 			case 'export':
 				await this.exportCsv();
+				break;
+			case 'auto':
+				try {
+					// The form's configuration, stopping on the halt.
+					const r = await this.request('auto', { config: m.on ? { ...this.config, Stop: 'halt' } : null });
+					this.auto = Boolean(r?.Auto);
+					this.post({ type: 'auto', on: this.auto });
+					if (this.auto && !this.poll) {
+						this.startPolling();
+					}
+				} catch (e) {
+					this.post({ type: 'auto', on: this.auto, error: e instanceof Error ? e.message : String(e) });
+				}
 				break;
 			case 'insns':
 				await this.forward('insnsPage', 'insns', { from: m.from, count: m.count }, { from: m.from });
@@ -307,11 +331,20 @@ export class TracePanel {
 		try {
 			const st = await this.request('status');
 			this.armed = st?.Armed === true && st?.Owner === 'snapshot';
+			const auto = Boolean(st?.Auto);
+			if (auto !== this.auto) {
+				this.auto = auto;
+				this.post({ type: 'auto', on: auto });
+			}
 			this.post({ type: 'status', status: st });
+			const stopped = typeof st?.Last?.stopped_ms === 'number' ? st.Last.stopped_ms : undefined;
 			if (this.armed && st?.Done === true && !this.reading) {
 				// Finished by itself (the core halted, the buffer filled): read it now.
 				await this.stopAndRead();
-			} else if (this.armed) {
+			} else if (auto && !this.armed && !this.reading && stopped !== undefined && stopped !== this.lastRead) {
+				// Armed on run: the server read the recording at the halt; show it.
+				await this.stopAndRead();
+			} else if (this.armed || auto) {
 				if (!this.poll) {
 					this.startPolling();
 				}
@@ -338,6 +371,8 @@ export class TracePanel {
 				this.armed = false;
 			}
 			this.post({ type: 'reading' });
+			const st = await this.request('status');
+			this.lastRead = typeof st?.Last?.stopped_ms === 'number' ? st.Last.stopped_ms : undefined;
 			this.result = await this.request('read', { max: 20000 });
 			this.post({ type: 'result', result: this.result });
 		} catch (e) {
@@ -448,6 +483,7 @@ export class TracePanel {
 <div id="actions">
   <button id="arm" type="button">Arm</button>
   <button id="stopBtn" type="button" class="secondary">Stop and read</button>
+  <label class="inline" id="autoLabel" title="Arm this trace whenever the core runs (Continue, not a step) and stop it when the core halts: every halt comes with the trace up to it, and Step Back replays it"><input id="auto" type="checkbox"> Arm on every run, stop on halt</label>
   <span class="spacer"></span>
   <button id="export" type="button" class="secondary" disabled>Export CSV</button>
 </div>

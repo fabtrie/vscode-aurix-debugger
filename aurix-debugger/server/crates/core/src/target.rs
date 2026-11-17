@@ -432,6 +432,14 @@ impl Core {
         each!(self, c => c.irq_masked())
     }
     forward!(unmask_irq() -> ());
+    /// Whether a resume would stop at a breakpoint on the PC before executing anything (a probe
+    /// that does its own run control handles that itself).
+    pub fn breakpoint_at_pc(&mut self, io: &mut Io) -> Result<bool> {
+        match self {
+            Core::Tricore(c) if io.adapter.run_control().is_none() => c.breakpoint_at_pc(io),
+            _ => Ok(false),
+        }
+    }
     /// One register, as the single-register case of [`Core::read_regs`] -- a
     /// probe that does its own run control answers both the same way.
     pub fn read_reg(&mut self, io: &mut Io, idx: usize) -> Result<u32> {

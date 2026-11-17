@@ -2579,9 +2579,22 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		void this.armTraceFromLaunchConfig(this.launchArgs?.trace);
 	}
 
-	/** Launch configuration `trace`: arms that trace configuration once the session is set up. */
+	/**
+	 * Launch configuration `trace`: arms that trace configuration once the session is set up, or
+	 * with `"Auto": true` on every run (the recording is read at each halt).
+	 */
 	private async armTraceFromLaunchConfig(cfg: unknown): Promise<void> {
 		if (!cfg || typeof cfg !== 'object') {
+			return;
+		}
+		const { Auto: auto, ...config } = cfg as TraceConfig;
+		if (auto) {
+			try {
+				await this.tcfClient.sendCommand(new TraceCommand('auto', { Config: { Stop: 'halt', ...config } }));
+				this.sendEvent(new OutputEvent('Trace armed on every run (launch configuration).\n', 'console'));
+			} catch (e) {
+				this.sendEvent(new OutputEvent(`Trace on run from the launch configuration not set: ${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
+			}
 			return;
 		}
 		try {
@@ -4983,7 +4996,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (command === 'aurix/trace') {
 			// miniMCDS trace (AurixTrace): `op` arm | check | status | stop | read, with `config` or `max`;
 			// the instruction trace: insns {from, count}, regs {at}, find {query, from, back}.
-			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read', 'insns', 'regs', 'find'];
+			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read', 'auto', 'insns', 'regs', 'find'];
 			const op = ops.find((o) => o === args?.op);
 			try {
 				if (!op) {
@@ -4991,6 +5004,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 				const arg = op === 'arm' || op === 'check' ? args?.config ?? {}
 					: op === 'read' ? { Max: args?.max }
+					: op === 'auto' ? (args && 'config' in args ? { Config: args.config ?? null } : {})
 					: op === 'insns' ? { From: args?.from ?? 0, Count: args?.count ?? 500 }
 					: op === 'regs' ? { At: args?.at }
 					: op === 'find' ? { Query: String(args?.query ?? ''), From: args?.from, Back: Boolean(args?.back) }

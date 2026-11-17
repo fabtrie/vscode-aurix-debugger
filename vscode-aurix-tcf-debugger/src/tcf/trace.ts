@@ -7,7 +7,7 @@
  */
 import { toBuffer, ValidatingCommand } from './tcfutils';
 
-export type TraceOp = 'arm' | 'check' | 'status' | 'stop' | 'read' | 'insns' | 'regs' | 'find' | 'replay' | 'replayMove';
+export type TraceOp = 'arm' | 'check' | 'status' | 'stop' | 'read' | 'auto' | 'insns' | 'regs' | 'find' | 'replay' | 'replayMove';
 
 /** Trace configuration as the service takes it. */
 export interface TraceConfig {
@@ -16,6 +16,8 @@ export interface TraceConfig {
 	Ranges?: Array<{ Function: string } | { Start: string | number; Len: number }>;
 	Stop?: 'halt' | 'full' | 'manual' | { Function: string };
 	Timestamps?: 'tsu' | 'ticks';
+	/** Launch configuration only: arm this trace on every run instead of once. */
+	Auto?: boolean;
 }
 
 export class TraceCommand extends ValidatingCommand<any> {

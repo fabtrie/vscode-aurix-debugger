@@ -132,8 +132,9 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 #insnMain { display: grid; grid-template-columns: 1fr 320px; height: 70vh; min-height: 320px; border: 1px solid var(--vscode-panel-border); }
 #insnList { position: relative; overflow: auto; outline: none; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
 #insnRows { position: absolute; top: 0; left: 0; right: 0; }
-#insnList .it { position: absolute; left: 0; right: 0; height: 19px; line-height: 19px; white-space: pre; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
-#insnList .row { display: grid; grid-template-columns: 5.5em 7.5em 6.5em 22em 1fr; cursor: default; }
+/* Rows keep their full width (min. the list's); the list scrolls horizontally. */
+#insnList .it { position: absolute; left: 0; min-width: 100%; width: max-content; box-sizing: border-box; height: 19px; line-height: 19px; white-space: pre; padding-right: 12px; }
+#insnList .row { display: grid; grid-template-columns: 5.5em 7.5em 6.5em 22em auto; cursor: default; }
 #insnList .row:hover { background: var(--vscode-list-hoverBackground); }
 #insnList .row.sel, #insnList .entry.sel { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 #insnList .row.pc { box-shadow: inset 3px 0 var(--vscode-debugIcon-stepBackForeground, var(--vscode-charts-yellow)); }
@@ -141,16 +142,15 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 #insnList .row .n { color: var(--vscode-editorLineNumber-foreground); text-align: right; padding-right: 8px; }
 #insnList .row .t { color: var(--vscode-descriptionForeground); text-align: right; padding-right: 8px; }
 #insnList .row .a { color: var(--vscode-debugTokenExpression-number, var(--vscode-descriptionForeground)); }
-#insnList .row .i { padding-left: calc(var(--d) * 12px); overflow: hidden; text-overflow: ellipsis; }
+#insnList .row .i { padding-left: calc(var(--d) * 12px); }
 #insnList .row .i .m { display: inline-block; min-width: 5.5em; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground)); }
 #insnList .row.call .i .m, #insnList .row.ret .i .m { color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-charts-purple)); }
-#insnList .row .e { overflow: hidden; text-overflow: ellipsis; }
-#insnList .fn { padding-left: calc(20em + var(--d) * 12px); font-weight: 600; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground)); }
-#insnList .src { padding-left: calc(20em + var(--d) * 12px); background: var(--vscode-editorWidget-background); }
+#insnList .fn { padding-left: calc(4px + var(--d) * 12px); font-weight: 600; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground)); }
+#insnList .src { padding-left: calc(4px + var(--d) * 12px); background: var(--vscode-editorWidget-background); }
 #insnList .src .code { color: var(--vscode-debugTokenExpression-name, var(--vscode-foreground)); }
 #insnList .it.gap { text-align: center; font-style: italic; border: 0; }
-#insnList .entry { padding-left: calc(20em + var(--d) * 12px); color: var(--vscode-charts-orange); }
-#insnList .halt { padding-left: 20em; color: var(--vscode-errorForeground); }
+#insnList .entry { padding-left: calc(4px + var(--d) * 12px); color: var(--vscode-charts-orange); }
+#insnList .halt { padding-left: 4px; color: var(--vscode-errorForeground); }
 .v-exact { color: var(--vscode-foreground); }
 .v-mem { color: var(--vscode-charts-green); }
 .v-unk { color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground)); }

@@ -90,6 +90,9 @@ pub struct TraceState {
     pub last: Option<Recording>,
     /// Set by a device reset while armed; reported once by `status`.
     pub lost_by_reset: bool,
+    /// Arm this configuration whenever the traced core is run (`ops::resume`), and read the
+    /// recording when it halts ([`auto_arm`], [`on_halted`]).
+    pub auto: Option<TraceConfig>,
 }
 
 /// Recorder state as read from the chip.
@@ -225,8 +228,40 @@ pub fn on_halted(c: &mut Ctx, t: usize) {
             if let Some(a) = c.mcds.armed.as_mut() {
                 a.finished = true;
             }
+            // Armed on run: read it now, so the recording (and its replay) is there at once.
+            if c.mcds.auto.is_some() {
+                if let Err(e) = stop(c, Owner::Snapshot) {
+                    crate::log_warn!("trace: reading the recording at the halt failed: {e}");
+                }
+            }
         }
         Err(e) => crate::log_warn!("trace: stopping at the halt failed: {e}"),
+    }
+}
+
+/// Arms the automatic trace before core `t` runs (a plain run, not a step). Leaves a trace
+/// alone that another owner uses or that is still recording; a finished one is read first.
+pub fn auto_arm(c: &mut Ctx, t: usize) {
+    let Some(cfg) = c.mcds.auto.clone() else { return };
+    let traced = matches!(&c.targets[t].core, crate::target::Core::Tricore(tc) if tc.coreid == cfg.core as u32);
+    if !traced {
+        return;
+    }
+    match &c.mcds.armed {
+        Some(a) if a.owner != Owner::Snapshot => {
+            crate::log_info!("trace: not armed on run, the trace is in use ({})", a.owner.as_str());
+            return;
+        }
+        Some(a) if !a.finished => return,
+        Some(_) => {
+            if let Err(e) = stop(c, Owner::Snapshot) {
+                crate::log_warn!("trace: reading the finished recording failed: {e}");
+            }
+        }
+        None => {}
+    }
+    if let Err(e) = arm(c, cfg, Owner::Snapshot) {
+        crate::log_warn!("trace: arming on run failed: {e}");
     }
 }
 

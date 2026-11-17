@@ -29,6 +29,7 @@
 	let callsOnly = false;
 	let active = false;
 	let regsTimer;
+	let wide = 0; // widest row drawn so far: the horizontal scroll width only grows
 
 	function esc(s) {
 		return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -181,6 +182,8 @@
 		}
 		if (result && result.Halt) display.push({ k: 'halt', d: 0 });
 		$('insnSpacer').style.height = display.length * ROW_H + 'px';
+		wide = 0;
+		$('insnRows').style.width = '';
 		const list = $('insnList');
 		list.scrollTop = Math.min(list.scrollTop, Math.max(0, display.length * ROW_H - list.clientHeight));
 		draw();
@@ -253,6 +256,12 @@
 		for (const el of box.children) {
 			el.style.top = el.dataset.top + 'px';
 			el.style.setProperty('--d', el.dataset.depth);
+		}
+		let w = wide;
+		for (const el of box.children) w = Math.max(w, el.scrollWidth);
+		if (w > wide) {
+			wide = w;
+			box.style.width = w + 'px';
 		}
 	}
 

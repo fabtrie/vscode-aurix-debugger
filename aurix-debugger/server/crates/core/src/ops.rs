@@ -483,6 +483,18 @@ pub fn resume(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
 /// multi-core cfg handlers (resume-start) release them too.
 pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()> {
     require_examined(cx, t)?;
+    if mode == RunMode::Continue {
+        // `mcds auto`: a trace that ends at the next halt.
+        cx.with(|c| crate::mcds_trace::auto_arm(c, t));
+    }
+    // A breakpoint on the PC would stop the resume before the first instruction: step past it
+    // first (not reported: to the frontends this is one run).
+    if addr.is_none() && cx.with(|c| c.target_io(t).and_then(|(mut io, e)| e.core.breakpoint_at_pc(&mut io))).unwrap_or(false) {
+        step_inner(cx, t, None, RunMode::Step, false)?;
+        if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
+            return Ok(());
+        }
+    }
     unmask_irq_except(cx, t);
     fire(cx, t, "resume-start");
     cx.with(|c| {
@@ -526,6 +538,12 @@ pub fn step(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
 
 /// Instruction step as part of `mode` (see [`resume_as`]).
 pub fn step_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()> {
+    step_inner(cx, t, addr, mode, true)
+}
+
+/// An instruction step; `report`: the halt after it is reported (frontends, `halted` events,
+/// a trace stopping on halt). A step past a breakpoint before a resume is not.
+fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool) -> Result<()> {
     require_examined(cx, t)?;
     let name = target_name(cx, t);
     if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
@@ -560,7 +578,9 @@ pub fn step_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()
     fire(cx, t, "resumed");
     let r = match res {
         Ok(true) => {
-            handle_transition(cx, t, Transition::Halted { debug: false, boot: false });
+            if report {
+                handle_transition(cx, t, Transition::Halted { debug: false, boot: false });
+            }
             Ok(())
         }
         Ok(false) => {

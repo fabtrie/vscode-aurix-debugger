@@ -3070,6 +3070,25 @@
         ],
         "type": "object"
       },
+      "TraceAutoRequest": {
+        "additionalProperties": false,
+        "description": "Automatic arming on run.",
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TraceConfigRequest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The configuration to arm on every run (stop `halt` is the useful one); null: off."
+          }
+        },
+        "type": "object"
+      },
       "TraceConfigRequest": {
         "additionalProperties": false,
         "description": "A trace configuration.",
@@ -6979,6 +6998,75 @@
           }
         },
         "summary": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow (optionally only while the PC is inside a function or address range) or every write into an address range.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/auto": {
+      "post": {
+        "description": "Arm a trace automatically whenever the traced core runs (a run, not a step) and read the\nrecording when it halts, so every halt comes with the trace up to it (and its\ninstruction trace and replay). `config` null ends it; the answer is the current setting.",
+        "operationId": "trace_auto",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Automatic arming on run.",
+                "properties": {
+                  "config": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/TraceConfigRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "The configuration to arm on every run (stop `halt` is the useful one); null: off."
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Arm a trace automatically whenever the traced core runs (a run, not a step) and read the recording when it halts, so every halt comes with the trace up to it (and its instruction trace and replay).",
         "tags": [
           "trace"
         ]

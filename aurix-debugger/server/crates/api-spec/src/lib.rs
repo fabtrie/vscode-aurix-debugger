@@ -53,7 +53,7 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// `end_client`). 6: `ucb_read`, `ucb_stage`, `ucb_review`, `ucb_export`, `ucb_compare`,
 /// `ucb_apply`; `ucb_write` in `connect`. 7: `trace_arm`, `trace_check`, `trace_status`,
 /// `trace_stop`, `trace_read`; DAQ points with `mode: "trace"`. 8: `trace_insns`, `trace_regs`,
-/// `trace_find` (instruction trace with rebuilt registers).
+/// `trace_find` (instruction trace with rebuilt registers), `trace_auto`.
 pub const API_VERSION: u32 = 8;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies

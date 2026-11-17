@@ -1007,6 +1007,14 @@ mcds plan [-json] <options of mcds arm>
 
 Show the register writes `mcds arm` would make, without touching the target.
 
+### `mcds auto`
+
+```
+mcds auto [off | <mcds arm options>] [-json]
+```
+
+Arms the trace whenever the traced core runs (`resume`, not a step) and reads it when the core halts, so every halt comes with the trace up to it: `mcds auto -program -stop halt`. `off` ends it; without arguments it shows the setting. A trace that another owner uses or that is still recording is left alone.
+
 ### `mcds status`
 
 ```

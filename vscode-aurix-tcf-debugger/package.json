@@ -1204,7 +1204,8 @@
 										"items": { "type": "object", "properties": { "Function": { "type": "string" }, "Start": { "type": ["string", "number"] }, "Len": { "type": "number" } } }
 									},
 									"Stop": { "description": "\"halt\", \"full\", \"manual\" or { \"Function\": name }", "default": "halt" },
-									"Timestamps": { "type": "string", "enum": ["tsu", "ticks"], "default": "tsu" }
+									"Timestamps": { "type": "string", "enum": ["tsu", "ticks"], "default": "tsu" },
+									"Auto": { "type": "boolean", "default": false, "description": "Arm the trace on every run (Continue) instead of once, stopping on the halt: every halt then comes with the trace up to it, and Step Back replays it." }
 								}
 							},
 							"profile": {

@@ -12,7 +12,7 @@ use crate::ctx::Cx;
 use crate::mcds_trace::{self as mt, Owner, Recording};
 use crate::util::parse_u32;
 
-pub const USAGE: &str = "usage: mcds arm|plan|status|stop|decode|dump|init ...";
+pub const USAGE: &str = "usage: mcds arm|plan|auto|status|stop|decode|dump|init ...";
 
 fn flags<'a>(a: &[&'a str]) -> (Vec<&'a str>, bool) {
     (a.iter().copied().filter(|x| *x != "-json").collect(), a.contains(&"-json"))
@@ -124,12 +124,14 @@ pub fn recording_json(r: &Recording) -> Value {
         "ring": r.ring,
         "paragraphs": r.paragraphs().len(),
         "bytes": r.raw.len(),
+        "stopped_ms": r.stopped_at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
     })
 }
 
 fn status_json(cx: &Cx) -> Result<Value, String> {
     let (armed, last, lost) = cx.with(|c| (c.mcds.armed.clone(), c.mcds.last.as_ref().map(recording_json), c.mcds.lost_by_reset));
-    let mut v = json!({"armed": armed.is_some(), "lost_by_reset": lost, "last": last});
+    let auto = cx.with(|c| c.mcds.auto.as_ref().map(config_json));
+    let mut v = json!({"armed": armed.is_some(), "lost_by_reset": lost, "last": last, "auto": auto});
     if let Some(a) = armed {
         let (st, fill) = cx
             .with(|c| -> crate::Result<_> {
@@ -216,6 +218,24 @@ pub fn cmd_mcds(cx: &Cx, args: &[&str]) -> CmdResult {
                 v["config"]["stop"],
                 p.writes.len()
             );
+            out(v, text)
+        }
+        "auto" => {
+            let rest: Vec<&str> = rest.iter().copied().filter(|x| *x != "-json").collect();
+            match rest.first().copied() {
+                None => {}
+                Some("off") => cx.with(|c| c.mcds.auto = None),
+                Some(_) => {
+                    let cfg = parse_config(&rest)?;
+                    cfg.plan()?;
+                    cx.with(|c| c.mcds.auto = Some(cfg));
+                }
+            }
+            let v = json!({"auto": cx.with(|c| c.mcds.auto.as_ref().map(config_json))});
+            let text = match &v["auto"] {
+                Value::Null => "off: the trace is armed by hand".to_string(),
+                cfg => format!("on: armed whenever the core runs ({})", cfg),
+            };
             out(v, text)
         }
         "status" => {

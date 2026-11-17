@@ -225,6 +225,10 @@ impl Channel {
                 let v = trace::check_cmd(&self.shared, &a.value(0)?).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
+            ("AurixTrace", "auto") => {
+                let v = trace::auto_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
             ("AurixTrace", "status") => {
                 let v = trace::status_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])

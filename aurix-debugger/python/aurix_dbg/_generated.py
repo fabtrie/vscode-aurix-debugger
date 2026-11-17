@@ -1655,6 +1655,16 @@ class GeneratedClient:
         """
         return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/arm", None, _args({"core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
 
+    def trace_auto(self, *, config: TraceConfigRequest | None = None) -> TraceData:
+        """Arm a trace automatically whenever the traced core runs (a run, not a step) and read the
+        recording when it halts, so every halt comes with the trace up to it (and its
+        instruction trace and replay). `config` null ends it; the answer is the current setting.
+
+        Args:
+            config: The configuration to arm on every run (stop `halt` is the useful one); null: off.
+        """
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/auto", None, _args({"config": config})))
+
     def trace_check(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
         """Check a trace configuration without arming: the resources it takes and the window to
         expect, or why it cannot be armed.

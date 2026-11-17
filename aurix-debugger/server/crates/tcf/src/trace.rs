@@ -122,6 +122,24 @@ pub fn check_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
     }))
 }
 
+/// `auto {Config}` arms that configuration whenever the traced core runs (and reads the
+/// recording when it halts); `auto {Config: null}` ends it; without `Config` it only reports.
+pub fn auto_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
+    match v.get("Config") {
+        None => {}
+        Some(Value::Null) => {
+            sh.handle.call(|cx| cx.with(|c| c.mcds.auto = None)).ok_or("the debug server stopped")?;
+        }
+        Some(cfg) => {
+            let cfg = parse_config(sh, cfg)?;
+            cfg.plan()?;
+            sh.handle.call(move |cx| cx.with(|c| c.mcds.auto = Some(cfg))).ok_or("the debug server stopped")?;
+        }
+    }
+    let auto = sh.handle.call(|cx| cx.with(|c| c.mcds.auto.as_ref().map(mcds_cmd::config_json))).ok_or("the debug server stopped")?;
+    Ok(json!({"Auto": auto}))
+}
+
 pub fn status_cmd(sh: &Shared) -> Result<Value, String> {
     let r = sh
         .handle
@@ -129,7 +147,8 @@ pub fn status_cmd(sh: &Shared) -> Result<Value, String> {
             cx.with(|c| -> Result<Value, String> {
                 let armed = c.mcds.armed.clone();
                 let last = c.mcds.last.as_ref().map(mcds_cmd::recording_json);
-                let mut v = json!({"Armed": armed.is_some(), "LostByReset": c.mcds.lost_by_reset, "Last": last});
+                let auto = c.mcds.auto.as_ref().map(mcds_cmd::config_json);
+                let mut v = json!({"Armed": armed.is_some(), "LostByReset": c.mcds.lost_by_reset, "Last": last, "Auto": auto});
                 if let Some(a) = armed {
                     v["Owner"] = json!(a.owner.as_str());
                     v["Config"] = mcds_cmd::config_json(&a.cfg);

@@ -258,6 +258,13 @@ impl Tricore {
         Ok(())
     }
 
+    /// Whether a breakpoint sits on the PC: a resume would halt there again before executing
+    /// anything (break before make; measured on the TC377), so `ops::resume_as` steps past it.
+    pub fn breakpoint_at_pc(&mut self, io: &mut Io) -> Result<bool> {
+        let pc = self.read_reg(io, REG_PC)?;
+        Ok(self.triggers.iter().any(|t| t.enable && t.pc && t.bbm && !t.range && t.addr == pc))
+    }
+
     /// Executes one instruction. Uses a non-BBM PC trigger on the current PC,
     /// which halts after the instruction has executed. Returns whether the
     /// core halted again.

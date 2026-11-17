@@ -770,6 +770,15 @@ pub struct TraceConfigRequest {
     pub timestamps: Option<String>,
 }
 
+/// Automatic arming on run.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceAutoRequest {
+    /// The configuration to arm on every run (stop `halt` is the useful one); null: off.
+    #[serde(default)]
+    pub config: Option<TraceConfigRequest>,
+}
+
 /// Reading a recording.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

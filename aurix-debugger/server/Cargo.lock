@@ -749,6 +749,7 @@ version = "0.1.0"
 dependencies = [
  "capstone",
  "object",
+ "serde_json",
 ]
 
 [[package]]

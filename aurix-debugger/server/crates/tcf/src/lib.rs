@@ -18,6 +18,7 @@ mod stack;
 mod stepping;
 mod symstore;
 pub mod trace;
+pub mod trace_insns;
 mod wire;
 
 use std::collections::HashMap;
@@ -109,6 +110,10 @@ pub struct Shared {
     pub orti: Mutex<Option<Arc<orti::Awareness>>>,
     /// The running task profiler, while one is started.
     pub profile: Mutex<Option<Arc<profile::Profile>>>,
+    /// The last program recording, decoded with its register replay.
+    pub trace: Mutex<Option<Arc<trace_insns::ProgramTrace>>>,
+    /// The trace replay the debugger shows instead of the halted core, while one is active.
+    pub replay: Mutex<Option<trace_insns::ReplayView>>,
     /// The live sets of every connection (`AurixTarget.setLiveSet`).
     pub live: Mutex<live::LiveSets>,
     /// Receivers of [`SessionEvent`]s (bounded: a receiver that does not keep up misses events).
@@ -378,6 +383,8 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         exprs: Mutex::new(ExprTable::default()),
         orti: Mutex::new(None),
         profile: Mutex::new(None),
+        trace: Mutex::new(None),
+        replay: Mutex::new(None),
         live: Mutex::new(live::LiveSets::default()),
         listeners: Mutex::new(Vec::new()),
         api_clients: Mutex::new(HashMap::new()),

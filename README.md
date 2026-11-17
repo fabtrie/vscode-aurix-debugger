@@ -162,6 +162,8 @@ On a TC37x the debugger uses the chip's small trace unit (miniMCDS, 8 KB) over t
 - **Stop** when the core halts (the trace then ends exactly at the halt, e.g. a breakpoint), when the buffer is full, manually, or at a function.
 - The panel checks the configuration as you type and shows the resources it takes; configurations can be saved by name, and a launch configuration `trace` object arms one when the session starts.
 - The result lists the executed code grouped by function with source lines and target times; a click opens the source. **Export CSV** saves it.
+- **Instructions** shows every executed instruction with the source lines in between, what each instruction wrote, and the registers at any instruction, rebuilt from the state at the halt. Each value is exact, taken from memory at the halt, or unknown, and a click on a register tells where its value came from.
+- **Step Back** and **Reverse Continue** in the debug toolbar replay the trace: the editor, Variables, Watch, Registers, Call Stack and Disassembly show the rebuilt state at that point, and Step, Step Into and Continue move forward again up to the halt.
 
 8 KB holds about 80 µs of unfiltered program flow, more with a filter. Only CPU0 can be traced, and the data trace sees only CPU0's writes. A trace that stops on a halt runs right up to the breakpoint or halt point.
 

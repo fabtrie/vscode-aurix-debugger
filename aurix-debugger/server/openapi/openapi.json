@@ -3129,6 +3129,57 @@
         ],
         "type": "object"
       },
+      "TraceFindRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "back": {
+            "default": false,
+            "type": "boolean"
+          },
+          "from": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "TraceInsnsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "default": null,
+            "description": "Rows (default 500, at most 5000).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "from": {
+            "default": null,
+            "description": "First row (default 0).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "TraceRange": {
         "additionalProperties": false,
         "description": "A trace range: a function (by name, its whole code) or an address range.",
@@ -3169,6 +3220,27 @@
               "integer",
               "null"
             ]
+          }
+        },
+        "type": "object"
+      },
+      "TraceRegsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "default": null,
+            "description": "The row (default: the last, where the core halted).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "before": {
+            "default": false,
+            "description": "The registers before the row instead of after it.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -6815,7 +6887,7 @@
     },
     "/api/v1/sessions/{session}/trace/arm": {
       "post": {
-        "description": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow\n(optionally only while the PC is inside a function or address range) or every write into an\naddress range. Stop: `halt` (the last 8 KB before the core halts, stopped in hardware),\n`full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds\nabout 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they\nuse it.",
+        "description": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow\n(optionally only while the PC is inside a function or address range) or every write into an\naddress range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),\n`full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds\nabout 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they\nuse it.",
         "operationId": "trace_arm",
         "parameters": [
           {
@@ -7011,6 +7083,153 @@
         ]
       }
     },
+    "/api/v1/sessions/{session}/trace/find": {
+      "get": {
+        "description": "The next row of the instruction trace matching `query`: an address (`0x80001234`), a\nregister value (`d15=0xC`), a register write (`a4 changes`), or text in the instruction,\nfunction or file name. `from`: start after this row; `back`: search backwards.",
+        "operationId": "trace_find",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "back",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The next row of the instruction trace matching `query`: an address (`0x80001234`), a register value (`d15=0xC`), a register write (`a4 changes`), or text in the instruction, function or file name.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/insns": {
+      "get": {
+        "description": "The last program recording as instructions, a page at a time: each row (`I`) with its time\n(`T`, ns from the first), kind (`K`: `i` instruction, `e` interrupt entry, `g` gap), address\n(`A`), mnemonic and operands (`M`, `O`), function and file (`F`, `Fl`: indices into\n`Functions`, `Files`), line (`L`), call depth (`D`), branch taken (`B`), the registers it\nwrote (`W`: `[name, value or null, \"exact\" | \"mem\" | null, known bits]`) and its memory\naccesses (`X`). Registers are rebuilt from the state at the halt: `exact`, `mem` (taken from\nmemory at the halt) or unknown (null). `Replay` summarises how much could be rebuilt.",
+        "operationId": "trace_insns",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows (default 500, at most 5000).",
+            "in": "query",
+            "name": "count",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "First row (default 0).",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The last program recording as instructions, a page at a time: each row (`I`) with its time (`T`, ns from the first), kind (`K`: `i` instruction, `e` interrupt entry, `g` gap), address (`A`), mnemonic and operands (`M`, `O`), function and file (`F`, `Fl`: indices into `Functions`, `Files`), line (`L`), call depth (`D`), branch taken (`B`), the registers it wrote (`W`: `[name, value or null, \"exact\" | \"mem\" | null, known bits]`) and its memory accesses (`X`).",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
     "/api/v1/sessions/{session}/trace/read": {
       "get": {
         "description": "The last recording, decoded: program flow as instructions with function, file and line\n(`Columns` names the fields of each `Steps` row; gaps are objects), or data trace writes\nwith address, value and the variable hit. `max`: the newest rows only.",
@@ -7064,6 +7283,74 @@
           }
         },
         "summary": "The last recording, decoded: program flow as instructions with function, file and line (`Columns` names the fields of each `Steps` row; gaps are objects), or data trace writes with address, value and the variable hit.",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/trace/regs": {
+      "get": {
+        "description": "All registers after one row of the instruction trace, each with how sure it is and where\nit came from (`Why`), and the call stack at that point.",
+        "operationId": "trace_regs",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The row (default: the last, where the core halted).",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The registers before the row instead of after it.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "All registers after one row of the instruction trace, each with how sure it is and where it came from (`Why`), and the call stack at that point.",
         "tags": [
           "trace"
         ]

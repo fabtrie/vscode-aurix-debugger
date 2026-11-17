@@ -779,6 +779,38 @@ pub struct TraceReadRequest {
     pub max: Option<u32>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceInsnsRequest {
+    /// First row (default 0).
+    #[serde(default)]
+    pub from: Option<u32>,
+    /// Rows (default 500, at most 5000).
+    #[serde(default)]
+    pub count: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceRegsRequest {
+    /// The row (default: the last, where the core halted).
+    #[serde(default)]
+    pub at: Option<u32>,
+    /// The registers before the row instead of after it.
+    #[serde(default)]
+    pub before: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceFindRequest {
+    pub query: String,
+    #[serde(default)]
+    pub from: Option<u32>,
+    #[serde(default)]
+    pub back: bool,
+}
+
 /// Trace data as the trace service answers: a plan, a status, a recording or a decoded trace.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TraceData {

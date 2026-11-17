@@ -154,12 +154,13 @@ pub fn stop_cmd(sh: &Shared) -> Result<Value, String> {
 }
 
 /// The code of the ELF files of a symbol set: load segments by address.
-struct Image {
-    segs: Vec<(u32, Vec<u8>)>,
+#[derive(Default)]
+pub(crate) struct Image {
+    pub segs: Vec<(u32, Vec<u8>)>,
 }
 
 impl Image {
-    fn load(set: &SymbolSet) -> Image {
+    pub fn load(set: &SymbolSet) -> Image {
         let mut segs = Vec::new();
         for (_, s) in &set.elfs {
             if let Ok(data) = std::fs::read(Path::new(&s.path)) {
@@ -169,7 +170,7 @@ impl Image {
         Image { segs }
     }
 
-    fn read(&self, a: u32, n: usize) -> Option<Vec<u8>> {
+    pub fn read(&self, a: u32, n: usize) -> Option<Vec<u8>> {
         self.segs.iter().find(|(b, d)| a >= *b && ((a - b) as usize) < d.len()).map(|(b, d)| {
             let o = (a - b) as usize;
             d[o..(o + n).min(d.len())].to_vec()
@@ -211,22 +212,10 @@ fn gap_name(r: mcds::GapReason) -> &'static str {
 /// Decodes a program recording: instructions with function and source line, gaps.
 fn program_json(sh: &Shared, r: &Recording, max: usize) -> Result<Value, String> {
     let set = sh.symbols_for("");
-    let img = set.as_deref().map(Image::load).unwrap_or(Image { segs: Vec::new() });
-    if img.segs.is_empty() {
-        return Err("no code to decode the program trace with (load the ELF of the application)".into());
-    }
-    let mut code = mcds::flow::CapstoneCode::new(|a: u32, n: usize| img.read(a, n))?;
-    let pars = r.paragraphs();
-    // A ring recording ends where the core halted (stop on halt, or a manual stop of a halted core:
-    // nothing is recorded while it is halted); a linear one may have filled long before.
-    let halt_pc = r.halt_pc.filter(|_| r.ring);
-    let (steps, fs, ds, reached) = mcds::decode_program_to(&pars, &mut code, halt_pc);
-    let t_start = steps.iter().find_map(|s| match s {
-        Step::Insn { time, .. } | Step::Gap { time, .. } => *time,
-    });
-    let t_end = steps.iter().rev().find_map(|s| match s {
-        Step::Insn { time, .. } | Step::Gap { time, .. } => *time,
-    });
+    let pt = crate::trace_insns::program_trace(sh, r)?;
+    let (steps, fs, ds, reached) = (&pt.steps, &pt.flow, &pt.decode, pt.reached);
+    let halt_pc = pt.halt_pc;
+    let (t_start, t_end) = (pt.t_start, pt.t_end);
     // The flow reaches the halt PC when the recording was flushed before the stop (the straight
     // code after the last message is filled in). If it does not (data lost, an older recording),
     // mark the gap; either way the halt point itself is reported as `Halt`.
@@ -298,6 +287,7 @@ fn program_json(sh: &Shared, r: &Recording, max: usize) -> Result<Value, String>
             "Messages": ds.messages, "Lost": ds.lost, "Undecodable": ds.undecodable,
         },
         "Columns": ["addr", "t_ns", "function", "file", "line"],
+        "Replay": pt.summary(),
     }))
 }
 

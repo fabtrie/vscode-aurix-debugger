@@ -650,6 +650,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		threadId: number,
 		opts?: { allThreadsStopped?: boolean; preserveFocus?: boolean; hitBreakpointIds?: number[] }
 	) {
+		if (this.traceReplay) {
+			// The target stopped again: the server ended the replay.
+			this.traceReplay = undefined;
+			this.sendEvent(new Event('aurix/traceReplay', { active: false }));
+		}
 		const ctx = this.threadIdToContext.get(threadId);
 		this.focusLog(
 			`StoppedEvent: reason=${reason} threadId=${threadId} ctx=${String(ctx ?? '')} allThreadsStopped=${String(Boolean(opts?.allThreadsStopped))} preserveFocusHint=${String(opts?.preserveFocus)}`
@@ -1894,6 +1899,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		response.body.supportsReadMemoryRequest = true;
 		response.body.supportsWriteMemoryRequest = true;
 		(response.body as any).supportsDisassembleRequest = true;
+		// Step Back / Reverse Continue replay a program trace that ended at the halt.
+		response.body.supportsStepBack = true;
 		this.sendResponse(response);
 		return Promise.resolve();
 	}
@@ -2847,6 +2854,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async setVariableRequestAsync(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments): Promise<void> {
+		if (this.traceReplay) {
+			this.sendErrorResponse(response, 0, 'The debugger shows a trace replay: leave it (continue to the halt) to change values');
+			return;
+		}
 		try {
 			const vars = await this.variablesOf(args.variablesReference);
 			const variable = vars.find(v => (v?.name?.() ?? '') === args.name);
@@ -3166,12 +3177,92 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async continueRequestAsync(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): Promise<void> {
+		if (this.inTraceReplay(args.threadId)) {
+			return this.traceReplayMove(response, args.threadId, 'continue');
+		}
+		await this.leaveTraceReplay();
 		const contextId = this.threadIdToContext.get(args.threadId);
 		await this.tcfClient.continue(contextId);
 		this.sendResponse(response);
 	}
 
+	// ---- trace replay -------------------------------------------------------------------------
+	// A program trace that ended at the halt can be replayed: Step Back / Reverse Continue move a
+	// trace cursor instead of the PC, and while it is away from the halt the server answers the
+	// core's stack, registers and locals with the values rebuilt for that point. Step, Step Into,
+	// Step Out and Continue then move forward; past the last instruction the core is shown live.
+
+	private traceReplay: { threadId: number; ctx?: string } | undefined;
+
+	private inTraceReplay(threadId: number): boolean {
+		return this.traceReplay !== undefined && (this.traceReplay.threadId === threadId || this.threadIdToContext.get(threadId) === this.traceReplay.ctx);
+	}
+
+	private threadOfContext(ctx: string | undefined): number | undefined {
+		if (!ctx) {
+			return undefined;
+		}
+		for (const [id, c] of this.threadIdToContext) {
+			if (c === ctx) {
+				return id;
+			}
+		}
+		return undefined;
+	}
+
+	/** Shows the replay position (or the live core) the server answered with. */
+	private traceReplayShow(r: any, threadHint?: number): void {
+		const ctx = typeof r?.Ctx === 'string' && r.Ctx ? r.Ctx : this.traceReplay?.ctx;
+		const threadId = this.threadOfContext(ctx) ?? threadHint ?? this.traceReplay?.threadId;
+		this.traceReplay = r?.Replay && threadId !== undefined ? { threadId, ctx } : undefined;
+		this.sendEvent(new Event('aurix/traceReplay', { active: Boolean(r?.Replay), at: r?.At, total: r?.Total, t: r?.T, endNs: r?.EndNs }));
+		if (threadId !== undefined) {
+			const ev = new StoppedEvent('step', threadId);
+			const body = ev.body as DebugProtocol.StoppedEvent['body'];
+			body.description = r?.Replay ? `Trace replay ${Number(r.At) + 1}/${r.Total}` : 'At the halt';
+			body.preserveFocusHint = false;
+			this.sendEvent(ev);
+		}
+	}
+
+	private async traceReplayMove(response: DebugProtocol.Response, threadId: number, kind: string): Promise<void> {
+		try {
+			const r = await this.tcfClient.sendCommand(new TraceCommand('replayMove', { Kind: kind }));
+			this.sendResponse(response);
+			this.traceReplayShow(r, threadId);
+		} catch (e) {
+			this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+		}
+	}
+
+	/** Ends a replay before the target really runs. */
+	private async leaveTraceReplay(): Promise<void> {
+		if (!this.traceReplay) {
+			return;
+		}
+		this.traceReplay = undefined;
+		this.sendEvent(new Event('aurix/traceReplay', { active: false }));
+		try {
+			await this.tcfClient.sendCommand(new TraceCommand('replay', { Off: true }));
+		} catch {
+			// The server ends it anyway when the core runs.
+		}
+	}
+
+	protected override async stepBackRequestAsync(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments): Promise<void> {
+		const insn = this.instructionSteppingEnabled || args.granularity === 'instruction';
+		return this.traceReplayMove(response, args.threadId, insn ? 'stepInsnBack' : 'stepBack');
+	}
+
+	protected override async reverseContinueRequestAsync(response: DebugProtocol.ReverseContinueResponse, args: DebugProtocol.ReverseContinueArguments): Promise<void> {
+		return this.traceReplayMove(response, args.threadId, 'reverseContinue');
+	}
+
 	protected override async nextRequestAsync(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): Promise<void> {
+		if (this.inTraceReplay(args.threadId)) {
+			return this.traceReplayMove(response, args.threadId, this.instructionSteppingEnabled || args.granularity === 'instruction' ? 'stepInsn' : 'step');
+		}
+		await this.leaveTraceReplay();
 		const contextId = this.threadIdToContext.get(args.threadId);
 		this.pendingStepThreads.add(args.threadId);
 		if (this.instructionSteppingEnabled) {
@@ -3461,6 +3552,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async stepInRequestAsync(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments): Promise<void> {
+		if (this.inTraceReplay(args.threadId)) {
+			return this.traceReplayMove(response, args.threadId, this.instructionSteppingEnabled || args.granularity === 'instruction' ? 'stepInsn' : 'stepIn');
+		}
+		await this.leaveTraceReplay();
 		const contextId = this.threadIdToContext.get(args.threadId);
 		this.pendingStepThreads.add(args.threadId);
 		if (this.instructionSteppingEnabled) {
@@ -3472,6 +3567,10 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	}
 
 	protected override async stepOutRequestAsync(response: DebugProtocol.StepOutResponse, args: DebugProtocol.StepOutArguments): Promise<void> {
+		if (this.inTraceReplay(args.threadId)) {
+			return this.traceReplayMove(response, args.threadId, 'stepOut');
+		}
+		await this.leaveTraceReplay();
 		const contextId = this.threadIdToContext.get(args.threadId);
 		this.pendingStepThreads.add(args.threadId);
 		// No instruction-level "step out" in TCF; keep semantic step-out.
@@ -4882,16 +4981,34 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 
 		if (command === 'aurix/trace') {
-			// miniMCDS trace (AurixTrace): `op` arm | check | status | stop | read, with `config` or `max`.
-			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read'];
+			// miniMCDS trace (AurixTrace): `op` arm | check | status | stop | read, with `config` or `max`;
+			// the instruction trace: insns {from, count}, regs {at}, find {query, from, back}.
+			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read', 'insns', 'regs', 'find'];
 			const op = ops.find((o) => o === args?.op);
 			try {
 				if (!op) {
 					throw new Error(`unknown trace operation '${args?.op}'`);
 				}
-				const arg = op === 'arm' || op === 'check' ? args?.config ?? {} : op === 'read' ? { Max: args?.max } : undefined;
+				const arg = op === 'arm' || op === 'check' ? args?.config ?? {}
+					: op === 'read' ? { Max: args?.max }
+					: op === 'insns' ? { From: args?.from ?? 0, Count: args?.count ?? 500 }
+					: op === 'regs' ? { At: args?.at }
+					: op === 'find' ? { Query: String(args?.query ?? ''), From: args?.from, Back: Boolean(args?.back) }
+					: undefined;
 				response.body = await this.tcfClient.sendCommand(new TraceCommand(op, arg));
 				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+		if (command === 'aurix/traceReplay') {
+			// The Trace panel: show a trace row in the debugger ({at}) or the live core again ({off}).
+			try {
+				const r = await this.tcfClient.sendCommand(new TraceCommand('replay', args?.off ? { Off: true } : { At: args?.at }));
+				response.body = r;
+				this.sendResponse(response);
+				this.traceReplayShow(r);
 			} catch (e) {
 				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
 			}

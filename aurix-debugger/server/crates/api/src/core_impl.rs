@@ -942,6 +942,21 @@ impl DebuggerApi for CoreApi {
         Ok(TraceData { data: v })
     }
 
+    fn trace_insns(&self, req: TraceInsnsRequest) -> Result<TraceData, ApiError> {
+        let v = tcf::trace_insns::insns_cmd(&self.session, &serde_json::json!({ "From": req.from, "Count": req.count })).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_regs(&self, req: TraceRegsRequest) -> Result<TraceData, ApiError> {
+        let v = tcf::trace_insns::regs_cmd(&self.session, &serde_json::json!({ "At": req.at, "Before": req.before })).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_find(&self, req: TraceFindRequest) -> Result<TraceData, ApiError> {
+        let v = tcf::trace_insns::find_cmd(&self.session, &serde_json::json!({ "Query": req.query, "From": req.from, "Back": req.back })).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
     fn ucb_read(&self, req: UcbReadRequest) -> Result<UcbData, ApiError> {
         let mut cmd = format!("ucb {} -json", if req.cached { "show" } else { "read" });
         if let Some(u) = &req.ucb {

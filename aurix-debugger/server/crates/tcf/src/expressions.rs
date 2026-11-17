@@ -133,6 +133,9 @@ fn frames(sh: &Shared, c: &CoreInfo) -> Res<Vec<Frame>> {
     if !c.suspended() || sh.is_stepping(c.idx) {
         return fail(ERR_IS_RUNNING, "Execution context is running");
     }
+    if let Some(f) = crate::trace_insns::replay_frames(sh, c.idx) {
+        return Ok(f);
+    }
     if let Some(f) = sh.stacks.lock().unwrap().get(&c.idx) {
         return Ok(f.clone());
     }

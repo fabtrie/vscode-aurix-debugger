@@ -58,6 +58,10 @@ pub struct Recording {
     /// last instructions before it are usually not in the trace (the PTU reports a stretch at the
     /// next discontinuity, which the halt cuts off).
     pub halt_pc: Option<u32>,
+    /// All registers of the traced core at the stop when it was halted (the debugger's numbering
+    /// 0..=41: d0-d15, a0-a15, lcx, fcx, pcxi, psw, pc, icr, isp, btv, biv, syscon): the anchor
+    /// of the register replay.
+    pub halt_regs: Option<Vec<u32>>,
 }
 
 impl Recording {
@@ -179,7 +183,8 @@ pub fn stop(c: &mut Ctx, owner: Owner) -> Result<Recording> {
     let wp = io.read32(regs::FIFONOW)?;
     let raw = io.read(regs::TRAM, regs::TRAM_SIZE as usize)?;
     let halt_pc = halted_pc(c, a.cfg.core as u32);
-    let rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc };
+    let halt_regs = halt_pc.and_then(|_| halted_regs(c, a.cfg.core as u32));
+    let rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc, halt_regs };
     c.mcds.armed = None;
     c.mcds.last = Some(rec.clone());
     Ok(rec)
@@ -251,6 +256,14 @@ pub fn on_reset(c: &mut Ctx) {
 }
 
 /// The PC of TriCore `coreid` if it is halted (as last polled).
+/// The registers the replay starts from, if the TriCore `coreid` is halted.
+pub fn halted_regs(c: &mut Ctx, coreid: u32) -> Option<Vec<u32>> {
+    let t = c.targets.iter().position(|t| matches!(&t.core, crate::target::Core::Tricore(tc) if tc.coreid == coreid && tc.state == crate::target::TargetState::Halted))?;
+    let idxs: Vec<usize> = (0..=41).collect();
+    let (mut io, e) = c.target_io(t).ok()?;
+    e.core.read_regs(&mut io, &idxs).ok()
+}
+
 fn halted_pc(c: &mut Ctx, coreid: u32) -> Option<u32> {
     let addr = c.targets.iter().find_map(|t| match &t.core {
         crate::target::Core::Tricore(tc) if tc.coreid == coreid && tc.state == crate::target::TargetState::Halted => Some(tc.csfr(crate::arch::PC)),

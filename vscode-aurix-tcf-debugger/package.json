@@ -327,6 +327,13 @@
 				"icon": "$(pulse)"
 			},
 			{
+				"command": "aurix-debugger.traceReplayExit",
+				"title": "Leave Trace Replay",
+				"category": "AURIX™ Debugger",
+				"icon": "$(history)",
+				"enablement": "aurix.traceReplay"
+			},
+			{
 				"command": "aurix-debugger.osShowProfile",
 				"title": "Show OS Profile",
 				"category": "AURIX™ Debugger",
@@ -395,6 +402,11 @@
 		},
 		"menus": {
 			"debug/toolBar": [
+				{
+					"command": "aurix-debugger.traceReplayExit",
+					"when": "debugType == aurixdbg && aurix.traceReplay",
+					"group": "navigation@0"
+				},
 				{
 					"command": "aurix-debugger.flashTarget",
 					"when": "debugType == aurixdbg",

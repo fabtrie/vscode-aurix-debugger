@@ -1641,7 +1641,7 @@ class GeneratedClient:
     def trace_arm(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
         """Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow
         (optionally only while the PC is inside a function or address range) or every write into an
-        address range. Stop: `halt` (the last 8 KB before the core halts, stopped in hardware),
+        address range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),
         `full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds
         about 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they
         use it.
@@ -1688,6 +1688,43 @@ class GeneratedClient:
             max: The newest rows only (default 20000).
         """
         return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/read", _args({"max": max}), None))
+
+    def trace_insns(self, *, count: int | None = None, from_: int | None = None) -> TraceData:
+        """The last program recording as instructions, a page at a time: each row (`I`) with its time
+        (`T`, ns from the first), kind (`K`: `i` instruction, `e` interrupt entry, `g` gap), address
+        (`A`), mnemonic and operands (`M`, `O`), function and file (`F`, `Fl`: indices into
+        `Functions`, `Files`), line (`L`), call depth (`D`), branch taken (`B`), the registers it
+        wrote (`W`: `[name, value or null, "exact" | "mem" | null, known bits]`) and its memory
+        accesses (`X`). Registers are rebuilt from the state at the halt: `exact`, `mem` (taken from
+        memory at the halt) or unknown (null). `Replay` summarises how much could be rebuilt.
+
+        Args:
+            count: Rows (default 500, at most 5000).
+            from_: First row (default 0).
+        """
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/insns", _args({"count": count, "from": from_}), None))
+
+    def trace_regs(self, *, at: int | None = None, before: bool | None = None) -> TraceData:
+        """All registers after one row of the instruction trace, each with how sure it is and where
+        it came from (`Why`), and the call stack at that point.
+
+        Args:
+            at: The row (default: the last, where the core halted).
+            before: The registers before the row instead of after it.
+        """
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/regs", _args({"at": at, "before": before}), None))
+
+    def trace_find(self, *, query: str, back: bool | None = None, from_: int | None = None) -> TraceData:
+        """The next row of the instruction trace matching `query`: an address (`0x80001234`), a
+        register value (`d15=0xC`), a register write (`a4 changes`), or text in the instruction,
+        function or file name. `from`: start after this row; `back`: search backwards.
+
+        Args:
+            query: 
+            back: 
+            from_: 
+        """
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/find", _args({"query": query, "back": back, "from": from_}), None))
 
     def ucb_apply(self, *, target: str) -> UcbData:
         """Stage values from the compared files: everything, one UCB, one field or the password.

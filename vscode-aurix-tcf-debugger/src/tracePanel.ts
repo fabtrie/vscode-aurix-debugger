@@ -2,11 +2,13 @@
  * The Trace panel: configure, arm and read a miniMCDS program (or data) trace.
  *
  * The configuration form names what to record (all code, or only inside a function or address
- * range), when to stop (core halt - stopped in hardware -, buffer full, manually) and the time
+ * range), when to stop (core halt, buffer full, manually) and the time
  * stamps; every change is checked by the server (`check`), which answers with the resources the
  * setup takes or why it cannot be armed. While armed the panel polls the status; a trace that
  * finished by itself (the core halted, the buffer filled) is read at once. The result is the
- * executed instructions grouped by function, with source lines and target times, gaps marked.
+ * executed instructions grouped by function, with source lines and target times, gaps marked
+ * (Flow), or every instruction with its source line, what it wrote and the registers rebuilt from
+ * the halt (Instructions); a row can be shown in the debugger (trace replay).
  *
  * Configurations are saved per workspace by name.
  */
@@ -106,6 +108,11 @@ export class TracePanel {
 		panel.onDidDispose(() => this.dispose());
 	}
 
+	/** The debugger moved the trace replay (or left it): the Instructions view follows. */
+	static replayMoved(active: boolean, at: number | undefined): void {
+		TracePanel.current?.post({ type: 'replay', active, at });
+	}
+
 	static show(context: vscode.ExtensionContext, placement?: PanelPlacement): void {
 		const media = vscode.Uri.joinPath(context.extensionUri, 'media');
 		if (TracePanel.current) {
@@ -195,6 +202,70 @@ export class TracePanel {
 			case 'export':
 				await this.exportCsv();
 				break;
+			case 'insns':
+				await this.forward('insnsPage', 'insns', { from: m.from, count: m.count }, { from: m.from });
+				break;
+			case 'regs':
+				await this.forward('regs', 'regs', { at: m.at }, { at: m.at });
+				break;
+			case 'find':
+				await this.forward('found', 'find', { query: m.query, from: m.from, back: m.back }, { query: m.query });
+				break;
+			case 'sources':
+				this.post({ type: 'sources', sources: await this.readSources((m.files ?? []) as string[]) });
+				break;
+			case 'replayAt':
+			case 'replayOff': {
+				const s = this.session();
+				try {
+					if (!s) {
+						throw new Error('No AURIX debug session');
+					}
+					await s.customRequest('aurix/traceReplay', m.type === 'replayOff' ? { off: true } : { at: m.at });
+				} catch (e) {
+					this.post({ type: 'error', error: e instanceof Error ? e.message : String(e) });
+				}
+				break;
+			}
+		}
+	}
+
+	/** Sends a trace request and posts the answer to the webview as `type`. */
+	private async forward(type: string, op: string, args: Record<string, unknown>, echo: Record<string, unknown>): Promise<void> {
+		try {
+			const r = await this.request(op, args);
+			this.post({ type, ...echo, result: r });
+		} catch (e) {
+			this.post({ type, ...echo, error: e instanceof Error ? e.message : String(e) });
+		}
+	}
+
+	/** The lines of the source files the trace shows (resolved like `openSource`), by path. */
+	private async readSources(files: string[]): Promise<Record<string, string[]>> {
+		const out: Record<string, string[]> = {};
+		for (const file of files.slice(0, 200)) {
+			try {
+				const uri = await this.resolveSource(file);
+				if (!uri) {
+					continue;
+				}
+				const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+				out[file] = text.split(/\r?\n/);
+			} catch {
+				// Not readable: rows show the location only.
+			}
+		}
+		return out;
+	}
+
+	/** A source file as the debug information names it: that path, else a workspace file of that name. */
+	private async resolveSource(file: string): Promise<vscode.Uri | undefined> {
+		try {
+			await vscode.workspace.fs.stat(vscode.Uri.file(file));
+			return vscode.Uri.file(file);
+		} catch {
+			const found = await vscode.workspace.findFiles(`**/${path.basename(file.replace(/\\/g, '/'))}`, undefined, 2);
+			return found[0];
 		}
 	}
 
@@ -282,14 +353,7 @@ export class TracePanel {
 		if (!file) {
 			return;
 		}
-		let uri: vscode.Uri | undefined;
-		try {
-			await vscode.workspace.fs.stat(vscode.Uri.file(file));
-			uri = vscode.Uri.file(file);
-		} catch {
-			const found = await vscode.workspace.findFiles(`**/${path.basename(file.replace(/\\/g, '/'))}`, undefined, 2);
-			uri = found[0];
-		}
+		const uri = await this.resolveSource(file);
 		if (!uri) {
 			void vscode.window.showWarningMessage(`Source file not found: ${file}`);
 			return;
@@ -332,6 +396,7 @@ export class TracePanel {
 	private html(webview: vscode.Webview): string {
 		const css = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'trace.css'));
 		const js = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'trace.js'));
+		const insnsJs = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'traceInsns.js'));
 		const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -387,9 +452,30 @@ export class TracePanel {
   <button id="export" type="button" class="secondary" disabled>Export CSV</button>
 </div>
 <div id="message"></div>
+<div id="tabs" hidden><button type="button" data-tab="flow" class="tab on">Flow</button><button type="button" data-tab="insns" class="tab">Instructions</button></div>
 <div id="coverage"></div>
 <div id="result"></div>
+<div id="insns" hidden>
+  <div id="insnSummary" class="summary"></div>
+  <div id="insnToolbar">
+    <input id="insnFind" type="search" placeholder="Find: address, instruction, function, d15=0xC, a4 changes" spellcheck="false">
+    <button id="insnSrc" type="button" class="toggle on" title="Source lines between the instructions">Source</button>
+    <button id="insnEff" type="button" class="toggle on" title="What each instruction wrote">Effects</button>
+    <button id="insnCalls" type="button" class="toggle" title="Only calls, returns and interrupt entries">Calls only</button>
+    <button id="insnStart" type="button" class="secondary" title="First instruction">⇤</button>
+    <button id="insnEnd" type="button" class="secondary" title="Last instruction (the halt)">⇥</button>
+    <span class="spacer"></span>
+    <button id="insnReplay" type="button" title="Show the selected instruction in the debugger: source, registers, locals, call stack (Step Back and Step move on from there)">Show in debugger</button>
+    <button id="insnReplayOff" type="button" class="secondary" hidden>Back to the halt</button>
+  </div>
+  <div id="insnMain">
+    <div id="insnList" tabindex="0"><div id="insnSpacer"></div><div id="insnRows"></div></div>
+    <div id="insnRegs"></div>
+  </div>
+  <div class="legend"><span><b class="v-exact">0x0000000C</b> exact</span><span><b class="v-mem">≈0x0000003C</b> from memory at the halt</span><span><b class="v-unk">········</b> unknown</span><span><b class="w">d15</b> written here</span></div>
+</div>
 <script nonce="${nonce}" src="${js}"></script>
+<script nonce="${nonce}" src="${insnsJs}"></script>
 </body>
 </html>`;
 	}

@@ -8,6 +8,7 @@ All notable changes to the "AURIX™ Debugger" extension will be documented in t
 
 - on-chip trace on TC37x (miniMCDS) over the miniWiggler: Trace panel for program flow and data trace, Live Watch "Trace every write", traced lanes in the OS Profile
 - OS Profile: a sampling rate per lane
+- instruction trace: every executed instruction with source lines and the registers rebuilt from the halt; Step Back and Reverse Continue replay the trace in the debugger
 
 ## 0.4.0
 

@@ -1,11 +1,13 @@
 /*
  * The AurixTrace service: arm a miniMCDS trace, check a configuration, read the status, stop and
  * read the trace RAM, and get the recording decoded (program flow with function and source line,
- * or data trace writes). Every command answers with free-form JSON.
+ * or data trace writes), and the instruction trace: pages of instructions with the registers
+ * rebuilt from the halt (`insns`, `regs`, `find`) and the replay of a trace position in the
+ * debugger (`replay`, `replayMove`). Every command answers with free-form JSON.
  */
 import { toBuffer, ValidatingCommand } from './tcfutils';
 
-export type TraceOp = 'arm' | 'check' | 'status' | 'stop' | 'read';
+export type TraceOp = 'arm' | 'check' | 'status' | 'stop' | 'read' | 'insns' | 'regs' | 'find' | 'replay' | 'replayMove';
 
 /** Trace configuration as the service takes it. */
 export interface TraceConfig {

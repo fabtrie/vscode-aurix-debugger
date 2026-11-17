@@ -1,6 +1,8 @@
 // Trace panel webview: the configuration form, the check result, the state and the decoded trace.
 (function () {
 	const vscode = acquireVsCodeApi();
+	// The Instructions view (traceInsns.js) posts through the same API (it can be acquired once).
+	window.traceVscode = vscode;
 	const $ = (id) => document.getElementById(id);
 	const MAX_ROWS_PER_BLOCK = 400;
 
@@ -105,7 +107,7 @@
 		const stop = $('stop').value;
 		$('stopAt').hidden = stop !== 'function';
 		$('stopHint').textContent =
-			stop === 'halt' ? ' stopped in hardware: the trace ends at the halt' :
+			stop === 'halt' ? ' the debugger stops it when the core halts: the trace runs up to the halt, and Step Back replays it' :
 			stop === 'full' ? ' a single buffer: the first 8 KB of the run' :
 			stop === 'manual' ? ' a ring: the last 8 KB before "Stop and read"' :
 			' the trace ends when the function is entered';
@@ -236,8 +238,10 @@
 			top.map(([fi, n]) => {
 				const pct = (100 * n) / total;
 				return `<div class="bar" title="${esc(fn[fi] ?? '?')}: ${n} instructions"><span class="name">${esc(fn[fi] ?? '?')}</span>` +
-					`<span class="track"><span class="fill" style="width:${pct.toFixed(1)}%"></span></span><span class="pct">${pct.toFixed(0)} %</span></div>`;
+					`<span class="track"><span class="fill" data-pct="${pct.toFixed(1)}"></span></span><span class="pct">${pct.toFixed(0)} %</span></div>`;
 			}).join('') + `</div>`;
+		// Widths through the DOM: the webview's CSP drops inline style attributes.
+		document.querySelectorAll('#coverage .fill[data-pct]').forEach((el) => (el.style.width = el.dataset.pct + '%'));
 
 		const last = [...(r.Steps || [])].reverse().find((s) => Array.isArray(s));
 		const halt = r.Halt;
@@ -317,6 +321,9 @@
 		} else {
 			renderData(r);
 		}
+		// The Instructions view (traceInsns.js) takes over a program recording.
+		$('tabs').hidden = !(r && r.Kind === 'program');
+		window.dispatchEvent(new CustomEvent('trace-result', { detail: r }));
 	}
 
 	// ---- wiring ------------------------------------------------------------------------------

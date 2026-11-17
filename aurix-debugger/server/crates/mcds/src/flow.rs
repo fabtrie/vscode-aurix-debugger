@@ -230,6 +230,7 @@ pub struct CapstoneCode<R: FnMut(u32, usize) -> Option<Vec<u8>>> {
     cs: capstone::Capstone,
     read: R,
     cache: std::collections::HashMap<u32, Option<Insn>>,
+    text: std::collections::HashMap<u32, Option<crate::replay::Decoded>>,
 }
 
 #[cfg(feature = "capstone")]
@@ -240,7 +241,25 @@ impl<R: FnMut(u32, usize) -> Option<Vec<u8>>> CapstoneCode<R> {
         use capstone::arch::tricore::ArchMode;
         use capstone::prelude::*;
         let cs = Capstone::new().tricore().mode(ArchMode::TriCore162).detail(true).build().map_err(|e| e.to_string())?;
-        Ok(Self { cs, read, cache: Default::default() })
+        Ok(Self { cs, read, cache: Default::default(), text: Default::default() })
+    }
+}
+
+#[cfg(feature = "capstone")]
+impl<R: FnMut(u32, usize) -> Option<Vec<u8>>> crate::replay::Disasm for CapstoneCode<R> {
+    fn disasm(&mut self, addr: u32) -> Option<crate::replay::Decoded> {
+        if let Some(t) = self.text.get(&addr) {
+            return t.clone();
+        }
+        let a = if addr >> 28 == 0xA { (addr & 0x0FFF_FFFF) | 0x8000_0000 } else { addr };
+        let r = (|| {
+            let bytes = (self.read)(a, 4)?;
+            let insns = self.cs.disasm_count(&bytes, addr as u64, 1).ok()?;
+            let i = insns.iter().next()?;
+            Some(crate::replay::Decoded { size: i.bytes().len() as u8, mnemonic: i.mnemonic()?.to_string(), ops: i.op_str().unwrap_or("").to_string() })
+        })();
+        self.text.insert(addr, r.clone());
+        r
     }
 }
 

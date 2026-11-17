@@ -238,6 +238,27 @@ impl Channel {
                 let v = trace::read_cmd(&self.shared, &opts).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
+            // Instruction trace: pages of rows, registers at a row, search, replay in the debugger.
+            ("AurixTrace", "insns") => {
+                let v = crate::trace_insns::insns_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "regs") => {
+                let v = crate::trace_insns::regs_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "find") => {
+                let v = crate::trace_insns::find_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "replay") => {
+                let v = crate::trace_insns::replay_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixTrace", "replayMove") => {
+                let v = crate::trace_insns::replay_move(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
             ("AurixOS", "getProfileLanes") => {
                 let v = profile::lanes_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
@@ -747,6 +768,15 @@ impl Channel {
     fn reg_get(&self, a: &Args) -> Reply {
         let (c, idx) = self.reg_index(&a.string(0)?)?;
         let ti = c.idx;
+        // Trace replay: the registers rebuilt for the replay position.
+        if let Some(r) = self.shared.replay.lock().unwrap().as_ref().filter(|r| r.target == ti) {
+            if let Some(slot) = r.regs.get(idx) {
+                return match slot {
+                    Some(v) => Ok(vec![String::new(), j(&B64.encode(v.to_le_bytes()))]),
+                    None => Err(err(ERR_OTHER, "not known at this point of the trace")),
+                };
+            }
+        }
         let v = self
             .h()
             .call(move |cx| ops::read_reg(cx, ti, idx).map_err(|e| e.to_string()))
@@ -757,6 +787,9 @@ impl Channel {
 
     fn reg_set(&self, a: &Args) -> Reply {
         let (c, idx) = self.reg_index(&a.string(0)?)?;
+        if self.shared.replay.lock().unwrap().as_ref().is_some_and(|r| r.target == c.idx) {
+            return Err(err(ERR_OTHER, "the debugger shows a trace replay: leave it to change registers"));
+        }
         if c.arch.regs[idx].group != RegGroup::Debug && c.state != TargetState::Halted {
             return Err(err(ERR_IS_RUNNING, "Execution context is running"));
         }
@@ -831,6 +864,9 @@ impl Channel {
     // --- StackTrace --------------------------------------------------------------------
 
     fn frames(&self, c: &CoreInfo) -> Result<Vec<Frame>, TcfError> {
+        if let Some(f) = crate::trace_insns::replay_frames(&self.shared, c.idx) {
+            return Ok(f);
+        }
         if let Some(f) = self.shared.stacks.lock().unwrap().get(&c.idx) {
             return Ok(f.clone());
         }

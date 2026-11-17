@@ -442,6 +442,12 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 		vscode.commands.registerCommand('aurix-debugger.osShowProfile', () => OsProfilePanel.show(context.extensionUri)),
 		vscode.commands.registerCommand('aurix-debugger.showTrace', () => TracePanel.show(context)),
+		vscode.commands.registerCommand('aurix-debugger.traceReplayExit', async () => {
+			const s = vscode.debug.activeDebugSession;
+			if (s?.type === 'aurixdbg') {
+				await s.customRequest('aurix/traceReplay', { off: true });
+			}
+		}),
 		vscode.commands.registerCommand('aurix-debugger.showUcbs', () => UcbPanel.show(context.extensionUri)),
 		vscode.commands.registerCommand('aurix-debugger.osShowObjects', (kind?: string) =>
 			OsObjectsPanel.show(context.extensionUri, typeof kind === 'string' ? kind : undefined),
@@ -639,6 +645,13 @@ export function activate(context: vscode.ExtensionContext) {
 				targetHealthBySession.delete(e.session.id);
 				targetHealthBySession.set(e.session.id, e.body);
 				updateTargetHealthItem();
+				return;
+			}
+			if (e.event === 'aurix/traceReplay') {
+				// The debugger shows a trace position (Step Back) or the live core again.
+				const b = e.body as { active?: boolean; at?: number } | undefined;
+				void vscode.commands.executeCommand('setContext', 'aurix.traceReplay', Boolean(b?.active));
+				TracePanel.replayMoved(Boolean(b?.active), typeof b?.at === 'number' ? b.at : undefined);
 				return;
 			}
 			if (e.event === 'aurix/probeLost') {

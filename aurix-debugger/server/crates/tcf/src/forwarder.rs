@@ -47,12 +47,14 @@ pub fn start(shared: Arc<Shared>) {
                 Event::Halted { target, reason, pc, .. } => {
                     // Any core may have run (TL1-gated steps run all cores).
                     shared.stacks.lock().unwrap().clear();
+                    crate::trace_insns::end_replay(&shared, None);
                     if !shared.any_stepping() {
                         halted(&shared, target, reason, pc, true);
                     }
                 }
                 Event::Resumed { target, .. } => {
                     shared.invalidate_stack(target);
+                    crate::trace_insns::end_replay(&shared, Some(target));
                     if shared.any_stepping() {
                         continue;
                     }
@@ -62,6 +64,7 @@ pub fn start(shared: Arc<Shared>) {
                 }
                 Event::ResetDone => {
                     shared.stacks.lock().unwrap().clear();
+                    crate::trace_insns::end_replay(&shared, None);
                     for c in cores(&shared.handle).into_iter().filter(|c| c.visible) {
                         if c.suspended() {
                             let pc = read_pc(&shared.handle, c.idx);
@@ -71,7 +74,10 @@ pub fn start(shared: Arc<Shared>) {
                         }
                     }
                 }
-                Event::ResetDetected => shared.stacks.lock().unwrap().clear(),
+                Event::ResetDetected => {
+                    shared.stacks.lock().unwrap().clear();
+                    crate::trace_insns::end_replay(&shared, None);
+                }
                 Event::Health { health } => {
                     shared.broadcast(&wire::event("AurixTarget", "healthChanged", &[crate::health_json(health).to_string()]));
                 }

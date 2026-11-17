@@ -18,6 +18,7 @@ pub mod encode;
 pub mod flow;
 pub mod frame;
 pub mod regs;
+pub mod replay;
 
 pub use config::{AddrRange, Kind, Plan, Stop, Timestamps, TraceConfig};
 pub use decode::{Access, DataEvent, Decoder, Event, PtuEvent};

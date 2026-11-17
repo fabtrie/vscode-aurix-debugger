@@ -1068,7 +1068,7 @@ reverse on [-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-maxhit
 
 Switch reverse debugging on: before every run, step, source step and register or memory write of the core, its registers and the given RAM regions are saved.
 
-`reverse back` then writes an earlier state back into the halted core, which really runs from there again. `-private` marks a region only this core writes (its stacks, its context save area). `-history` checkpoints are kept (default 50, 0: all). While on, the mode owns the miniMCDS and records each action (CPU0; `-notrace`: not); `mcds arm` and `mcds auto` are refused. The TCF/REST operations take the regions from the ELF. Not rewound: peripherals, timers, other cores.
+`reverse back` then writes an earlier state back into the halted core, which really runs from there again. A run already going (switched on after attaching to a running application) is recorded up to its halt, without a checkpoint. `-private` marks a region only this core writes (its stacks, its context save area). `-history` checkpoints are kept (default 50, 0: all). While on, the mode owns the miniMCDS and records each action (CPU0; `-notrace`: not); `mcds arm` and `mcds auto` are refused. The TCF/REST operations take the regions from the ELF. Not rewound: peripherals, timers, other cores.
 
 ### `reverse off`
 

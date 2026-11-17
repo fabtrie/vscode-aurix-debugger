@@ -139,6 +139,9 @@ pub struct State {
     pub suspended: u32,
     /// The next run continues the last action (a breakpoint whose condition was false).
     pub continuing: bool,
+    /// The core runs without an action (it ran when the mode was switched on, or something else
+    /// started it): recorded anyway, so its halt comes with the trace up to it (no checkpoint).
+    pub watching: bool,
     /// Why the history was last cleared.
     pub cleared: Option<String>,
     next_id: u64,
@@ -216,8 +219,41 @@ pub fn enable(c: &mut Ctx, cfg: Config) -> Result<()> {
     c.reverse.at_checkpoint = false;
     c.reverse.scope = 0;
     c.reverse.cleared = None;
+    c.reverse.watching = false;
+    let t = cfg.target;
     c.reverse.cfg = Some(cfg);
+    // Running already (attached to a running application): record up to its halt.
+    if !halted(c, t) {
+        watch(c, t);
+    }
     Ok(())
+}
+
+/// Records a run of `t` that is no action (no checkpoint): the trace up to the halt, for the
+/// trace panel and the instruction trace.
+fn watch(c: &mut Ctx, t: usize) {
+    let trace = c.reverse.cfg.as_ref().is_some_and(|cfg| cfg.trace);
+    let Some(core) = traced_core(c, t).filter(|_| trace) else { return };
+    if c.mcds.armed.is_some() {
+        return;
+    }
+    match mt::arm(c, trace_config(core), Owner::Reverse) {
+        Ok(_) => c.reverse.watching = true,
+        Err(e) => crate::log_warn!("reverse: cannot record the run: {e}"),
+    }
+}
+
+/// The poll found the reversed core running without a run of the debugger's (another client, a
+/// script): the history no longer leads to the core's state, so it is dropped; the run is
+/// recorded up to its halt.
+pub fn on_untracked_run(c: &mut Ctx, t: usize) {
+    if c.reverse.target() != Some(t) || c.reverse.open || c.reverse.scope > 0 || c.reverse.suspended > 0 || c.reverse.watching {
+        return;
+    }
+    if !c.reverse.history.is_empty() {
+        clear(c, "the core ran outside the debugger's run control");
+    }
+    watch(c, t);
 }
 
 /// Switches reverse debugging off: the history is dropped, the trace released.
@@ -240,6 +276,7 @@ pub fn clear(c: &mut Ctx, why: &str) {
     c.reverse.history.clear();
     c.reverse.open = false;
     c.reverse.at_checkpoint = false;
+    c.reverse.watching = false;
     c.reverse.cleared = Some(why.to_string());
 }
 
@@ -418,6 +455,10 @@ pub fn begin_action(c: &mut Ctx, t: usize, kind: &str, mode: RunMode) {
     if c.reverse.open {
         finish_action(c, t);
     }
+    if c.reverse.watching {
+        c.reverse.watching = false;
+        let _ = mt::release(c, Owner::Reverse);
+    }
     let t0 = Instant::now();
     if c.reverse.at_checkpoint && !c.reverse.history.is_empty() {
         // The core stands at the last checkpoint (restored): its state is saved already.
@@ -537,8 +578,19 @@ pub fn finish_action(c: &mut Ctx, t: usize) {
 
 /// The reversed core halted (seen by the poll or after a step): an action outside a scope ends.
 pub fn on_halted(c: &mut Ctx, t: usize) {
-    if c.reverse.target() == Some(t) && c.reverse.open && c.reverse.scope == 0 && c.reverse.suspended == 0 {
+    if c.reverse.target() != Some(t) {
+        return;
+    }
+    if c.reverse.open && c.reverse.scope == 0 && c.reverse.suspended == 0 {
         finish_action(c, t);
+    } else if c.reverse.watching {
+        // The run without an action ended: its recording becomes the last one (not in the history).
+        c.reverse.watching = false;
+        if c.mcds.armed.as_ref().is_some_and(|a| a.owner == Owner::Reverse) {
+            if let Err(e) = mt::stop(c, Owner::Reverse) {
+                crate::log_warn!("reverse: reading the run's recording failed: {e}");
+            }
+        }
     }
 }
 
@@ -813,6 +865,7 @@ pub fn status_json(c: &Ctx) -> serde_json::Value {
             "strict": cfg.strict,
             "max_hits": cfg.max_hits,
             "open": st.open,
+            "recording_run": st.watching,
             "at_checkpoint": st.at_checkpoint,
             "snapshot_bytes": st.snapshot_bytes(),
             "last_cost_ms": st.history.last().map(|c| c.cost_ms),

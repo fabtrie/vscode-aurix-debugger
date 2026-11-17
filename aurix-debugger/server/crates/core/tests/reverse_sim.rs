@@ -16,6 +16,13 @@ fn tcl_path(p: PathBuf) -> String {
 }
 
 fn server() -> Server {
+    let s = server_running();
+    s.interp.eval_global("halt").unwrap();
+    s
+}
+
+/// The board cfgs, initialised, CPU0 selected and running.
+fn server_running() -> Server {
     aurix_core::log::set_debug_level(0);
     let s = Server::new();
     s.cx().with(|c| {
@@ -31,7 +38,6 @@ fn server() -> Server {
     s.interp.eval_global("set sbc_rstb_wired 0").unwrap();
     s.interp.eval_global("init").unwrap();
     s.interp.eval_global("targets tc37x.cpu0").unwrap();
-    s.interp.eval_global("halt").unwrap();
     s
 }
 
@@ -142,4 +148,23 @@ fn protected_ram_is_never_written() {
     tcl(&s, "mww 0x7000B410 0x22");
     json(&s, "reverse back -json");
     assert_eq!(word(&s, 0x7000_B410), 0);
+}
+
+#[test]
+fn a_run_already_going_is_recorded_up_to_its_halt() {
+    let s = server_running();
+    assert_eq!(tcl(&s, "tc37x.cpu0 curstate"), "running");
+    json(&s, "reverse on -region 0x70000000 0x40 -json");
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], true, "{st}");
+    assert_eq!(st["owner"], "reverse", "{st}");
+    assert_eq!(json(&s, "reverse status -json")["recording_run"], true);
+    tcl(&s, "halt");
+    tcl(&s, "wait_halt 2000");
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], false, "read at the halt: {st}");
+    let r = json(&s, "reverse status -json");
+    assert_eq!(r["recording_run"], false);
+    assert_eq!(r["checkpoints"], 0, "no action, no checkpoint");
+    assert!(json(&s, "mcds decode -json 10")["total"].as_u64().is_some(), "the recording is the last one");
 }

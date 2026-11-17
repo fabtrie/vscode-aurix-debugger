@@ -162,6 +162,7 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
         Transition::Running => {
             let name = target_name(cx, t);
             log_debug!("[{name}] running");
+            cx.with(|c| crate::reverse::on_untracked_run(c, t));
             // Released outside a resume (e.g. a raw DBGSR write) while
             // interrupts were masked for a step: give them back.
             let unmasked = cx.with(|c| -> Result<bool> {

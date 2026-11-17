@@ -113,7 +113,16 @@ export class TracePanel {
 		panel.webview.html = this.html(panel.webview);
 		this.disposables.push(
 			panel.webview.onDidReceiveMessage((m) => void this.onMessage(m)),
-			vscode.debug.onDidTerminateDebugSession(() => this.stopPolling()),
+			vscode.debug.onDidTerminateDebugSession(() => {
+				this.stopPolling();
+				this.forgetResult();
+			}),
+			// A new session (another worker): read its state, not the last session's.
+			vscode.debug.onDidStartDebugSession(() => {
+				this.forgetResult();
+				void this.status();
+				void this.reverseRefresh();
+			}),
 		);
 		panel.onDidDispose(() => this.dispose());
 	}
@@ -389,9 +398,21 @@ export class TracePanel {
 		}
 	}
 
+	/** Drops the shown recording: it belongs to a session that ended. */
+	private forgetResult(): void {
+		this.result = undefined;
+		this.lastRead = undefined;
+		this.shownLast = false;
+		this.post({ type: 'result', result: undefined });
+	}
+
 	private async status(): Promise<void> {
 		try {
 			const st = await this.request('status');
+			if (!st?.Last && this.result && !this.reading) {
+				// The server has no recording (a new worker): what is shown is another session's.
+				this.forgetResult();
+			}
 			this.armed = st?.Armed === true && st?.Owner === 'snapshot';
 			// Reverse debugging records every action: its recordings are read as they come, too.
 			const auto = Boolean(st?.Auto) || st?.Reverse === true;

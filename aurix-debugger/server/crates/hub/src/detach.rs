@@ -12,7 +12,7 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
 use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
 
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -54,6 +54,14 @@ fn quote(arg: &str) -> String {
 /// (they are set on this process: only for a process that has no other threads yet). Returns
 /// the process ID.
 pub fn create_process(exe: &Path, args: &[&str], cwd: Option<&Path>, env: &[(&str, &str)]) -> std::io::Result<u32> {
+    let (pid, process) = create_process_handle(exe, args, cwd, env)?;
+    unsafe { CloseHandle(process) };
+    Ok(pid)
+}
+
+/// Like [`create_process`], also returning the process handle (the caller closes it): it keeps
+/// the exit code readable after the process ended.
+pub fn create_process_handle(exe: &Path, args: &[&str], cwd: Option<&Path>, env: &[(&str, &str)]) -> std::io::Result<(u32, HANDLE)> {
     // The child inherits the environment block; set the additions on ourselves first.
     for (k, v) in env {
         // SAFETY: called before other threads look at these variables (startup, or a fresh copy).
@@ -78,11 +86,8 @@ pub fn create_process(exe: &Path, args: &[&str], cwd: Option<&Path>, env: &[(&st
             CreateProcessW(app.as_ptr(), cmdline.as_mut_ptr(), std::ptr::null(), std::ptr::null(), FALSE, flags, std::ptr::null(), dir_ptr, &si, &mut pi)
         };
         if ok != 0 {
-            unsafe {
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-            }
-            return Ok(pi.dwProcessId);
+            unsafe { CloseHandle(pi.hThread) };
+            return Ok((pi.dwProcessId, pi.hProcess));
         }
     }
     Err(std::io::Error::last_os_error())

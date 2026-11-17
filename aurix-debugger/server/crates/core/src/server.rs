@@ -247,7 +247,9 @@ impl Server {
             let wait = deadline(next_poll, daq_due).saturating_duration_since(Instant::now());
             let mut changed = match self.rx.recv_timeout(wait) {
                 Ok(job) => {
-                    job(&cx);
+                    // A panic in a job fails that request (its caller sees no answer), not the
+                    // session: the panic hook has logged it.
+                    let _ = survive(|| job(&cx));
                     true
                 }
                 Err(RecvTimeoutError::Timeout) => false,
@@ -259,7 +261,11 @@ impl Server {
             // precisely because the poll pushed the deadline out - merging is what removed the
             // reason.
             if Instant::now() >= next_poll {
-                ops::poll_all(&cx);
+                if !survive(|| ops::poll_all(&cx)) {
+                    // It would fail again every poll period: stop polling instead of the worker.
+                    cx.with(|c| c.poll_enabled = false);
+                    crate::log_error!("background polling is off after that internal error (`poll on` turns it back on)");
+                }
                 let period = Duration::from_millis(cx.with(|c| c.poll_period_ms).max(1));
                 next_poll = Instant::now() + period;
                 changed = true;
@@ -271,8 +277,10 @@ impl Server {
             // Whatever the poll did not take: it only runs once a period, and it returns early
             // when polling is disabled or the device is not up, so this stays the primary path.
             let now = Instant::now();
-            if cx.with(|c| c.daq.next_due().is_some_and(|d| now >= d)) {
-                daq::tick(&cx, now);
+            if cx.with(|c| c.daq.next_due().is_some_and(|d| now >= d)) && !survive(|| daq::tick(&cx, now)) {
+                // Ends every DAQ stream (their consumers see the end) rather than failing at 1 kHz.
+                cx.with(|c| c.daq = daq::Registry::default());
+                crate::log_error!("DAQ stopped after that internal error");
             }
         }
         cx.with(|c| {
@@ -284,6 +292,13 @@ impl Server {
         });
         events::emit(Event::Shutdown);
     }
+}
+
+/// Runs `f`, returning `false` if it panicked. The panic hook ([`crate::crash`]) has logged the
+/// panic by then; the core thread carries on, since the session matters more than the one
+/// operation that failed (the state it touched lives in `RefCell`s, released while unwinding).
+fn survive(f: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_ok()
 }
 
 /// When the server loop must wake next: the run-state poll, or a DAQ point if one is due sooner.

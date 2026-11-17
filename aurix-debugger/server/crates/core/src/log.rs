@@ -52,12 +52,12 @@ pub fn set_stderr(on: bool) {
 
 pub fn set_output_file(path: &str) -> std::io::Result<()> {
     let f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    *FILE.lock().unwrap() = Some(f);
+    *FILE.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
     Ok(())
 }
 
 pub fn add_sink(sink: Sink) {
-    SINKS.lock().unwrap().push(sink);
+    SINKS.lock().unwrap_or_else(|p| p.into_inner()).push(sink);
 }
 
 pub fn enabled(level: Level) -> bool {
@@ -78,7 +78,7 @@ pub fn log(level: Level, msg: &str) {
     if STDERR.load(Ordering::Relaxed) != 0 {
         eprintln!("{line}");
     }
-    if let Some(f) = FILE.lock().unwrap().as_mut() {
+    if let Some(f) = FILE.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
         let _ = writeln!(f, "{line}");
     }
     let captured = CAPTURE.with(|c| match c.borrow_mut().as_mut() {
@@ -89,9 +89,37 @@ pub fn log(level: Level, msg: &str) {
         None => false,
     });
     if !captured {
-        for s in SINKS.lock().unwrap().iter() {
+        for s in SINKS.lock().unwrap_or_else(|p| p.into_inner()).iter() {
             s(level, &line);
         }
+    }
+}
+
+/// Writes an error line to the log file (and to stderr with `to_stderr`, where the caller has no
+/// other output) from a crash handler: a panic hook, an unhandled exception. No sinks, since their
+/// locks may be what the crashed thread held, and the file lock only for as long as another
+/// thread may reasonably keep it. A poisoned lock is still used: losing the reason for a crash is
+/// worse than an interleaved line.
+pub fn log_fatal(msg: &str, to_stderr: bool) {
+    use std::sync::TryLockError;
+    let line = format!("Error: {msg}");
+    if to_stderr && STDERR.load(Ordering::Relaxed) != 0 {
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }
+    for _ in 0..100 {
+        let mut guard = match FILE.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+        };
+        if let Some(f) = guard.as_mut() {
+            let _ = writeln!(f, "{line}");
+            let _ = f.flush();
+        }
+        return;
     }
 }
 

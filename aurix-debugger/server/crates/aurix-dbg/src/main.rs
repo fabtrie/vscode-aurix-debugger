@@ -36,6 +36,9 @@ enum Action {
 }
 
 fn main() {
+    // Before anything can fail: run by the hub, the worker has no console, so a panic or a crash
+    // is only known from the log.
+    aurix_core::crash::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Server::new asks for the 1 ms timer resolution the poll loop and DAQ need.
     let server = Server::new();

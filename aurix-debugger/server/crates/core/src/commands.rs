@@ -91,6 +91,11 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     });
     reg(interp, sh, "echo", cmd_echo);
     reg(interp, sh, "sleep", cmd_sleep);
+    // Jim's `after` stays for its event forms (`after <ms> <script>`, `info`, `cancel`, `idle`);
+    // the blocking `after <ms>` is ours, see cmd_after.
+    if interp.eval_global("rename after _jim_after").is_ok() {
+        reg(interp, sh, "after", cmd_after);
+    }
     reg(interp, sh, "version", |_, _| Ok(format!("aurix-dbg {} (OpenOCD-compatible, TAS)", env!("CARGO_PKG_VERSION"))));
     reg(interp, sh, "debug_level", |_, a| {
         if let Some(l) = a.get(1) {
@@ -1146,6 +1151,34 @@ fn cmd_sleep(_cx: &Cx, a: &[&str]) -> CmdResult {
     let ms = num(a.get(1).ok_or("usage: sleep <ms> [busy]")?)?;
     std::thread::sleep(Duration::from_millis(ms));
     ok()
+}
+
+/// `after <ms>` waits like `sleep`; every other form goes to Jim's `after` (renamed `_jim_after`).
+/// Jim hands the blocking form to `usleep(ms * 1000)`, whose argument is unsigned on MinGW: a
+/// negative time became a wait of about 71 minutes, with the worker's core thread stuck in it. Here
+/// a negative time does not wait (as in Tcl), and one too large for a wait is a Tcl error.
+fn cmd_after(cx: &Cx, a: &[&str]) -> CmdResult {
+    if a.len() == 2 {
+        let t = a[1].trim();
+        // Numbers as Jim reads them for `after`: decimal, float, or (signed) hex.
+        let (neg, mag) = t.strip_prefix('-').map_or((false, t), |m| (true, m));
+        let ms = t
+            .parse::<f64>()
+            .ok()
+            .filter(|v| !v.is_nan())
+            .or_else(|| parse_u64(mag).ok().map(|v| if neg { -(v as f64) } else { v as f64 }));
+        if let Some(ms) = ms {
+            if ms > 0.0 {
+                let d = Duration::try_from_secs_f64(ms / 1000.0).map_err(|_| format!("after: {t} ms is too long to wait"))?;
+                std::thread::sleep(d);
+            }
+            return ok();
+        }
+    }
+    if a.len() < 2 {
+        return Err("wrong # args: should be \"after option ?arg ...?\"".into());
+    }
+    cx.interp.eval(&list(std::iter::once("_jim_after").chain(a[1..].iter().copied())))
 }
 
 fn cmd_poll(cx: &Cx, a: &[&str]) -> CmdResult {

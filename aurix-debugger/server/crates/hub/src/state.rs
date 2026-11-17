@@ -58,6 +58,9 @@ pub struct Session {
     pub state: SessionState,
     /// The worker process, when this hub started it (an adopted one has none).
     pub child: Option<Child>,
+    /// Watches the worker process (from its start, or from its registration when adopted): it
+    /// tells how the worker ended.
+    pub worker: Option<spawn::ProcessWatch>,
     pub pid: Option<u32>,
     pub api_port: Option<u16>,
     pub tcf_port: Option<u16>,
@@ -437,6 +440,7 @@ impl Hub {
                 created: s.created,
                 state: s.state,
                 child: None,
+                worker: None,
                 pid: s.pid,
                 api_port: s.api_port,
                 tcf_port: s.tcf_port,
@@ -470,6 +474,9 @@ impl Hub {
             Some(s) => {
                 let first = s.state == SessionState::Starting;
                 s.state = SessionState::Running;
+                if s.pid != Some(reg.pid) {
+                    s.worker = spawn::ProcessWatch::open(reg.pid);
+                }
                 s.pid = Some(reg.pid);
                 s.api_port = Some(reg.api_port);
                 s.tcf_port = reg.tcf_port;
@@ -497,6 +504,7 @@ impl Hub {
                     created: Instant::now(),
                     state: SessionState::Running,
                     child: None,
+                    worker: spawn::ProcessWatch::open(reg.pid),
                     pid: Some(reg.pid),
                     api_port: Some(reg.api_port),
                     tcf_port: reg.tcf_port,
@@ -608,9 +616,16 @@ impl Hub {
                     Some(_) => {}
                     None => {
                         if let Some(pid) = s.pid {
-                            if !spawn::alive(pid) {
+                            let ended = match &s.worker {
+                                Some(w) => w.ended().then(|| w.exit_code()),
+                                None => (!spawn::alive(pid)).then_some(None),
+                            };
+                            if let Some(code) = ended {
+                                // The exit code tells a crash (a panic, an access violation) from a
+                                // worker that shut down; the log tail shows what led to it.
                                 let tail = tail(&s.log_file, 30);
-                                gone.push((s.id.clone(), format!("the worker ended{}", if tail.is_empty() { String::new() } else { format!(":
+                                let how = spawn::describe_exit(code);
+                                gone.push((s.id.clone(), format!("the worker ended ({how}){}", if tail.is_empty() { String::new() } else { format!(":
 {tail}") })));
                             } else if ping {
                                 if let Some(b) = s.base() {
@@ -972,7 +987,7 @@ impl HubApi for Hub {
         }
         args.extend(["--hub".into(), self.url(), "--session".into(), id.clone()]);
         let cwd = profile_dir.unwrap_or_else(paths::config_dir_or_exe);
-        let pid = spawn::spawn_worker(&exe, &args, &cwd).map_err(|e| ApiError::failed(format!("cannot start {}: {e}", exe.display())))?;
+        let (pid, worker) = spawn::spawn_worker(&exe, &args, &cwd).map_err(|e| ApiError::failed(format!("cannot start {}: {e}", exe.display())))?;
         hlog!("session {id} ({name}): worker pid {pid}, log {}", log_file.display());
         {
             let mut st = self.lock();
@@ -988,6 +1003,7 @@ impl HubApi for Hub {
                 created: Instant::now(),
                 state: SessionState::Starting,
                 child: None,
+                worker: Some(worker),
                 pid: Some(pid),
                 api_port: None,
                 tcf_port: None,

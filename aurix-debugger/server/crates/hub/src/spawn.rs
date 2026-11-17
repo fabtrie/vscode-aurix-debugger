@@ -22,17 +22,19 @@ pub fn spawn_detached(exe: &Path, args: &[&str]) -> std::io::Result<u32> {
 }
 
 /// Starts a worker in `cwd`: detached like [`spawn_detached`] (it logs to the file its `-l`
-/// names). Returns the process ID.
-pub fn spawn_worker(exe: &Path, args: &[String], cwd: &Path) -> std::io::Result<u32> {
+/// names). Returns the process ID and a watch on the process that also reads its exit code: the
+/// worker's stdio goes nowhere, so how it ended is all a crash leaves behind.
+pub fn spawn_worker(exe: &Path, args: &[String], cwd: &Path) -> std::io::Result<(u32, ProcessWatch)> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     #[cfg(windows)]
     {
-        crate::detach::create_process(exe, &args, Some(cwd), &[])
+        let (pid, handle) = crate::detach::create_process_handle(exe, &args, Some(cwd), &[])?;
+        Ok((pid, ProcessWatch { handle }))
     }
     #[cfg(not(windows))]
     {
         let child = Command::new(exe).args(&args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-        Ok(child.id())
+        Ok((child.id(), ProcessWatch { pid: child.id() }))
     }
 }
 
@@ -59,8 +61,8 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
-/// Watches a process that this hub did not start (the owner of a session). On Windows it holds a
-/// handle, so the process ID cannot be reused by another process while it is watched.
+/// Watches a process: the owner of a session, or a worker. On Windows it holds a handle, so the
+/// process ID cannot be reused by another process while it is watched.
 pub struct ProcessWatch {
     #[cfg(windows)]
     handle: windows_sys::Win32::Foundation::HANDLE,
@@ -100,6 +102,46 @@ impl ProcessWatch {
         {
             !alive(self.pid)
         }
+    }
+
+    /// The exit code of the ended process (`None` while it runs, or where it cannot be read).
+    pub fn exit_code(&self) -> Option<u32> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+            let mut code = 0u32;
+            (self.ended() && unsafe { GetExitCodeProcess(self.handle, &mut code) } != 0).then_some(code)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+}
+
+/// How a process ended, from its exit code: the code, and what it means when it says more than
+/// "failed" (a Rust panic, a Windows exception).
+pub fn describe_exit(code: Option<u32>) -> String {
+    let Some(code) = code else { return "exit code unknown".into() };
+    let what = match code {
+        101 => "a Rust panic, see the log",
+        0xC000_0005 => "access violation",
+        0xC000_001D => "illegal instruction",
+        0xC000_0094 => "integer division by zero",
+        0xC000_00FD => "stack overflow",
+        0xC000_0135 => "a DLL was not found",
+        0xC000_0139 => "a DLL entry point was not found",
+        0xC000_013A => "ended with Ctrl+C",
+        0xC000_0374 => "heap corruption",
+        0xC000_0409 => "fast fail: abort or stack buffer overrun",
+        0x4001_0004 => "the debugger ended it",
+        _ => "",
+    };
+    match (code, what.is_empty()) {
+        (0..=0xFFFF, true) => format!("exit code {code}"),
+        (_, true) => format!("exit code 0x{code:08X}"),
+        (0..=0xFFFF, false) => format!("exit code {code}: {what}"),
+        (_, false) => format!("exit code 0x{code:08X}: {what}"),
     }
 }
 

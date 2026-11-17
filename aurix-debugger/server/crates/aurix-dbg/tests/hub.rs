@@ -335,11 +335,19 @@ fn hub_sessions_end_to_end() {
     let w = mcp.ok("wait_session", json!({ "session": id3, "timeout_s": 60 }));
     assert_eq!(w["phase"], "ready", "{w}");
 
+    // --- Jim's `after` through the MCP Tcl console: waits, and the worker stays ----------------------
+    let r = mcp.ok("tcl", json!({ "session": id3, "command": "after 5; after -1; set x [after 1 {set ::y 1}]; after 10; update; set ::y" }));
+    assert_eq!(r["output"], "1", "{r}");
+    let info = http.ok("GET", &format!("/api/v1/sessions/{id3}/info"), None);
+    assert_eq!(info["session"], id3.as_str(), "{info}");
+
     // --- A board that does not come up: the error carries the log ---------------------------------
     let (err, e) = mcp.call("open_session", json!({ "connect": { "commands": ["script no/such/board.cfg"], "adapter": "sim" } }));
     assert!(err, "{e}");
     let msg = e.as_str().unwrap_or_default();
     assert!(msg.contains("ended before it was connected") && msg.contains("no/such/board.cfg"), "{msg}");
+    // How it ended: the hub keeps the worker's process handle for the exit code.
+    assert!(msg.contains("exit code 1"), "{msg}");
 
     // --- A session that belongs to a process: closed when that process ends -------------------------
     let (err, e) = mcp.call("open_session", json!({ "profile": "sim", "owner_pid": u32::MAX - 3 }));

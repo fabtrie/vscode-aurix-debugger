@@ -14,6 +14,8 @@ All notable changes to the "AURIX™ Debugger" extension will be documented in t
 ### Fixed
 
 - Continue from a breakpoint through the server's resume stopped at the same breakpoint again before executing anything; the debugger now steps past it first
+- a debug session that ended unexpectedly now says why: the session log gets the internal error or crash, and the hub the exit code; an internal error in background polling no longer ends the session
+- Tcl `after` with a negative time no longer blocks the debugger for over an hour
 
 ## 0.4.0
 

@@ -196,6 +196,39 @@ api! {
     /// function or file name. `from`: start after this row; `back`: search backwards.
     op trace_find [trace]: GET "/api/v1/trace/find" (TraceFindRequest) -> TraceData;
 
+    /// Switch reverse debugging on for a TriCore core: before every action (run, step, source
+    /// step, register or memory write) the core's registers and the RAM regions are saved, and
+    /// `reverse_back` / `reverse_continue` write an earlier state back into the halted core, which
+    /// then really runs from there. Regions: the ELF's writable sections, the core's stacks and
+    /// context save area, plus `regions`, without `exclude`. While on it owns the miniMCDS (each
+    /// action is recorded; manual traces are refused). Not rewound: peripherals, timers, other
+    /// cores. The answer has the regions and what one checkpoint costs (`CheckpointMs`).
+    op reverse_enable [reverse]: POST "/api/v1/reverse/enable" (ReverseEnableRequest) -> ReverseData;
+
+    /// Switch reverse debugging off (the history is dropped, the trace released).
+    op reverse_disable [reverse]: POST "/api/v1/reverse/disable" (NoArgs) -> ReverseData;
+
+    /// Whether reverse debugging is on, for which core, how many checkpoints and the regions.
+    op reverse_status [reverse]: GET "/api/v1/reverse" (NoArgs) -> ReverseData;
+
+    /// The checkpoints, oldest first: the action that followed each (`Action`), where it started
+    /// (`Pc`, `At`) and ended (`EndPc`), whether it was recorded.
+    op reverse_history [reverse]: GET "/api/v1/reverse/history" (NoArgs) -> ReverseData;
+
+    /// Step Back on the hardware: `line` (default) to the start of the previous source line,
+    /// stepping backwards over calls; `instruction`; `action` (before the whole last action). A
+    /// point inside an action is reached by restoring its checkpoint and running there again;
+    /// `Diverged` reports a run again that took another path (it stops on a real state). The
+    /// report lists what was restored and what not (`NotUndone`: peripheral registers).
+    op reverse_back [reverse]: POST "/api/v1/reverse/back" (ReverseBackRequest) -> ReverseData;
+
+    /// Reverse Continue on the hardware: back to the last breakpoint or data breakpoint hit in the
+    /// history, or to its start.
+    op reverse_continue [reverse]: POST "/api/v1/reverse/continue" (NoArgs) -> ReverseData;
+
+    /// Go to checkpoint `index` of the history (and to row `row` of the action's recording).
+    op reverse_goto [reverse]: POST "/api/v1/reverse/goto" (ReverseGotoRequest) -> ReverseData;
+
     /// Stage values from the compared files: everything, one UCB, one field or the password.
     /// Nothing is written; the result is the updated comparison (`taken` per field).
     op ucb_apply [ucb]: POST "/api/v1/ucb/apply" (UcbApplyRequest) -> UcbData;

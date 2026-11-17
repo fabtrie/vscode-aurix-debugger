@@ -10,6 +10,8 @@ All notable changes to the "AURIX™ Debugger" extension will be documented in t
 - OS Profile: a sampling rate per lane
 - instruction trace: every executed instruction with source lines and the registers rebuilt from the halt; Step Back and Reverse Continue replay the trace in the debugger
 - trace option "Arm on every run, stop on halt" (launch configuration `"trace": {"Auto": true}`)
+- reverse debugging on the hardware (launch configuration `"reverse": true`): Step Back and Reverse Continue restore the core's registers and RAM to an earlier point, so the code really runs again from there; History tab in the Trace panel
+- the view-only trace replay is marked as such: status bar, current line, thread and scope names
 
 ### Fixed
 

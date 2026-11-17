@@ -592,6 +592,7 @@ pub fn write_image(cx: &Cx, img: &Image, erase: bool) -> Result<WriteStats> {
 /// they are programmed: reading erased PFLASH raises an ECC error that the application's
 /// SMU configuration may turn into a reset (seen on the TC377 board). `unlock`: see [`skip_ucbs`].
 pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, unlock: bool) -> Result<WriteStats> {
+    cx.with(|c| crate::reverse::clear(c, "flash programmed"));
     let (img, ucb_skipped) = skip_ucbs(img, unlock, "flash write_image")?;
     let img = fold_non_cached_cx(cx, &img)?;
     // A section may span adjacent banks (merged images, e.g. pfls0 into pfls1): the loop below
@@ -702,6 +703,7 @@ pub fn erase_check(cx: &Cx, bank: &FlashBank) -> Result<Vec<(u32, bool)>> {
 
 /// Erases sectors `first..=last` of a bank.
 pub fn erase_sectors(cx: &Cx, bank: &FlashBank, first: u32, last: u32) -> Result<()> {
+    cx.with(|c| crate::reverse::clear(c, "flash erased"));
     halt_all(cx)?;
     let layout = probe_bank(cx, bank)?;
     let count = layout.size / layout.sector_size;

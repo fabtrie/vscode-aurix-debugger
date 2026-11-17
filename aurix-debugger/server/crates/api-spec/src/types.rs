@@ -820,6 +820,81 @@ pub struct TraceFindRequest {
     pub back: bool,
 }
 
+/// A RAM range for reverse debugging.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseRegion {
+    /// Start address.
+    #[serde(default)]
+    pub start: Option<Addr>,
+    /// Length in bytes.
+    #[serde(default)]
+    pub size: Option<u32>,
+    /// A global of the ELF (for `exclude`): its symbol's address and size.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Written only by this core (its stacks, context save area): restored by difference.
+    #[serde(default)]
+    pub private: Option<bool>,
+}
+
+/// Switching reverse debugging on.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseEnableRequest {
+    /// The core (default: CPU0).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Checkpoints kept (default 50; 0: all since the last reset).
+    #[serde(default)]
+    pub history: Option<u32>,
+    /// Record every action with the miniMCDS (default true; CPU0 only).
+    #[serde(default)]
+    pub trace: Option<bool>,
+    /// RAM saved in addition to the ELF's writable sections.
+    #[serde(default)]
+    pub regions: Vec<ReverseRegion>,
+    /// RAM left out (large buffers).
+    #[serde(default)]
+    pub exclude: Vec<ReverseRegion>,
+    /// Linker symbol pairs bounding the stacks (`[[low, high], ...]`; defaults for iLLD/TASKING).
+    #[serde(default)]
+    pub stack_symbols: Vec<[String; 2]>,
+    /// Linker symbol pairs bounding the context save area.
+    #[serde(default)]
+    pub csa_symbols: Vec<[String; 2]>,
+    /// Refuse a Step Back that cannot restore everything.
+    #[serde(default)]
+    pub strict: Option<bool>,
+    /// Most breakpoint hits a run again may count (default 200).
+    #[serde(default)]
+    pub max_hits: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseBackRequest {
+    /// `line` (default), `instruction` or `action`.
+    #[serde(default)]
+    pub granularity: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReverseGotoRequest {
+    /// Checkpoint index in the history.
+    pub index: u32,
+    /// Row of that action's recording (default 0: the checkpoint itself).
+    #[serde(default)]
+    pub row: Option<u32>,
+}
+
+/// What the reverse debugging service answers: a status, the history or a restore report.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReverseData {
+    pub data: serde_json::Value,
+}
+
 /// Trace data as the trace service answers: a plan, a status, a recording or a decoded trace.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TraceData {

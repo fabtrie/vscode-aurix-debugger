@@ -20,6 +20,8 @@ pub enum Owner {
     Snapshot,
     /// The DAQ registry, for traced points.
     Daq,
+    /// Reverse debugging: one recording per action, held while the mode is on.
+    Reverse,
 }
 
 impl Owner {
@@ -27,6 +29,7 @@ impl Owner {
         match self {
             Owner::Snapshot => "snapshot",
             Owner::Daq => "daq",
+            Owner::Reverse => "reverse",
         }
     }
 }
@@ -95,6 +98,9 @@ pub struct TraceState {
     pub auto: Option<TraceConfig>,
 }
 
+/// Why a manual trace is refused while reverse debugging is on.
+pub const REVERSE_OWNS: &str = "the trace is used by reverse debugging; switch it off with `reverse off` or in the launch configuration";
+
 /// Recorder state as read from the chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {
@@ -127,6 +133,9 @@ pub fn status(c: &mut Ctx) -> Result<Status> {
 
 /// Arms `cfg` for `owner`: MCDS on, configuration, trace RAM cleared, start.
 pub fn arm(c: &mut Ctx, cfg: TraceConfig, owner: Owner) -> Result<Plan> {
+    if owner != Owner::Reverse && c.reverse.enabled() {
+        return Err(Error::Resource(REVERSE_OWNS.into()));
+    }
     if let Some(a) = &c.mcds.armed {
         if a.owner != owner {
             return Err(Error::Resource(format!("the trace is in use ({})", a.owner.as_str())));
@@ -242,6 +251,9 @@ pub fn on_halted(c: &mut Ctx, t: usize) {
 /// Arms the automatic trace before core `t` runs (a plain run, not a step). Leaves a trace
 /// alone that another owner uses or that is still recording; a finished one is read first.
 pub fn auto_arm(c: &mut Ctx, t: usize) {
+    if c.reverse.enabled() {
+        return;
+    }
     let Some(cfg) = c.mcds.auto.clone() else { return };
     let traced = matches!(&c.targets[t].core, crate::target::Core::Tricore(tc) if tc.coreid == cfg.core as u32);
     if !traced {
@@ -285,6 +297,7 @@ pub fn read_pieces(c: &mut Ctx, reads: &[(usize, usize)]) -> Result<Vec<(usize, 
 
 /// A device reset switched the MCDS off: the armed recording is gone.
 pub fn on_reset(c: &mut Ctx) {
+    crate::reverse::clear(c, "device reset");
     if c.mcds.armed.take().is_some() {
         c.mcds.lost_by_reset = true;
     }

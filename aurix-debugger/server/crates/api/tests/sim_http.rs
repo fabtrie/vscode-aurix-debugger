@@ -533,6 +533,51 @@ fn trace(http: &Http, vs: &mut Tcf) {
     assert_eq!(m["values"][0], "78563412", "{m}");
 }
 
+/// Reverse debugging over REST and TCF: a write is undone by Step Back, the stop reaches the TCF
+/// client as a step back, and the trace belongs to the mode while it is on.
+fn reverse(http: &Http, vs: &mut Tcf, c0: &str) {
+    http.ok("POST", "/api/v1/targets/tc37x.cpu0/halt", None);
+    let before = http.ok("GET", "/api/v1/memory?address=0x70000410&length=4", None)["data"].clone();
+    // The traced DAQ point of the trace test gives the trace up once its stream is gone.
+    let t0 = Instant::now();
+    let on = loop {
+        let (status, v) = http.request("POST", "/api/v1/reverse/enable", Some(json!({ "regions": [{ "start": "0x70000400", "size": 256 }] })), &[]);
+        if status == 200 {
+            break v;
+        }
+        assert!(v.to_string().contains("manual trace") && t0.elapsed() < Duration::from_secs(5), "{v}");
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(on["data"]["Enabled"], true, "{on}");
+    assert!(on["data"]["CheckpointMs"].is_u64(), "{on}");
+    let (status, e) = http.request("POST", "/api/v1/trace/arm", Some(json!({ "kind": "data", "ranges": [{ "start": "0x70000100", "len": 16 }] })), &[]);
+    assert_ne!(status, 200);
+    assert!(e.to_string().contains("reverse debugging"), "{e}");
+
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000410", "data": "11223344" })));
+    let h = http.ok("GET", "/api/v1/reverse/history", None);
+    let list = h["data"]["Checkpoints"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{h}");
+    assert_eq!(list[0]["Action"], "write", "{h}");
+
+    let r = http.ok("POST", "/api/v1/reverse/back", Some(json!({ "granularity": "action" })));
+    assert_eq!(r["data"]["Action"], "write", "{r}");
+    assert_eq!(r["data"]["Bytes"], 4, "{r}");
+    assert_eq!(http.ok("GET", "/api/v1/memory?address=0x70000410&length=4", None)["data"], before);
+    vs.event("RunControl", "contextResumed", c0);
+    let stop = vs.event("RunControl", "contextSuspended", c0);
+    assert!(stop[5].contains("Step back"), "{stop:?}");
+    let (status, e) = http.request("POST", "/api/v1/reverse/back", Some(json!({ "granularity": "action" })), &[]);
+    assert_ne!(status, 200, "nothing before the first checkpoint: {e}");
+
+    // Over TCF, as VS Code uses it.
+    let r = vs.command("AurixReverse", "status", &[]);
+    assert_eq!(serde_json::from_str::<Value>(&r[1]).unwrap()["Checkpoints"], 1, "{r:?}");
+    let r = vs.command("AurixReverse", "disable", &[]);
+    assert_eq!(r[0], "", "{r:?}");
+    assert_eq!(http.ok("GET", "/api/v1/reverse", None)["data"]["Enabled"], false);
+}
+
 fn launch_steps(http: &Http) {
     let dir = std::env::temp_dir().join(format!("aurix-launch-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1612,6 +1657,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     watchpoints(&http, &mut vs, &h, &sse);
     variables_of_real_elf(&http);
     trace(&http, &mut vs);
+    reverse(&http, &mut vs, &c0);
     launch_steps(&http);
 
     // Web pages of other sites must not drive the debugger.

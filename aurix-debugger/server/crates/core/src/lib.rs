@@ -24,6 +24,8 @@ pub mod image;
 pub mod mcds_cmd;
 pub mod mcds_trace;
 pub mod ops;
+pub mod reverse;
+pub mod reverse_cmd;
 pub mod scr_monitor;
 pub mod server;
 pub mod sim;

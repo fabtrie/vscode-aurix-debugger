@@ -327,6 +327,25 @@
 				"icon": "$(pulse)"
 			},
 			{
+				"command": "aurix-debugger.enableReverse",
+				"title": "Enable Reverse Debugging",
+				"category": "AURIX™ Debugger",
+				"icon": "$(history)",
+				"enablement": "debugType == aurixdbg && !aurix.reverse"
+			},
+			{
+				"command": "aurix-debugger.disableReverse",
+				"title": "Disable Reverse Debugging",
+				"category": "AURIX™ Debugger",
+				"enablement": "debugType == aurixdbg && aurix.reverse"
+			},
+			{
+				"command": "aurix-debugger.reverseHistory",
+				"title": "Show Reverse Debugging History",
+				"category": "AURIX™ Debugger",
+				"enablement": "debugType == aurixdbg && aurix.reverse"
+			},
+			{
 				"command": "aurix-debugger.traceReplayExit",
 				"title": "Leave Trace Replay",
 				"category": "AURIX™ Debugger",
@@ -1207,6 +1226,34 @@
 									"Timestamps": { "type": "string", "enum": ["tsu", "ticks"], "default": "tsu" },
 									"Auto": { "type": "boolean", "default": false, "description": "Arm the trace on every run (Continue) instead of once, stopping on the halt: every halt then comes with the trace up to it, and Step Back replays it." }
 								}
+							},
+							"reverse": {
+								"description": "Reverse debugging on the hardware: before every run, step and write the core's registers and RAM are saved, and Step Back / Reverse Continue put an earlier state back into the core, which then really runs from there. true for the defaults. Uses the miniMCDS for every action, so it cannot be combined with \"trace\". Not rewound: peripherals, timers, other cores.",
+								"anyOf": [
+									{ "type": "boolean" },
+									{
+										"type": "object",
+										"properties": {
+											"enabled": { "type": "boolean", "default": true },
+											"history": { "type": "number", "default": 50, "description": "Checkpoints kept (0: all since the last reset)." },
+											"trace": { "type": "boolean", "default": true, "description": "Record every action with the miniMCDS (CPU0): shared memory is restored only where the core wrote, and Step Back can go to a line inside a run. false: whole actions only, restored by difference." },
+											"regions": {
+												"type": "array",
+												"description": "RAM saved in addition to the ELF's writable sections, stacks and context save area.",
+												"items": { "type": "object", "properties": { "start": { "type": ["string", "number"] }, "size": { "type": "number" }, "private": { "type": "boolean", "description": "Written only by this core: restored by difference." }, "name": { "type": "string" } }, "required": ["start", "size"] }
+											},
+											"exclude": {
+												"type": "array",
+												"description": "RAM left out of the checkpoints (large buffers that do not matter): an ELF symbol or a range.",
+												"items": { "type": "object", "properties": { "symbol": { "type": "string" }, "start": { "type": ["string", "number"] }, "size": { "type": "number" } } }
+											},
+											"stackSymbols": { "type": "array", "description": "Linker symbol pairs bounding the stacks, e.g. [[\"__USTACK0_END\", \"__USTACK0\"]] (defaults for iLLD/HighTec and TASKING).", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
+											"csaSymbols": { "type": "array", "description": "Linker symbol pairs bounding the context save area, e.g. [[\"__CSA0\", \"__CSA0_END\"]].", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
+											"maxHits": { "type": "number", "default": 200, "description": "Step Back inside a run runs there again from its checkpoint: most breakpoint hits it may count." },
+											"strict": { "type": "boolean", "default": false, "description": "Refuse a Step Back that cannot restore everything (peripheral writes, unknown writes)." }
+										}
+									}
+								]
 							},
 							"profile": {
 								"type": "string",

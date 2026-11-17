@@ -259,6 +259,35 @@ impl Channel {
                 let v = crate::trace_insns::replay_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
+            // Reverse debugging on the hardware.
+            ("AurixReverse", "enable") => {
+                let v = crate::reverse::enable_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixReverse", "disable") => {
+                let v = crate::reverse::disable_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixReverse", "status") => {
+                let v = crate::reverse::status_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixReverse", "history") => {
+                let v = crate::reverse::history_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixReverse", "back") => {
+                let v = crate::reverse::back_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixReverse", "continue") => {
+                let v = crate::reverse::continue_cmd(&self.shared).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
+            ("AurixReverse", "goto") => {
+                let v = crate::reverse::goto_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
             ("AurixTrace", "replayMove") => {
                 let v = crate::trace_insns::replay_move(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])

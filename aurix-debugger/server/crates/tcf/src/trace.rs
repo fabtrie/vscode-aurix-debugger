@@ -133,7 +133,17 @@ pub fn auto_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
         Some(cfg) => {
             let cfg = parse_config(sh, cfg)?;
             cfg.plan()?;
-            sh.handle.call(move |cx| cx.with(|c| c.mcds.auto = Some(cfg))).ok_or("the debug server stopped")?;
+            sh.handle
+                .call(move |cx| {
+                    cx.with(|c| {
+                        if c.reverse.enabled() {
+                            return Err(mt::REVERSE_OWNS.to_string());
+                        }
+                        c.mcds.auto = Some(cfg);
+                        Ok(())
+                    })
+                })
+                .ok_or("the debug server stopped")??;
         }
     }
     let auto = sh.handle.call(|cx| cx.with(|c| c.mcds.auto.as_ref().map(mcds_cmd::config_json))).ok_or("the debug server stopped")?;
@@ -148,7 +158,7 @@ pub fn status_cmd(sh: &Shared) -> Result<Value, String> {
                 let armed = c.mcds.armed.clone();
                 let last = c.mcds.last.as_ref().map(mcds_cmd::recording_json);
                 let auto = c.mcds.auto.as_ref().map(mcds_cmd::config_json);
-                let mut v = json!({"Armed": armed.is_some(), "LostByReset": c.mcds.lost_by_reset, "Last": last, "Auto": auto});
+                let mut v = json!({"Armed": armed.is_some(), "LostByReset": c.mcds.lost_by_reset, "Last": last, "Auto": auto, "Reverse": c.reverse.enabled()});
                 if let Some(a) = armed {
                     v["Owner"] = json!(a.owner.as_str());
                     v["Config"] = mcds_cmd::config_json(&a.cfg);

@@ -593,6 +593,11 @@ export abstract class TCFClient extends AbstractTCFClient {
         this.console.log(`${service}.${event}`);
     }
 
+    /** Reverse debugging was switched on or off, or its history changed. */
+    protected onReverseChanged(_status: any): void {
+        // Overridden by the debug session.
+    }
+
     protected onAurixTargetEvent(event: string, datas: Buffer[]): void {
         switch (event) {
             case "healthChanged":
@@ -653,6 +658,13 @@ export abstract class TCFClient extends AbstractTCFClient {
             case "Memory": // memoryChanged
             case "Registers": // registerChanged
                 this.onTargetDataChanged(service, event);
+                break;
+            case "AurixReverse": // changed: reverse debugging status
+                try {
+                    this.onReverseChanged(datas.length > 0 ? JSON.parse(datas[0].toString()) : null);
+                } catch (e) {
+                    this.console.log(`Bad AurixReverse.${event} event: ${String(e)}`);
+                }
                 break;
             case AURIX_TARGET_SERVICE:
                 this.onAurixTargetEvent(event, datas);

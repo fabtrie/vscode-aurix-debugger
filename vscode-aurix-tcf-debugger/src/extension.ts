@@ -19,6 +19,7 @@ import { OsObjectsPanel } from './osObjectsPanel';
 import { UcbPanel } from './ucbPanel';
 import { OsProfilePanel } from './osProfilePanel';
 import { registerTraceStatus, TracePanel } from './tracePanel';
+import { registerReverseUi, reverseStatus, reverseStopped, traceReplay } from './reverseUi';
 import { DebugLayout, focusEditorGroup } from './debugLayout';
 import { describeOsError } from './tcf/osaware';
 import {
@@ -392,6 +393,7 @@ export function activate(context: vscode.ExtensionContext) {
 	instructionStepStatusItem.tooltip = 'Toggle instruction-level stepping';
 	context.subscriptions.push(instructionStepStatusItem);
 	registerTraceStatus(context);
+	registerReverseUi(context);
 	liveWatchStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
 	liveWatchStatusItem.command = 'aurix-debugger.configureLiveWatch';
 	liveWatchStatusItem.tooltip = 'Configure the global live update interval';
@@ -416,6 +418,8 @@ export function activate(context: vscode.ExtensionContext) {
 					if (message?.type === 'event' && message.event === 'stopped') {
 						// Paused live views still update on a halt, the way the Watch view does.
 						notifyLiveUpdateBreak();
+						// Reverse debugging: the history grew or was cut.
+						reverseStopped();
 					}
 					if (message?.type === 'event' && message.event === 'aurix/runState') {
 						// Every TriCore core halted: the periodic loops rest (liveWatch.pauseWhileHalted).
@@ -652,6 +656,12 @@ export function activate(context: vscode.ExtensionContext) {
 				const b = e.body as { active?: boolean; at?: number } | undefined;
 				void vscode.commands.executeCommand('setContext', 'aurix.traceReplay', Boolean(b?.active));
 				TracePanel.replayMoved(Boolean(b?.active), typeof b?.at === 'number' ? b.at : undefined);
+				traceReplay(b);
+				return;
+			}
+			if (e.event === 'aurix/reverse') {
+				// Reverse debugging switched on or off, or its history changed.
+				reverseStatus(e.body);
 				return;
 			}
 			if (e.event === 'aurix/probeLost') {

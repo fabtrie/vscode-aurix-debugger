@@ -172,3 +172,12 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 #insns .legend { display: flex; gap: 16px; padding: 4px 0; color: var(--vscode-descriptionForeground); font-size: 12px; }
 #insns .legend b { font-weight: normal; font-family: var(--vscode-editor-font-family); }
 #insns .legend .w { background: var(--vscode-editor-findMatchHighlightBackground); padding: 0 3px; }
+
+/* Reverse debugging */
+.banner { margin: 6px 0; padding: 6px 8px; border-left: 3px solid var(--vscode-editorInfo-foreground); background: var(--vscode-textBlockQuote-background); }
+#form.off { opacity: 0.55; }
+#history { margin-top: 6px; }
+.histTable { border-collapse: collapse; margin-top: 6px; width: 100%; }
+.histTable th, .histTable td { text-align: left; padding: 2px 8px 2px 0; white-space: nowrap; }
+.histTable td.num { text-align: right; }
+.histTable tr.cur td { font-weight: bold; }

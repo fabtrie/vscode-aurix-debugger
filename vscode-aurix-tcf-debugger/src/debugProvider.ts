@@ -11,6 +11,7 @@
  */
 
 import { TraceCommand, TraceConfig, TraceOp } from './tcf/trace';
+import { describeRestore, ReverseCommand, reverseEnableArgs, ReverseLaunchConfig, ReverseOp, reverseWanted } from './tcf/reverse';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
@@ -141,6 +142,8 @@ export interface AurixTCFLaunchRequestArguments extends DebugProtocol.LaunchRequ
 	ortiFile?: string;
 	/** miniMCDS trace armed once the session is set up (TraceConfig). */
 	trace?: TraceConfig;
+	/** Reverse debugging on the hardware (exclusive with `trace`). */
+	reverse?: ReverseLaunchConfig | boolean;
 
 	// Optional reset behavior (no GUI; can be set in launch.json)
 	resetType?: string;
@@ -503,6 +506,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			protected onTargetDataChanged(): void {
 				outer.onTargetDataChanged();
 			}
+			protected onReverseChanged(status: any): void {
+				outer.onReverseStatus(status);
+			}
 			protected onRunControlContextAdded(contextIDs: string[]) {
 				void outer.onContextsAdded(contextIDs);
 			}
@@ -648,7 +654,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private sendStoppedEvent(
 		reason: string,
 		threadId: number,
-		opts?: { allThreadsStopped?: boolean; preserveFocus?: boolean; hitBreakpointIds?: number[] }
+		opts?: { allThreadsStopped?: boolean; preserveFocus?: boolean; hitBreakpointIds?: number[]; description?: string }
 	) {
 		if (this.traceReplay) {
 			// The target stopped again: the server ended the replay.
@@ -679,6 +685,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 		if (opts?.hitBreakpointIds && opts.hitBreakpointIds.length > 0) {
 			(ev.body as DebugProtocol.StoppedEvent['body']).hitBreakpointIds = opts.hitBreakpointIds;
+		}
+		if (opts?.description) {
+			(ev.body as DebugProtocol.StoppedEvent['body']).description = opts.description;
 		}
 		this.sendEvent(ev);
 	}
@@ -2357,6 +2366,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const { host, port, hubFlashed } = this.endpoint;
 			args = { ...args, host, port, internal: { ...(args.internal ?? {}), ...(hubFlashed ? { hubFlashed } : {}) } };
 		}
+		if (reverseWanted(args.reverse) && args.trace) {
+			// Both want the one miniMCDS: reverse debugging records every action with it.
+			this.sendErrorResponse(response, 0, '"reverse" and "trace" cannot be used together in a launch configuration: reverse debugging uses the trace for every action. Remove one of them.');
+			return;
+		}
 		this.launchArgs = args;
 		this.launchCore = args.core;
 		this.instructionSteppingEnabled = args.instructionStepping === true;
@@ -2577,6 +2591,87 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// After the symbols are in place: the attribute expressions are resolved against them.
 		void this.loadOrtiFromLaunchConfig(this.launchArgs?.ortiFile);
 		void this.armTraceFromLaunchConfig(this.launchArgs?.trace);
+		void this.enableReverseFromLaunchConfig(this.launchArgs?.reverse);
+	}
+
+	// ---- reverse debugging on the hardware ------------------------------------------------------
+	// With the mode on (launch configuration `reverse`, the Enable Reverse Debugging command or
+	// another client), Step Back and Reverse Continue restore the real core; the view-only trace
+	// replay is not offered then. The server reports the stop (contextSuspended "Step back").
+
+	private reverseStatus: any = undefined;
+	private reverseHintShown = false;
+	private replayHintShown = false;
+
+	private get reverseOn(): boolean {
+		return this.reverseStatus?.Enabled === true;
+	}
+
+	private onReverseStatus(status: any): void {
+		this.reverseStatus = status ?? undefined;
+		this.sendEvent(new Event('aurix/reverse', this.reverseStatus ?? { Enabled: false }));
+	}
+
+	private async launchCoreContextId(): Promise<string | undefined> {
+		try {
+			const infos = await this.tcfClient.getThreads();
+			return infos.map(x => x.info.ID).find(id => this.isLaunchCoreContext(id));
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Launch configuration `reverse`: switches the mode on once the symbols are loaded. */
+	private async enableReverseFromLaunchConfig(cfg: unknown): Promise<void> {
+		if (!reverseWanted(cfg)) {
+			try {
+				// Another client may have switched it on already.
+				this.onReverseStatus(await this.tcfClient.sendCommand(new ReverseCommand('status')));
+			} catch {
+				// An older server without the service.
+			}
+			return;
+		}
+		await this.enableReverse(cfg);
+	}
+
+	private async enableReverse(cfg: ReverseLaunchConfig | true): Promise<boolean> {
+		try {
+			const r = await this.tcfClient.sendCommand(new ReverseCommand('enable', reverseEnableArgs(cfg, await this.launchCoreContextId())));
+			this.onReverseStatus(r);
+			const kb = Math.round(Number(r?.SnapshotBytes ?? 0) / 1024);
+			this.sendEvent(new OutputEvent(`Reverse debugging on for ${r?.Target ?? 'the core'}: ${kb} KB saved before every action (about ${r?.CheckpointMs ?? '?'} ms each). Step Back and Reverse Continue restore the target.\n`, 'console'));
+			for (const n of Array.isArray(r?.Notes) ? r.Notes : []) {
+				this.sendEvent(new OutputEvent(`Reverse debugging: ${n}\n`, 'console'));
+			}
+			return true;
+		} catch (e) {
+			this.sendEvent(new OutputEvent(`Reverse debugging not switched on: ${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
+			return false;
+		}
+	}
+
+	private async reverseMove(response: DebugProtocol.Response, op: ReverseOp, arg?: unknown): Promise<void> {
+		if (!this.reverseHintShown) {
+			this.reverseHintShown = true;
+			this.sendEvent(new OutputEvent('Step Back restores registers and RAM of the core. Not rewound: peripherals (their writes are listed), timers, other cores, DMA.\n', 'console'));
+		}
+		try {
+			const r = await this.tcfClient.sendCommand(new ReverseCommand(op, arg));
+			this.sendResponse(response);
+			this.sendEvent(new OutputEvent(describeRestore(r) + '\n', r?.Diverged ? 'stderr' : 'console'));
+		} catch (e) {
+			this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+		}
+	}
+
+	/** Step Back without reverse debugging: the view-only trace replay (hint once). */
+	private replayHint(): void {
+		if (this.replayHintShown) {
+			return;
+		}
+		this.replayHintShown = true;
+		this.sendEvent(new OutputEvent('Step Back replays the trace (view only, nothing on the target changes). For a real step back enable "reverse" in the launch configuration.\n', 'console'));
 	}
 
 	/**
@@ -2615,7 +2710,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const base = x.info.Name || x.info.ID;
 			const core = AurixTCFDebugSession.coreOfContext(x.info.ID);
 			const task = core === undefined ? undefined : running.get(core);
-			return new Thread(id, task ? `${base} · ${task}` : base);
+			const name = task ? `${base} · ${task}` : base;
+			return new Thread(id, this.inTraceReplay(id) ? `${name} (trace replay, view only)` : name);
 		});
 		if (this.startupDiagnosticsEnabled) {
 			const list = threads.map(t => `${t.id}:${t.name}`).join(', ');
@@ -2711,11 +2807,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.maybeRefocusToBreakpointThread('ScopesRequest', resolved);
 		}
 		try {
+			// The view-only trace replay marks its scopes: the values are rebuilt, not the core's.
+			const frameThread = this.tryResolveFrame(args.frameId).threadId;
+			const mark = frameThread !== undefined && this.inTraceReplay(frameThread) ? ' (trace replay)' : '';
 			response.body = {
 				scopes: [
-					new Scope('Locals', this.getLocalScopeVariableReference(args.frameId), false),
+					new Scope(`Locals${mark}`, this.getLocalScopeVariableReference(args.frameId), false),
 					// new Scope('Globals', this.getGlobalScopeVariableReference(args.frameId), false),
-					new Scope('CORE Registers', this.getRegisterScopeVariableReference(args.frameId), false),
+					new Scope(`CORE Registers${mark}`, this.getRegisterScopeVariableReference(args.frameId), false),
 				]
 			};
 			this.sendResponse(response);
@@ -3228,7 +3327,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		const ctx = typeof r?.Ctx === 'string' && r.Ctx ? r.Ctx : this.traceReplay?.ctx;
 		const threadId = this.threadOfContext(ctx) ?? threadHint ?? this.traceReplay?.threadId;
 		this.traceReplay = r?.Replay && threadId !== undefined ? { threadId, ctx } : undefined;
-		this.sendEvent(new Event('aurix/traceReplay', { active: Boolean(r?.Replay), at: r?.At, total: r?.Total, t: r?.T, endNs: r?.EndNs }));
+		this.sendEvent(new Event('aurix/traceReplay', { active: Boolean(r?.Replay), at: r?.At, total: r?.Total, t: r?.T, endNs: r?.EndNs, haltFile: r?.HaltFile, haltLine: r?.HaltLine }));
 		if (threadId !== undefined) {
 			const ev = new StoppedEvent('step', threadId);
 			const body = ev.body as DebugProtocol.StoppedEvent['body'];
@@ -3264,10 +3363,18 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 	protected override async stepBackRequestAsync(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments): Promise<void> {
 		const insn = this.instructionSteppingEnabled || args.granularity === 'instruction';
+		if (this.reverseOn) {
+			return this.reverseMove(response, 'back', { Granularity: insn ? 'instruction' : 'line' });
+		}
+		this.replayHint();
 		return this.traceReplayMove(response, args.threadId, insn ? 'stepInsnBack' : 'stepBack');
 	}
 
 	protected override async reverseContinueRequestAsync(response: DebugProtocol.ReverseContinueResponse, args: DebugProtocol.ReverseContinueArguments): Promise<void> {
+		if (this.reverseOn) {
+			return this.reverseMove(response, 'continue');
+		}
+		this.replayHint();
 		return this.traceReplayMove(response, args.threadId, 'reverseContinue');
 	}
 
@@ -4601,7 +4708,14 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		// Step is an explicit user action; don't delay or suppress it.
 		if (reason === StoppedEventReason.step) {
 			this.invalidateLiveWatchContext();
-			this.sendStoppedEvent(reason, threadId);
+			// Reverse debugging: "Stepped back", "Start of history" in the Call Stack.
+			const back = reasonText.startsWith('step back');
+			const description = !back ? undefined
+				: reasonText.includes('start of history') ? 'Start of history'
+				: reasonText.includes('failed') ? 'Step back failed'
+				: reasonText.includes('data breakpoint') ? 'Reversed to data breakpoint'
+				: 'Stepped back';
+			this.sendStoppedEvent(reason, threadId, description ? { description } : undefined);
 			void this.emitSourceLocation(contextId);
 			return;
 		}
@@ -5010,6 +5124,43 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 					: op === 'find' ? { Query: String(args?.query ?? ''), From: args?.from, Back: Boolean(args?.back) }
 					: undefined;
 				response.body = await this.tcfClient.sendCommand(new TraceCommand(op, arg));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
+			}
+			return;
+		}
+		if (command === 'aurix/reverse') {
+			// Enable/disable from the command palette, the History tab of the Trace panel ({op, ...}).
+			try {
+				const op = String(args?.op ?? 'status') as ReverseOp;
+				if (op === 'enable') {
+					const cfg = this.launchArgs?.reverse;
+					const ok = await this.enableReverse(reverseWanted(cfg) ? cfg : true);
+					response.body = this.reverseStatus;
+					if (!ok) {
+						throw new Error('see the Debug Console');
+					}
+				} else if (op === 'goto' || op === 'back' || op === 'continue') {
+					const arg = op === 'goto' ? { Index: args?.index, Row: args?.row } : op === 'back' ? { Granularity: args?.granularity ?? 'line' } : undefined;
+					const r = await this.tcfClient.sendCommand(new ReverseCommand(op, arg));
+					this.sendEvent(new OutputEvent(describeRestore(r) + '\n', r?.Diverged ? 'stderr' : 'console'));
+					response.body = r;
+				} else {
+					const r = await this.tcfClient.sendCommand(new ReverseCommand(op));
+					if (op === 'disable') {
+						this.onReverseStatus(r);
+					} else if (op === 'status') {
+						// Told only when it changed: the status event makes the panel ask again.
+						const changed = (r?.Enabled === true) !== this.reverseOn || r?.Checkpoints !== this.reverseStatus?.Checkpoints || r?.AtCheckpoint !== this.reverseStatus?.AtCheckpoint;
+						if (changed) {
+							this.onReverseStatus(r);
+						} else {
+							this.reverseStatus = r;
+						}
+					}
+					response.body = r;
+				}
 				this.sendResponse(response);
 			} catch (e) {
 				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });

@@ -10,6 +10,7 @@ publish = false
 aurix-core.workspace = true
 tas.workspace = true
 symbols.workspace = true
+object.workspace = true
 orti.workspace = true
 mcds = { workspace = true, features = ["capstone"] }
 isa.workspace = true

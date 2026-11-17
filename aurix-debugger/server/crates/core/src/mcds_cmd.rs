@@ -228,6 +228,9 @@ pub fn cmd_mcds(cx: &Cx, args: &[&str]) -> CmdResult {
                 Some(_) => {
                     let cfg = parse_config(&rest)?;
                     cfg.plan()?;
+                    if cx.with(|c| c.reverse.enabled()) {
+                        return Err(mt::REVERSE_OWNS.into());
+                    }
                     cx.with(|c| c.mcds.auto = Some(cfg));
                 }
             }

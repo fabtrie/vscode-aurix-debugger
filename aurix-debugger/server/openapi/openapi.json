@@ -2470,6 +2470,203 @@
         ],
         "type": "object"
       },
+      "ReverseBackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "granularity": {
+            "default": null,
+            "description": "`line` (default), `instruction` or `action`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ReverseData": {
+        "description": "What the reverse debugging service answers: a status, the history or a restore report.",
+        "properties": {
+          "data": true
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "ReverseEnableRequest": {
+        "additionalProperties": false,
+        "description": "Switching reverse debugging on.",
+        "properties": {
+          "csa_symbols": {
+            "default": [],
+            "description": "Linker symbol pairs bounding the context save area.",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "exclude": {
+            "default": [],
+            "description": "RAM left out (large buffers).",
+            "items": {
+              "$ref": "#/components/schemas/ReverseRegion"
+            },
+            "type": "array"
+          },
+          "history": {
+            "default": null,
+            "description": "Checkpoints kept (default 50; 0: all since the last reset).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_hits": {
+            "default": null,
+            "description": "Most breakpoint hits a run again may count (default 200).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "regions": {
+            "default": [],
+            "description": "RAM saved in addition to the ELF's writable sections.",
+            "items": {
+              "$ref": "#/components/schemas/ReverseRegion"
+            },
+            "type": "array"
+          },
+          "stack_symbols": {
+            "default": [],
+            "description": "Linker symbol pairs bounding the stacks (`[[low, high], ...]`; defaults for iLLD/TASKING).",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "strict": {
+            "default": null,
+            "description": "Refuse a Step Back that cannot restore everything.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "target": {
+            "default": null,
+            "description": "The core (default: CPU0).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trace": {
+            "default": null,
+            "description": "Record every action with the miniMCDS (default true; CPU0 only).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ReverseGotoRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "description": "Checkpoint index in the history.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "row": {
+            "default": null,
+            "description": "Row of that action's recording (default 0: the checkpoint itself).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "index"
+        ],
+        "type": "object"
+      },
+      "ReverseRegion": {
+        "additionalProperties": false,
+        "description": "A RAM range for reverse debugging.",
+        "properties": {
+          "private": {
+            "default": null,
+            "description": "Written only by this core (its stacks, context save area): restored by difference.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "size": {
+            "default": null,
+            "description": "Length in bytes.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "start": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Start address."
+          },
+          "symbol": {
+            "default": null,
+            "description": "A global of the ELF (for `exclude`): its symbol's address and size.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RunState": {
         "description": "Run state of a target.",
         "oneOf": [
@@ -6084,6 +6281,460 @@
         "summary": "Reset the device through the debug adapter and run the reset handlers of the configuration (OpenOCD `reset run|halt|init`).",
         "tags": [
           "run_control"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse": {
+      "get": {
+        "description": "Whether reverse debugging is on, for which core, how many checkpoints and the regions.",
+        "operationId": "reverse_status",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Whether reverse debugging is on, for which core, how many checkpoints and the regions.",
+        "tags": [
+          "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse/back": {
+      "post": {
+        "description": "Step Back on the hardware: `line` (default) to the start of the previous source line,\nstepping backwards over calls; `instruction`; `action` (before the whole last action). A\npoint inside an action is reached by restoring its checkpoint and running there again;\n`Diverged` reports a run again that took another path (it stops on a real state). The\nreport lists what was restored and what not (`NotUndone`: peripheral registers).",
+        "operationId": "reverse_back",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "granularity": {
+                    "default": null,
+                    "description": "`line` (default), `instruction` or `action`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Step Back on the hardware: `line` (default) to the start of the previous source line, stepping backwards over calls; `instruction`; `action` (before the whole last action).",
+        "tags": [
+          "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse/continue": {
+      "post": {
+        "description": "Reverse Continue on the hardware: back to the last breakpoint or data breakpoint hit in the\nhistory, or to its start.",
+        "operationId": "reverse_continue",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Reverse Continue on the hardware: back to the last breakpoint or data breakpoint hit in the history, or to its start.",
+        "tags": [
+          "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse/disable": {
+      "post": {
+        "description": "Switch reverse debugging off (the history is dropped, the trace released).",
+        "operationId": "reverse_disable",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Switch reverse debugging off (the history is dropped, the trace released).",
+        "tags": [
+          "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse/enable": {
+      "post": {
+        "description": "Switch reverse debugging on for a TriCore core: before every action (run, step, source\nstep, register or memory write) the core's registers and the RAM regions are saved, and\n`reverse_back` / `reverse_continue` write an earlier state back into the halted core, which\nthen really runs from there. Regions: the ELF's writable sections, the core's stacks and\ncontext save area, plus `regions`, without `exclude`. While on it owns the miniMCDS (each\naction is recorded; manual traces are refused). Not rewound: peripherals, timers, other\ncores. The answer has the regions and what one checkpoint costs (`CheckpointMs`).",
+        "operationId": "reverse_enable",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Switching reverse debugging on.",
+                "properties": {
+                  "csa_symbols": {
+                    "default": [],
+                    "description": "Linker symbol pairs bounding the context save area.",
+                    "items": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "type": "array"
+                  },
+                  "exclude": {
+                    "default": [],
+                    "description": "RAM left out (large buffers).",
+                    "items": {
+                      "$ref": "#/components/schemas/ReverseRegion"
+                    },
+                    "type": "array"
+                  },
+                  "history": {
+                    "default": null,
+                    "description": "Checkpoints kept (default 50; 0: all since the last reset).",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "max_hits": {
+                    "default": null,
+                    "description": "Most breakpoint hits a run again may count (default 200).",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "regions": {
+                    "default": [],
+                    "description": "RAM saved in addition to the ELF's writable sections.",
+                    "items": {
+                      "$ref": "#/components/schemas/ReverseRegion"
+                    },
+                    "type": "array"
+                  },
+                  "stack_symbols": {
+                    "default": [],
+                    "description": "Linker symbol pairs bounding the stacks (`[[low, high], ...]`; defaults for iLLD/TASKING).",
+                    "items": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "type": "array"
+                  },
+                  "strict": {
+                    "default": null,
+                    "description": "Refuse a Step Back that cannot restore everything.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "default": null,
+                    "description": "The core (default: CPU0).",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "trace": {
+                    "default": null,
+                    "description": "Record every action with the miniMCDS (default true; CPU0 only).",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Switch reverse debugging on for a TriCore core: before every action (run, step, source step, register or memory write) the core's registers and the RAM regions are saved, and `reverse_back` / `reverse_continue` write an earlier state back into the halted core, which then really runs from there.",
+        "tags": [
+          "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse/goto": {
+      "post": {
+        "description": "Go to checkpoint `index` of the history (and to row `row` of the action's recording).",
+        "operationId": "reverse_goto",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "index": {
+                    "description": "Checkpoint index in the history.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "row": {
+                    "default": null,
+                    "description": "Row of that action's recording (default 0: the checkpoint itself).",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "index"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Go to checkpoint `index` of the history (and to row `row` of the action's recording).",
+        "tags": [
+          "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/reverse/history": {
+      "get": {
+        "description": "The checkpoints, oldest first: the action that followed each (`Action`), where it started\n(`Pc`, `At`) and ended (`EndPc`), whether it was recorded.",
+        "operationId": "reverse_history",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The checkpoints, oldest first: the action that followed each (`Action`), where it started (`Pc`, `At`) and ended (`EndPc`), whether it was recorded.",
+        "tags": [
+          "reverse"
         ]
       }
     },

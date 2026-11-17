@@ -68,6 +68,13 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
     shared.invalidate_stack(idx);
     shared.broadcast(&wire::event("RunControl", "contextResumed", &[json!(ctx).to_string()]));
     thread::spawn(move || {
+        // Reverse debugging: one checkpoint (and one recording) for the whole step.
+        let (kind, rm) = match mode {
+            3 => ("step over", RunMode::StepOver),
+            5 => ("step out", RunMode::StepOut),
+            _ => ("step into", RunMode::Step),
+        };
+        let _ = shared.handle.call(move |cx| cx.with(|c| aurix_core::reverse::begin_scope(c, idx, kind, rm)));
         let arch = find_core(&shared.handle, &ctx).map(|c| c.arch.name);
         let result = match arch {
             Some("cortex_m") => run_arm(&shared, idx, &ctx, mode, &cancel),
@@ -83,6 +90,7 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
                 ops::wait_state(cx, idx, TargetState::Halted, 2000)
             });
         }
+        let _ = h.call(move |cx| cx.with(|c| aurix_core::reverse::end_scope(c, idx)));
         // The forwarder still has the events of the instruction steps queued: let it drop them
         // while this core counts as stepping, before the one stop below.
         shared.flush_events(Duration::from_secs(2));

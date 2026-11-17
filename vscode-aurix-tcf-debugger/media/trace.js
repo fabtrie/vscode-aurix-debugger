@@ -115,6 +115,10 @@
 			stop === 'full' ? 'the start (the buffer fills once)' :
 			'the end (the buffer is a ring and keeps the newest messages)';
 		$('rangeInfo').textContent = kind === 'inside' ? ' only code in this range is recorded' : '';
+		if (window.aurixReverse) {
+			$('range').disabled = true;
+			$('dataRange').disabled = true;
+		}
 		$('arm').textContent = armed ? 'Re-arm' : 'Arm';
 	}
 
@@ -148,7 +152,7 @@
 			$('arm').disabled = true;
 			return;
 		}
-		$('arm').disabled = false;
+		$('arm').disabled = !!window.aurixReverse;
 		const c = m.check || {};
 		const r = c.Resources || {};
 		el.innerHTML =
@@ -176,7 +180,7 @@
 		} else {
 			setState('idle', 'idle');
 		}
-		$('stopBtn').disabled = !armed;
+		$('stopBtn').disabled = !armed || !!window.aurixReverse;
 		updateFormState();
 	}
 
@@ -322,7 +326,7 @@
 			renderData(r);
 		}
 		// The Instructions view (traceInsns.js) takes over a program recording.
-		$('tabs').hidden = !(r && r.Kind === 'program');
+		$('tabs').hidden = !(r && r.Kind === 'program') && !window.aurixReverse;
 		window.dispatchEvent(new CustomEvent('trace-result', { detail: r }));
 	}
 
@@ -395,7 +399,8 @@
 				message(m.error, 'bad');
 				break;
 			case 'auto':
-				$('auto').checked = !!m.on;
+				$('auto').checked = !!m.on && !window.aurixReverse;
+				if (window.aurixReverse) break;
 				if (m.error) message(m.error, 'bad');
 				else if (m.on && !armed) message('Armed on every run: run the target; at the next halt the trace up to it is read here (Step Back replays it).', 'info');
 				break;

@@ -115,9 +115,13 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
 
 /// Reports a poll transition: frontend event plus the `halted` Tcl event.
 pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
-    // Before anyone hears of the halt (and might resume): a trace that stops on it ends here.
+    // Before anyone hears of the halt (and might resume): a trace that stops on it ends here, and
+    // so does the action reverse debugging records.
     if matches!(tr, Transition::Rehalted | Transition::Halted { boot: false, .. }) {
-        cx.with(|c| crate::mcds_trace::on_halted(c, t));
+        cx.with(|c| {
+            crate::mcds_trace::on_halted(c, t);
+            crate::reverse::on_halted(c, t);
+        });
     }
     match tr {
         Transition::None => {}
@@ -483,6 +487,8 @@ pub fn resume(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
 /// multi-core cfg handlers (resume-start) release them too.
 pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()> {
     require_examined(cx, t)?;
+    // Reverse debugging: the state before the run (inside a source step: the step's own).
+    cx.with(|c| crate::reverse::begin_action(c, t, action_name(mode, true), mode));
     if mode == RunMode::Continue {
         // `mcds auto`: a trace that ends at the next halt.
         cx.with(|c| crate::mcds_trace::auto_arm(c, t));
@@ -505,6 +511,26 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
     fire(cx, t, "resumed");
     fire(cx, t, "resume-end");
     Ok(())
+}
+
+/// The reverse debugging action a run (`run`) or an instruction step in `mode` is.
+fn action_name(mode: RunMode, run: bool) -> &'static str {
+    match (mode, run) {
+        (RunMode::Continue, _) => "continue",
+        (RunMode::StepOver, _) => "step over",
+        (RunMode::StepOut, _) => "step out",
+        (RunMode::Step, true) => "run",
+        (RunMode::Step, false) => "step",
+    }
+}
+
+/// A resume that continues the last action rather than starting one (the frontends resume after
+/// a breakpoint whose condition is false): reverse debugging takes no checkpoint for it.
+pub fn resume_continuing(cx: &Cx, t: usize) -> Result<()> {
+    cx.with(|c| c.reverse.continuing = true);
+    let r = resume(cx, t, None);
+    cx.with(|c| c.reverse.continuing = false);
+    r
 }
 
 fn unmask_irq_except(cx: &Cx, t: usize) {
@@ -548,6 +574,9 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
     let name = target_name(cx, t);
     if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
         return Err(Error::NotHalted(name));
+    }
+    if report {
+        cx.with(|c| crate::reverse::begin_action(c, t, action_name(mode, false), mode));
     }
     let tl1_step = cx.with(|c| c.targets[t].core.run().tl1_step);
     if tl1_step {
@@ -637,6 +666,7 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
         "run" => false,
         _ => return Err(usage(format!("Invalid mode: {mode}, must be one of: halt, init, or run"))),
     };
+    cx.with(|c| crate::reverse::clear(c, "reset"));
     // A board cfg that steers resets itself (`reset_hook`) gets every request -- from Tcl, TCF,
     // the API and `program` alike; a `reset` it issues runs the built-in sequence below.
     let hook = cx.with(|c| if c.in_reset_hook || c.in_reset { None } else { c.reset_hook.clone() });
@@ -880,8 +910,45 @@ pub fn read_reg(cx: &Cx, t: usize, idx: usize) -> Result<u32> {
 
 pub fn write_reg(cx: &Cx, t: usize, idx: usize, value: u32) -> Result<()> {
     cx.with(|c| {
+        crate::reverse::on_write_reg(c, t);
         let (mut io, e) = c.target_io(t)?;
         e.core.write_reg(&mut io, idx, value)
+    })
+}
+
+/// Breakpoints and watchpoints of TriCore `t` taken out of the hardware (they stay listed), for
+/// runs to one address of reverse debugging; [`resume_triggers`] puts them back.
+pub fn suspend_triggers(cx: &Cx, t: usize) -> Result<Vec<crate::tricore::Trigger>> {
+    cx.with(|c| {
+        if c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_some()) {
+            return Err(Error::Resource("this probe sets the breakpoints itself: runs to an address are not available".into()));
+        }
+        let (mut io, e) = c.target_io(t)?;
+        match &mut e.core {
+            Core::Tricore(tc) => tc.suspend_triggers(&mut io),
+            _ => Err(Error::Resource("only on TriCore cores".into())),
+        }
+    })
+}
+
+/// A temporary breakpoint while the triggers are suspended (not listed; gone at [`resume_triggers`]).
+pub fn temporary_breakpoint(cx: &Cx, t: usize, addr: u32) -> Result<()> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        match &mut e.core {
+            Core::Tricore(tc) => tc.add_breakpoint(&mut io, addr, 2).map(|_| ()),
+            _ => Err(Error::Resource("only on TriCore cores".into())),
+        }
+    })
+}
+
+pub fn resume_triggers(cx: &Cx, t: usize, saved: &[crate::tricore::Trigger]) -> Result<()> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        match &mut e.core {
+            Core::Tricore(tc) => tc.resume_triggers(&mut io, saved),
+            _ => Ok(()),
+        }
     })
 }
 
@@ -964,7 +1031,10 @@ pub fn read_memory_partial(cx: &Cx, addr: u32, len: usize) -> Result<adapter::Pa
 }
 
 pub fn write_memory(cx: &Cx, addr: u32, data: &[u8]) -> Result<()> {
-    cx.with(|c| c.io()?.write(addr, data))
+    cx.with(|c| {
+        crate::reverse::on_write_memory(c, addr, data.len());
+        c.io()?.write(addr, data)
+    })
 }
 
 /// The target that serves a memory access of core `t` to `addr..addr + len` through its own path:
@@ -1002,6 +1072,7 @@ pub fn read_memory_partial_as(cx: &Cx, t: usize, addr: u32, len: usize) -> Resul
 
 pub fn write_memory_as(cx: &Cx, t: usize, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| {
+        crate::reverse::on_write_memory(c, addr, data.len());
         let (mut io, e) = c.target_io(t)?;
         e.core.write_memory(&mut io, addr, data)
     })

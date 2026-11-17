@@ -343,8 +343,9 @@
 		active = tab === 'insns';
 		document.querySelectorAll('#tabs .tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
 		$('insns').hidden = !active;
-		$('coverage').hidden = active;
-		$('result').hidden = active;
+		$('coverage').hidden = tab !== 'flow';
+		$('result').hidden = tab !== 'flow';
+		$('history').hidden = tab !== 'history';
 		if (active) {
 			if (result && result.Kind === 'program' && !total && !loading) load();
 			draw();
@@ -405,7 +406,16 @@
 		}
 	});
 	$('insnReplay').addEventListener('click', () => {
-		if (sel >= 0) vscode.postMessage({ type: 'replayAt', at: sel });
+		if (sel < 0) return;
+		if (window.aurixReverse) {
+			// Reverse debugging: restore the target to the point before the selected row.
+			vscode.postMessage({ type: 'reverseGoto', row: sel });
+		} else {
+			vscode.postMessage({ type: 'replayAt', at: sel });
+		}
+	});
+	window.addEventListener('message', (e) => {
+		if (e.data && e.data.type === 'showTab') setTab(e.data.tab);
 	});
 	$('insnReplayOff').addEventListener('click', () => vscode.postMessage({ type: 'replayOff' }));
 

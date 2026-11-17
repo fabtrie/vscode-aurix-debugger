@@ -777,6 +777,42 @@ class RegisterValue:
 
 
 @dataclass
+class ReverseData:
+    """What the reverse debugging service answers: a status, the history or a restore report."""
+
+    data: Any
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ReverseData:
+        return cls(
+            data=d.get("data"),
+        )
+
+
+@dataclass
+class ReverseRegion:
+    """A RAM range for reverse debugging."""
+
+    private: bool | None = None
+    """Written only by this core (its stacks, context save area): restored by difference."""
+    size: int | None = None
+    """Length in bytes."""
+    start: int | str | None = None
+    """Start address."""
+    symbol: str | None = None
+    """A global of the ELF (for `exclude`): its symbol's address and size."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ReverseRegion:
+        return cls(
+            private=d.get("private"),
+            size=d.get("size"),
+            start=d.get("start"),
+            symbol=d.get("symbol"),
+        )
+
+
+@dataclass
 class ServerInfo:
     """The debug server, its probe connection and what is loaded."""
 
@@ -1735,6 +1771,71 @@ class GeneratedClient:
             from_: 
         """
         return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/find", _args({"query": query, "back": back, "from": from_}), None))
+
+    def reverse_enable(self, *, csa_symbols: list[list[str]] | None = None, exclude: list[ReverseRegion] | None = None, history: int | None = None, max_hits: int | None = None, regions: list[ReverseRegion] | None = None, stack_symbols: list[list[str]] | None = None, strict: bool | None = None, target: str | None = None, trace: bool | None = None) -> ReverseData:
+        """Switch reverse debugging on for a TriCore core: before every action (run, step, source
+        step, register or memory write) the core's registers and the RAM regions are saved, and
+        `reverse_back` / `reverse_continue` write an earlier state back into the halted core, which
+        then really runs from there. Regions: the ELF's writable sections, the core's stacks and
+        context save area, plus `regions`, without `exclude`. While on it owns the miniMCDS (each
+        action is recorded; manual traces are refused). Not rewound: peripherals, timers, other
+        cores. The answer has the regions and what one checkpoint costs (`CheckpointMs`).
+
+        Args:
+            csa_symbols: Linker symbol pairs bounding the context save area.
+            exclude: RAM left out (large buffers).
+            history: Checkpoints kept (default 50; 0: all since the last reset).
+            max_hits: Most breakpoint hits a run again may count (default 200).
+            regions: RAM saved in addition to the ELF's writable sections.
+            stack_symbols: Linker symbol pairs bounding the stacks (`[[low, high], ...]`; defaults for iLLD/TASKING).
+            strict: Refuse a Step Back that cannot restore everything.
+            target: The core (default: CPU0).
+            trace: Record every action with the miniMCDS (default true; CPU0 only).
+        """
+        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/enable", None, _args({"csa_symbols": csa_symbols, "exclude": exclude, "history": history, "max_hits": max_hits, "regions": regions, "stack_symbols": stack_symbols, "strict": strict, "target": target, "trace": trace})))
+
+    def reverse_disable(self) -> ReverseData:
+        """Switch reverse debugging off (the history is dropped, the trace released).
+        """
+        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/disable", None, None))
+
+    def reverse_status(self) -> ReverseData:
+        """Whether reverse debugging is on, for which core, how many checkpoints and the regions.
+        """
+        return ReverseData.from_dict(self._call("GET", self._session_path() + "/reverse", None, None))
+
+    def reverse_history(self) -> ReverseData:
+        """The checkpoints, oldest first: the action that followed each (`Action`), where it started
+        (`Pc`, `At`) and ended (`EndPc`), whether it was recorded.
+        """
+        return ReverseData.from_dict(self._call("GET", self._session_path() + "/reverse/history", None, None))
+
+    def reverse_back(self, *, granularity: str | None = None) -> ReverseData:
+        """Step Back on the hardware: `line` (default) to the start of the previous source line,
+        stepping backwards over calls; `instruction`; `action` (before the whole last action). A
+        point inside an action is reached by restoring its checkpoint and running there again;
+        `Diverged` reports a run again that took another path (it stops on a real state). The
+        report lists what was restored and what not (`NotUndone`: peripheral registers).
+
+        Args:
+            granularity: `line` (default), `instruction` or `action`.
+        """
+        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/back", None, _args({"granularity": granularity})))
+
+    def reverse_continue(self) -> ReverseData:
+        """Reverse Continue on the hardware: back to the last breakpoint or data breakpoint hit in the
+        history, or to its start.
+        """
+        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/continue", None, None))
+
+    def reverse_goto(self, *, index: int, row: int | None = None) -> ReverseData:
+        """Go to checkpoint `index` of the history (and to row `row` of the action's recording).
+
+        Args:
+            index: Checkpoint index in the history.
+            row: Row of that action's recording (default 0: the checkpoint itself).
+        """
+        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/goto", None, _args({"index": index, "row": row})))
 
     def ucb_apply(self, *, target: str) -> UcbData:
         """Stage values from the compared files: everything, one UCB, one field or the password.

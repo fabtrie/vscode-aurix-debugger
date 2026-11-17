@@ -26,6 +26,9 @@ pub enum Event {
     MemoryChanged { target: Option<usize>, addr: u32, len: u32 },
     /// A core register written by a frontend (REST/MCP) the other frontends do not know about.
     RegisterChanged { target: usize, name: String },
+    /// Reverse debugging wrote an earlier state back into the halted `target` (registers and
+    /// memory changed; the core stands at `pc`).
+    Restored { target: usize, name: String, pc: Option<u32> },
     Log { text: String },
     /// Carries no news: a frontend sends it through the event stream to learn when everything
     /// emitted before it has been processed (see `tcf::Shared::flush_events`).

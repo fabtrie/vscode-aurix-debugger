@@ -58,8 +58,24 @@ pub fn decode_program_to(
     code: &mut dyn Code,
     halt_pc: Option<u32>,
 ) -> (Vec<Step>, flow::FlowStats, decode::Stats, bool) {
+    decode_program_between(paragraphs, code, None, halt_pc)
+}
+
+/// [`decode_program_to`] of a recording whose first message belongs to the core's first stretch
+/// after it was started at `start_pc` (armed while the core stood there, nothing lost since): the
+/// flow starts at that PC instead of waiting for the first full address message, so the
+/// instructions before it are not missing.
+pub fn decode_program_between(
+    paragraphs: &[(usize, &[u8])],
+    code: &mut dyn Code,
+    start_pc: Option<u32>,
+    halt_pc: Option<u32>,
+) -> (Vec<Step>, flow::FlowStats, decode::Stats, bool) {
     let mut d = Decoder::new();
     let mut f = Flow::new();
+    if let Some(pc) = start_pc {
+        f.start_at(pc);
+    }
     let mut out = Vec::new();
     for (_, p) in paragraphs {
         for (_, m) in frame::messages(p) {

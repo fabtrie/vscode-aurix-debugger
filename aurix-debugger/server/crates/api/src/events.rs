@@ -117,6 +117,11 @@ fn convert(handle: &ServerHandle, names: &mut HashMap<usize, String>, ev: Event)
         Event::MemoryChanged { target, addr, len } => {
             ApiEvent::MemoryChanged { target: target.map(|t| name(handle, names, t)), address: addr, length: len }
         }
+        // Reverse debugging wrote an earlier state into the halted core: a new stop for the clients.
+        Event::Restored { target, name, pc } => {
+            names.insert(target, name.clone());
+            ApiEvent::Halted { target: name, reason: "step back".into(), pc }
+        }
         Event::RegisterChanged { target, name: reg } => ApiEvent::RegisterChanged { target: name(handle, names, target), name: reg },
         Event::Log { text } => ApiEvent::Log { text },
         Event::Shutdown | Event::Marker(_) => return None,

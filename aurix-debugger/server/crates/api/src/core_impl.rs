@@ -964,6 +964,54 @@ impl DebuggerApi for CoreApi {
         Ok(TraceData { data: v })
     }
 
+    fn reverse_enable(&self, req: ReverseEnableRequest) -> Result<ReverseData, ApiError> {
+        self.check_control()?;
+        let region = |r: &ReverseRegion| serde_json::json!({ "Start": r.start.map(|a| a.0), "Size": r.size, "Symbol": r.symbol, "Private": r.private });
+        let v = serde_json::json!({
+            "Target": req.target,
+            "History": req.history,
+            "Trace": req.trace,
+            "Regions": req.regions.iter().map(region).collect::<Vec<_>>(),
+            "Exclude": req.exclude.iter().map(region).collect::<Vec<_>>(),
+            "StackSymbols": req.stack_symbols,
+            "CsaSymbols": req.csa_symbols,
+            "Strict": req.strict,
+            "MaxHits": req.max_hits,
+        });
+        let data = tcf::reverse::enable_cmd(&self.session, &v).map_err(api_msg)?;
+        Ok(ReverseData { data })
+    }
+
+    fn reverse_disable(&self, _req: NoArgs) -> Result<ReverseData, ApiError> {
+        self.check_control()?;
+        Ok(ReverseData { data: tcf::reverse::disable_cmd(&self.session).map_err(api_msg)? })
+    }
+
+    fn reverse_status(&self, _req: NoArgs) -> Result<ReverseData, ApiError> {
+        Ok(ReverseData { data: tcf::reverse::status_cmd(&self.session).map_err(api_msg)? })
+    }
+
+    fn reverse_history(&self, _req: NoArgs) -> Result<ReverseData, ApiError> {
+        Ok(ReverseData { data: tcf::reverse::history_cmd(&self.session).map_err(api_msg)? })
+    }
+
+    fn reverse_back(&self, req: ReverseBackRequest) -> Result<ReverseData, ApiError> {
+        self.check_control()?;
+        let v = serde_json::json!({ "Granularity": req.granularity.unwrap_or_else(|| "line".into()) });
+        Ok(ReverseData { data: tcf::reverse::back_cmd(&self.session, &v).map_err(api_msg)? })
+    }
+
+    fn reverse_continue(&self, _req: NoArgs) -> Result<ReverseData, ApiError> {
+        self.check_control()?;
+        Ok(ReverseData { data: tcf::reverse::continue_cmd(&self.session).map_err(api_msg)? })
+    }
+
+    fn reverse_goto(&self, req: ReverseGotoRequest) -> Result<ReverseData, ApiError> {
+        self.check_control()?;
+        let v = serde_json::json!({ "Index": req.index, "Row": req.row });
+        Ok(ReverseData { data: tcf::reverse::goto_cmd(&self.session, &v).map_err(api_msg)? })
+    }
+
     fn ucb_read(&self, req: UcbReadRequest) -> Result<UcbData, ApiError> {
         let mut cmd = format!("ucb {} -json", if req.cached { "show" } else { "read" });
         if let Some(u) = &req.ucb {

@@ -22,6 +22,7 @@ Notation: `<value>` is a value to fill in, `[...]` is optional, `a|b` is one of 
 - [Flash](#flash)
 - [User configuration blocks (`ucb`, TC3xx)](#user-configuration-blocks-ucb-tc3xx)
 - [Trace (`mcds`, TC37x miniMCDS)](#trace-mcds-tc37x-minimcds)
+- [Reverse debugging (`reverse`)](#reverse-debugging-reverse)
 - [Server, ports and logging](#server-ports-and-logging)
 - [Scripting](#scripting)
 - [TAS adapter (`adapter driver tas_client`)](#tas-adapter-adapter-driver-tas_client)
@@ -1056,6 +1057,68 @@ mcds init
 ```
 
 Switch the MCDS on (clock, enable bits); `mcds arm` does this itself.
+
+## Reverse debugging (`reverse`)
+
+### `reverse on`
+
+```
+reverse on [-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-maxhits <n>] -region <start> <len> [-private] ...
+```
+
+Switch reverse debugging on: before every run, step, source step and register or memory write of the core, its registers and the given RAM regions are saved.
+
+`reverse back` then writes an earlier state back into the halted core, which really runs from there again. `-private` marks a region only this core writes (its stacks, its context save area). `-history` checkpoints are kept (default 50, 0: all). While on, the mode owns the miniMCDS and records each action (CPU0; `-notrace`: not); `mcds arm` and `mcds auto` are refused. The TCF/REST operations take the regions from the ELF. Not rewound: peripherals, timers, other cores.
+
+### `reverse off`
+
+```
+reverse off [-json]
+```
+
+Switch reverse debugging off: the history is dropped, the trace released.
+
+### `reverse status`
+
+```
+reverse status [-json]
+```
+
+Whether reverse debugging is on, for which core, the checkpoints and the regions.
+
+### `reverse history`
+
+```
+reverse history [-json]
+```
+
+The checkpoints, oldest first: the action that followed each, where it started and ended.
+
+### `reverse back`
+
+```
+reverse back [-json]
+```
+
+Restore the checkpoint before the last action into the halted core (by difference against the saved RAM).
+
+Goes back by whole actions. Step Back by line or instruction, re-execution inside an action and Reverse Continue need the code and the symbols: the TCF (VS Code) and REST/MCP operations do them.
+
+### `reverse goto`
+
+```
+reverse goto <index> [-json]
+```
+
+Restore checkpoint `index` of the history (see `reverse history`).
+
+### `reverse peek`
+
+```
+reverse peek <index> <addr> <len>
+```
+
+Show bytes of checkpoint `index`'s RAM snapshot (hex), for checking what a restore will write.
 
 ## Server, ports and logging
 

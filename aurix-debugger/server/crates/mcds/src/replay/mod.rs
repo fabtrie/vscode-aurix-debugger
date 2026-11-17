@@ -155,6 +155,22 @@ impl Replay {
     /// Rebuilds the registers for `steps`. `halt`: the registers at the halt when the flow
     /// reaches it (then also memory at the halt is used, through `read`).
     pub fn build(steps: &[Step], dis: &mut dyn Disasm, halt: Option<&HaltRegs>, read: &mut dyn FnMut(u32, usize) -> Option<Vec<u8>>, core: u8) -> Replay {
+        Self::build_between(steps, dis, None, halt, read, core)
+    }
+
+    /// [`Replay::build`] with the registers before the first row as well (`entry`: the state the
+    /// core was started from, when `steps` begin with the first instruction it ran). Values then
+    /// also spread forwards from an exact start, so far fewer stay unknown.
+    pub fn build_between(
+        steps: &[Step],
+        dis: &mut dyn Disasm,
+        entry: Option<&HaltRegs>,
+        halt: Option<&HaltRegs>,
+        read: &mut dyn FnMut(u32, usize) -> Option<Vec<u8>>,
+        core: u8,
+    ) -> Replay {
+        // Only an entry state whose PC is the first instruction belongs to these rows.
+        let entry = entry.filter(|e| matches!(steps.first(), Some(Step::Insn { addr, .. }) if e.pc() == Some(*addr)));
         let mut solver = Solver::default();
         let mut rows = Vec::new();
         let mut after = Vec::new();
@@ -163,7 +179,7 @@ impl Replay {
         let mut entries = 0;
         let (initial, last_epoch, cur) = {
             let mut b = Builder::new(&mut solver);
-            b.isp = halt.and_then(|h| h.get(38));
+            b.isp = halt.and_then(|h| h.get(38)).or_else(|| entry.and_then(|h| h.get(38)));
             let initial = b.cur;
             let next_of = |i: usize| -> Option<u32> {
                 match steps.get(i + 1) {
@@ -232,10 +248,10 @@ impl Replay {
         };
         solver.last_epoch = last_epoch;
         solver.anchored = halt.is_some();
-        if let Some(h) = halt {
+        let anchor_all = |solver: &mut Solver, at: &[Ver; NREG], h: &HaltRegs, how: How, row: u32| {
             let mut anchor = |r: usize, v: Option<u32>| {
                 if let Some(v) = v {
-                    solver.set(cur[r], Val { v, mark: Mark::Exact, row: u32::MAX, how: How::Halt });
+                    solver.set(at[r], Val { v, mark: Mark::Exact, row, how });
                 }
             };
             for r in 0..32 {
@@ -248,6 +264,12 @@ impl Replay {
             anchor(FCX as usize, h.get(33).map(|v| v & PCXI_LINK));
             // Only IE and CCPN: PIPN (pending priority) changes with the interrupts that come in.
             anchor(ICR as usize, h.get(37).map(|v| v & model::ICR_TRACKED));
+        };
+        if let Some(h) = halt {
+            anchor_all(&mut solver, &cur, h, How::Halt, u32::MAX);
+        }
+        if let Some(e) = entry {
+            anchor_all(&mut solver, &initial, e, How::Entry, u32::MAX);
         }
         let mut mem = Mem { core, read, cache: HashMap::new() };
         // Solve; where a value from memory contradicts a branch outcome (memory changed after the
@@ -380,6 +402,7 @@ impl Replay {
         };
         let mut s = match (r.how, r.row) {
             (Some(How::Halt), _) => "The value at the halt.".to_string(),
+            (Some(How::Entry), _) => "The value when the core was started (checkpoint).".to_string(),
             (Some(How::Forward), Some(row)) => format!("Computed by {} from known inputs.", insn(row)),
             (Some(How::Inverse), Some(row)) => format!("Undone through {} from the value after it.", insn(row)),
             (Some(How::Fact), Some(row)) => format!("From where the trace went at {}.", insn(row)),

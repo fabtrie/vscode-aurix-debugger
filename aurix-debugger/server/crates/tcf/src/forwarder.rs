@@ -52,6 +52,20 @@ pub fn start(shared: Arc<Shared>) {
                         halted(&shared, target, reason, pc, true);
                     }
                 }
+                // Reverse debugging restored a state from Tcl (the TCF operations report their own).
+                Event::Restored { target, pc, .. } => {
+                    shared.stacks.lock().unwrap().clear();
+                    crate::trace_insns::end_replay(&shared, None);
+                    if shared.any_stepping() {
+                        continue;
+                    }
+                    shared.broadcast(&wire::event("Memory", "memoryChanged", &[json!(CONTAINER).to_string(), json!([{"addr": 0, "size": 0}]).to_string()]));
+                    shared.broadcast(&wire::event("Registers", "contextChanged", &[]));
+                    if let Some(c) = core_by_index(&shared, target).filter(|c| c.visible) {
+                        shared.broadcast(&wire::event("RunControl", "contextResumed", &[json!(c.id).to_string()]));
+                        suspended_event(&shared, &c, pc, "Step back", &[], DebugReason::SingleStep);
+                    }
+                }
                 Event::Resumed { target, .. } => {
                     shared.invalidate_stack(target);
                     crate::trace_insns::end_replay(&shared, Some(target));
@@ -126,7 +140,7 @@ pub fn halted(shared: &Shared, target: usize, reason: DebugReason, pc: Option<u3
     let Some(c) = core_by_index(shared, target).filter(|c| c.visible) else { return };
     let bp_ids = hit_breakpoints(shared, target, reason, pc);
     if filter && !bp_ids.is_empty() && !stop_wanted(shared, &c.id, &bp_ids) {
-        match shared.handle.call(move |cx| ops::resume(cx, target, None).map_err(|e| e.to_string())) {
+        match shared.handle.call(move |cx| ops::resume_continuing(cx, target).map_err(|e| e.to_string())) {
             Some(Ok(())) => return,
             Some(Err(e)) => log_warn!("[{}] cannot resume after a breakpoint whose condition is false: {e}", c.name),
             None => return,

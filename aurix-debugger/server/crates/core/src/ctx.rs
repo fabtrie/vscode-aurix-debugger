@@ -107,6 +107,9 @@ pub struct Ctx {
     /// The miniMCDS trace: armed configuration and the last recording (`mcds ...`, traced DAQ
     /// points, the trace API).
     pub mcds: crate::mcds_trace::TraceState,
+    /// Reverse debugging: checkpoints before the user's actions (`reverse ...`, the TCF/REST
+    /// reverse operations).
+    pub reverse: crate::reverse::State,
 }
 
 /// See [`Ctx::probe_lost_timeout_ms`].
@@ -158,6 +161,7 @@ impl Ctx {
             user_help: Default::default(),
             ucb: Default::default(),
             mcds: Default::default(),
+            reverse: Default::default(),
             tcl_origin: Default::default(),
         }
     }

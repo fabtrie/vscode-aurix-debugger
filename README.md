@@ -168,6 +168,20 @@ On a TC37x the debugger uses the chip's small trace unit (miniMCDS, 8 KB) over t
 
 8 KB holds about 80 µs of unfiltered program flow, more with a filter. Only CPU0 can be traced, and the data trace sees only CPU0's writes. A trace that stops on a halt runs right up to the breakpoint or halt point.
 
+### Reverse debugging
+
+With `"reverse": true` in the launch configuration (or **AURIX: Enable Reverse Debugging**), **Step Back** and **Reverse Continue** put the real core back into an earlier state: you step over a function, see a wrong result, step back to the call and step into it.
+
+- Before every step, source step, run and register or memory write, the debugger saves the core's registers and its RAM (the ELF's writable sections, the stacks and the context save area). Step Back writes them back, so the core really stands there and runs from there again.
+- Step Back goes to the start of the previous line (stepping backwards over calls), or by one instruction in instruction stepping mode. Inside a Continue it goes back by restoring the run's starting point and running again to that line; the trace of that run is compared with the first one, and a run that takes another path stops there and says so.
+- Reverse Continue goes back to the last breakpoint or data breakpoint hit, or to the start of the history.
+- Not rewound: peripherals (their writes are listed in the Debug Console), timers, the other cores, DMA. Going back a few steps inside the application works reliably; going back across initialisation is better done with a reset.
+- An application that protects its RAM against other bus masters (TC3xx safety protection of the DSPR, `CPUx_SPR_SPROT`) also locks out the debugger: a Step Back that would have to write its stack or context save area is refused, and nothing is changed. When reverse debugging starts, the Debug Console lists which saved memory is closed to the debugger. A test build can open those areas to the debugger alone (master tags 28 and 30) with one more protection region per core while a debugger is connected.
+- The mode records every action with the on-chip trace, so the Trace panel's own setup is off while it is on, and a launch configuration cannot have both `reverse` and `trace`. The panel's **History** tab lists the checkpoints and goes back to any of them; **Go here** in the Instructions tab goes back to an instruction of the last action.
+- Without the mode, Step Back is the view-only trace replay above: the status bar shows **Trace replay · view only**, the current line is marked with where the core really is, and nothing on the target changes.
+
+Options (`"reverse": {...}`): `history` (checkpoints kept, default 50, 0 for all since the last reset), `regions` and `exclude` (RAM added or left out, e.g. large buffers), `stackSymbols` / `csaSymbols` (when the linker symbols are not the iLLD or TASKING ones), `trace`, `maxHits`, `strict`. The Debug Console says at the start how much RAM is saved and how long one checkpoint takes.
+
 ### Peripheral view
 
 The **XPeripherals** view shows the registers of the `device` set in the launch configuration, with their bit fields, and lets you change them. On TC3xx devices it also lists:

@@ -33,17 +33,33 @@ pub struct ProgramTrace {
     pub t_end: Option<u64>,
     pub replay: Replay,
     /// Per row: function, file (indices into `funcs`, `files`) and line.
-    loc: Vec<(Option<u32>, Option<u32>, Option<u32>)>,
+    pub(crate) loc: Vec<(Option<u32>, Option<u32>, Option<u32>)>,
     pub funcs: Vec<String>,
     pub files: Vec<String>,
     /// Per row: call depth relative to the shallowest row.
-    depth: Vec<u16>,
+    pub(crate) depth: Vec<u16>,
     /// The call stack at the halt (live unwinder), when anchored.
     halt_frames: Vec<Frame>,
     /// Target index of the traced core.
     pub target: Option<usize>,
     /// Whether memory at the halt came from the device (the core still stood at the halt).
     pub memory: bool,
+    /// The flow starts at the PC the core was started from (a reverse debugging checkpoint), and
+    /// the replay from its registers as well.
+    pub from_entry: bool,
+}
+
+/// Where the replay takes memory at the halt from.
+pub enum MemAt {
+    /// The device, while the core still stands where the recording stopped.
+    Live,
+    /// Saved bytes (a reverse debugging snapshot of the state at the end): `(start, bytes)`.
+    Saved(Vec<(u32, Vec<u8>)>),
+}
+
+/// Whether a ring recording went round its trace RAM (its start is lost).
+pub fn lapped(r: &Recording) -> bool {
+    r.ring && r.paragraphs().first().is_some_and(|p| p.0 != 0)
 }
 
 fn is_call(m: &str) -> bool {
@@ -59,12 +75,29 @@ pub fn program_trace(sh: &Shared, r: &Recording) -> Result<Arc<ProgramTrace>, St
     if let Some(t) = sh.trace.lock().unwrap().as_ref().filter(|t| t.key == key) {
         return Ok(t.clone());
     }
-    let t = Arc::new(build(sh, r)?);
+    // A reverse debugging action's recording starts at its checkpoint: decode it from there.
+    let (stopped, wp) = (r.stopped_at, r.write_ptr);
+    let entry = sh
+        .handle
+        .call(move |cx| {
+            cx.with(|c| {
+                c.reverse
+                    .history
+                    .iter()
+                    .find(|cp| cp.from_start && cp.recording.as_ref().is_some_and(|x| x.stopped_at == stopped && x.write_ptr == wp))
+                    .map(|cp| cp.regs.clone())
+            })
+        })
+        .flatten();
+    let t = Arc::new(build_with(sh, r, entry.as_deref(), MemAt::Live)?);
     *sh.trace.lock().unwrap() = Some(t.clone());
     Ok(t)
 }
 
-fn build(sh: &Shared, r: &Recording) -> Result<ProgramTrace, String> {
+/// Decodes `r` with its register replay. `entry`: the registers the core was started from when
+/// the recording was armed right there (reverse debugging), so the flow and the replay start
+/// from them too; `mem`: memory at the end of the recording.
+pub fn build_with(sh: &Shared, r: &Recording, entry: Option<&[u32]>, mem: MemAt) -> Result<ProgramTrace, String> {
     let set = sh.symbols_for("");
     let img = set.as_deref().map(Image::load).unwrap_or_default();
     if img.segs.is_empty() {
@@ -75,7 +108,9 @@ fn build(sh: &Shared, r: &Recording) -> Result<ProgramTrace, String> {
     // A ring recording ends where the core halted (stop on halt, or a manual stop of a halted core:
     // nothing is recorded while it is halted); a linear one may have filled long before.
     let halt_pc = r.halt_pc.filter(|_| r.ring);
-    let (steps, flow, decode, reached) = mcds::decode_program_to(&pars, &mut code, halt_pc);
+    let entry = entry.filter(|e| e.len() > 36 && !lapped(r));
+    let start_pc = entry.map(|e| e[36]);
+    let (steps, flow, decode, reached) = mcds::decode_program_between(&pars, &mut code, start_pc, halt_pc);
     let t_start = steps.iter().find_map(|s| match s {
         Step::Insn { time, .. } | Step::Gap { time, .. } => *time,
     });
@@ -96,7 +131,12 @@ fn build(sh: &Shared, r: &Recording) -> Result<ProgramTrace, String> {
         })
         .unwrap_or((None, None));
     let anchor = r.halt_regs.clone().filter(|_| reached && halt_pc.is_some());
-    let memory = anchor.is_some() && now_regs.is_some() && now_regs == r.halt_regs;
+    let live = matches!(mem, MemAt::Live) && anchor.is_some() && now_regs.is_some() && now_regs == r.halt_regs;
+    let saved = match mem {
+        MemAt::Saved(v) => v,
+        MemAt::Live => Vec::new(),
+    };
+    let memory = live || (!saved.is_empty() && anchor.is_some());
     let mut read = |a: u32, n: usize| -> Option<Vec<u8>> {
         if a >> 28 == 0x8 {
             if let Some(b) = img.read(a, n).filter(|b| b.len() == n) {
@@ -106,12 +146,17 @@ fn build(sh: &Shared, r: &Recording) -> Result<ProgramTrace, String> {
         if !memory {
             return None;
         }
+        if !live {
+            let ga = replay::place(r.cfg.core, a).0;
+            return saved.iter().find(|(s, b)| ga >= *s && (ga - s) as usize + n <= b.len()).map(|(s, b)| b[(ga - s) as usize..(ga - s) as usize + n].to_vec());
+        }
         sh.handle.call(move |cx| cx.with(|c| c.io().and_then(|mut io| io.read(a, n)).ok())).flatten()
     };
     let halt = anchor.map(replay::HaltRegs);
-    let replay = Replay::build(&steps, &mut code, halt.as_ref(), &mut read, r.cfg.core);
+    let entry_regs = entry.map(|e| replay::HaltRegs(e.to_vec()));
+    let replay = Replay::build_between(&steps, &mut code, entry_regs.as_ref(), halt.as_ref(), &mut read, r.cfg.core);
 
-    let halt_frames = match (target, halt.is_some() && memory) {
+    let halt_frames = match (target, halt.is_some() && live) {
         (Some(t), true) => crate::stack::unwind_core(sh, t).unwrap_or_default(),
         _ => Vec::new(),
     };
@@ -172,6 +217,7 @@ fn build(sh: &Shared, r: &Recording) -> Result<ProgramTrace, String> {
         halt_frames,
         target,
         memory,
+        from_entry: entry.is_some(),
     })
 }
 
@@ -211,7 +257,7 @@ impl ProgramTrace {
         }
     }
 
-    fn row_addr(&self, row: usize) -> Option<u32> {
+    pub(crate) fn row_addr(&self, row: usize) -> Option<u32> {
         match self.replay.rows.get(row)? {
             Row::Insn { addr, .. } => Some(*addr),
             _ => None,
@@ -219,7 +265,7 @@ impl ProgramTrace {
     }
 
     /// The address executed after `row` (the halt PC after the last one).
-    fn next_pc(&self, row: usize) -> Option<u32> {
+    pub(crate) fn next_pc(&self, row: usize) -> Option<u32> {
         match self.replay.rows.get(row + 1) {
             Some(Row::Insn { addr, .. }) => Some(*addr),
             Some(Row::Entry { vector, .. }) => Some(*vector),
@@ -568,6 +614,9 @@ pub fn replay_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
         }
         return Ok(json!({"Replay": false, "Ctx": ctx}));
     }
+    if sh.handle.call(|cx| cx.with(|c| c.reverse.enabled())).unwrap_or(false) {
+        return Err("reverse debugging is on: Step Back restores the target instead of replaying the trace".into());
+    }
     let t = current(sh)?;
     let target = t.target.ok_or("the traced core is not a target of this session")?;
     if !t.replay.stats.anchored {
@@ -598,6 +647,10 @@ pub fn replay_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
         "T": t.time(row),
         "EndNs": t.t_end.map(|e| mcds::units_to_ns(e.saturating_sub(t.t_start.unwrap_or(0)))),
         "Frames": nframes,
+        // Where the core really stands (the replay is view only).
+        "HaltPc": t.halt_pc,
+        "HaltFile": t.halt_pc.and_then(|pc| sh.symbols_for("").and_then(|s| s.line_at(pc)).map(|l| l.file)),
+        "HaltLine": t.halt_pc.and_then(|pc| sh.symbols_for("").and_then(|s| s.line_at(pc)).map(|l| l.line)),
     }))
 }
 

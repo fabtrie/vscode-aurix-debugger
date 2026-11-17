@@ -18,6 +18,7 @@ mod stack;
 mod stepping;
 mod symstore;
 pub mod trace;
+pub mod reverse;
 pub mod trace_insns;
 mod wire;
 
@@ -59,6 +60,7 @@ pub const SERVICES: &[&str] = &[
     "Locator",
     "AurixOS",
     "AurixTrace",
+    "AurixReverse",
     "ContextQuery",
     "RunControl",
     "Memory",
@@ -112,6 +114,9 @@ pub struct Shared {
     pub profile: Mutex<Option<Arc<profile::Profile>>>,
     /// The last program recording, decoded with its register replay.
     pub trace: Mutex<Option<Arc<trace_insns::ProgramTrace>>>,
+    /// Reverse debugging: the decoded recordings of the actions, by checkpoint ID (with the
+    /// recording's stop time).
+    pub reverse_cache: Mutex<HashMap<u64, (std::time::SystemTime, Arc<trace_insns::ProgramTrace>)>>,
     /// The trace replay the debugger shows instead of the halted core, while one is active.
     pub replay: Mutex<Option<trace_insns::ReplayView>>,
     /// The live sets of every connection (`AurixTarget.setLiveSet`).
@@ -384,6 +389,7 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         orti: Mutex::new(None),
         profile: Mutex::new(None),
         trace: Mutex::new(None),
+        reverse_cache: Mutex::new(HashMap::new()),
         replay: Mutex::new(None),
         live: Mutex::new(live::LiveSets::default()),
         listeners: Mutex::new(Vec::new()),

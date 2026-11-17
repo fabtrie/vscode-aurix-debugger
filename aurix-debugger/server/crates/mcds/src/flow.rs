@@ -82,6 +82,11 @@ impl Flow {
         Self::default()
     }
 
+    /// Starts the flow at a known PC (where the core stood when the recording started).
+    pub fn start_at(&mut self, pc: u32) {
+        self.pc = Some(pc);
+    }
+
     /// Where the flow continues after the last event (`None`: unknown, e.g. after an indirect
     /// branch whose target message was not recorded).
     pub fn pc(&self) -> Option<u32> {
@@ -386,5 +391,20 @@ mod tests {
         assert_eq!(f.stats.inconsistent, 0);
         assert_eq!(f.stats.zero_counts, 1);
         assert_eq!(f.stats.sync_fills, 1);
+    }
+
+    #[test]
+    fn started_at_a_known_pc() {
+        // The first stretch (0x100..0x104, jump to 0x110) comes before any address message.
+        let mut c = code(&[(0x100, 2, None), (0x102, 2, Some(0x110)), (0x110, 2, None), (0x112, 2, None)]);
+        let mut f = Flow::new();
+        let mut out = Vec::new();
+        f.feed(PtuEvent::Count(4), None, &mut c, &mut out);
+        assert!(out.is_empty(), "unknown pc: the count is dropped");
+        let mut f = Flow::new();
+        f.start_at(0x100);
+        f.feed(PtuEvent::Count(4), None, &mut c, &mut out);
+        assert!(f.run_to(0x112, None, &mut c, &mut out));
+        assert_eq!(addrs(&out), vec![0x100, 0x102, 0x110]);
     }
 }

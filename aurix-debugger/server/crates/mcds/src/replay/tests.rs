@@ -205,3 +205,33 @@ fn loop_call_store_and_return() {
     let e = r.explain(&cnt, &|row| format!("#{}", row + 1));
     assert!(e.contains("Undone through #"), "{e}");
 }
+
+#[test]
+fn entry_state_spreads_forwards() {
+    // From the halt alone the store address and d8 before the mov are lost; with the state the
+    // core started from, every value is exact, including the stored address.
+    let c = &mut code(&[(0x100, 2, "add", "d8, #1"), (0x102, 4, "st.w", "[a4]#0, d8"), (0x106, 2, "mov", "d8, #5"), (0x108, 2, "mov.a", "a4, d8")]);
+    let mut entry = vec![0u32; 42];
+    entry[8] = 0x41;
+    entry[20] = 0x7000_0100;
+    entry[36] = 0x100;
+    let mut halt = entry.clone();
+    halt[8] = 5;
+    halt[20] = 5;
+    halt[36] = 0x10A;
+    let s = steps(&[0x100, 0x102, 0x106, 0x108]);
+    let only_halt = Replay::build(&s, c, Some(&HaltRegs(halt.clone())), &mut |_, _| None, 0);
+    assert!(!reg(&only_halt, Some(0), "d8").is_known());
+    assert_eq!(only_halt.accesses(1)[0].addr, None);
+    let both = Replay::build_between(&s, c, Some(&HaltRegs(entry.clone())), Some(&HaltRegs(halt)), &mut |_, _| None, 0);
+    assert_eq!(reg(&both, Some(0), "d8").value, 0x42);
+    assert_eq!(reg(&both, None, "d8").how, Some(How::Entry));
+    let st = &both.accesses(1)[0];
+    assert!(st.store);
+    assert_eq!(st.addr, Some(0x7000_0100));
+    assert_eq!(st.value, Some(vec![0x42]));
+    // An entry state that does not start at the first row is not used.
+    entry[36] = 0x200;
+    let other = Replay::build_between(&s, c, Some(&HaltRegs(entry)), None, &mut |_, _| None, 0);
+    assert!(!reg(&other, Some(0), "d8").is_known());
+}

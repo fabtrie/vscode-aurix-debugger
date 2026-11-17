@@ -39,6 +39,8 @@ pub enum MemFrom {
 pub enum How {
     /// The register's value at the halt.
     Halt,
+    /// The register's value when the core was started (the state before the first row).
+    Entry,
     /// Computed by the instruction from known inputs.
     Forward,
     /// Undone through the instruction from the value after it.

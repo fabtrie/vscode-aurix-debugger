@@ -44,7 +44,10 @@ export function registerTraceStatus(context: vscode.ExtensionContext): void {
 		busy = true;
 		try {
 			const st = await s.customRequest('aurix/trace', { op: 'status' });
-			if (st?.Armed) {
+			if (st?.Reverse) {
+				// Reverse debugging owns the trace: its own status bar item shows it.
+				item.hide();
+			} else if (st?.Armed) {
 				const core = st.Config?.Core ?? 0;
 				const who = st.Owner === 'daq' ? ' (Live Watch)' : '';
 				const fill = typeof st.Fill === 'number' ? ` · ${Math.round(st.Fill * 100)} % full` : '';
@@ -120,6 +123,41 @@ export class TracePanel {
 		TracePanel.current?.post({ type: 'replay', active, at });
 	}
 
+	/** Reverse debugging was switched on or off, or a stop changed its history. */
+	static reverseChanged(): void {
+		void TracePanel.current?.reverseRefresh();
+	}
+
+	/** Opens the panel on its History tab. */
+	static showHistory(context: vscode.ExtensionContext): void {
+		TracePanel.show(context);
+		TracePanel.current?.post({ type: 'showTab', tab: 'history' });
+		void TracePanel.current?.reverseRefresh();
+	}
+
+	private reverseOn = false;
+
+	private async reverseRefresh(): Promise<void> {
+		const s = this.session();
+		if (!s) {
+			this.reverseOn = false;
+			this.post({ type: 'reverse', status: undefined, history: undefined });
+			return;
+		}
+		try {
+			const status = await s.customRequest('aurix/reverse', { op: 'status' });
+			this.reverseOn = status?.Enabled === true;
+			const history = this.reverseOn ? await s.customRequest('aurix/reverse', { op: 'history' }) : undefined;
+			this.post({ type: 'reverse', status, history });
+			if (this.reverseOn) {
+				// The last action's recording, read as it comes (like arming on run).
+				void this.status();
+			}
+		} catch {
+			this.post({ type: 'reverse', status: undefined, history: undefined });
+		}
+	}
+
 	static show(context: vscode.ExtensionContext, placement?: PanelPlacement): void {
 		const media = vscode.Uri.joinPath(context.extensionUri, 'media');
 		if (TracePanel.current) {
@@ -170,7 +208,31 @@ export class TracePanel {
 				this.post({ type: 'init', config: this.config, saved: this.saved().map((s) => s.name) });
 				void this.check();
 				void this.status();
+				void this.reverseRefresh();
 				break;
+			case 'reverseGoto': {
+				// History tab ({index, row: 0}) or the Instructions tab ({row}: the last action).
+				const s = this.session();
+				try {
+					if (!s) {
+						throw new Error('No AURIX debug session');
+					}
+					let index = typeof m.index === 'number' ? m.index : undefined;
+					if (index === undefined) {
+						const h = await s.customRequest('aurix/reverse', { op: 'history' });
+						const n = Array.isArray(h?.Checkpoints) ? h.Checkpoints.length : 0;
+						index = h?.AtCheckpoint ? n - 2 : n - 1;
+					}
+					if (index === undefined || index < 0) {
+						throw new Error('no history before this point');
+					}
+					await s.customRequest('aurix/reverse', { op: 'goto', index, row: m.row ?? 0 });
+				} catch (e) {
+					this.post({ type: 'error', error: e instanceof Error ? e.message : String(e) });
+				}
+				void this.reverseRefresh();
+				break;
+			}
 			case 'config':
 				this.config = m.config as TraceConfig;
 				await this.context.workspaceState.update(LAST_KEY, this.config);
@@ -331,7 +393,8 @@ export class TracePanel {
 		try {
 			const st = await this.request('status');
 			this.armed = st?.Armed === true && st?.Owner === 'snapshot';
-			const auto = Boolean(st?.Auto);
+			// Reverse debugging records every action: its recordings are read as they come, too.
+			const auto = Boolean(st?.Auto) || st?.Reverse === true;
 			if (auto !== this.auto) {
 				this.auto = auto;
 				this.post({ type: 'auto', on: auto });
@@ -432,6 +495,7 @@ export class TracePanel {
 		const css = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'trace.css'));
 		const js = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'trace.js'));
 		const insnsJs = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'traceInsns.js'));
+		const reverseJs = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'traceReverse.js'));
 		const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -449,6 +513,7 @@ export class TracePanel {
   <span class="spacer"></span>
   <span id="state" class="state idle">idle</span>
 </div>
+<div id="reverseBanner" class="banner" hidden>Trace used by reverse debugging: the setup and Arm are off while it is on. The tabs show the recording of the last action; History lists the checkpoints. Switch it off with <b>AURIX: Disable Reverse Debugging</b> to record here.</div>
 <form id="form">
   <label>Core</label>
   <div><select id="core"><option value="0">CPU0</option><option value="1">CPU1</option><option value="2">CPU2</option></select></div>
@@ -488,7 +553,8 @@ export class TracePanel {
   <button id="export" type="button" class="secondary" disabled>Export CSV</button>
 </div>
 <div id="message"></div>
-<div id="tabs" hidden><button type="button" data-tab="flow" class="tab on">Flow</button><button type="button" data-tab="insns" class="tab">Instructions</button></div>
+<div id="tabs" hidden><button type="button" data-tab="flow" class="tab on">Flow</button><button type="button" data-tab="insns" class="tab">Instructions</button><button type="button" data-tab="history" class="tab" hidden>History</button></div>
+<div id="history" hidden></div>
 <div id="coverage"></div>
 <div id="result"></div>
 <div id="insns" hidden>
@@ -512,6 +578,7 @@ export class TracePanel {
 </div>
 <script nonce="${nonce}" src="${js}"></script>
 <script nonce="${nonce}" src="${insnsJs}"></script>
+<script nonce="${nonce}" src="${reverseJs}"></script>
 </body>
 </html>`;
 	}

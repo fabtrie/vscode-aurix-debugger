@@ -654,6 +654,34 @@ impl Tricore {
         Ok(tr)
     }
 
+    /// Takes every trigger out of the hardware for a while (reverse debugging runs to one
+    /// address); [`Tricore::resume_triggers`] puts them back as they were.
+    pub fn suspend_triggers(&mut self, io: &mut Io) -> Result<Vec<Trigger>> {
+        let saved = self.triggers.to_vec();
+        for i in 0..NUM_TRIGGERS {
+            if self.triggers[i].enable {
+                self.triggers[i].enable = false;
+                io.write32_seq(&[(self.csfr(trxevt(i)), 0), (self.csfr(trxadr(i)), 0)])?;
+            }
+        }
+        Ok(saved)
+    }
+
+    /// Ends [`Tricore::suspend_triggers`]: the triggers set meanwhile are removed, the saved
+    /// ones programmed again into their slots.
+    pub fn resume_triggers(&mut self, io: &mut Io, saved: &[Trigger]) -> Result<()> {
+        for i in 0..NUM_TRIGGERS {
+            if self.triggers[i].enable {
+                self.triggers[i].enable = false;
+                io.write32_seq(&[(self.csfr(trxevt(i)), 0), (self.csfr(trxadr(i)), 0)])?;
+            }
+        }
+        for (i, t) in saved.iter().enumerate().take(NUM_TRIGGERS) {
+            self.triggers[i] = *t;
+        }
+        self.restore_triggers(io)
+    }
+
     pub fn restore_triggers(&self, io: &mut Io) -> Result<()> {
         for i in 0..NUM_TRIGGERS {
             let t = self.triggers[i];

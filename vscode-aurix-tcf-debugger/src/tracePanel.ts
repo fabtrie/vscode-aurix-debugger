@@ -117,6 +117,12 @@ export class TracePanel {
 				this.stopPolling();
 				this.forgetResult();
 			}),
+			// A stop (or a reset seen as one): the shown recording may no longer end where the core is.
+			vscode.debug.onDidChangeActiveStackItem(() => {
+				if (this.result && !this.reading) {
+					void this.status();
+				}
+			}),
 			// A new session (another worker): read its state, not the last session's.
 			vscode.debug.onDidStartDebugSession(() => {
 				this.forgetResult();

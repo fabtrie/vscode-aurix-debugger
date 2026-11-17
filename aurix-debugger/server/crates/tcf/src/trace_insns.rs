@@ -535,6 +535,12 @@ impl ProgramTrace {
 
 /// The last recording, if it is a program trace, decoded.
 pub fn current(sh: &Shared) -> Result<Arc<ProgramTrace>, String> {
+    current_with(sh).map(|(t, _)| t)
+}
+
+/// [`current`] and why the traced core no longer stands where it ended (see
+/// `Recording::ran_since`): the cached decode does not change with that.
+pub fn current_with(sh: &Shared) -> Result<(Arc<ProgramTrace>, Option<&'static str>), String> {
     let r: Arc<Recording> = sh
         .handle
         .call(|cx| cx.with(|c| c.mcds.last.clone().map(Arc::new)))
@@ -543,17 +549,27 @@ pub fn current(sh: &Shared) -> Result<Arc<ProgramTrace>, String> {
     if !matches!(r.cfg.kind, mcds::Kind::Program { .. }) {
         return Err("the last recording is a data trace".into());
     }
-    program_trace(sh, &r)
+    Ok((program_trace(sh, &r)?, r.ran_since))
+}
+
+/// Why a replay of a recording is refused when the core ran since it ended.
+fn ran_since_text(why: &str) -> String {
+    let what = match why {
+        "reset" => "the device was reset",
+        "step" => "the core stepped",
+        _ => "the core ran",
+    };
+    format!("the trace ends at an earlier halt ({what} since): there is no trace up to the current halt; arm it and run again")
 }
 
 /// `insns {From, Count}`: a page of rows.
 pub fn insns_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
-    let t = current(sh)?;
+    let (t, ran_since) = current_with(sh)?;
     let n = t.rows();
     let from = (v.get("From").and_then(Value::as_u64).unwrap_or(0) as usize).min(n);
     let count = v.get("Count").and_then(Value::as_u64).unwrap_or(500).min(5000) as usize;
     let rows: Vec<Value> = (from..(from + count).min(n)).map(|i| t.row_json(i)).collect();
-    Ok(json!({"Total": n, "From": from, "Rows": rows, "Functions": t.funcs, "Files": t.files, "EndNs": t.t_end.map(|e| mcds::units_to_ns(e.saturating_sub(t.t_start.unwrap_or(0)))), "HaltPc": t.halt_pc, "Reached": t.reached, "Replay": t.summary()}))
+    Ok(json!({"Total": n, "From": from, "Rows": rows, "Functions": t.funcs, "Files": t.files, "EndNs": t.t_end.map(|e| mcds::units_to_ns(e.saturating_sub(t.t_start.unwrap_or(0)))), "HaltPc": t.halt_pc, "Reached": t.reached, "Replay": t.summary(), "RanSince": ran_since}))
 }
 
 /// `regs {At}`: the registers after a row.
@@ -617,7 +633,10 @@ pub fn replay_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
     if sh.handle.call(|cx| cx.with(|c| c.reverse.enabled())).unwrap_or(false) {
         return Err("reverse debugging is on: Step Back restores the target instead of replaying the trace".into());
     }
-    let t = current(sh)?;
+    let (t, ran_since) = current_with(sh)?;
+    if let Some(why) = ran_since {
+        return Err(ran_since_text(why));
+    }
     let target = t.target.ok_or("the traced core is not a target of this session")?;
     if !t.replay.stats.anchored {
         return Err("the recording does not end at the core's halt: there is no state to replay from".into());

@@ -317,6 +317,10 @@ fn program_json(sh: &Shared, r: &Recording, max: usize) -> Result<Value, String>
         },
         "Columns": ["addr", "t_ns", "function", "file", "line"],
         "Replay": pt.summary(),
+        // The core ran, stepped or was reset since the recording ended (the halt above is old).
+        "RanSince": r.ran_since,
+        // Which recording this is (the status names the last one the same way).
+        "StoppedMs": r.stopped_at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
     }))
 }
 

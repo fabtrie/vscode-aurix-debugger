@@ -103,6 +103,14 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
                 e.unreachable = false;
             });
             handle_transition(cx, t, tr);
+            // Found running (re-attached after a reset): the poll reports no run for a core it
+            // had not examined, so the trace that ends at the next halt starts here.
+            cx.with(|c| {
+                if !c.in_reset && !c.in_reset_hook && c.targets[t].core.state() == TargetState::Running {
+                    crate::reverse::on_untracked_run(c, t);
+                    crate::mcds_trace::auto_arm(c, t);
+                }
+            });
             fire(cx, t, "examine-end");
             if !quiet {
                 log_info!("[{name}] Examination succeed");
@@ -119,6 +127,10 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
     // so does the action reverse debugging records.
     if matches!(tr, Transition::Rehalted | Transition::Halted { boot: false, .. }) {
         cx.with(|c| {
+            if matches!(tr, Transition::Rehalted) {
+                // It ran in between: an older recording no longer ends here.
+                crate::mcds_trace::on_run(c, t, "run");
+            }
             crate::mcds_trace::on_halted(c, t);
             crate::reverse::on_halted(c, t);
         });
@@ -162,7 +174,10 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
         Transition::Running => {
             let name = target_name(cx, t);
             log_debug!("[{name}] running");
-            cx.with(|c| crate::reverse::on_untracked_run(c, t));
+            cx.with(|c| {
+                crate::reverse::on_untracked_run(c, t);
+                crate::mcds_trace::on_run(c, t, "run");
+            });
             // Released outside a resume (e.g. a raw DBGSR write) while
             // interrupts were masked for a step: give them back.
             let unmasked = cx.with(|c| -> Result<bool> {
@@ -489,7 +504,10 @@ pub fn resume(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
 pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<()> {
     require_examined(cx, t)?;
     // Reverse debugging: the state before the run (inside a source step: the step's own).
-    cx.with(|c| crate::reverse::begin_action(c, t, action_name(mode, true), mode));
+    cx.with(|c| {
+        crate::reverse::begin_action(c, t, action_name(mode, true), mode);
+        crate::mcds_trace::on_run(c, t, "run");
+    });
     if mode == RunMode::Continue {
         // `mcds auto`: a trace that ends at the next halt.
         cx.with(|c| crate::mcds_trace::auto_arm(c, t));
@@ -576,9 +594,12 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
     if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
         return Err(Error::NotHalted(name));
     }
-    if report {
-        cx.with(|c| crate::reverse::begin_action(c, t, action_name(mode, false), mode));
-    }
+    cx.with(|c| {
+        if report {
+            crate::reverse::begin_action(c, t, action_name(mode, false), mode);
+        }
+        crate::mcds_trace::on_run(c, t, "step");
+    });
     let tl1_step = cx.with(|c| c.targets[t].core.run().tl1_step);
     if tl1_step {
         // All cores run for the instruction: interrupts masked for an earlier
@@ -667,7 +688,10 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
         "run" => false,
         _ => return Err(usage(format!("Invalid mode: {mode}, must be one of: halt, init, or run"))),
     };
-    cx.with(|c| crate::reverse::clear(c, "reset"));
+    cx.with(|c| {
+        crate::reverse::clear(c, "reset");
+        crate::mcds_trace::on_device_reset(c);
+    });
     // A board cfg that steers resets itself (`reset_hook`) gets every request -- from Tcl, TCF,
     // the API and `program` alike; a `reset` it issues runs the built-in sequence below.
     let hook = cx.with(|c| if c.in_reset_hook || c.in_reset { None } else { c.reset_hook.clone() });

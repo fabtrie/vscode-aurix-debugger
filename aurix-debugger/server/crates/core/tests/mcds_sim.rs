@@ -89,12 +89,18 @@ fn reset_ends_the_recording_and_plan_needs_no_target() {
     assert_eq!(p["resources"]["ptu_comparators"], 1);
     assert!(p["register_writes"].as_array().unwrap().iter().any(|w| w == "0xfb718800=0xffffffbf"), "{p}");
     assert!(tcl(&s, "mcds arm -core 1 -program").unwrap_err().contains("CPU0"));
+    // A finished recording, then a reset: it says it is from before the reset (no longer the
+    // trace up to where the core stands).
+    json(&s, "mcds arm -program -stop full -json");
+    json(&s, "mcds stop -json");
+    assert_eq!(json(&s, "mcds status -json")["last"]["ran_since"], Value::Null);
     json(&s, "mcds arm -program -stop manual -json");
     sim(&s, |a| a.mcds.reset());
     s.cx().with(aurix_core::mcds_trace::on_reset);
     let st = json(&s, "mcds status -json");
     assert_eq!(st["armed"], Value::Bool(false));
     assert_eq!(st["lost_by_reset"], Value::Bool(true));
+    assert_eq!(st["last"]["ran_since"], "reset", "{st}");
     // Arming again switches the MCDS on again.
     json(&s, "mcds arm -program -stop full -json");
     assert_eq!(json(&s, "mcds status -json")["done"], Value::Bool(true));

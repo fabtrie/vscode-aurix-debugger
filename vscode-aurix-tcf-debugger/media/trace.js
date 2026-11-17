@@ -161,6 +161,13 @@
 			`buffer ${c.Ring ? 'ring' : 'linear'} 8 KB · covers ${esc(c.Window || '')}`;
 	}
 
+	/** Why the recording does not end where the core stands now (`RanSince`), as a phrase. */
+	function ranSinceText(why) {
+		const what = why === 'reset' ? 'the device was reset' : why === 'step' ? 'the core stepped' : 'the core ran';
+		return `ends at an earlier halt: ${what} since`;
+	}
+	window.traceRanSinceText = ranSinceText;
+
 	function showStatus(st, error) {
 		if (error) {
 			setState('no session', 'idle');
@@ -182,6 +189,15 @@
 		}
 		$('stopBtn').disabled = !armed || !!window.aurixReverse;
 		updateFormState();
+		// The shown recording: the core ran, stepped or was reset since it ended.
+		if (result && result.Kind === 'program' && st && st.Last && st.Last.stopped_ms === result.StoppedMs) {
+			const rs = st.Last.ran_since || null;
+			if (rs !== (result.RanSince || null)) {
+				result.RanSince = rs;
+				renderProgram(result);
+				window.dispatchEvent(new CustomEvent('trace-ran-since', { detail: rs }));
+			}
+		}
 	}
 
 	// ---- result ------------------------------------------------------------------------------
@@ -254,7 +270,8 @@
 			// Where the core stands: the flow above ends with the instruction before it.
 			const where = `${esc(halt.Function || hex(halt.Addr))}, ${esc(baseName(halt.File))}:${halt.Line || '?'}`;
 			html += `<div class="haltrow"><a href="#" class="src" data-file="${esc(halt.File)}" data-line="${halt.Line || 0}">Go to the halt point (${where})</a>` +
-				(r.ReachesHalt ? ' <span class="hint">· traced up to it</span>' : ' <span class="warn">· the end before it is not in the trace</span>') + '</div>';
+				(r.ReachesHalt ? ' <span class="hint">· traced up to it</span>' : ' <span class="warn">· the end before it is not in the trace</span>') +
+				(r.RanSince ? ` <span class="warn">· this trace ${ranSinceText(r.RanSince)}</span>` : '') + '</div>';
 		} else if (last && files[last[3]]) {
 			html += `<div class="haltrow"><a href="#" class="src" data-file="${esc(files[last[3]])}" data-line="${last[4] || 0}">Go to the last instruction (${esc(baseName(files[last[3]]))}:${last[4] || '?'})</a></div>`;
 		}

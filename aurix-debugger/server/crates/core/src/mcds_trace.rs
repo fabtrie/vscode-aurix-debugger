@@ -65,6 +65,10 @@ pub struct Recording {
     /// 0..=41: d0-d15, a0-a15, lcx, fcx, pcxi, psw, pc, icr, isp, btv, biv, syscon): the anchor
     /// of the register replay.
     pub halt_regs: Option<Vec<u32>>,
+    /// Why the recording no longer ends at the traced core's current state: it ran ("run"), took
+    /// an instruction step ("step") or the device was reset ("reset") after the stop. None while
+    /// the core still stands where the recording stopped.
+    pub ran_since: Option<&'static str>,
 }
 
 impl Recording {
@@ -196,7 +200,7 @@ pub fn stop(c: &mut Ctx, owner: Owner) -> Result<Recording> {
     let raw = io.read(regs::TRAM, regs::TRAM_SIZE as usize)?;
     let halt_pc = halted_pc(c, a.cfg.core as u32);
     let halt_regs = halt_pc.and_then(|_| halted_regs(c, a.cfg.core as u32));
-    let rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc, halt_regs };
+    let rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc, halt_regs, ran_since: None };
     c.mcds.armed = None;
     c.mcds.last = Some(rec.clone());
     Ok(rec)
@@ -295,9 +299,27 @@ pub fn read_pieces(c: &mut Ctx, reads: &[(usize, usize)]) -> Result<Vec<(usize, 
     Ok(out)
 }
 
+/// Core `t` runs (a resume, a step, or released outside the debugger): the last recording of
+/// it no longer ends where the core stands.
+pub fn on_run(c: &mut Ctx, t: usize, why: &'static str) {
+    let Some(r) = c.mcds.last.as_mut() else { return };
+    let traced = matches!(&c.targets[t].core, crate::target::Core::Tricore(tc) if tc.coreid == r.cfg.core as u32);
+    if traced && r.ran_since.is_none() {
+        r.ran_since = Some(why);
+    }
+}
+
+/// A reset (by the debugger or detected): the last recording is from before it.
+pub fn on_device_reset(c: &mut Ctx) {
+    if let Some(r) = c.mcds.last.as_mut() {
+        r.ran_since = Some("reset");
+    }
+}
+
 /// A device reset switched the MCDS off: the armed recording is gone.
 pub fn on_reset(c: &mut Ctx) {
     crate::reverse::clear(c, "device reset");
+    on_device_reset(c);
     if c.mcds.armed.take().is_some() {
         c.mcds.lost_by_reset = true;
     }

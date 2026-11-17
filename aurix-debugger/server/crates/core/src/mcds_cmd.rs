@@ -125,6 +125,7 @@ pub fn recording_json(r: &Recording) -> Value {
         "paragraphs": r.paragraphs().len(),
         "bytes": r.raw.len(),
         "stopped_ms": r.stopped_at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+        "ran_since": r.ran_since,
     })
 }
 

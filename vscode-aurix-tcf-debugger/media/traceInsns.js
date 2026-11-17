@@ -121,6 +121,11 @@
 		const s = summary || {};
 		const pct = (x) => (x === null || x === undefined ? '?' : Math.round(100 * x) + ' %');
 		let text = `${total} instructions`;
+		const old = result && result.RanSince;
+		if (old) {
+			text = `<span class="warn">This trace ${esc(window.traceRanSinceText(old))}; it does not lead to the current halt.</span> ` + text;
+		}
+		if (!window.aurixReverse) $('insnReplay').disabled = !!old;
 		if (s.Anchored) {
 			text += ` · registers rebuilt from the halt: ${pct(s.KnownNearHalt)} known at the halt, ${pct(s.KnownAtStart)} at the start`;
 			if (!s.Memory) text += ' · <span class="warn">memory at the halt not read (the core ran since)</span>';
@@ -233,7 +238,8 @@
 			}
 			case 'halt': {
 				const h = result.Halt || {};
-				return `<div class="it halt" ${pad}>● the core halted here: ${esc(h.Function || '')} ${h.File ? esc(baseName(h.File)) + ':' + (h.Line || '?') : ''} (${hex(h.Addr)}), not executed</div>`;
+				const then = result.RanSince ? ` (${esc(window.traceRanSinceText(result.RanSince).replace(/^ends at /, ''))})` : '';
+				return `<div class="it halt" ${pad}>● the core halted here${then}: ${esc(h.Function || '')} ${h.File ? esc(baseName(h.File)) + ':' + (h.Line || '?') : ''} (${hex(h.Addr)}), not executed</div>`;
 			}
 			default: {
 				const r = rows[it.i];
@@ -418,6 +424,12 @@
 		if (e.data && e.data.type === 'showTab') setTab(e.data.tab);
 	});
 	$('insnReplayOff').addEventListener('click', () => vscode.postMessage({ type: 'replayOff' }));
+
+	window.addEventListener('trace-ran-since', () => {
+		if (!result) return;
+		showSummary();
+		draw();
+	});
 
 	window.addEventListener('trace-result', (e) => {
 		reset(e.detail);

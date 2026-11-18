@@ -89,6 +89,8 @@ pub struct Tricore {
     /// PCXI and application IE when the first masked run started.
     irq_run: Option<(u32, bool)>,
     pub examined: bool,
+    /// The last halting reset cleared OCDS and the core ran: the probe's halt after reset was lost.
+    pub reset_halt_missed: bool,
 }
 
 impl Default for Tricore {
@@ -113,6 +115,7 @@ impl Tricore {
             irq_saved_ie: None,
             irq_run: None,
             examined: false,
+            reset_halt_missed: false,
         }
     }
 
@@ -625,12 +628,17 @@ impl Tricore {
     /// ([`crate::target::RunControl::after_reset`]): none of the register
     /// writes below are possible -- or needed -- when the probe owns OCDS.
     pub fn after_reset(&mut self, io: &mut Io, halt: bool, name: &str) -> Result<Transition> {
+        self.reset_halt_missed = false;
+        let mut ocds_cleared = false;
         if self.coreid == 0 {
             // Boot-time debug lock lasts a few tens of ms after a reset.
             let t0 = Instant::now();
             loop {
                 match crate::ops::enable_ocds(io) {
-                    Ok(_) => break,
+                    Ok(enabled) => {
+                        ocds_cleared = enabled;
+                        break;
+                    }
                     Err(err) if t0.elapsed() > Duration::from_millis(1000) => return Err(err),
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
                 }
@@ -647,7 +655,12 @@ impl Tricore {
         io.write32(self.csfr(SWEVT), SWEVT_HALT_TC16)?;
         let tr = self.poll(io)?;
         if halt && self.state != TargetState::Halted {
-            crate::log_warn!("[{name}] ran after reset and before halt ...");
+            if ocds_cleared {
+                self.reset_halt_missed = true;
+                crate::log_warn!("[{name}] ran after reset and before halt (the reset cleared OCDS: no halt after reset was requested) ...");
+            } else {
+                crate::log_warn!("[{name}] ran after reset and before halt ...");
+            }
             self.halt(io)?;
         }
         self.restore_triggers(io)?;

@@ -614,7 +614,10 @@ impl Adapter for TasAdapter {
         match self.client()?.device_connect(mode) {
             Ok(_) => Ok(()),
             // The reset happened, but it cleared OSTATE - OCDS gets re-enabled by the target.
-            Err(tas::Error::DeviceLocked) => Ok(()),
+            Err(tas::Error::DeviceLocked) => {
+                log_warn!("TAS: device_connect({mode:?}) answered 'device locked'; the TasServer's halt after reset did not take effect");
+                Ok(())
+            }
             Err(e) => Err(e.into()),
         }
     }

@@ -336,6 +336,10 @@ impl Core {
         matches!(self, Core::Tricore(_))
     }
 
+    pub fn reset_halt_missed(&self) -> bool {
+        matches!(self, Core::Tricore(c) if c.reset_halt_missed)
+    }
+
     /// Whether frontends list the core (an MCS channel only once it is used).
     pub fn visible(&self) -> bool {
         match self {

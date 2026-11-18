@@ -718,6 +718,8 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
     r
 }
 
+const RESET_HALT_RETRIES: u32 = 2;
+
 fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     // A probe that can only reset with halt: reset as `reset halt`, run afterwards.
     let run_after = !halt && cx.with(|c| c.adapter.as_deref().is_some_and(|a| a.reset_always_halts()));
@@ -754,6 +756,19 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     }
     for &t in &all {
         arp_reset_deassert(cx, t, halt)?;
+    }
+    // Seen with TasServer: now and then a reset-and-halt connect is a plain power-on reset; another one holds.
+    for retry in 1..=RESET_HALT_RETRIES {
+        if !halt || !cx.with(|c| c.targets.iter().any(|e| e.core.reset_halt_missed())) {
+            break;
+        }
+        crate::log_warn!("halt after reset lost, resetting again ({retry}/{RESET_HALT_RETRIES})");
+        for &t in &all {
+            arp_reset_assert(cx, t, halt)?;
+        }
+        for &t in &all {
+            arp_reset_deassert(cx, t, halt)?;
+        }
     }
     for &t in &all {
         fire(cx, t, "reset-deassert-post");

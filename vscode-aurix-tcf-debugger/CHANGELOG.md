@@ -2,24 +2,23 @@
 
 All notable changes to the "AURIX™ Debugger" extension will be documented in this file.
 
-## Unreleased
+## 0.5.0
 
 ### Added
 
 - on-chip trace on TC37x (miniMCDS) over the miniWiggler: Trace panel for program flow and data trace, Live Watch "Trace every write", traced lanes in the OS Profile
+- instruction trace: every executed instruction with its source line and the registers rebuilt from the halt; Step Back and Reverse Continue replay it (view only)
+- reverse debugging on the hardware (launch configuration `"reverse": true`): Step Back and Reverse Continue restore the core's registers and RAM, so the code really runs again from there
+- trace option "Arm on every run, stop on halt"
 - OS Profile: a sampling rate per lane
-- instruction trace: every executed instruction with source lines and the registers rebuilt from the halt; Step Back and Reverse Continue replay the trace in the debugger
-- trace option "Arm on every run, stop on halt" (launch configuration `"trace": {"Auto": true}`)
-- reverse debugging on the hardware (launch configuration `"reverse": true`): Step Back and Reverse Continue restore the core's registers and RAM to an earlier point, so the code really runs again from there; History tab in the Trace panel
-- the view-only trace replay is marked as such: status bar, current line, thread and scope names
 
 ### Fixed
 
-- Continue from a breakpoint through the server's resume stopped at the same breakpoint again before executing anything; the debugger now steps past it first
-- after a reset the trace panel kept showing the recording from before it as if it led to the current halt; it now says it ends at an earlier halt (Step Back refuses it), and with arm on run or reverse debugging on, the trace is armed again when the debugger reattaches, so the next halt has its own
-- a debug session that ended unexpectedly now says why: the session log gets the internal error or crash, and the hub the exit code; an internal error in background polling no longer ends the session
-- Tcl `after` with a negative time no longer blocks the debugger for over an hour
-- editing a global in LMU/DLMU RAM (Variables, Watch, Memory view, Tcl `mww`, REST/MCP writes) could reset the board: the debugger wrote to the cached alias `0x9…`, which the bus refuses; it now reads and writes such memory through the non-cached alias `0xB…`
+- editing a global in LMU/DLMU RAM could reset the board (the debugger wrote through the cached alias `0x9…`)
+- after a reset with the cores halted, VS Code kept showing the old stop instead of the reset vector
+- boards without the FS26 reset line wired were taken for wired ones when miniWiggler reads failed while the HSM ran
+- resume over REST/MCP from a breakpoint stopped at the same breakpoint again
+- a debug session that ends unexpectedly now says why (session log and hub)
 
 ## 0.4.0
 

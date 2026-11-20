@@ -38,7 +38,7 @@ The extension installs its debug server to `%LOCALAPPDATA%\aurix-dbg` and keeps 
 
 ## Quick start
 
-1. Copy `tc3xx_ocds.cfg`, `fs26_sbc.cfg` and the example board script `tc37x_ocds_init.cfg` from the [`aurix-debugger`](aurix-debugger) folder into your project, e.g. into `debug/`, and adapt the board script to your board (see [Board setup](#board-setup)).
+1. Copy `tc3xx_ocds.cfg` and an example board script from the [`aurix-debugger`](aurix-debugger) folder into your project, e.g. into `debug/`, and adapt the board script to your board (see [Board setup](#board-setup)): `tc375_lite_example.cfg` for a board without a safety SBC, or `tc37x_fs26_example.cfg` (with `fs26_sbc.cfg`) for a board with an NXP FS26.
 2. Create `.vscode/launch.json`:
 
    ```json
@@ -50,7 +50,7 @@ The extension installs its debug server to `%LOCALAPPDATA%\aurix-dbg` and keeps 
          "request": "launch",
          "name": "AURIX Debug",
          "searchDirs": ["${workspaceFolder}/debug"],
-         "configFiles": ["board/infineon/kit_a2g_tc375_lite.cfg", "tc37x_ocds_init.cfg"],
+         "configFiles": ["board/infineon/kit_a2g_tc375_lite.cfg", "tc375_lite_example.cfg"],
          "symbolFiles": ["${workspaceFolder}/build/app.elf"],
          "flashFiles": ["${workspaceFolder}/build/app.hex"],
          "enableFlashing": true,
@@ -247,8 +247,9 @@ When a session ends, the extension remembers where its tabs were (Disassembly, L
 
 The configuration scripts tell the debugger which chip is on the board, which probe to use and how to reset the board.
 
-- `tc3xx_ocds.cfg` describes the TC3xx chips; you don't change it.
-- `tc37x_ocds_init.cfg` is an **example** board script for a TC37x board with a safety SBC (`fs26_sbc.cfg`). Start your own board script from it and keep only what your board needs.
+- `tc3xx_ocds.cfg` is the part every TC3xx board shares; you don't change it. Multi-core halt and step, peripheral suspend, the HSM start and the attach modes are the debug server's, switched by commands in your board script.
+- `tc375_lite_example.cfg` (no safety SBC) and `tc37x_fs26_example.cfg` (NXP FS26, policy in `fs26_sbc.cfg`) are **example** board scripts. Start your own from one of them and keep only what your board needs.
+- **Attach mode:** `"configCommands": ["attach_mode halt", "init"]` attaches and halts where the application is; `passive`, `hot` (default), `reset_halt` and `reset_run` are the others.
 - **BlueBox:** add `"adapter": "bluebox"` to the launch configuration. The winIDEA 9.21.417 installation is found in the usual install folders.
 - **Password-protected devices:** `adapter debug_password -env <variable>` and `reset_config connect_assert_srst` in the board script; the password is taken from the environment variable and never logged.
 

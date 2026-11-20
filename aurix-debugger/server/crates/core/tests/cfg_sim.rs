@@ -747,7 +747,7 @@ fn halting_reset_after_a_failed_reset_still_resets() {
     no_violations(&s);
 }
 
-/// sbc_attach halt on a disarmed application whose STM0/1 have no suspend (locked): a halt would make
+/// attach_mode halt on a disarmed application whose STM0/1 have no suspend (locked): a halt would make
 /// the OS panic on resume, so it resets first, then halts in the application.
 #[test]
 fn attach_halt_resets_first_when_stm_is_not_suspended() {

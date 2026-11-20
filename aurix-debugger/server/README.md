@@ -72,7 +72,7 @@ The worker takes the same options as OpenOCD and can still be run by hand for de
 
 ```powershell
 .\server\target\debug\aurix-dbg.exe -s server/target/openocd-tcl/tcl `
-    -f board/infineon/kit_a2g_tc375_lite.cfg -f tc37x_ocds_init.cfg [-c cmd] [-d3] [-l log.txt]
+    -f board/infineon/kit_a2g_tc375_lite.cfg -f tc375_lite_example.cfg [-c cmd] [-d3] [-l log.txt]
 ```
 
 | Option | Meaning |
@@ -651,7 +651,7 @@ winidea status
 
 ```powershell
 aurix-dbg.exe --adapter winidea -s server/target/openocd-tcl/tcl `
-    -f board/infineon/kit_a2g_tc375_lite.cfg -f tc37x_ocds_init.cfg `
+    -f board/infineon/kit_a2g_tc375_lite.cfg -f tc375_lite_example.cfg `
     -c "winidea workspace C:/ws/app.xjrf" -c "init"
 ```
 
@@ -689,48 +689,49 @@ Polled DAQ is bounded by the read cost — roughly 250 reads per second across a
 
 ## Cfg scripts and other derivatives
 
-The server itself holds no board or application settings. The cfg scripts come in four layers:
+The server holds the chip mechanics; the cfg scripts hold board settings and board policy:
 
 | File | Content |
 |---|---|
 | OpenOCD target cfg (`target/infineon/tc3?x.cfg`, via the board cfg) | TriCore cores with `-coreid`/`-dbgbase`, PFLASH banks. |
-| [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | Chip mechanics, no board policy: TL1 break/step/continue, STM and peripheral suspend (written only where CLC and ACCEN0 let it land), OCDS enable, HSM and MCS targets, HSM start after a halting reset, a 64-bit STM reset watch, diagnostics. It takes DBGSR (`-dbgbase` + 0x1FD00) and the per-core CBS_TRCx/STMx/WDTCPUx registers (`-coreid`) from the target cfg. |
-| [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Attach modes and reset policy for boards with an NXP FS26 SBC: `passive`, `hot`, `halt`, `reset_halt`, `reset_run`; every reset request (Tcl, VS Code, flashing) goes through its `reset_hook`; every reset followed by the same initialization; a halting reset repeated until it holds (with the debugger reset on the FS26 RSTB: until the FS26 has gone through deep fail-safe, for a lasting halt at the reset vector); the watchdog disarmed by the application once, with a running reset before the first reset after the connection (no application addresses). |
-| [`tc37x_ocds_init.cfg`](../tc37x_ocds_init.cfg) | Example board cfg, a TC37x board with an FS26: adapter speed, DFLASH banks, the MCS modules (off; `set tc3xx_mcs_modules {0 1}` turns them on), and, empty with examples, the peripheral suspend list. |
+| [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | The generic part of every TC3xx board cfg: finds the chip by the target names, creates the HSM (`tc3xx_hsm_target 1`), MCS and SCR targets, sets `ocds sync tl1` and step interrupt masking, defines the DFLASH banks, loads `<tc3xx_sbc>_sbc.cfg` only when `tc3xx_sbc` names one; diagnostics (`tc3xx_status`, `tc3xx_wdt_status`, `tc3xx_scr_enable`). No event handlers. |
+| [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Reset and halt policy for boards with an NXP FS26 SBC (`tc3xx_sbc fs26`): every reset request goes through its `reset_hook`; a halting reset is repeated until it holds (with the debugger reset on the FS26 RSTB: until the FS26 has gone through deep fail-safe, for a lasting halt at the reset vector); the watchdog disarmed by the application once, with a running reset before the first reset after the connection (no application addresses); a halt while the watchdog is not known to be disarmed is watched and recovered; its `halt_check_hook` makes `attach_mode halt` reset first. |
+| [`tc375_lite_example.cfg`](../tc375_lite_example.cfg), [`tc37x_fs26_example.cfg`](../tc37x_fs26_example.cfg) | Example board cfgs, without an SBC and with an FS26 (adapter speed, HSM target, the STM suspend). |
 
-Choose the attach mode before `init`, e.g. `"configCommands": ["set sbc_attach_mode halt", "init"]`.
+What the server does for the cfgs (`help <command>`):
 
-For your application, keep your settings (peripheral suspend list) in a cfg of your own that sets them and then loads `tc37x_ocds_init.cfg`: settings made before it win over its defaults. For another board or derivative, copy `tc37x_ocds_init.cfg`, pass the target cfg's chip name to `tc3xx_setup` and adjust its settings; leave out `fs26_sbc.cfg` on a board without an FS26. Settings of each file are listed at its top.
+- **`ocds sync tl1|none`**: all cores halt, resume and step together through trigger line TL1 (see below); `ocds tl1_members`, `ocds step all|single`, `ocds step_timers run|frozen`, `ocds tl1_force`.
+- **`suspend add <module>|cores ?soft|hard|off?`**: peripherals stopped with the cores (OCS.SUS), by their names in the chip's SVD description. Each OCS is written as soon as the module is enabled and its ACCEN0 lets the debugger write, never before (a refused write reset one board): right after every reset in the step that switches OCDS on again, by the background poll once the application has enabled a module, before a pause, late at a halt. `suspend status` shows each module's state (`pending`, `idle`, `done`, `locked`, `refused`).
+- **Restore after a reset**: OCDS, the TL1 routing and the peripheral suspend are written again right after every reset, at the access that reports it (the device watch) or right after cpu0's deassert (the server's own reset), before any handler.
+- **`hsm autostart`, `hsm ready_ms`**: the HSM released from its boot ROM breakpoint after a reset if it is held there; before the server resumes the cores after a halting reset it waits for HSM2HTS.
+- **`attach_mode passive|hot|halt|reset_halt|reset_run`** (before `init`, e.g. `"configCommands": ["attach_mode halt", "init"]`), `attach_status`, `halt_all`, `halt_check_hook`, `reset_hook`, `reset_settle`.
 
-`reset_hook ?proc?` (aurix-dbg): every reset request -- the `reset` command, TCF, the REST API, `program` -- calls `proc <mode>` instead; a `reset` inside the proc runs the built-in sequence.
-
-Console procs: `daq` (what the DAQ sessions are sampling, read-only), `tc3xx_step_timers run|frozen`, `tc3xx_status`, `tc3xx_wdt_status`, `sbc_status`, `sbc_attach <mode>`.
+For another board or derivative, copy an example, set what your board needs and load `tc3xx_ocds.cfg`; settings of each file are listed at its top. Console procs: `daq` (what the DAQ sessions are sampling, read-only), `tc3xx_status`, `tc3xx_wdt_status`, `sbc_status`.
 
 TriCore 1.8 (TC4x) is rejected.
 
 ## Tcl commands
 
-The commands the cfg scripts use behave as in OpenOCD. Multi-core policy stays in the cfg files, for example TL1 sync halt, STM suspend and resume/step sequencing in `tc3xx_ocds.cfg`, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points.
+The commands the cfg scripts use behave as in OpenOCD, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points. The multi-core run control and the peripheral suspend are the server's (`ocds`, `suspend`); the events are free for a board policy.
 
 Every command, its arguments and options are in the [Tcl command reference](docs/commands.md). The server has the same text built in: `help` lists the commands, `help <command>` describes one (`help reset_config`), and `help <word>` searches the descriptions (`help srst`). In VS Code type them as `monitor help ...` in the Debug Console. The reference is generated from `crates/core/src/help.rs`, and a test fails when a command has no entry there.
 
-## Multi-core stepping (`tricore tl1_step`)
+## Multi-core run control (`ocds sync tl1`)
 
-With `<target> tricore tl1_step on` (set by `tc3xx_ocds.cfg`), an instruction step runs **all** cores for the stepped instruction, not only the stepping one:
+With `ocds sync tl1` (set by `tc3xx_ocds.cfg`) every BRKOUT (CPUs, HSM) drives TL1 and capture-and-hold keeps it active: a halt of one core stops all TL1 members (`ocds tl1_members`: CPUs, HSM, DMA, HSSL0) and every suspended peripheral in the same cycle. A pause pulses TL1 (`tricore tl1_halt`). A resume releases the other cores' debug halt while the held TL1 still suspends them, resumes the core, then clears suspend-out and drops the hold in one transaction: all cores start in the same cycle.
 
-1. The core makes sure TL1 is latched (capture-and-hold), pulsing it if needed.
-2. The cfg's `step-start` releases the other cores' debug halt; TL1 still suspends them.
-3. The core arms the step trigger, releases the stepping core (still held by TL1) and clears the TL1 hold: all cores start in the same cycle.
-4. The step trigger halts the core and pulses BRKOUT: TL1 latches and stops all cores in the same cycle.
+An instruction step (`ocds step all`, default; `tricore tl1_step on` on every core) runs **all** cores for the stepped instruction:
 
-Without `tl1_step` (OpenOCD), the other cores stay in debug halt and only the stepping core runs.
+1. The core makes sure TL1 is latched, pulsing it if needed.
+2. In one packed transaction it releases the other cores' debug halt (TL1 still suspends them), arms the step trigger, releases the stepping core and clears the TL1 hold: all cores start in the same cycle.
+3. The step trigger halts the core and pulses BRKOUT: TL1 latches and stops all cores in the same cycle.
 
-**STMs.** On the TC377 an STM with `OCS.SUS=2` stops while its CPU is suspended by TL1 *or* has `DBGSR.SUSP` set (measured with raw register writes). A trigger event loads `DBGSR.SUSP` from `TRxEVT.SUSP`; the core carries the current SUSP into the step release and the step trigger, so the cfg decides:
+With `ocds step single` the other cores are kept in debug halt and only the stepping core runs. `ocds sync none` lets every core halt and run alone.
 
-- `tc3xx_step_timers run` (default): SUSP stays clear. TL1 stops and restarts the STMs in the same cycle as the cores, so they stop at halt, run with continue, and advance together while the cores execute a step.
-- `tc3xx_step_timers frozen`: SUSP is set on every core while halted, so the STMs also stay stopped during steps.
+**STMs.** On the TC377 an STM with `OCS.SUS=2` stops while its CPU is suspended by TL1 *or* has `DBGSR.SUSP` set (measured with raw register writes). A trigger event loads `DBGSR.SUSP` from `TRxEVT.SUSP`; the step carries SUSP into the release and the step trigger:
 
-Switch at runtime with `monitor tc3xx_step_timers frozen` or `run`.
+- `ocds step_timers run` (default): SUSP stays clear. TL1 stops and restarts the STMs in the same cycle as the cores, so they stop at halt, run with continue, and advance together while the cores execute a step.
+- `ocds step_timers frozen`: SUSP is set on every core at a halt, so the STMs also stay stopped during steps.
 
 ## Interrupts while stepping (`tricore irq_mask`)
 
@@ -742,7 +743,7 @@ Switch at runtime with `monitor tc3xx_step_timers frozen` or `run`.
 - **Hardware findings (TC377, TC1.6.2P):** CALL copies ICR.IE into PCXI.PIE and leaves ICR.IE unchanged. RET does not restore ICR.IE from PIE. Masked calls therefore leave nothing behind. Only contexts restored by RFE (traps, interrupts) need PIE fixed.
 - **Limit:** during a masked step over or step out, the callee runs with interrupts masked. If it disables interrupts and does not restore them before the step ends, the debugger can't tell and restores the IE from before the step on continue.
 - **Flash:** `flash info|probe|erase_check|erase_sector|write_image|write_images|verify_image <bank> ...`, `verify_image`, `program <file> [preverify] [verify] [reset] [exit] [offset]`, `aurix_eflash fallback`.
- PFLASH and DFLASH0/1 banks (`tc3x_eflash`); DFLASH banks support `erase_sector` and `erase_check` only, the DF0 bank size is the device's DF0 size (256 KB on the TC377). `tc37x_ocds_init.cfg` defines them as `dfls0` and `dfls1` (HSM data, 128 KB).
+ PFLASH and DFLASH0/1 banks (`tc3x_eflash`); DFLASH banks support `erase_sector` and `erase_check` only, the DF0 bank size is the device's DF0 size (256 KB on the TC377). `tc3xx_ocds.cfg` defines them as `dfls0` (where the chip's DF0 size is known, or `tc3xx_dflash0_size` is set) and `dfls1` (HSM data, 128 KB).
 
 Unknown commands fail with `not supported by aurix-dbg`.
 
@@ -776,7 +777,7 @@ Context IDs:
 All cores are halted first. `flash write_image(s)` then runs a small RAM flash loader on cpu0 (`flash loader on`, the default): the loader goes to the start of cpu0's PSPR, its buffers to the start of its DSPR, and cpu0 runs the DMU command sequences while the debugger moves the data in 8 KB blocks, filling one buffer while the loader programs the other. That takes one probe access per 8 KB instead of about 40 per 256 bytes, which matters most on the BlueBox (every write is a USB message there): measured on a TC377 with an iC5700, 5.9 MB in 361 sectors were erased and programmed in 17 s and verified in 6 s, where the DMU sequences over the debug interface manage about 3.7 KB/s (about 27 minutes for the same image). The loader turns off the CPU0 and safety watchdogs until the next reset; cpu0 gets its registers back afterwards, the RAM keeps the loader. If the loader cannot start (no cpu0, RAM not writable, watchdogs that do not turn off), or with `flash loader off`, the driver runs the DMU command sequences over the debug interface itself. The other `flash` commands always do. Source: `crates/core/src/flash_loader.s`, assembled with Green Hills `astri -nooptimize`; the simulator executes it.
 
 - **`flash write_image [erase] [incremental] <file>`:** DMU-erased sectors are programmed directly. Other touched sectors are erased first, which requires `erase`. `incremental` skips sectors whose image pages already match, but it reads flash, and reading unprogrammed PFLASH raises an ECC error that the application's SMU may turn into a reset.
-- **`flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-type <type>] <file> ...`:** Merges the files into one image (where they overlap, later files win) and writes it like `flash write_image`. `-offset` (added to the file's addresses, the load address of a binary file) and `-type` (`elf`, `ihex`, `s19`/`srec`, `bin`) apply to the file that follows them; the REST/MCP `flash_write` takes them as `{"path", "offset", "type"}` entries. Writing the files one by one would erase data of earlier files in shared 16 KB sectors, and incremental writes would reprogram those sectors every time. With `incremental`, `verify` reads back only the programmed sectors, since the unchanged ones were just compared; otherwise the whole image. Reading runs at about 470 KB/s at `adapter speed 5000` and about 2 MB/s at 30000 (set by `tc37x_ocds_init.cfg`), so comparing large images dominates. The VS Code extension flashes `flashFiles` with this command (`verifyFlash` selects `verify`).
+- **`flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-type <type>] <file> ...`:** Merges the files into one image (where they overlap, later files win) and writes it like `flash write_image`. `-offset` (added to the file's addresses, the load address of a binary file) and `-type` (`elf`, `ihex`, `s19`/`srec`, `bin`) apply to the file that follows them; the REST/MCP `flash_write` takes them as `{"path", "offset", "type"}` entries. Writing the files one by one would erase data of earlier files in shared 16 KB sectors, and incremental writes would reprogram those sectors every time. With `incremental`, `verify` reads back only the programmed sectors, since the unchanged ones were just compared; otherwise the whole image. Reading runs at about 470 KB/s at `adapter speed 5000` and about 2 MB/s at 30000 (set by `tc37x_fs26_example.cfg`), so comparing large images dominates. The VS Code extension flashes `flashFiles` with this command (`verifyFlash` selects `verify`).
 - **`verify_image`:** reads only the image bytes. Flash is read through the non-cached 0xA segment.
 - **`program … preverify`:** leaves flash untouched when the image already matches.
 - **Supported images:** ELF (load segments), Intel HEX, Motorola S-records (S1/S2/S3; lines starting with `;` or `#` are comments, as in flash container files), raw binary. Without an explicit type the format is taken from the ELF magic, the extension (`.hex`, `.srec`/`.s19`/`.s28`/`.s37`/`.mot`/`.sx`) or the first non-comment line. UCB banks are not supported.

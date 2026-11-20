@@ -1,6 +1,10 @@
 # Debugger Actions
 
-`actions` in the launch configuration adds the **Debugger Actions** button to the debug toolbar. It offers your own commands: an entry with `items` opens a submenu, an entry with `tcl` runs Tcl commands on the debug server (their output goes to the Debug Console), and an entry with `command` runs a command of this extension.
+`actions` in the launch configuration adds a **Debugger Actions** button to the debug toolbar. Each entry is one of:
+
+- `items`: a submenu
+- `tcl`: Tcl commands on the debug server; output goes to the Debug Console
+- `command`: a command of this extension
 
 ```jsonc
 "actions": [
@@ -34,7 +38,7 @@
 | Property | Description |
 |---|---|
 | `label` | Name shown in the list (required) |
-| `description`, `detail` | Additional text |
+| `description`, `detail` | Text next to / below the label |
 | `icon` | [Codicon](https://microsoft.github.io/vscode-codicons/dist/codicon.html) name |
 | `items` | Submenu entries (same format) |
 | `tcl` | Tcl command or list of commands; stops at the first error |
@@ -42,15 +46,16 @@
 | `args` | Argument for `command` |
 | `confirm` | Confirmation text shown before running |
 | `resetAfter` | Reset the target afterwards, like the Reset button |
-| `showOutput` | Show the Tcl output in a notification |
-| `timeout` | Timeout per command in seconds (default 900) |
+| `showOutput` | Also show the Tcl output in a notification |
+| `timeout` | Timeout per Tcl command in seconds (default 900) |
 | `id` | Lets you run the action from a keybinding |
 
-The action is responsible for the target state it needs, e.g. halting the cores first. The available Tcl commands are in the [Tcl command reference](../aurix-debugger/server/docs/commands.md).
+- The action must bring the target into the state it needs, e.g. halt the cores first.
+- Tcl commands: [Tcl command reference](../aurix-debugger/server/docs/commands.md).
 
 ## Keybindings
 
-An action with an `id` can be run from a keybinding (`keybindings.json`):
+Run an action with an `id` from `keybindings.json`:
 
 ```json
 { "key": "ctrl+alt+e", "command": "aurix-debugger.runAction", "args": { "id": "eraseDflash" }, "when": "debugType == aurixdbg" }

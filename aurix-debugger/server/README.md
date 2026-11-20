@@ -1,33 +1,39 @@
 # aurix-dbg
 
-An AURIX TC3xx debug server written in Rust. It talks to the target through Infineon's `tas_server` (miniWiggler, no DAS, no OpenOCD process) or, on the `winidea` backend, through an iSYSTEM **BlueBox** driven by the winIDEA SDK -- see [Backends](#backends-tas_client-sim-winidea). Either way it runs the **unchanged OpenOCD cfg scripts**. Frontends sit on top of a protocol-neutral core. The first frontend is **TCF**, for the VS Code extension `vscode-aurix-tcf-debugger`. A gdb RSP frontend is planned; see [docs/gdb-frontend.md](docs/gdb-frontend.md).
+AURIX TC3xx debug server in Rust. It runs the unchanged OpenOCD cfg scripts and talks to the target through:
+- Infineon's `tas_server` (miniWiggler; no DAS, no OpenOCD process);
+- an iSYSTEM BlueBox, directly over USB or through winIDEA (see [Backends](#backends)).
 
-Compared with OpenOCD + gdb + cppdbg, this gives VS Code writable registers and variables, a live watch while the target runs, source breakpoints and stepping on all cores, disassembly, reset, and flashing.
+Frontends: TCF (for the VS Code extension), REST, MCP, a Python client and a telnet Tcl console. A gdb RSP frontend is planned: [docs/gdb-frontend.md](docs/gdb-frontend.md).
 
 ## Build
 
 Requirements (Windows):
 - rustup with the `stable-x86_64-pc-windows-gnu` toolchain (pinned in `rust-toolchain.toml`);
-- MSYS2 mingw64 gcc in `C:\msys64\mingw64\bin`, which builds Jim Tcl and Capstone;
-- network access: the build downloads Jim Tcl
-  (crate `jimtcl`) and OpenOCD's Tcl scripts (crate `openocd-tcl`, into `target/openocd-tcl/`) from
-  GitHub; set `JIMTCL_SRC_DIR` / `OPENOCD_TCL_DIR` to local copies to build offline.
+- MSYS2 mingw64 gcc in `C:\msys64\mingw64\bin` (builds Jim Tcl and Capstone);
+- network access: the build downloads Jim Tcl (crate `jimtcl`) and OpenOCD's Tcl scripts (crate `openocd-tcl`, into `target/openocd-tcl/`) from GitHub. To build offline, set `JIMTCL_SRC_DIR` / `OPENOCD_TCL_DIR` to local copies.
 
 ```powershell
 cd server
 $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"   # gcc for Jim Tcl and Capstone
-cargo build          # target\debug\aurix-dbg.exe
+cargo build          # target\debug\aurix-dbg.exe, aurix-hub.exe
 cargo test --workspace --exclude aurix-dbg
 ```
 
-Stop a running `aurix-dbg.exe` before `cargo build`, because Windows locks the exe.
+- Stop a running `aurix-dbg.exe` before `cargo build`: Windows locks the exe.
+- `cargo build --no-default-features` builds the worker without the API (no tokio/axum).
 
 ## Run
 
 Two programs:
 
-- **`aurix-hub`** - the always-on front door, one per machine, on port **3001**: MCP, REST and Swagger UI for every client (Claude, VS Code, scripts), and the sessions. It never touches a probe.
-- **`aurix-dbg`** - the worker of one board (one *session*): one Jim interpreter, one set of cfg scripts, one probe. The hub starts it, it listens on free loopback ports and registers them with the hub. A worker that crashes or reset-storms takes only its own board down; a hub that restarts keeps the workers, which register again.
+| Program | Role |
+|---|---|
+| `aurix-hub` | One per machine, port **3001**. MCP, REST and Swagger UI for every client (Claude, VS Code, scripts); opens and closes sessions. Never touches a probe. |
+| `aurix-dbg` | The worker of one board (one *session*): one Jim interpreter, one set of cfg scripts, one probe. Started by the hub; listens on free loopback ports and registers them with the hub. |
+
+- A crashing worker takes down only its own board.
+- A restarted hub keeps the workers; they register again.
 
 ```text
 Claude (http) ─────────────────┐
@@ -39,7 +45,7 @@ VS Code extension ───────────────┤
                                                         ▲ TCF: VS Code (direct, or relayed by the hub)
 ```
 
-Start the hub (the extension and `aurix-hub stdio` start it when needed; `aurix-hub install --autostart` starts it at logon, see [Installation](#installation)):
+Start the hub by hand (the extension and `aurix-hub stdio` start it when needed; for a start at logon see [Installation](#installation)):
 
 ```powershell
 .\server\target\debug\aurix-hub.exe serve --foreground     # Ctrl-C stops it
@@ -65,10 +71,10 @@ run_to = "main"
 
 ```powershell
 curl -X POST http://127.0.0.1:3001/api/v1/sessions -H "Content-Type: application/json" -d '{\"profile\": \"tc375-lite\"}'
-.\server\target\debug\aurix-hub.exe tcl targets "reg pc" "mdw 0x70013954 4"   # the Tcl console of the only session
+.\server\target\debug\aurix-hub.exe tcl targets "reg pc" "mdw 0x70013954 4"   # Tcl console of the only session
 ```
 
-The worker takes the same options as OpenOCD and can still be run by hand for development (it then registers with nothing):
+Run a worker by hand (development; it registers with no hub). It takes OpenOCD's options:
 
 ```powershell
 .\server\target\debug\aurix-dbg.exe -s server/target/openocd-tcl/tcl `
@@ -79,33 +85,35 @@ The worker takes the same options as OpenOCD and can still be run by hand for de
 |---|---|
 | `-f` / `-c` / `-s` | Script, command, search directory; handled in order, like OpenOCD. `init` runs automatically at the end. |
 | `-d<n>`, `-l <file>` | Debug level 0..3, log file. |
-| `--adapter sim` | Built-in TC37x simulator instead of TAS. Used by the tests. |
+| `--adapter <name>` | Override the cfg's adapter driver. `sim`: built-in TC37x simulator (used by the tests). |
 | `--hub <url> --session <id>` | Set by the hub: register with it. |
 
 Ports:
 - **Hub:** 3001 (`port` in `hub.toml`). Binds to 127.0.0.1 unless `hub.toml` says otherwise; see [Remote use](#remote-use).
-- **Worker:** `telnet_port`, `tcf_port` and `api_port` default to 0: free ports on 127.0.0.1, shown in the worker log and in `list_sessions` (`tcf_port`, `telnet_port`). A worker of the hub always binds to loopback.
+- **Worker:** `telnet_port`, `tcf_port`, `api_port` default to 0 = a free port on 127.0.0.1. Shown in the worker log and in `list_sessions`. A worker started by the hub always binds to loopback.
 
-`aurix-hub` commands: `serve`, `stdio`, `tcl`, `install`, `uninstall`, `stop [--now]`, `status`; `aurix-hub --help` explains them. Logs: `%LOCALAPPDATA%\aurix-dbg\logs\` (`hub.log`, `session-<id>.log` per worker, `stdio.log`).
+`aurix-hub` commands: `serve`, `stdio`, `tcl`, `install`, `uninstall`, `stop [--now]`, `status` (`aurix-hub --help`).
+
+Logs: `%LOCALAPPDATA%\aurix-dbg\logs\` (`hub.log`, `session-<id>.log` per worker, `stdio.log`).
 
 ## VS Code
 
-Use a launch configuration of type `aurixdbg`; the extension's [README](../../README.md#quick-start) has an example. The extension opens the session through the hub (starting the hub when needed) and connects to the worker's TCF port.
+Use a launch configuration of type `aurixdbg` (example in the extension's [README](../../README.md#quick-start)). The extension opens the session through the hub, starting the hub when needed, and connects to the worker's TCF port.
 
 | Attribute | Meaning |
 |---|---|
 | `profile` | A hub profile; the attributes below override its parts. |
 | `searchDirs`, `configFiles`, `configCommands`, `adapter`, `probe` | The session's `connect`: passed to the worker as `-s`, `-f`, `-c`, `--adapter`. |
 | `session` | Attach to an open session (ID or name, e.g. one Claude opened) instead of opening one. |
-| `enableFlashing`, `flashFiles`, `verifyFlash`, `resetType`, `resetSuspend`, `runTo` | The launch steps the hub runs before the debugger attaches (flash, reset, run to). |
-| `sessionLifetime` | `close` (default): close the session when debugging ends, if this debug session opened it; `keep`: leave it open. |
-| `hub`, `hubToken` | Another hub (default: the `aurix-debugger.hub.url` setting, `http://127.0.0.1:3001`). TCF then goes through the hub's WebSocket relay. |
+| `enableFlashing`, `flashFiles`, `verifyFlash`, `resetType`, `resetSuspend`, `runTo` | Launch steps the hub runs before the debugger attaches (flash, reset, run to). |
+| `sessionLifetime` | `close` (default): close the session when debugging ends, if this debug session opened it. `keep`: leave it open. |
+| `hub`, `hubToken` | Another hub (default: setting `aurix-debugger.hub.url`, `http://127.0.0.1:3001`). TCF then goes through the hub's WebSocket relay. |
 
-Debug console: `monitor <tcl command>`, for example `monitor tc3xx_status` or `monitor sbc_status`.
+Debug Console: `monitor <tcl command>`, e.g. `monitor tc3xx_status`, `monitor sbc_status`.
 
 ## Installation
 
-The extension ships `aurix-hub.exe`, `aurix-dbg.exe` and OpenOCD's scripts. Since its own directory changes with every update, `aurix-hub install` copies them to a fixed per-user location, which the logon start and MCP configurations name:
+The extension ships `aurix-hub.exe`, `aurix-dbg.exe` and OpenOCD's scripts. `aurix-hub install` copies them to a fixed per-user location, which the logon start and MCP configurations use:
 
 ```text
 %LOCALAPPDATA%\aurix-dbg\versions\<version>-<hash>\   the files of one build
@@ -113,11 +121,12 @@ The extension ships `aurix-hub.exe`, `aurix-dbg.exe` and OpenOCD's scripts. Sinc
 %APPDATA%\aurix-dbg\hub.toml, profiles\              settings (never touched by install/uninstall)
 ```
 
-- The extension runs `aurix-hub install` when it starts (setting `aurix-debugger.hub.install`, default `auto`); it copies only when the bundled build differs, never downgrades, and needs no admin rights (a junction, not a symlink).
-- **Logon start:** command *AURIX: Start Debugger Hub at Logon* (`aurix-hub install --autostart`) writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\AurixDbgHub` = `"%LOCALAPPDATA%\aurix-dbg\current\aurix-hub.exe" serve` and starts the hub; *Don't Start Debugger Hub at Logon* removes it. The `Run` key starts the hub while the user is logged on.
-- **Updates:** installing a newer build moves `current`; the running hub restarts from it as soon as no session is open (*AURIX: Restart Debugger Hub Now* applies it at once and closes the sessions). Hub and workers always come from the same build.
-- **Uninstall:** the extension's `vscode:uninstall` hook runs `aurix-hub uninstall`: it stops the hub, removes the logon start, and removes the files unless another VS Code profile still uses them (`installs.json`).
-- Without VS Code (e.g. the probe PC): copy the `extension\bin` folder of the `.vsix` (a zip) and run `aurix-hub.exe install --autostart`. With VS Code Remote-SSH or Remote-Tunnels the extension runs on the remote machine (`extensionKind: workspace`), so the commands install there.
+- **Automatic:** the extension runs `aurix-hub install` at start (setting `aurix-debugger.hub.install`, default `auto`). It copies only when the bundled build differs, never downgrades, needs no admin rights.
+- **Logon start:** command *AURIX: Start Debugger Hub at Logon* (`aurix-hub install --autostart`) writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\AurixDbgHub` = `"%LOCALAPPDATA%\aurix-dbg\current\aurix-hub.exe" serve` and starts the hub. *Don't Start Debugger Hub at Logon* removes it.
+- **Updates:** a newer build moves `current`; the running hub restarts from it once no session is open. *AURIX: Restart Debugger Hub Now* applies it at once and closes the sessions. Hub and workers always come from the same build.
+- **Uninstall:** the extension's `vscode:uninstall` hook runs `aurix-hub uninstall`: stops the hub, removes the logon start, removes the files unless another VS Code profile still uses them (`installs.json`).
+- **Without VS Code** (e.g. a probe PC): copy the `extension\bin` folder of the `.vsix` (a zip) and run `aurix-hub.exe install --autostart`.
+- **VS Code Remote-SSH / Remote-Tunnels:** the extension runs on the remote machine (`extensionKind: workspace`), so the commands install there.
 
 **Claude:** *AURIX: Add Debugger MCP Server to Claude Config* writes the workspace `.mcp.json`, either
 
@@ -125,11 +134,11 @@ The extension ships `aurix-hub.exe`, `aurix-dbg.exe` and OpenOCD's scripts. Sinc
 { "mcpServers": { "aurix-debugger": { "command": "C:\\Users\\<you>\\AppData\\Local\\aurix-dbg\\current\\aurix-hub.exe", "args": ["stdio"] } } }
 ```
 
-(`aurix-hub stdio`: Claude starts the wrapper, the wrapper starts the hub when none answers and ends its MCP session when Claude exits) or `{ "type": "http", "url": "http://127.0.0.1:3001/mcp" }` when the hub runs anyway.
+or `{ "type": "http", "url": "http://127.0.0.1:3001/mcp" }` when the hub runs anyway. `aurix-hub stdio` starts the hub when none answers and ends its MCP session when Claude exits.
 
 ## Remote use
 
-The hub can serve other machines (Claude, Python, VS Code on a laptop; the probes on a lab PC):
+The hub can serve other machines (e.g. probes on a lab PC, clients on a laptop):
 
 ```toml
 # %APPDATA%\aurix-dbg\hub.toml on the lab PC (aurix-hub install --remote creates it)
@@ -137,11 +146,13 @@ bind = "0.0.0.0"
 port = 3001
 token = "<random>"
 allow_tcl = true    # false: other machines may not run Tcl commands
+mcp_idle_min = 30   # end an MCP session after this many minutes without a request
 ```
 
-- Clients that are not on loopback send `Authorization: Bearer <token>` on every route except `/health`; a non-loopback `bind` without a token is refused at startup. Worker registration (`/internal/*`) is for the hub machine only. Workers listen on loopback only, so the hub is the one exposed port.
-- **Tcl is shell access:** Jim is built with `exec` and `file`, so the token is as good as a login on that PC. `allow_tcl = false` refuses the `tcl` operation (and `monitor`) from other machines.
-- **Files:** paths in operations are on the hub machine. `POST /api/v1/files?name=app.elf` (raw body) stores a file and returns its ID `file:<sha256>/app.elf`, which works wherever a path does; the hub replaces IDs in every request. The extension uploads `configFiles` and `flashFiles` to a remote hub by itself; Python has `Client.upload`.
+- **Token:** clients not on loopback send `Authorization: Bearer <token>` on every route except `/health`. A non-loopback `bind` without a token is refused at startup.
+- **Ports:** workers listen on loopback only; the hub is the one exposed port. `/internal/*` (worker registration) is for the hub machine only.
+- **Tcl is shell access:** Jim has `exec` and `file`, so the token equals a login on that PC. `allow_tcl = false` refuses `tcl` (and `monitor`) from other machines.
+- **Files:** paths in operations are on the hub machine. `POST /api/v1/files?name=app.elf` (raw body) stores a file and returns `file:<sha256>/app.elf`, usable wherever a path is. The extension uploads `configFiles` and `flashFiles` to a remote hub itself; Python has `Client.upload`.
 - **VS Code:** TCF has no authentication, so the hub relays it over an authenticated WebSocket (`/api/v1/sessions/{session}/tcf`); the extension opens a local port for it.
 - **MCP:** `claude mcp add --transport http aurix http://<lab-pc>:3001/mcp --header "Authorization: Bearer <token>"`, or `aurix-hub stdio --url http://<lab-pc>:3001 --token <token>`.
 
@@ -151,45 +162,68 @@ The hub's port (3001) serves:
 
 | Path | Content |
 |---|---|
-| `/mcp` | MCP (Streamable HTTP, JSON responses). Register it with `claude mcp add --transport http aurix http://127.0.0.1:3001/mcp`. |
-| `/api/v1/hub`, `/api/v1/sessions`, `/api/v1/profiles` | The hub: `hub_info`, `list_sessions`, `open_session` (POST), `close_session` (DELETE `.../sessions/{session}`), `session_log`, `list_profiles`. |
-| `/api/v1/sessions/{session}/...` | A session's operations (ID or name): targets, run control, registers, memory, [variables by name](#variables-by-name), breakpoints, watchpoints, flash, Tcl, `launch`, the control lease. `/api/v1/session/...` is the only open session (409 with the list when several are open). |
-| `/api/v1/sessions/{session}/info` | Liveness probe of the worker: version, API revision, process ID, probe connection, targets, loaded symbol files, launch phase, lease holder. Never waits for the core. |
-| `/api/v1/sessions/{session}/os/...` | [AUTOSAR OS awareness](#autosar-os-awareness-orti): the objects an ORTI file describes, read from the running target. |
-| `/api/v1/sessions/{session}/events`, `/api/v1/events` | Server-sent events: a session's halts, resumes, resets, breakpoint changes and log lines; the hub's sessions opened, launched and closed. |
-| `/api/v1/sessions/{session}/daq` | WebSocket: [periodic sampling](#periodic-sampling-daq) of variables, each at its own rate. |
-| `/api/v1/sessions/{session}/tcf` | WebSocket: the worker's TCF connection, for a VS Code on another machine. |
-| `/api/v1/files` | Uploads (`file:` IDs, see [Remote use](#remote-use)). |
-| `/docs`, `/openapi.json` | Swagger UI and the OpenAPI 3.1 document. |
+| `/mcp` | MCP (Streamable HTTP, JSON responses). Register: `claude mcp add --transport http aurix http://127.0.0.1:3001/mcp`. |
+| `/api/v1/hub`, `/api/v1/sessions`, `/api/v1/profiles` | `hub_info`, `list_sessions`, `open_session` (POST), `close_session` (DELETE `.../sessions/{session}`), `session_log`, `list_profiles`. |
+| `/api/v1/sessions/{session}/...` | A session's operations (ID or name): targets, run control, registers, memory, [variables](#variables-by-name), breakpoints, watchpoints, flash, Tcl, `launch`, the control lease. `/api/v1/session/...` = the only open session (409 with the list when several are open). |
+| `/api/v1/sessions/{session}/info` | Worker liveness: version, API revision, PID, probe connection, targets, symbol files, launch phase, lease holder. Never waits for the core. |
+| `/api/v1/sessions/{session}/os/...` | [AUTOSAR OS awareness](#autosar-os-awareness-orti). |
+| `/api/v1/sessions/{session}/events`, `/api/v1/events` | Server-sent events: a session's halts, resumes, resets, breakpoint changes, log lines; the hub's sessions opened, launched, closed. |
+| `/api/v1/sessions/{session}/daq` | WebSocket: [periodic sampling](#periodic-sampling-daq). |
+| `/api/v1/sessions/{session}/tcf` | WebSocket: the worker's TCF connection, for VS Code on another machine. |
+| `/api/v1/files` | Uploads (see [Remote use](#remote-use)). |
+| `/docs`, `/openapi.json` | Swagger UI, OpenAPI 3.1 document. |
 
-**Sessions.** `open_session` starts a worker for a board from a profile and/or `connect` (cfg scripts, commands, search directories, adapter) and runs the **launch steps** when asked: symbols, ORTI, flash (after `reset init`), breakpoints, reset, `run_to`, `stop_on_entry` - what a VS Code launch configuration does. It returns once the steps are done or after `wait_s` with phase `starting`; `wait_session` waits for the rest, `relaunch` runs the same steps again after a rebuild, and a failed step leaves the session open to inspect (its log: `session_log`). Over MCP, session operations take a `session` argument, optional while one session is open; with none or several open, the result is guidance (the profiles or the sessions to choose from) rather than an error, so the model can retry.
+The examples in the sections below use a worker's own paths (`/api/v1/...`). Through the hub, replace `/api/v1` with `/api/v1/sessions/{session}` (or `/api/v1/session`).
 
-**One source of truth.** The operations are declared once: the session operations in [crates/api-spec/src/ops.rs](crates/api-spec/src/ops.rs), the hub's in [hub_ops.rs](crates/api-spec/src/hub_ops.rs), with their request and response types in [types.rs](crates/api-spec/src/types.rs). The `///` comments there are the documentation of all outputs. `cargo build` generates the rest from them:
-- the REST routes, the MCP tools and their JSON schemas, and the `DebuggerApi` / `HubApi` traits that [crates/api](crates/api) and [crates/hub](crates/hub) implement;
+**Sessions.**
+- `open_session` starts a worker from a profile and/or `connect` (cfg scripts, commands, search directories, adapter).
+- It runs the **launch steps** when asked: symbols, ORTI, flash (after `reset init`), breakpoints, reset, `run_to`, `stop_on_entry`.
+- It returns when the steps are done, or after `wait_s` with phase `starting`; `wait_session` waits for the rest.
+- `relaunch` runs the same steps again (e.g. after a rebuild).
+- A failed step leaves the session open; read its log with `session_log`.
+- Over MCP, `session` is optional while one session is open. With none or several open, the result lists the profiles or sessions to choose from.
+
+**Clients and the control lease.**
+- Every client names itself with the header `X-Aurix-Client` (MCP: `mcp:<id>`, VS Code: `vscode:<id>`, Python: `py:<id>`).
+- A client owns the breakpoints and watchpoints it sets (`client` in `list_breakpoints`). `end_client` removes them. The hub calls it when an MCP session ends (`DELETE /mcp`, or `mcp_idle_min` without a request).
+- `acquire_control` takes the **control lease**. While another client holds it, run control, register/memory/variable writes, flashing, launches and Tcl fail with `busy`. Reads never wait for it. It expires after `ttl_s`. Nobody holds it unless a client takes it.
+
+**Limits.**
+- Memory transfers: 64 KB per call (the Python client splits longer ones).
+- `info` answers even while a flash job or long Tcl script holds the core.
+- `load_symbols` does not block run control.
+
+**Security.**
+- On this machine there is no authentication; other machines need the hub's token.
+- Requests with an `Origin` header from other sites are rejected (hub and workers, DAQ WebSocket included), so a web page cannot drive the debugger.
+
+**Adding an operation** (developers). Operations are declared once: session operations in [crates/api-spec/src/ops.rs](crates/api-spec/src/ops.rs), the hub's in [hub_ops.rs](crates/api-spec/src/hub_ops.rs), types in [types.rs](crates/api-spec/src/types.rs). Their `///` comments are the documentation of all outputs. `cargo build` generates:
+- the REST routes, the MCP tools and their JSON schemas, the `DebuggerApi` / `HubApi` traits that [crates/api](crates/api) and [crates/hub](crates/hub) implement;
 - [openapi/openapi.json](openapi/openapi.json);
 - the Python client's [_generated.py](../python/aurix_dbg/_generated.py).
 
-The generated files are checked in, and a file is only written when its content changes. To add an operation, add a line to `ops.rs` and implement the new trait method; the compiler reports what is missing. A worker serves the session operations at its own `/api/v1/...` routes and by name at `/api/v1/ops/{op}` (what the hub's MCP front door calls); MCP, Swagger and the OpenAPI document are the hub's.
+Generated files are checked in and written only when they change. Add a line to `ops.rs`, implement the new trait method; the compiler reports what is missing. A worker serves session operations at `/api/v1/...` and by name at `/api/v1/ops/{op}`. DAQ is not an operation: its WebSocket protocol is [specified below](#periodic-sampling-daq).
 
-DAQ is deliberately *not* an operation: a streaming session is of no use as an MCP tool and would only hold a socket open, and putting its configuration on the WebSocket is what ties a session's lifetime to its connection. Its protocol is therefore hand-written and specified below instead of in the OpenAPI document.
+### Shared session
 
-**Clients.** Every client names itself with the header `X-Aurix-Client` (an MCP session is `mcp:<id>`, a VS Code debug session `vscode:<id>`, a Python client `py:<id>`). The client owns the breakpoints and watchpoints it sets (`list_breakpoints` shows it as `client`); `end_client` removes them, and the hub calls it when an MCP session ends (`DELETE /mcp`, or `mcp_idle_min`, default 30, without a request). A client that needs the target to itself takes the **control lease** (`acquire_control`): while another client holds it, run control, register/memory/variable writes, flashing, launches and Tcl fail with `busy`; reading never waits for it, it expires after `ttl_s`, and nobody holds it unless a client takes it.
+All clients of a session (REST, MCP, VS Code over TCF) share it:
+- **Run control:** a halt from the API shows in VS Code; a resume in VS Code shows in `wait_state` and on the event stream.
+- **Breakpoints:** one table. Two clients on one address share one hardware breakpoint. `Breakpoints.set` replaces only the calling client's own breakpoints. API breakpoints stay until removed.
+- **Watchpoints:** same table; VS Code data breakpoints and API watchpoints share hardware. `list_watchpoints` also shows the Tcl console's (`wp`), owner `console`.
+- **API breakpoints in VS Code's Breakpoints view:**
+  - at the start of a source line: a source breakpoint;
+  - elsewhere: a function breakpoint named by symbol or address (`0x8021a9de`);
+  - a watchpoint: a function breakpoint named by what it watches (`g_count [write]`).
+  - Removing, disabling or enabling it in VS Code changes it on the server, and the other way round. They leave the view when the debug session ends (not saved with the workspace).
+  - VS Code's own function breakpoints accept a symbol, an address or `file:line`.
+- **Conditions:** a `condition` (C expression) is evaluated by the server on the halted core, in its top frame. When it is zero the core resumes before any client hears of the halt (the event stream still shows halt and resume). Checked during a source step over a function too. Every hit is a real halt (a few ms).
+- **Writes:** API memory and register writes send `Memory.memoryChanged` / `Registers.registerChanged`; VS Code refreshes its views.
+- **Source steps:** while VS Code runs a source step, API `resume`, `step` and `reset` fail with `busy`; `halt` cancels the step.
+- **Symbols:** `load_symbols` works without VS Code. One symbol set per core, last writer wins (a later VS Code session replaces what the API loaded, and vice versa). `symbols` reports what is loaded.
 
-**Shared session.** All clients of a session share it - REST, MCP and VS Code (TCF):
-- Run control goes through the same core operations and events. A halt from the API shows up in VS Code, and a resume in VS Code shows up in `wait_state` and on the event stream.
-- Breakpoints live in one table. Two clients on the same address share one hardware breakpoint. `Breakpoints.set` only replaces the calling client's own breakpoints. API breakpoints stay until they are removed.
-- Watchpoints (data breakpoints) live in the same table: VS Code's data breakpoints and the API's watchpoints share hardware the same way. `list_watchpoints` also shows the Tcl console's (`wp`), with owner `console`; those are only on the core.
-- VS Code shows API breakpoints in its Breakpoints view. A breakpoint at the start of a source line is shown as a source breakpoint; any other is shown as a function breakpoint named by symbol or address, e.g. `0x8021a9de`. An API watchpoint is shown as a function breakpoint named by what it watches, e.g. `g_count [write]`, since an extension cannot add data breakpoints to the view. Removing, disabling or enabling it in VS Code changes it on the server, and removing it through the API removes it from the view. When the debug session ends, the extension takes them out of the view again, so they are not saved with the workspace. VS Code's own function breakpoints accept a symbol, an address or `file:line`.
-- A breakpoint or watchpoint with a `condition` (a C expression) is evaluated by the server on the halted core, in its top stack frame. When the condition is zero, the core is resumed before any client is told about the halt, so VS Code does not flicker. The API's event stream still shows the halt and the resume. Conditions are also checked during a source-level step over a function. Every hit is still a real halt, which costs a few milliseconds.
-- Memory and register writes from the API send `Memory.memoryChanged` / `Registers.registerChanged`. The extension then refreshes its variable, watch and register views.
-- During a source-level step from VS Code, API `resume`, `step` and `reset` fail with `busy`, and `halt` cancels the step, like the pause button.
-- Symbols can be loaded from the API (`load_symbols`), not only by a VS Code debug session. There is one symbol set per core and the last writer wins: a VS Code session started afterwards replaces what the API loaded, and the other way round. `symbols` reports what is loaded.
+### Python
 
-**Performance.** Every operation is one short job on the core thread, except `info`, which is none: it reads a status the core thread publishes after every job and poll, so it answers while a flash job or a long Tcl script holds the core. Waiting (`wait_state`, the rest of `halt`) happens on the API's own threads, not on the core thread. Memory transfers are limited to 64 KB per call. The API subscribes to the core events once and drops events for slow stream clients. With no API client connected, the only extra work is one thread that receives and drops the core events. `load_symbols` runs on an API thread, never on the core thread: loading a large ELF takes seconds and would otherwise freeze run control. With no DAQ session open the sampler costs one `Option` comparison per loop iteration; while one is open, sample decoding happens on a thread per session, so the core thread only moves bytes. The core loop always sleeps: it never busy-waits for a DAQ deadline, and the sampler corrects its own rate instead, so 1 kHz costs ~8 % of a core. A point that is due when the run-state poll runs is read by the poll's own batch instead of costing a second round trip. `cargo build --no-default-features` builds the server without the API (no tokio/axum).
-
-**Security.** On this machine there is no authentication; other machines need the hub's token (see [Remote use](#remote-use)). Workers bind to loopback only. Requests with an `Origin` header from other sites are rejected by the hub and the workers, so a web page cannot drive the debugger. The DAQ WebSocket upgrade goes through the same check, which matters more there: browsers exempt WebSocket from CORS entirely, so the `Origin` check is the only defence. A local client can still start a sustained high-rate read loop on the probe; the caps below and the "no socket, no sampling" rule bound it. The core thread is never busy-waited, so the worst case is probe traffic and one batch of added latency, not a pinned CPU.
-
-Python ([python/](../python)): `pip install -e python`, then:
+[python/](../python): `pip install -e python`, then:
 
 ```python
 from aurix_dbg import Client
@@ -204,7 +238,7 @@ dbg.end()                               # remove this client's breakpoints, rele
 
 ### Variables by name
 
-Globals can be browsed, read and written by name over REST and MCP, without a VS Code session:
+Browse, read and write globals by name over REST and MCP, without VS Code:
 
 ```text
 GET /api/v1/info                                            liveness probe
@@ -222,22 +256,23 @@ print(dbg.evaluate(expression="g_motor.speed_rpm").value)
 dbg.write_variable(expression="g_motor.mode", value="MODE_RUN")
 ```
 
-- **Browsing.** `list_globals` matches a case-insensitive glob (`*`, `?`) against the whole name of every global of the loaded symbols and returns one page, sorted by name; `total` counts all matches. The sorted list is built once per symbol set, so a search over 10^5 globals is one pass over the names, and only the page's types are looked up. `symbol_children` lists struct and union members (those of an anonymous member lifted to where C finds them) and array elements, paged the same way. Pointers are not followed: their target can move, so evaluate `*p` or `p->x` instead.
-- **Every item says how to use it:** `expression` to pass to the other operations and to a DAQ point, `class` (`uint`, `int`, `float`, `bool`, `enum`, `pointer`, `array`, `struct`, `union`, `function`, `unknown`), `size`, `address`, `has_children`, and `sampleable` - a DAQ point streams it as a typed value (a scalar of at most 8 bytes) rather than hex.
-- **An expression names exactly one variable.** Two `static` variables of the same name in different files, or one in the bootmanager ELF as well, are found by name in a fixed order. The ones the name does not find get a symbol reference such as `${E0/GV:12}` as their `expression`, which `evaluate`, `write_variable`, `symbol_children` and DAQ points all accept.
-- **The evaluator is the one VS Code uses** (TCF Expressions), without a stack frame: globals, statics, members, elements, casts and arithmetic, while the cores run. With `frame`, on a halted core, it evaluates in that stack frame instead (see [Call stack](#call-stack-and-code-locations)).
-- **Core-local RAM needs its core.** A variable linked to the core-local alias (`0xD000_0000` DSPR, `0xC000_0000` PSPR) exists once per TriCore core, and on the system bus the alias means nothing. Which copy an expression means:
-  - a trailing **`@N`** (core ID, as in a Live Watch) names it: `CRASH_state@2`, `g_motor.speed@1`, `${E0/GV:12}@2`. `@` cannot occur in C, so the suffix is unambiguous. It is allowed on any expression; on memory that is not core-local it only selects that core's symbols. `@hsm` evaluates for the HSM. An `@N` that names no TriCore core is `not_found`, one that contradicts `target` a `bad_request`;
-  - otherwise, if the ELF is **assigned to exactly one core**, that core's: the plain name works. A file is assigned with `load_symbols(files=["cosi.elf@0"])` (`@N,M` for several), as `symbolFiles` does in VS Code; `info` lists it as `local_cores`. Loading a file without the suffix clears its assignment;
-  - otherwise (assigned to several cores, or to none) there is **no single variable**, and the bare name is refused rather than guessed: `` `CRASH_state` is in core-local RAM (0xD0037E8A) and cosi.elf is not assigned to a single core; use `CRASH_state@0`, `CRASH_state@1` or `CRASH_state@2` `` (the file's cores if it has several, else every TriCore core). `list_globals` lists such a variable as a group, `per_core: true` with no `address` and `sampleable: false`; its `symbol_children` are the copies, `core 0` = `CRASH_state@0` and so on, each with its type and address. A struct copy's members keep the suffix: `g_s@2` has `g_s.a@2`.
-
-  `target` selects symbols and the HSM/MCS memory view, not the copy. Every `address` reported is the system-bus one: `CRASH_state@1` at `0xD0000100` is at `0x60000100`. A VS Code Live Watch is unchanged: it has a core, the one it evaluates for.
-- **Values are decoded as DAQ decodes them:** `value` is a number, a bool, an enumerator name, `nan`/`inf`/`-inf`, or hex for aggregates and anything over 8 bytes, with the bytes as read in `raw_hex`. A bit field reads its storage unit and reports `bit_offset` and `bit_size`.
-- **Writes** take a number, `true`/`false`, an enumerator name, or a decimal or `0x` string (exact for 64-bit values, which a JSON number is not); a struct or array takes its bytes as hex. The value is range-checked against the type or bit field, a bit field is merged into its storage unit, and the variable is read back. Connected VS Code clients get `Memory.memoryChanged`.
-- **LMU and DLMU are accessed at their non-cached alias.** Globals linked to the cached segment (`0x9000_0000`..`0x97FF_FFFF`) are read and written at the same offset in segment `0xB`, on every path (REST, MCP, Python, TCF memory and variables, the Tcl memory commands, DAQ): on a TC377 a debugger write to `0x9…` is dropped and the board resets a few seconds later (bus error, SMU reaction). Reported addresses stay the linked ones, and watchpoints still trigger on them, as the cores store through `0x9`. The miniMCDS trace RAM at `0x9800_0000` and PFLASH (`0x8`/`0xA`) are accessed where they are.
-- **Errors:** `not_found` (404) without symbols, for an unknown name or an `@N` that names no TriCore core, `bad_request` (400) for an expression that does not parse, a value that does not fit, or core-local RAM that needs an `@N`, `memory` (422) when the target memory cannot be read.
-- **`info`** is what a client polls to see that the server is up: `api_version` is an integer raised whenever an operation or field is added or changed, `core_lag_ms` the time since the core thread last finished a job or poll (it grows while one long operation holds it), and `symbols_loading` is set while `load_symbols` parses an ELF.
-- Query parameters are URL-encoded as usual; note that `+` in an expression must be sent as `%2B`, or it arrives as a space.
+- **`list_globals`:** case-insensitive glob (`*`, `?`) over the full name of every global; one page sorted by name; `total` counts all matches.
+- **`symbol_children`:** struct/union members (members of anonymous members lifted up, as in C) and array elements, paged. Pointers are not followed: evaluate `*p` or `p->x`.
+- **Each item** has `expression` (pass it to the other operations and to DAQ points), `class` (`uint`, `int`, `float`, `bool`, `enum`, `pointer`, `array`, `struct`, `union`, `function`, `unknown`), `size`, `address`, `has_children`, `sampleable` (DAQ streams it as a typed value: a scalar of at most 8 bytes).
+- **Same name twice** (statics in different files, or in a bootmanager ELF too): the name finds one in a fixed order; the others get a symbol reference like `${E0/GV:12}` as `expression`, accepted by `evaluate`, `write_variable`, `symbol_children` and DAQ points.
+- **Evaluator:** the one VS Code uses: globals, statics, members, elements, casts, arithmetic, while the cores run. With `frame` on a halted core it evaluates in that stack frame (see [Call stack](#call-stack-and-code-locations)).
+- **Core-local RAM** (`0xD000_0000` DSPR, `0xC000_0000` PSPR alias) exists once per TriCore core. Which copy an expression means:
+  - a trailing **`@N`** (core ID) names it: `CRASH_state@2`, `g_motor.speed@1`, `${E0/GV:12}@2`. Allowed on any expression; on other memory it only selects that core's symbols. `@hsm` evaluates for the HSM. An `@N` naming no TriCore core is `not_found`; one contradicting `target` is `bad_request`;
+  - else, if the ELF is **assigned to exactly one core**, that core's copy. Assign with `load_symbols(files=["app.elf@0"])` (`@N,M` for several), as `symbolFiles` does in VS Code; `info` lists it as `local_cores`. Loading a file without the suffix clears the assignment;
+  - else the bare name is refused with a message listing the `@N` choices. `list_globals` shows such a variable as a group (`per_core: true`, no `address`, `sampleable: false`); its `symbol_children` are the copies (`core 0` = `CRASH_state@0`, …). Members keep the suffix: `g_s@2` has `g_s.a@2`.
+  - `target` selects symbols and the HSM/MCS memory view, not the copy.
+  - Reported addresses are system-bus addresses: `CRASH_state@1` at `0xD0000100` is at `0x60000100`.
+- **Values:** a number, a bool, an enumerator name, `nan`/`inf`/`-inf`, or hex for aggregates and anything over 8 bytes; `raw_hex` has the bytes as read. A bit field reads its storage unit and reports `bit_offset`, `bit_size`.
+- **Writes** take a number, `true`/`false`, an enumerator name, or a decimal or `0x` string (exact for 64-bit values); a struct or array takes hex bytes. Range-checked against the type or bit field, bit fields merged into their storage unit, read back. VS Code gets `Memory.memoryChanged`.
+- **LMU/DLMU** globals linked to the cached segment (`0x9000_0000`..`0x97FF_FFFF`) are accessed at the same offset in segment `0xB` on every path (REST, MCP, TCF, Tcl memory commands, DAQ): a debugger write to `0x9…` is dropped and can reset the board. Reported addresses stay the linked ones; watchpoints trigger on them. The miniMCDS trace RAM (`0x9800_0000`) and PFLASH (`0x8`/`0xA`) are accessed as linked.
+- **Errors:** `not_found` (404): no symbols, unknown name, or `@N` naming no TriCore core. `bad_request` (400): expression does not parse, value does not fit, or core-local RAM needs `@N`. `memory` (422): target memory unreadable.
+- **`info`:** `api_version` (integer, raised when an operation or field changes), `core_lag_ms` (time since the core thread last finished a job; grows while a long operation runs), `symbols_loading`.
+- URL-encode query parameters: `+` must be sent as `%2B`.
 
 ### Call stack and code locations
 
@@ -248,10 +283,11 @@ GET /api/v1/targets/tc37x.cpu0/locals?frame=1               list_locals
 GET /api/v1/expressions?expression=buf.len&target=tc37x.cpu0&frame=1   evaluate in a frame
 ```
 
-- **`stack_trace`** returns the frames VS Code shows, top frame first, from the same unwinder and cache: TriCore from the CSA chain, the HSM from the Cortex-M prologues, a GTM MCS channel with at most two frames, the SCR with one. Each frame has its `pc` (the return address for caller frames), `sp` and `return_address` where the core has them, and a `location` (function, offset, file, line) once symbols are loaded. A caller frame's location is that of its call: the return address can already lie on the next line, or past the end of the calling function. While VS Code shows the core at a trace row, the frames are the replay's (`replay: true`). The target must be halted (`not_halted`), and not in a source-level step of VS Code (`busy`).
-- **The target state carries the location.** `state`, `halt`, `step`, `resume`, `wait_state`, `targets` and `reset` add a `location` to a halted target whose PC the symbols describe. It costs a symbol lookup and no target access. It is left out while symbols are loading, rather than waiting for them.
-- **Locals and parameters.** `list_locals` lists those of a frame (default 0, the top one) with their values, as the VS Code Variables view does, a shadowed outer declaration left out; a local the debug information gives no location for at the frame's PC has an `error` instead of a value. `evaluate`, `write_variable` and `symbol_children` take a `frame` (with `target`, without `@N`) and then resolve names as the VS Code Watch view with that frame selected: the frame's locals first, then the globals. A caller frame's registers are the ones its CSA saved, so they read correctly but cannot be written: a register local can only be written in the top frame, which VS Code hears of as a register change. A local on the stack can be written in any frame.
-- **`lookup_address`** is addr2line over the loaded symbols: the function, offset and line of code at an address (`return_address: true` looks up the call before a saved A11 or LR), and the global or static variable data there lies in, with the offset into it. It reads no target memory. Addresses are as linked, so a variable linked at the core-local alias is found by its `0xD000_0000` address.
+- **`stack_trace`:** the frames VS Code shows, top first. TriCore from the CSA chain, HSM from Cortex-M prologues, GTM MCS channel up to two frames, SCR one. Each frame: `pc` (return address for callers), `sp`, `return_address` where available, `location` (function, offset, file, line) with symbols. A caller's location is that of its call. While VS Code shows the core at a trace row, the frames are the replay's (`replay: true`). Needs a halted target (`not_halted`) not in a VS Code source step (`busy`).
+- **Location in state results:** `state`, `halt`, `step`, `resume`, `wait_state`, `targets` and `reset` add `location` for a halted target whose PC the symbols describe (no target access; left out while symbols load).
+- **`list_locals`:** locals and parameters of a frame (default 0) with values, as the VS Code Variables view; shadowed outer declarations left out. A local without a location at the frame's PC has an `error`.
+- **`frame` on `evaluate`, `write_variable`, `symbol_children`** (with `target`, without `@N`): names resolve as in the VS Code Watch view: frame locals first, then globals. Register locals can be written only in the top frame; stack locals in any frame.
+- **`lookup_address`:** addr2line over the loaded symbols: function, offset and line at an address (`return_address: true` looks up the call before a saved A11 or LR), and the variable the address lies in, with offset. No target access. Addresses as linked (core-local variables by their `0xD000_0000` address).
 
 ### Peripheral registers
 
@@ -265,29 +301,46 @@ PUT  /api/v1/peripherals/STM0.CMCON.MSIZE0/value  {"value": 31}   write_peripher
 GET  /api/v1/svd/definitions                           the peripheral viewer's definitions (VS Code)
 ```
 
-- **The description** is the device's SVD file as bundled with the extension (`svd/` next to the worker; `hub install` copies it), with its extra files merged (the TC3xx HSM and SCR). Without `load_svd`, the first peripheral operation loads the one of the chip the target configuration names (`tc37x.cpu0` -> `TC37x`, `tc37x_ext` -> `TC37xEXT`); VS Code loads the launch configuration's `device`. `load_svd` with a `file` takes an SVD file of your own. One description per session; converting takes 0.3 s (TC37x) to 1 s (TC4Dx), see `crates/svd`.
-- **Paths** name a peripheral, cluster, register or field, case-insensitively, with arrays named as the SVD names their copies (`STM0.CMP[0]`). `describe_peripheral` gives addresses, sizes, access, reset values, fields and their named values without touching the target, paged for large peripherals.
-- **Reading** reads only the registers the description declares, each at its own width, adjacent ones in one access: gaps are never read, as reserved addresses can raise bus errors and SMU alarms. Fields are decoded with their value names. Registers whose reading has a side effect are skipped unless `force`: an SVD `readAction`, or a debug view next to the register. Infineon's files declare no `readAction`, but a FIFO or result register has a twin described as a debug view that reads without popping or clearing it (`ASCLIN0.RXDATA` / `RXDATAD`, `QSPI0.RXEXIT` / `RXEXITD`, `EVADC.G0RES[0]` / `G0RESD[0]`). Write-only registers are skipped too. A register that cannot be read has its own `error`; the rest are still read. HSM peripherals and the SCR's SFRs go through their core, as with `read_memory`.
-- **Writing** a field reads the register, merges the field and writes it back, with the register's other `modifiedWriteValues` fields (write 1 to clear, ...) set to the value that leaves them alone. A field takes a number or a value name. Read-only registers and fields are refused. The register is read back, and a value that did not stick is reported in `note`: ENDINIT and Safety ENDINIT protected registers ignore writes without the unlock sequence, which this API does not do (it would have to service the watchdog). Writes need the control lease when another client holds it, and VS Code refreshes its views. Over TAS a protected write is refused outright (an access error, with that hint); the board keeps running.
-- **What the SVD says is trusted.** Infineon's TC3xx files declare the port output modification registers (`Pnn.OMR`, `OMSR`, `OMCR`) read-only although they are write-only, so `write_peripheral` refuses them; write them with `write_memory`. The SCR's SFRs have no host address: in a session without an SCR target they are refused, not read on the system bus (where their address would be segment 0); the same holds for HSM addresses without an HSM target.
+- **Description:** the device's SVD file bundled with the extension (`svd/` next to the worker; `hub install` copies it), merged with its extra files (TC3xx HSM and SCR). One per session.
+  - Without `load_svd`, the first peripheral operation loads the chip the target configuration names (`tc37x.cpu0` → `TC37x`, `tc37x_ext` → `TC37xEXT`).
+  - VS Code loads the launch configuration's `device`.
+  - `load_svd` with `file` loads your own SVD file.
+- **Paths** name a peripheral, cluster, register or field, case-insensitive; arrays as the SVD names their copies (`STM0.CMP[0]`). `describe_peripheral` gives addresses, sizes, access, reset values, fields and value names without touching the target (paged).
+- **Reading:**
+  - only declared registers, each at its width, adjacent ones in one access; gaps are never read (reserved addresses can raise bus errors and SMU alarms);
+  - fields decoded with value names;
+  - skipped unless `force`: registers with a read side effect (SVD `readAction`, or a debug-view twin such as `ASCLIN0.RXDATA` / `RXDATAD`, `QSPI0.RXEXIT` / `RXEXITD`, `EVADC.G0RES[0]` / `G0RESD[0]`) and write-only registers;
+  - an unreadable register has its own `error`; the rest are still read;
+  - HSM peripherals and SCR SFRs go through their core.
+- **Writing a field:** read, merge, write back; other `modifiedWriteValues` fields (write 1 to clear, …) are set to the neutral value. A field takes a number or a value name.
+  - Read-only registers and fields are refused.
+  - Read back; a value that did not stick is reported in `note`. ENDINIT / Safety ENDINIT protected registers ignore writes (this API does not do the unlock sequence). Over TAS a protected write is refused with an access error.
+  - Needs the control lease when another client holds it; VS Code refreshes its views.
+- **The SVD is trusted:** Infineon's TC3xx files declare `Pnn.OMR`, `OMSR`, `OMCR` read-only (they are write-only), so `write_peripheral` refuses them; use `write_memory`. SCR SFRs are refused in a session without an SCR target; HSM addresses without an HSM target.
 
 ### Watchpoints
 
-`add_watchpoint` takes an `address` (with `length`, default 4) or an `expression`, a `target` (default: every TriCore core) and an `access` (`write`, `read`, `access`). VS Code's data breakpoints are the same breakpoints, set through TCF with `AccessMode` and `Size`. An expression is resolved on each core from that core's symbols, to the object's address and the size of its type (a bit field: its storage unit). It is resolved again when other symbols are loaded, so a rebuilt ELF moves the watchpoint with the variable.
+`add_watchpoint`:
+- `address` (with `length`, default 4) or `expression`;
+- `target` (default: every TriCore core);
+- `access`: `write`, `read`, `access`;
+- `condition`: as for breakpoints (see [Shared session](#shared-session)).
 
-The TriCore data triggers decide what is caught. These rules were measured on a TC38x:
-- **Start address only.** A trigger compares the address an access starts at. A watchpoint wider than one byte is therefore a range over two of the core's 8 hardware events (shared with breakpoints): it catches every access that starts inside the object, a byte store to its middle included. An access that starts below the object and reaches into it is not caught, e.g. a 64-bit copy of the struct that contains it.
-- **After the access.** The core halts with reason `watchpoint` once the store is done, with the PC at the next instruction.
-- **Core-local RAM.** The local alias (`0xD000_0000`) and the global address of the same DSPR never match each other: the trigger sees the address as the core issues it. So a variable in core-local RAM is watched at its local address on its own core and at its global address on the others; `CRASH_state@2` picks core 2's copy. A variable of an ELF that runs on several cores means each core's own copy.
+An expression resolves on each core from its symbols, to the object's address and type size (bit field: its storage unit), and again when other symbols are loaded, so a rebuilt ELF moves the watchpoint with the variable. VS Code data breakpoints are the same breakpoints (TCF `AccessMode`, `Size`).
+
+What the TriCore data triggers catch:
+- **Start address only:** an access is caught when it starts inside the object (a byte store into its middle included). An access that starts below and reaches into it (e.g. a 64-bit copy of the enclosing struct) is not.
+- **Cost:** a watchpoint wider than one byte uses two of the core's 8 hardware events (shared with breakpoints).
+- **After the access:** the core halts with reason `watchpoint` after the store, PC at the next instruction.
+- **Core-local RAM:** the local alias (`0xD000_0000`) and the global address of the same DSPR never match each other. A core-local variable is watched at its local address on its own core and at its global address on the others; `CRASH_state@2` picks core 2's copy.
 - The HSM watches with its DWT, by address range. MCS channels have no watchpoints.
-
-A `condition` works as for breakpoints (see [Shared session](#rest-mcp-and-python-api)).
 
 ### Periodic sampling (DAQ)
 
-`ws://127.0.0.1:3001/api/v1/sessions/{session}/daq` (or `/api/v1/session/daq`) samples variables while the target runs, **each at its own rate**, and streams their decoded values. The sampler is host-side polled reads, merged into one batch per tick on the core thread. A point in `"mode":"trace"` is recorded by the chip instead: every write into it, with target time, through the [miniMCDS](#on-chip-trace-minimcds).
-
-**Sampling runs only while the socket is open.** Configuration travels on the same socket, so a session cannot outlive its client: close the socket, or crash, and the session is removed and the target is left alone. There is no reaper and no idle timeout.
+`ws://127.0.0.1:3001/api/v1/sessions/{session}/daq` (or `/api/v1/session/daq`) samples variables while the target runs, **each at its own rate**, and streams decoded values.
+- Host-side polled reads, merged into one batch per tick.
+- A point in `"mode":"trace"` is recorded by the chip instead (every write, with target time): see [DAQ trace points](#daq-trace-points).
+- **Sampling runs only while the socket is open.** Close the socket (or crash) and the session is removed. No idle timeout.
 
 Client frames (`id` correlates the reply):
 
@@ -303,9 +356,12 @@ Client frames (`id` correlates the reply):
 {"op":"pause","id":6}                 {"op":"resume","id":7}   {"op":"status","id":8}
 ```
 
-A point gives exactly one of `expression` or `address` (with `size`), and at most one of `rate_hz` or `interval_us`. `decode: false` streams raw hex. `target` uses that core's symbols; on the HSM or an MCS channel it also reads through that core's view (HSM-private memory, MCS program RAM) instead of the system bus, and those points cannot share the batch, so keep them slow.
-
-**Core-local RAM is sampled over the system bus.** An `expression` resolves exactly as in [`evaluate`](#variables-by-name), `@N` and the rules for core-local RAM included: `CRASH_state@1` at `0xD0000100` becomes a read of `0x60000100`, which batches with every other point at full speed instead of going through core 1's view. The `config` frame reports that translated `address`. A bare name that needs an `@N` gets the same message as `evaluate` as its point `error`. A TriCore's view differs from the system bus only in that alias, so a raw `address` with a TriCore `target` is translated for that core and read over the bus as well.
+Points:
+- exactly one of `expression` or `address` (with `size`); at most one of `rate_hz` or `interval_us`;
+- `decode: false` streams raw hex;
+- `target` uses that core's symbols. On the HSM or an MCS channel it also reads through that core's view (HSM-private memory, MCS program RAM); those points cannot share the batch, so keep them slow;
+- an `expression` resolves as in [`evaluate`](#variables-by-name), including `@N`. Core-local RAM is read over the system bus (`CRASH_state@1` at `0xD0000100` → `0x60000100`), batched with the other points; `config` reports the translated `address`. A raw `address` with a TriCore `target` is translated the same way;
+- a `pacing` key is rejected.
 
 Server frames:
 
@@ -326,106 +382,34 @@ Server frames:
 {"type":"error","id":4,"code":"bad_request","message":"..."}
 ```
 
-Samples are columnar: `points[i]` pairs with `values[i]`, and a tick carries only the points that were due. `t_us` is microseconds since `start_wall_ms`, taken after the batch returns.
+Samples are columnar: `points[i]` pairs with `values[i]`; a tick carries only the points that were due. `t_us` = microseconds since `start_wall_ms`, taken after the batch returns.
 
-- **Rates** are rounded up to a 100 µs grid and every point reports the period it was granted. The grid is that fine so ordinary rates come out exact: on a 1 ms grid, 400 Hz (2500 µs) would have been pulled down to 333 Hz.
+**Rates and timing:**
+- Rates are rounded up to a 100 µs grid; each point reports the period it got.
+- A rate is a floor: you get **at least** the requested rate. Spacing varies (p95 ~3.5 ms at 1 kHz). **Use `t_us`; do not assume a fixed step.**
+- Ceiling: about 1.5 kHz (the Windows sleep quantum is ~0.5 ms).
+- Host timestamps track the target's STM to within 25 ppm.
+- `daq` on the console shows per point: period asked for, period scheduled, interval achieved (steady ticks), interval delivered (mean over all samples, stalls included). `delivered` is what a client receives.
+- `delivered` near 15600 µs: something overrides the timer resolution (the server opts out of Windows power throttling at startup).
+- Due points ride in the run-state poll's batch (`daq merge 1`, default; `daq merge 0` turns it off). The poll (`polling_period`, default 10 ms) adds jitter, not rate loss. Raising `polling_period` tightens spacing but delays halt detection.
 
-- **A rate is a floor, not a grid.** You get **at least** what you asked for; individual samples land where they land.
+**What a tick costs is bus accesses, not points:**
+- miniWiggler: ~123 µs for the first access, ~57 µs for each further one, well under 1 µs per extra byte inside a read.
+- The sampler merges points across holes up to `daq gap <bytes>` (default 96 B, BlueBox 512 B). Never in peripheral space (`0xF0000000`+), where over-reading can clear a flag; adjacent points still merge there. `daq gap 0`: adjacent only.
+- **Lay sampled variables out together.** At 1 kHz: ~12 scattered points, ~40 points 32 B apart, 128 adjacent words.
+- Point count costs stream CPU (decoding, JSON), not sampling quality.
+- Other clients see at most one DAQ batch of added latency.
+- A stall (flashing, long Tcl script, reset) is reported as a `gap`.
 
-  A sleep cannot resolve better than the OS timer. On Windows that is ~512 µs whatever you ask for — a request of 500 µs, 700 µs or 900 µs all return after ~1025 µs, and `timeBeginPeriod(1)` does not change it. Aiming a sleep straight at a 1 ms deadline therefore always lands late and delivers ~20 % under the request.
+**Modes and values:**
+- `mode`: `every_tick` (default) or `on_change`. On-change saves stream bandwidth, not probe traffic (still read every period). The first read is always sent; the baseline is dropped on a device reset and on `resume`. A quiet point sends nothing; `resend_after_us` sets a floor. Bit fields compare only their own bits.
+- Encodings from the DWARF type: `int`, `uint`, `float`, `bool`, `enum` (enumerator name, or the number if none matches), `hex` for aggregates, unknown types and anything over 8 bytes. Non-finite floats are `"nan"`, `"inf"`, `"-inf"`. A `uint` above 2^53 loses precision in `JSON.parse`: use `decode: false` for 64-bit counters read by JavaScript.
+- Only globals and statics; frame locals are rejected. Names need symbols (`load_symbols`, or a VS Code debug session). A point that fails to resolve gets `error` and `interval_us: 0`; the rest runs.
 
-  So the sampler does not aim at the deadline. It schedules on a *shorter* period than you asked for and corrects that period from the rate it actually achieves. The correction needs no model of where the time went — timer overshoot, probe round trip, a run-state poll that got in the way all show up as one number. Measured at 1 kHz: **~990 samples/s for ~8 % of a core**. Samples land where they land (p95 ~3.5 ms, max ~7 ms at 1 kHz), but each carries its own timestamp, so the *placement* is known even when the *spacing* varies. **Do not assume a fixed step between consecutive values** — use `t_us`.
-
-  **What the correction costs: about 4 % of a core.** Aiming a sleep straight at the deadline with no correction delivers 684 samples/s for 7 %; correcting delivers ~990 for ~11 %.
-
-  **Over-delivering does not make it cheaper.** The core loop flattens out around 9 % whatever the rate, but decoding and writing each sample does not, so total CPU tracks the delivered count: 512 samples/s → 6 %, 1004 → 10 %, 1303 → 13 %, 1859 → 17 %. The cheapest way to satisfy "at least 1 kHz" is therefore to land just above it, which is what the controller does; asking for far more only costs more.
-
-  **The ceiling is ~1.5 kHz**, because a sleep of *any* non-zero length costs a full ~512 µs quantum. Above that the delivered rate stops tracking the request; the probe itself would go to ~6 kHz.
-
-  There used to be a second mode, `pacing: exact`, which held the requested period by busy-waiting the core thread below 3 ms. It was removed: measured at 1 kHz it burned 64–68 % of a core to deliver **fewer** samples (868/s) than the sleeping scheduler does at 8 %, and at 100 Hz and 10 Hz the two were indistinguishable. What it bought — evenly spaced samples and the 1.5–6 kHz band — was never worth a busy core. A `pacing` key in a `subscribe` or `add` frame is now rejected rather than ignored, so a script that still sets it is told.
-
-  `daq` on the console shows, per point, the period asked for, the period the scheduler settled on, the interval it *achieved* over its steady ticks, and the interval actually *delivered* — the mean over every sample since the first, stalls included. Only the last is what a client receives: `achieved` leaves stalls out by design, so a sampler that keeps losing whole periods still looks on time there.
-
-- **Windows 11 can take the 1 ms timer away.** A process that leaves its power throttling to the system (every process, unless it opts out) may have its `timeBeginPeriod` request ignored whenever Windows decides it is background work — and a server started hidden by VS Code is exactly that. The request then holds while the server is busy and lapses when it goes quiet, and every wait rounds up to the default 15.6 ms. Seen on a TC38x: a 1 kHz point delivered ~190 samples/s, in bursts of three with a 15.6 ms hole after each, while `sleep 1` on the console still took 1.5 ms. The server therefore opts out at startup (`SetProcessInformation(ProcessPowerThrottling)` with `IGNORE_TIMER_RESOLUTION` and `EXECUTION_SPEED` in the control mask and a zero state): its timer requests are always honoured and it never runs as EcoQoS. If `delivered` sits near 15600 µs anyway, something else is overriding it.
-
-- **Timestamps are trustworthy even when spacing is not.** Checked against the target's own STM clock (`0xF0001010`, 10 ns/tick) sampled in the same batch: the host timestamps track it to within 25 ppm over a run.
-
-- **The run-state poll is merged into the sampler.** `poll_all` of a 20-target configuration (3 cores, HSM, 16 MCS channels) runs every `polling_period` (10 ms) and holds the core thread for ~1.4 ms while its batch is in flight. Any DAQ point that is already due when it starts is queued into *that* batch rather than costing a second round trip right behind it. Measured at 1 kHz, `daq merge 0` versus `1` back to back:
-
-  | 1 kHz | merge off | merge on |
-  |---|---|---|
-  | delivered | 837–879 samples/s | **989–996 samples/s** |
-  | core thread | 7–9 % | 8–10 % |
-
-  At 100 Hz and 10 Hz it makes no measurable difference either way: a DAQ deadline rarely lands inside a poll, and 1.4 ms is a small part of a 10 ms period.
-
-  The DAQ reads are queued *after* the run-state reads on purpose. A PL0 packet marks every access after a failing one "consequential", so a bad DAQ address can never blank the poll it is riding in — and DAQ read errors never reach `mark_poll_failed`. `daq merge 0` on the console turns it off for a comparison.
-
-  **What is left is the poll's own duration**, and it shows up as jitter rather than as a lower rate — the controller schedules around it. Sweeping `polling_period` at 1 kHz:
-
-  | `polling_period` | delivered | p95 spacing |
-  |---|---|---|
-  | 10 ms (default) | 985 samples/s | 3525 µs |
-  | 20 ms | 987 | 2501 µs |
-  | 50 ms | 999 | 2085 µs |
-  | 200 ms | 1000 | 2054 µs |
-
-  The rate needs no tuning — it is within 1.5 % of the request at every setting. Raising `polling_period` only tightens the spacing, and it plateaus around 2 ms because the residual there is the ~512 µs sleep quantum, not the poll. The cost of raising it is that a halt takes correspondingly longer to be noticed by every frontend, so it is left at 10 ms.
-
-- **What a tick costs is bus accesses, not points.** Timed flat out on a TC377 over a miniWiggler, one tick of N separate 4-byte reads against one read of N words:
-
-  | N | N scattered reads | µs per access | one block of N words | µs per word |
-  |---|---|---|---|---|
-  | 1 | 123 µs | — | 123 µs | — |
-  | 8 | 525 µs | 57.4 | 124 µs | 0.12 |
-  | 16 | 983 µs | 57.3 | 126 µs | 0.18 |
-  | 32 | 1969 µs | 59.5 | 149 µs | 0.84 |
-  | 64 | 3957 µs | 60.9 | 196 µs | 1.17 |
-
-  **~123 µs for the first access, ~57 µs for each one after it, and well under a microsecond per extra byte inside a read already being made.** The per-access figure is flat across the probe's 32-reads-per-packet boundary (`daq` prints it), so it is not packet count, not USB turnaround and not anything the host schedules — it is spent inside the probe. Host-side reordering or pipelining cannot recover it; all due reads already travel in one batch, and `tas::client::execute` already keeps 8 packets in flight.
-
-- **Coalescing gap.** Because one avoided access pays for about a hundred bytes, the sampler reads small holes rather than making a second access. `daq gap <bytes>` sets how far it may reach; the default is 96 B. Twelve points, timed flat out:
-
-  | hole between points | gap 0 | gap 96 | |
-  |---|---|---|---|
-  | 4 B | 740 µs | 189 µs | **3.9×** |
-  | 12 B | 735 µs | 235 µs | **3.1×** |
-  | 28 B | 737 µs | 306 µs | **2.4×** |
-  | 60 B | 740 µs | 450 µs | **1.7×** |
-  | 92 B | 739 µs | 598 µs | 1.2× |
-  | 124 B | 753 µs | 756 µs | 1.0× |
-
-  Break-even is a hole of ~105 B, so the default sits just below it and merging can never lose. **The gap is never applied in peripheral space** (`0xF0000000`+), where reading a byte nobody asked for can clear a flag; points that are genuinely adjacent still merge there, because that reads only what was asked for. `daq gap 0` restores the old strictly-adjacent behaviour.
-
-  What this buys at 1 kHz, for variables 32 B apart as a struct would lay them out:
-
-  | points | 32 B apart | 2 KB apart (cannot merge) |
-  |---|---|---|
-  | 12 | 1022 /s | 1011 /s |
-  | 24 | 1013 /s | 579 /s |
-  | 48 | 933 /s | 300 /s |
-
-  So laying the sampled variables out together moves the 1 kHz ceiling from ~12 points to ~40. Past that the limit stops being accesses and becomes bytes: a 96-point span 32 B apart is 3 KB per tick, of which seven eighths is hole. Tight layouts stay far better — 128 *adjacent* words is 512 B and sustains 129 000 values/s.
-
-  A stall that does stop the sampler — flashing, a long Tcl script, a reset — is not hidden: it is counted in periods and reported as a `gap`.
-
-- **Adding points does not cost the sampler.** Per-thread CPU at 1 kHz, raw hex:
-
-  | shape | values/s | core thread | decoder thread | WS runtime |
-  |---|---|---|---|---|
-  | 1 × 4 B | 1 009 | 3.8 % | 0.5 % | 3.3 % |
-  | 16 × 32 B | 16 166 | 3.3 % | 4.6 % | 3.3 % |
-  | 64 × 8 B | 64 874 | 4.8 % | 6.9 % | 2.8 % |
-  | 128 × 4 B | 129 879 | 4.6 % | 8.9 % | 4.3 % |
-
-  **The core thread is flat** at 3–5 % however many points there are — it only moves bytes. Everything that grows is downstream, on the per-session decoder thread and the socket. Typed decoding is not the cost either (`decode: true` is ~1 point of CPU more than raw hex); it is JSON construction. So point count costs stream CPU, never sampling quality.
-
-- **Effect on everyone else.** A REST `read_memory` measured 0.54 ms median with no session, 0.54 ms at 1 kHz, 0.59 ms at 5 kHz, and 1.14 ms with 16 scattered points at 5 kHz — i.e. the worst case adds about one DAQ batch, as intended. The 10 ms run-state poll of a 20-target configuration is *not* the limit either: raising `polling_period` to 100 ms changed the achieved rate by under 10 %.
-- **`mode`** is `every_tick` (default) or `on_change`. **On-change saves stream bandwidth, not probe traffic** — the point is still read every period, because that is how a change is noticed. The first read is always delivered as a baseline, and the baseline is dropped on a device reset and on `resume`, so a client never keeps believing a stale value. A quiet `on_change` point sends nothing at all; set `resend_after_us` if a plot needs a floor on the gap. For a bit field the comparison is masked to the field's own bits, so a neighbour in the same storage word does not trigger it.
-- **Encodings** come from the DWARF type: `int`, `uint`, `float`, `bool`, `enum` (the enumerator name, or the number if it matches none) and `hex` for aggregates, unknown types and anything over 8 bytes. JSON has no NaN, so a non-finite float is the string `nan`, `inf` or `-inf` rather than `null`; a `uint` above 2^53 is exact in the frame but loses precision in `JSON.parse`, so use `decode: false` for 64-bit counters read by JavaScript.
-- **Only globals and statics.** A frame local lives in a register and exists only while the target is halted, so it is rejected at subscribe time. Names need symbols: `load_symbols`, or an open VS Code debug session. A point that fails to resolve gets an `error` and `interval_us: 0`; the rest of the session still runs.
-- **Backpressure and gaps.** Each session has a bounded queue (`queue`, default 256 ticks). A client that falls behind loses the newest messages and is told how many with `overrun`. When a tick does not fit the per-tick budget it is truncated and reported as `stalled`, and the points it drops **rotate**, so the budget is shared instead of permanently starving the highest addresses - which is where the peripherals are. Periods lost to a stall are reported as `gap` and never replayed as a burst. Only an interval longer than **four periods** counts: running a little late every tick is what the scheduler corrects for, not loss. At 1 kHz the run-state poll produces a steady trickle (~14 periods/s per point, which is about the gap between the rate asked for and the rate delivered); a burst means something owned the core thread.
-- **Caps.** 8 sessions, 256 points per session, 1024 bytes per point, and per tick at most 8 KB and two response packets. A tick over budget is truncated and reports `state: stalled`; the skipped points keep their advanced deadline.
+**Backpressure and caps:**
+- Each session has a bounded queue (`queue`, default 256 ticks). A slow client loses the newest messages and gets `overrun`.
+- A tick over budget is truncated and reported as `state: stalled`; dropped points rotate, so no point starves. Lost periods are reported as `gap` (only intervals over four periods), never replayed as a burst.
+- Caps: 8 sessions, 256 points per session, 1024 bytes per point; per tick at most 8 KB and two response packets.
 
 ```python
 from aurix_dbg import Client
@@ -447,25 +431,37 @@ with dbg.daq(("g_motor.speed_rpm", 1000),                # 1 kHz, every tick
 
 ## On-chip trace (miniMCDS)
 
-The TC37x production device has a small trace unit, the **miniMCDS**: 8 KB of trace RAM at `0x98000000` that the chip fills by itself while the core runs. The debugger configures it and reads it over the ordinary DAP connection, so it works with a **miniWiggler** — no ED device and no trace probe. 8 KB is small, so a trace is a window: about 80 µs of unfiltered program flow, about 600 writes of a data trace, much longer when filtered. The register setup and the message format were reverse engineered against winIDEA on a BlueBox (the documentation that describes them is not public); the decoders are checked against those recordings.
+The TC37x production device has a small trace unit: 8 KB of trace RAM at `0x98000000`, filled by the chip while the core runs. The debugger configures and reads it over the normal DAP connection, so it works with a miniWiggler (no ED device, no trace probe). A trace is a window: about 80 µs of unfiltered program flow, about 600 writes of a data trace, longer when filtered.
 
-Two kinds:
+| Kind | Content |
+|---|---|
+| Program trace (CPU0) | Executed instructions, with function, source line and target time. Optionally only inside one function or address range (outside: a gap). |
+| Data trace | Every write into an address range (up to `0x1000` bytes), with value, size and target time. **Only CPU0's stores** are seen. |
 
-- **Program trace** of CPU0: the executed instructions, reconstructed from branch messages and the code in the ELF, with function, source line and target time per instruction. Optionally only inside one function or address range (outside, the trace is off and the result shows a gap).
-- **Data trace**: every write into an address range (up to `0x1000` bytes), with value, size and target time. **Only CPU0's stores are seen**: the MCDS taps CPU0's bus port, so a variable written by another core does not show up.
-
-When it stops:
-
-| `Stop` | Buffer | Keeps |
+| `stop` | Buffer | Keeps |
 |---|---|---|
-| `halt` | ring | the last 8 KB up to the core's halt, whatever halted it (its breakpoint, a debugger halt, another core's halt over trigger line 1); the debugger stops it when it sees the halt |
+| `halt` | ring | the last 8 KB up to the core's halt, whatever halted it (breakpoint, debugger halt, another core's halt over TL1) |
 | `full` | linear | the first 8 KB after arming |
-| `manual` | ring | the last 8 KB before `trace_stop` (nothing is recorded while the core is halted) |
-| a function name | ring | until the PC enters the function (PTU comparator 1; works together with a filter range on comparator 0) |
+| `manual` | ring | the last 8 KB before `trace_stop` (nothing recorded while the core is halted) |
+| a function name | ring | until the PC enters the function (works together with a filter range) |
 
-Time stamps: `tsu` (default) stamps messages with the 150 MHz trace clock (6.67 ns): a program trace gets a stamp every ~160 ns while the core runs, a data trace one per write; `ticks` adds a tick per cycle, exact for every instruction but the buffer fills within milliseconds (a program trace stops the ticks while the core is halted).
+Time stamps:
+- `tsu` (default): 150 MHz trace clock (6.67 ns). Program trace: a stamp every ~160 ns while the core runs; data trace: one per write.
+- `ticks`: a tick per cycle, exact per instruction, but the buffer fills within milliseconds.
 
-**REST/MCP.** `trace_check` (POST `/api/v1/trace/check`) validates a configuration and reports the comparators and events it takes, without touching the target; `trace_arm` arms it; `trace_status` (GET `/api/v1/trace`) reports `{Armed, Owner, Done, Fill, LostByReset, Last}` (`Fill`: how much of the 8 KB holds data, 0 to 1; a ring rises to 1 and stays there after its first lap); `trace_stop` stops it and reads the trace RAM; `trace_read` (GET `/api/v1/trace/read?max=N`) decodes the last recording:
+**REST/MCP:**
+
+| Operation | Route | Does |
+|---|---|---|
+| `trace_check` | POST `/api/v1/trace/check` | Validate a configuration; report comparators and events it needs. No target access. |
+| `trace_arm` | | Arm it. |
+| `trace_status` | GET `/api/v1/trace` | `{Armed, Owner, Done, Fill, LostByReset, Last}`. `Fill` 0..1; a ring stays at 1 after its first lap. |
+| `trace_stop` | | Stop and read the trace RAM. |
+| `trace_read` | GET `/api/v1/trace/read?max=N` | Decode the last recording. |
+| `trace_auto` | POST `/api/v1/trace/auto` | `{"config": {...}}` (null ends it): arm whenever the traced core is resumed (not stepped), read at the halt. A trace in use by another owner or still recording is left alone. |
+| `trace_insns` | GET `/api/v1/trace/insns?from=&count=` | Rows with registers (below). |
+| `trace_regs` | GET `/api/v1/trace/regs?at=` | All registers and the call stack after a row. |
+| `trace_find` | | Search by address, register value (`d15=0xC`), register write (`a4 changes`) or text. |
 
 ```json
 {"core":0,"kind":"program","ranges":[{"function":"Os_Task_10ms"}],"stop":"halt","timestamps":"tsu"}
@@ -473,24 +469,44 @@ Time stamps: `tsu` (default) stamps messages with the 150 MHz trace clock (6.67 
 {"kind":"program","ranges":[{"function":"Fee_MainFunction"}],"stop":"Os_Task_5ms"}
 ```
 
-(The TCF service `AurixTrace` takes the same object with capitalized keys, `{"Stop":{"Function":…}}` for a function.)
+TCF service `AurixTrace` takes the same object with capitalized keys (`{"Stop":{"Function":…}}` for a function).
 
-A program trace reads back as `Functions` and `Files` tables and `Steps` rows `[addr, t_ns, function, file, line]` (indices into the tables; gaps are objects `{"Gap":"trace_off"|"lost"|"no_code"|"inconsistent"|"untraced","T":…}`), the newest `max` rows; a data trace as `Events [{T, Addr, Value, Size, Access, Symbol}]`. Times are nanoseconds from the first time stamp of the recording, `StartNs` is that stamp on the trace clock.
+Results:
+- Program trace: `Functions` and `Files` tables and `Steps` rows `[addr, t_ns, function, file, line]` (indices into the tables), the newest `max` rows. Gaps are `{"Gap":"trace_off"|"lost"|"no_code"|"inconsistent"|"untraced","T":…}`.
+- Data trace: `Events [{T, Addr, Value, Size, Access, Symbol}]`.
+- Times are ns from the first time stamp; `StartNs` is that stamp on the trace clock.
+- A stop-on-halt trace reaches the halt (`ReachesHalt`; `Halt` gives the halt point with function and line). If data was lost, the flow ends with an `untraced` gap.
 
-**Arm on every run.** `trace_auto` (POST `/api/v1/trace/auto`, `{"config": {...}}`, null to end it; Tcl `mcds auto -program -stop halt`, `mcds auto off`; TCF `AurixTrace auto {Config}`) arms the configuration whenever the traced core is run (a resume, not a step) and reads the recording when the core halts, so every halt has its trace (and replay) at once. A trace that another owner uses or that is still recording is left alone; `trace_status` reports the setting as `Auto` and each recording's `stopped_ms`.
+**Instruction trace with registers** (`trace_insns`, `trace_regs`):
+- Rows: instruction text, source location, call depth, branch outcome, registers written, memory accesses.
+- Registers are rebuilt from the halt registers, backwards and forwards through registers and memory. Each has `M` (`exact`, `mem` or null = unknown) and `Why` (provenance).
+- `mem`: read from the device as it is at the halt (another bus master may have changed it). Program flash comes from the ELF. Peripheral addresses are never read. Memory is used only while the core still stands where the recording stopped.
+- Unknown: results of instructions the model does not know (mostly FPU), and everything after a gap (so a filtered trace gives few values).
+- TCF: `AurixTrace insns|regs|find`; `replay {At}` / `replayMove {Kind}` show a trace row as the core's stack, registers and locals (VS Code's Step Back).
 
-**Instruction trace with registers.** `trace_insns` (GET `/api/v1/trace/insns?from=&count=`) returns the last program recording as rows: instruction text, source location, call depth, branch outcome, the registers each instruction wrote and its memory accesses. `trace_regs` (GET `/api/v1/trace/regs?at=`) returns all registers after a row, each with `M` (`exact`, `mem` or null for unknown) and `Why` (its provenance), and the call stack at that row; `trace_find` searches by address, register value (`d15=0xC`), register write (`a4 changes`) or text. The registers are rebuilt by `mcds::replay` from the halt registers the recording keeps: values spread backwards (operations that can be undone, branch outcomes, `ret` targets) and forwards (constants, operations with known inputs) through the registers and, per byte, through memory. The context save areas carry the upper context across calls and returns, program flash comes from the ELF, and other memory is read from the device as it is at the halt (marked `mem`, because another bus master may have changed it). Peripheral addresses are never read. An instruction the model does not know (mostly FPU instructions) makes its results unknown. A gap in the trace makes every register unknown, so a filtered trace gives few values. Memory at the halt is used only while the core still stands where the recording stopped. Checked on a TC377 against single-stepped registers (every exact value of 377 rows right) and free runs across interrupts; a value from memory that a later branch outcome contradicts is dropped. TCF: `AurixTrace insns|regs|find`, and `replay {At}` / `replayMove {Kind}`, which make the core's stack, registers and locals show a trace row (the VS Code adapter's Step Back).
+**Hardware behaviour:**
+- Leaving a filter range is reported one instruction late (the first instruction outside, then a `trace_off` gap).
+- A data trace stamps reads too: a range the application reads often costs more trace RAM per write.
+- Ring laps: a busy range (e.g. a core's stack) fills the 8 KB in ~3 ms.
+- The last few hundred ns before a halt or manual stop are flushed by the debugger; a DAQ trace flushes after 100 ms without new data.
 
-What the hardware reports, measured on a TC377:
+### Reverse debugging
 
-- **The last 32-byte word stays in the unit.** The MCDS writes the trace RAM in 32-byte words, and the PTU reports a stretch of code only at the next discontinuity. Stopped in hardware at a halt (`trace_done`), the last word, the last few hundred nanoseconds of program flow, never reaches the RAM. So a stop-on-halt trace keeps recording through the halt (nothing is recorded while the core is halted: the time stamps are gated with `dcu_sus`), and when the poll sees the halt the debugger forces a few time stamps to push the last word out (`Plan::flush`) and then stops it. The decoder fills in the straight code from the last report to the halt PC, and a final `ret` whose target was not reported returns to the address its call left. The result reaches the halt (`ReachesHalt`; measured on breakpoints in 10 functions, debugger halts and CPU1 breakpoints); `Halt` gives the halt point with function and line. If it does not (data lost), the flow ends with an `untraced` gap. The same flush runs before every manual stop, and a DAQ trace flushes after 100 ms without new data, so the last write of a quiet variable arrives too.
-- **Leaving a filter range is reported one instruction late:** each exit adds the first instruction outside the range (the callee's entry or the return address), then a `trace_off` gap.
-- **A data trace stamps accesses, not only writes:** a range the application reads often costs more trace RAM per write (12 instead of 5 messages per write measured on a much-read range).
-- **Ring laps.** The stack of a busy core is written ~350,000 times per second: the 8 KB last ~3 ms there.
+`reverse_enable` (POST `/api/v1/reverse/enable`) switches it on for a TriCore core.
+- **Checkpoints:** before every action (run, instruction step, source step, register or memory write; not reset hooks and cfg event handlers) the core's registers and RAM regions are saved, kept as differences.
+- **Regions:** the ELF's allocated writable RAM sections; the core's stacks and CSA by linker symbols (iLLD/HighTec `__USTACK0`/`__USTACK0_END`, `__ISTACK0`, `__CSA0`/`__CSA0_END`; TASKING `_lc_ub_ustack_tc0` …; others: `stack_symbols`, `csa_symbols`); plus `regions`, minus `exclude`.
+- **Going back:** `reverse_back` (`{"granularity": "line"|"instruction"|"action"}`), `reverse_continue`, `reverse_goto` (`{"index", "row"}`) write an earlier state into the halted core, which then really runs from there.
+- **Trace:** while on, the mode owns the miniMCDS (`trace_arm`, `trace_auto`, traced DAQ points refused; `reverse_enable` refused while a manual trace is set up). Every action except instruction steps and writes is recorded from its checkpoint to the halt.
+- **What is restored:** registers that differ; stacks and CSA by difference; other RAM only where the core wrote (from the recording, or the instruction model for a step), else by difference (`ByDifference`, with `Why`). Stores to peripheral registers are listed in `NotUndone`.
+- **A point inside an action:** the checkpoint is restored and the core runs to the row's address as often as the recording says (breakpoints out of the hardware; `max_hits` when the recording lost its start). The new recording and the exact registers are compared with the old (`Diverged`).
+- **Protection:** the restore reads `CPUx_SPR_SPROT_*`, `CPUx_DLMU_SPROT_*` first. Bytes closed to the debugger are never written: in the core's own regions the restore is refused before anything changes; elsewhere they are listed in `NotUndone.Protected`. Everything written is read back. LMU/DLMU at the `0xB` alias.
+- **History is cleared** by a reset, by flash programming, and when the core ran without the debugger (another client, a script). A run that is no action (e.g. after attaching to a running application) is recorded without a checkpoint (`reverse_status` `RecordingRun`).
+- **TCF:** `AurixReverse` (`enable`, `disable`, `status`, `history`, `back`, `continue`, `goto`, event `changed`). An operation ends like a source step: Memory/Registers change events, then one `contextSuspended` (`Step back`, `Breakpoint (reverse)`, `Step back (start of history)`).
+- **Tcl:** `reverse on -region <start> <len> [-private] … | off | status | history | back | goto <index> | peek <index> <addr> <len>` (restores whole actions by difference).
 
-**Reverse debugging.** `reverse_enable` (POST `/api/v1/reverse/enable`) switches it on for a TriCore core: before every action (run, instruction step, source step, register or memory write; not the resumes and writes of reset hooks and cfg event handlers) the core's registers and RAM regions are saved, and `reverse_back` (`{"granularity": "line"|"instruction"|"action"}`), `reverse_continue` and `reverse_goto` (`{"index", "row"}`) write an earlier state back into the halted core, which then really runs from there. The regions are the ELF's allocated writable sections in RAM, plus the core's stacks and context save area found by their linker symbols (iLLD/HighTec `__USTACK0`/`__USTACK0_END`, `__ISTACK0`, `__CSA0`/`__CSA0_END`; TASKING `_lc_ub_ustack_tc0` …; `stack_symbols`, `csa_symbols` for others), plus `regions`, without `exclude`. The snapshots are read in full and kept as differences. While on, the mode owns the miniMCDS (`trace_arm`, `trace_auto`, traced DAQ points refused; `reverse_enable` is refused while a manual trace is set up) and records every action except instruction steps and writes, from its checkpoint to the halt; the decoder starts at the checkpoint PC and the register replay from both ends. Restoring: registers that differ; the stacks and context save area (private) by difference against the snapshot; other RAM only where the core wrote (from the recordings, or from the instruction model for an instruction step), else by difference with `ByDifference` and `Why` in the report; stores to peripheral registers are listed in `NotUndone`. A point inside an action is reached by restoring its checkpoint, taking the breakpoints out of the hardware and running to the row's address as often as the recording says (a recording that lost its start: the hits up to the action's end are counted in a first run, `max_hits`); the new recording is compared with the old one, and the exact registers at that point too (`Diverged`). The TCF service `AurixReverse` (`enable`, `disable`, `status`, `history`, `back`, `continue`, `goto`, event `changed`) runs an operation like a source step: one `contextSuspended` (`Step back`, `Breakpoint (reverse)`, `Step back (start of history)`) after Memory/Registers change events. Tcl: `reverse on -region <start> <len> [-private] … | off | status | history | back | goto <index>` restores whole actions by difference. The history is cleared by a reset, by flash programming and when the core ran without a run of the debugger's (another client, a script). A run that is no action (the core ran when the mode was switched on, e.g. after attaching to a running application, or something else started it) is recorded too, without a checkpoint, so its halt comes with the trace up to it (`reverse_status` `RecordingRun`). Before writing, the restore reads the cores' safety protection (`CPUx_SPR_SPROT_*`, `CPUx_DLMU_SPROT_*`): bytes closed to the debugger are never written (on a TC377 such a write is dropped without an error); in the core's own regions they refuse the restore before anything changes, elsewhere they are reported in `NotUndone.Protected`. Everything written is read back. LMU/DLMU memory is accessed at the non-cached `0xB` alias (a debugger write to `0x9…` resets the board). `reverse peek <index> <addr> <len>` shows a checkpoint's saved bytes.
+### DAQ trace points
 
-**DAQ trace points.** A [DAQ](#periodic-sampling-daq) point with `"mode":"trace"` is recorded instead of polled: the session arms a data trace over the traced points (manual stop, ring buffer), drains the trace RAM every 2 ms while the target runs and sends every write:
+A [DAQ](#periodic-sampling-daq) point with `"mode":"trace"` is recorded instead of polled: the session arms a data trace over the traced points (manual stop, ring), drains it every 2 ms while the target runs and sends every write:
 
 ```json
 {"op":"add","id":9,"points":[{"expression":"g_state","mode":"trace"}]}
@@ -499,17 +515,19 @@ What the hardware reports, measured on a TC377:
 {"type":"source","point":4,"source":"host","reason":"another client is tracing"}
 ```
 
-A traced point that cannot be traced falls back to polling at its rate and says why in a `source` frame: the trace is in use (there is one MCDS, owned by the first session that traces, or by a `trace_arm`), or the points span more than `0x1000` bytes. A reset ends a running trace (`LostByReset`). The range from the lowest to the highest traced point is recorded, so writes between the points cost trace RAM too; when the writes come faster than the drain reads them, `trace_lost` reports the lost messages and ring laps (seen on a range over a core's stack: 118 laps in 3 s).
+- Falls back to polling at its rate, with a `source` frame saying why, when the trace is in use (one MCDS, owned by the first session that traces or by `trace_arm`) or the points span more than `0x1000` bytes.
+- The whole range from lowest to highest traced point is recorded: writes between points cost trace RAM too.
+- `trace_lost`: writes came faster than the drain (lost messages, ring laps).
+- A reset ends a running trace (`LostByReset`).
 
-**Tcl.** `mcds arm|plan|status|stop|decode|dump|init` (see [docs/commands.md](docs/commands.md)): `mcds plan` prints the register writes without touching the target, `mcds dump` saves the trace RAM with a winIDEA-compatible header.
+### Trace from Tcl and VS Code
 
-**In VS Code**: the *Show Trace* command opens the Trace panel (configuration, resources, arm, result grouped by function with source links, CSV export) and a status-bar item shows a running trace; a Live Watch instance can trace its expressions (interval menu → *Trace every write*); the OS Profile panel sets a rate or trace per lane. A launch configuration `trace` object arms a trace when the session starts.
-
-**Verified on a TC377 over the miniWiggler** (application running, 2026-11-17): program trace unfiltered (~11,000 instructions in 63–73 µs, no inconsistency), filtered to a function, stopped when full, manually, on a halt (by a CPU0 breakpoint, a debugger halt, a CPU1 breakpoint) and at a function, filter and stop comparators together; data trace of a 13.3 ms counter (every write, target times 13.33 ms apart); DAQ trace points streaming every write, across a halt, and reporting laps under overflow. Where the setup differs from winIDEA's (stop on halt on `dcu_sus` instead of `dcu_halt`, gated time stamps, stop before the end pulse) the hardware showed why: see `crates/mcds/src/config.rs`. The simulator implements the unit for the tests (`core/tests/mcds_sim.rs`, the trace part of `api/tests/sim_http.rs`).
+- **Tcl:** `mcds arm|plan|status|stop|decode|dump|init|auto` ([commands](docs/commands.md#trace-mcds-tc37x-minimcds)). `mcds plan` prints the register writes without touching the target; `mcds dump` saves the trace RAM with a winIDEA-compatible header; `mcds auto -program -stop halt` / `mcds auto off`.
+- **VS Code:** *Show Trace* opens the Trace panel (configuration, resources, arm, result grouped by function with source links, CSV export); a status-bar item shows a running trace. A Live Watch instance can trace its expressions (interval menu → *Trace every write*). The OS Profile panel sets a rate or trace per lane. A launch configuration `trace` object arms a trace at session start.
 
 ## AUTOSAR OS awareness (ORTI)
 
-An AUTOSAR/OSEK generator writes an **ORTI file** beside the ELF describing the OS objects: tasks, ISRs, stacks, alarms, resources, spinlocks, events. `load_orti` reads one and the debugger can then show them.
+`load_orti` reads the ORTI file an AUTOSAR/OSEK generator writes beside the ELF (tasks, ISRs, stacks, alarms, resources, spinlocks, events).
 
 ```python
 dbg.load_symbols(files=["app.elf"])
@@ -518,136 +536,116 @@ for o in dbg.os_objects("TASK", live_only=True).objects:
     print(o.name, {a.name: a.value for a in o.attributes})
 ```
 
-Both frontends serve it: the REST operations above, and the `AurixOS` [TCF service](#tcf-services) that the VS Code extension uses. They share one loaded file, because they share one session.
+- Served by REST (`/os/...`) and by the `AurixOS` [TCF service](#tcf-services); both share the session's loaded file.
+- Object types and attributes come from the file (e.g. MICROSAR's `vs_ISR`, `vs_SPINLOCK`, `vs_OS_CONFIG`); `os` lists what was declared.
+- **Versions:** ORTI 2.1, 2.2, and the unofficial 2.3 SMP extension (per-core arrays such as `RUNNINGTASK[0]`; Vector's `vs_SMP_NUMCPU` and `vs_COREID[]` map ORTI cores to targets). Indexed attributes are accepted whatever `VERSION` says. AUTOSAR ARTI is not implemented.
+- **Cost of a value:** each attribute is classified at load:
 
-Nothing about the OS is built in. The file *declares* its own object types and attributes, so a MICROSAR file's `vs_ISR`, `vs_SPINLOCK` and `vs_OS_CONFIG` come through exactly like the standard OSEK ones. `os` lists whatever was declared.
+  | Class | Example | Cost per refresh |
+  |---|---|---|
+  | prose | `ACTION = "SET_EVENT task ev"` | none, never evaluated |
+  | constant | `STACK = "&OsCfg_Stack_…"`, `SIZE = "sizeof(…_Dyn)"` | none, resolved at load |
+  | one address | `RUNNINGTASK[0] = "OsCfg_Trace_OsCore0_Dyn.CurrentTask"` | one read |
+  | computed | `STATE = "…OsState == 2 ? ( … ? 0 : …State ) : 0xFF"` | the reads the expression makes |
 
-**Versions.** ORTI 2.1 and 2.2 are the published OSEK/VDX specification. **2.3 is not published**: it is Lauterbach's unofficial SMP extension, where the `OS` attributes become arrays indexed by logical core — `RUNNINGTASK[0]`, `RUNNINGTASK[1]` — so one file describes a multicore system. Vector's generator adds `vs_SMP_NUMCPU` and `vs_COREID[]`, which is what lets a reader map ORTI core indices onto debug targets. Indexed attributes are accepted whatever the `VERSION` block claims. AUTOSAR ARTI is the official successor and is not implemented.
+  `live_only=true` skips the free classes; `reads` in the response reports what the call cost.
+- `CTYPE` and `ENUM` values are code, `STRING` values are text.
+- **Priority enums are an inverse map:** the target holds an ordinal; the enumerator name is the priority to display. `vs_HomePriorityInt` is the raw field.
+- **Enumerator values are often addresses** (`"IdleTask_OsCore0" = "&OsCfg_Trace_IdleTask_OsCore0"`), resolved at load: this turns a pointer into a task name and a `link` to that object.
+- An ORTI file can be loaded before the board is powered; `errors` lists what has not resolved yet.
 
-**What a value costs.** Every attribute is a C expression, and they fall into four classes, decided once when the file is loaded:
+**Stack coverage.** `os_stacks` (REST) / `getStacks` (TCF) report how much of each OS stack was ever used (from `SIZE`, `BASEADDRESS`, `STACKDIRECTION`, `FILLPATTERN`).
+- On demand only (it reads the untouched part of each stack). `names` narrows it to the stacks you need.
+- An unreadable stack (e.g. hidden by the SMPU) reports `error`, not 0 %.
+- A pattern-like hole inside live data counts as used: the result errs high.
 
-| Class | Example | Cost per refresh |
-|---|---|---|
-| prose | `ACTION = "SET_EVENT task ev"` | none — never evaluated |
-| constant | `STACK = "&OsCfg_Stack_…"`, `SIZE = "sizeof(…_Dyn)"` | none — resolved at load |
-| one address | `RUNNINGTASK[0] = "OsCfg_Trace_OsCore0_Dyn.CurrentTask"` | one read |
-| computed | `STATE = "…OsState == 2 ? ( … ? 0 : …State ) : 0xFF"` | the reads the expression makes |
+**Live update in VS Code.** Live Watch, the AUTOSAR OS view and the OS Objects panel share one scheduler:
+- One interval for all (`aurix-debugger.liveWatch.intervalMs`, launch option `liveWatchIntervalMs`, or the status-bar item), 200 ms to 10 s.
+- A view not on screen reads nothing (for the OS Profile panel, its sampler stops too).
+- Pause = update only on halt. Halts of several cores coalesce into one refresh.
+- The next refresh is timed from the start of the previous one; a slow read delays it rather than queueing.
 
-On the MICROSAR file this repo is developed against, that splits 1 522 attributes into 613 one-address, 252 computed, 360 constant and 297 prose — so most of a task table costs nothing to refresh. `live_only=true` skips the two free classes; `reads` in the response reports what the call actually cost.
+**Sampled task profiling.** `startProfile <periodUs> <lanes>` puts one DAQ point per core on `RUNNINGTASK` (on-change). `getProfile <sinceUs>` returns transitions since then and per-task occupancy.
+- Lanes: `[{"Core":0,"Attr":"RUNNINGTASK","Mode":"trace"|"off"|<periodUs>}]` (RUNNINGTASK per core, the ISR variables), each with its own rate.
+- A sampled lane is a statistical profile: switches shorter than the period are missed.
+- `trace`: recorded by the [miniMCDS](#on-chip-trace-minimcds), every switch exact. CPU0 lanes only; other cores stay sampled.
 
-Only the declaration says which class an attribute is in: `CTYPE` and `ENUM` values are code, `STRING` values are text. Two things follow that are easy to get wrong and are worth knowing when reading the output:
-
-- **Priority enums are an inverse map.** `PRIORITY` is declared `ENUM ["700" = 0, "680" = 1, …]`, so the field on the target holds an *ordinal* and the enumerator name is the priority to display. `vs_HomePriorityInt` is the same field read raw.
-- **Enumerator values are often addresses.** `RUNNINGTASK`'s enumerators are `"IdleTask_OsCore0" = "&OsCfg_Trace_IdleTask_OsCore0"`. Those are evaluated against DWARF at load time, which is what turns the sampled pointer into a task name — and into a `link` to the object it names.
-
-
-**Stack coverage.** `os_stacks` (REST) and `getStacks` (TCF) measure how much of each OS stack has ever been used. The OS fills every stack with a pattern at startup, so the high-water mark is the far end of the region that still holds it — and `SIZE`, `BASEADDRESS`, `STACKDIRECTION` and `FILLPATTERN` are ORTI-specified attribute names, so nothing about the OS is assumed.
-
-This is the one expensive part of OS awareness: finding a mark means reading the untouched part of a stack. It is therefore on demand only, never on a refresh timer, and `names` narrows it to the stacks you care about (measuring one of the 50 stacks in this file costs 2 reads against 100).
-
-A stack the debugger cannot read is reported with its `error` rather than as unused — on this board the SMPU hides CPU0 stack RAM below `0x7000B400` from TAS, and reporting 0% there would be a lie. A pattern-looking hole inside live data is counted as used, so the answer errs high rather than low.
-
-
-
-
-**One live-update loop.** The Live Watch, the AUTOSAR OS view and the OS Objects panel share a single scheduler (`src/liveUpdate.ts` in the extension), so they behave the same way and there is one rate to reason about:
-
-- One interval for all of them (`aurix-debugger.liveWatch.intervalMs`, the `liveWatchIntervalMs` launch option, or the status-bar item). 200 ms to 10 s.
-- **A view that is not on screen reads nothing.** A collapsed sidebar section, a hidden tab, a panel in the background: no bus accesses at all. For the OS Profile panel that also stops the sampler, not just the drawing.
-- Pause means *only on halt*, not *stop*: a paused view still updates when a core stops, the way the Watch view does. Stops of several cores coalesce into one refresh.
-- The next refresh is timed from the start of the previous one, so a slow read delays the next instead of queueing another behind it.
-
-**Sampled task profiling.** `startProfile` puts one [DAQ](#periodic-sampling-daq) point per core on `RUNNINGTASK` in on-change mode: the point is still *read* every period, but only *delivered* when the value differs. Two cores at 100 µs is two reads per tick, coalesced into one bus access, and the stream carries only the switches. `getProfile <sinceUs>` then returns the transitions since the caller last asked, plus the occupancy each task has accumulated — so a panel redrawing four times a second is independent of the sampling rate.
-
-A sampled lane is **not a trace**: a switch shorter than the sampling period is not seen at all, and one that straddles a sample is attributed to whichever task the sample caught. The result is a statistical profile, and the panel says so on its face. Each lane (RUNNINGTASK per core, the ISR variables) has its own rate, `startProfile <periodUs> <lanes>` with `[{"Core":0,"Attr":"RUNNINGTASK","Mode":"trace"|"off"|<periodUs>}]`: a lane in `trace` is recorded by the [miniMCDS](#on-chip-trace-minimcds), every switch exact in target time. Only CPU0's stores reach the data trace, so trace is refused for the lanes of other cores, which stay sampled.
-
-The other views do *not* use DAQ, deliberately. A task table is 613 single-address attributes — well past the 256-point session cap — and refreshing it once a second costs about as much as the sampler would. Sampling is worth its machinery where the rate has to be high; for a table, a one-shot read per refresh is simpler and no more expensive.
-
-**Task-filtered breakpoints.** A breakpoint whose condition reads `task == <name>` (or `task != <name>`, or just a task name) halts only when that task is running. The VS Code extension implements this on top of the awareness: right-click a breakpoint → *Edit Breakpoint* → *Expression*, or use *Halt Only in Task…* from the editor context menu, which offers the tasks of the loaded file.
-
-It is not free. The breakpoint is a plain hardware breakpoint, so the core really does halt on every hit and the adapter resumes it again when the wrong task got there — the same trade-off TRACE32 makes. A hit the adapter cannot attribute to a task is reported rather than swallowed: a stop the user cannot explain is better than one that never arrives.
-
-A conditional attribute's read set depends on which branch is live, so an attribute planned while a core was down is planned again the first time it is read. Loading an ORTI file before the board is powered is therefore harmless; `errors` lists what has not resolved yet.
+**Task-filtered breakpoints.** A breakpoint condition `task == <name>`, `task != <name>` or just a task name halts only in that task. In VS Code: *Edit Breakpoint* → *Expression*, or *Halt Only in Task…* in the editor context menu. The core halts on every hit and is resumed when the wrong task is running; a hit that cannot be attributed to a task is reported.
 
 ## Architecture
 
 | Crate | Responsibility |
 |---|---|
 | `tas` | Pure-Rust TAS client: batched PL0 reads and writes, device connect/reset, user pins (SRST). |
-| `jimtcl` | Builds Jim Tcl 0.83 from the upstream release (download, generated `configure` output, `cc`). |
+| `bluebox` | iSYSTEM BlueBox over WinUSB, without winIDEA ([README](crates/bluebox/README.md)). |
+| `winidea-sdk` | Bindings to the winIDEA SDK (`isystemConnect.dll`), loaded at runtime ([README](crates/winidea-sdk/README.md)). |
+| `jimtcl` | Builds Jim Tcl 0.83 from the upstream release. |
 | `jim` | Safe `Interp` API over Jim Tcl. |
-| `openocd-tcl` | Fetches OpenOCD's Tcl scripts (pinned commit of the tricore-oss fork) into `target/openocd-tcl/`; used by the tests and packaged with the VS Code extension. |
-| `core` (aurix-core) | Adapter trait (`tas_client`, `sim`), TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and event model, reset sequence, polling, periodic sampling (DAQ), CSA unwinder, flash driver and image loader. |
-| `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
-| `mcds` | miniMCDS trace: the register setup (as winIDEA writes it), the message framing, the data and program trace decoders, program flow reconstruction from the code. |
-| `orti` | ORTI files: the AUTOSAR/OSEK OS awareness description a generator emits. Parser (generic over the object types a file declares), and planning each attribute into the reads it costs. |
-| `svd` | CMSIS-SVD peripheral descriptions: a streaming reader straight from the `.svd.gz` (one peripheral in memory at a time; TC4Dx: 1 s, 65 MB), merged extra files (HSM, SCR), the register model, and the peripheral viewer's definitions, as the extension converted them. |
-| `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
-| `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
-| `api` | The worker's REST routes, event stream, DAQ WebSocket, the launch steps, clients and the lease (axum on its own thread), and its registration with the hub; its build script writes the generated files. |
+| `openocd-tcl` | Fetches OpenOCD's Tcl scripts (pinned commit of the tricore-oss fork) into `target/openocd-tcl/`; used by the tests and packaged with the extension. |
+| `core` (aurix-core) | Adapter trait and drivers, TriCore target (OCDS, halt/resume/step, triggers, TL1), OpenOCD command set and events, reset sequence, polling, DAQ, CSA unwinder, flash driver, image loader. |
+| `symbols` | DWARF (GHS DWARF 2, GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
+| `mcds` | miniMCDS trace: register setup, message framing, data and program trace decoders, program flow reconstruction. |
+| `orti` | ORTI parser (generic over declared object types) and per-attribute read planning. |
+| `svd` | CMSIS-SVD: streaming reader from `.svd.gz`, merged extra files (HSM, SCR), register model, the peripheral viewer's definitions. |
+| `tcf` | TCF frontend: protocol, services, source stepping, expressions, disassembly (Capstone); the debug session (breakpoints, symbols, stepping state) shared with the API. |
+| `api-spec` | API definition: operations, types, docs; OpenAPI and Python generators. |
+| `api` | Worker REST routes, event stream, DAQ WebSocket, launch steps, clients, lease, hub registration; writes the generated files. |
 | `aurix-dbg` | The worker: OpenOCD-style CLI, telnet console, TCF and API listeners. |
-| `hub` | `aurix-hub`: MCP, REST and Swagger front door, sessions and profiles, worker supervision, streaming proxy and WebSocket relays (DAQ, TCF), uploads, token check; the stdio wrapper; install/uninstall and the logon start. |
-| `winidea-sdk` | Rust bindings to the iSYSTEM winIDEA SDK (`isystemConnect.dll`), loaded at runtime. Used by the `winidea` backend. |
+| `hub` | `aurix-hub`: MCP/REST/Swagger, sessions and profiles, worker supervision, proxy and WebSocket relays (DAQ, TCF), uploads, token check, stdio wrapper, install/uninstall, logon start. |
 
-Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures run on the core thread) and subscribe to core events.
+Only the core thread touches the adapter and the Tcl interpreter. Frontends use `ServerHandle::call` (closures on the core thread) and subscribe to core events.
 
-## Backends (`tas_client`, `sim`, `winidea`)
+## Backends
 
-`adapter driver <name>`, or `--adapter <name>` to override whatever the cfg says. `adapter name` reports the one actually in use, which is how a cfg branches.
+Select with `adapter driver <name>` in the cfg, or `--adapter <name>` to override it. `adapter name` reports the driver in use (a cfg can branch on it).
 
 | Driver | Probe | Run control |
 |---|---|---|
-| `tas_client` | miniWiggler through `tas_server` | ours: [`crates/core/src/tricore.rs`](crates/core/src/tricore.rs) writes the OCDS debug registers |
-| `sim` | built-in TC37x model | as above, against the model |
-| `winidea` | **iSYSTEM BlueBox**, through a winIDEA instance | winIDEA's |
+| `tas_client` | miniWiggler through `tas_server` | the server ([`crates/core/src/tricore.rs`](crates/core/src/tricore.rs)) writes the OCDS registers |
+| `bluebox` | iSYSTEM BlueBox over USB, no winIDEA ([crates/bluebox](crates/bluebox/README.md)) | the server, as for `tas_client` |
+| `winidea` | iSYSTEM BlueBox through a running winIDEA | winIDEA's |
+| `sim` | built-in TC37x model | the server, against the model |
 
-If no `tas_server` is running on the local host (after a reboot, say), `init` starts one, as Infineon's own TAS clients do. It takes `tas_server.exe` from `TAS_INSTALL_DIR`, or from its `bin` or `servers` folder (the DAS installer sets that variable), and otherwise from `PATH`. First it runs `check_redistributable.exe` from the same folder, as `start_tas_server.bat` does, but without that script's console window. The server keeps running after `aurix-dbg` exits, with only its tray icon showing. A `tas-client host` on another machine is never started.
+**`tas_server` autostart:** if no `tas_server` runs on the local host, `init` starts one:
+- from `TAS_INSTALL_DIR` (or its `bin` / `servers` folder; set by the DAS installer), else from `PATH`;
+- after running `check_redistributable.exe` from the same folder;
+- it keeps running after `aurix-dbg` exits (tray icon only);
+- a `tas-client host` on another machine is never started.
 
-### How the winIDEA backend differs
+### winIDEA backend
 
-winIDEA is itself a debugger and owns OCDS, so it will not let a second master drive the debug registers underneath it. The backend therefore sits at two levels:
+winIDEA owns OCDS, so the backend works at two levels:
+- **Memory** through winIDEA (`REAL_TIME | DIRECT`, a running target is not disturbed): enough for DAQ, OS awareness, stack unwinding, expressions, disassembly, `verify_image`, `mdw` / `mww`.
+- **Run control** by winIDEA: halt, resume, step, registers, breakpoints, watchpoints of TriCore cores. The HSM and GTM MCS channels use plain bus accesses as on the other backends.
 
-- **As an `Adapter`** it serves ordinary memory (`DataController::read_memory` / `write_memory`, with `REAL_TIME | DIRECT` so a running target is not disturbed). That alone is enough for DAQ, OS awareness, CSA stack unwinding, expressions, disassembly, `verify_image` and console `mdw` / `mww` — they need memory, not OCDS.
-- **As a `RunControl`** (`crates/core/src/target.rs`) it takes over halt, resume, step, registers, breakpoints and watchpoints, so the OCDS register paths are never reached. The hook lives inside `Core`, not in `ops.rs`, because `ops.rs` is not the only route to the silicon: the TCF call stack and source stepping call `Core::read_regs` directly.
+Tcl on this backend:
 
-Only TriCore cores are taken over. The HSM (through its debug bridge) and the GTM MCS channels use no OCDS registers, so they keep working over plain bus accesses on either backend.
-
-### Tcl on this backend
-
-Unsupported **actions** fail loudly; **declarations** are accepted and reported. The split is forced by the cfg chain: `board/infineon/kit_a2g_tc375_lite.cfg` sources `interface/tas_client.cfg` and sets `adapter speed 5000`, and those are third-party files nobody can add an `if` to.
-
-| | Behaviour |
+| Command | Behaviour |
 |---|---|
 | `adapter speed`, `reset_config`, `transport select`, `flash bank`, `target create` | accepted, listed by `winidea status` and summarised at `init` |
 | `tas-client …`, `tricore tl1_halt` / `tl1_step` / `irq_mask` / `triggers` | error, naming the adapter |
-| `flash probe` / `info` / `erase_check` / `erase_sector` | error: winIDEA programs from its own download list, so there is no flash controller for us to drive |
-| a `mww` into a core debug register or the CBS trigger fabric | error; reads of the same addresses are allowed, because the cfg scripts check halts by reading DBGSR and the `tc3xx_status` / `tc3xx_wdt_status` diagnostics read them |
+| `flash probe` / `info` / `erase_check` / `erase_sector` | error: winIDEA programs from its own download list |
+| `mww` into a core debug register or the CBS trigger fabric | error (reads allowed) |
 
-`tc3xx_ocds.cfg` guards itself with `tc3xx_ocds_available` and skips only the OCDS **event wiring** — it still creates every target and still releases the HSM, which is plain SFR and is what starts cpu1 on this board.
-
-### Commands
+`tc3xx_ocds.cfg` checks `tc3xx_ocds_available` and skips only the OCDS setup; it still creates the targets.
 
 ```
-winidea workspace <path>                      # the primary instance's .xjrf (optional, see below)
+winidea workspace <path>                      # the primary instance's .xjrf (optional)
 winidea start if-required|existing|always     # default: if-required
 winidea status
 ```
 
-**Further cores.** winIDEA debugs CPU0 in the window you opened and every other core in a window of its own. The server attaches a core when it examines it, as TAS examines every core at `init`: it looks the core up in winIDEA's session topology (on a TC377 `CPU0`–`CPU2`, `SCR`, `HSM`; TriCore core *n* is `CPU<n>`) and attaches it through the session (`CSessionCtrl::instance_attach`). winIDEA opens that core's window, creating its workspace if the project has none — that is normal. A core whose application has not started it yet (cpu1 right after a reset, or an unused cpu2) has no running core in its window until it is started; it is reported as halted (boot-halt), as over TAS, and switches to running once the application starts it.
-
-**Choosing the primary.** With core windows open several winIDEA instances run side by side, and attaching to an arbitrary one drove the wrong window on hardware. The primary is `winidea workspace` when set; otherwise the running instance the core windows are named after (`Project.xjrf` for `Project_CPU1.xjrf`). Two unrelated projects open at once fail the connect and list them. With nothing running, the start mode decides: `if-required` launches one, `existing` fails. These are the SDK's own modes (`CConnectionConfig`), applied through `ConnectionMgr::connect_with`; the `connectMRU` family ignores them and always launches.
-
-**Registers.** The GPRs, PCXI, PSW and PC are winIDEA registers by name. The other system and debug CSFRs (ICR, FCX, BTV, DBGSR, …) are not in winIDEA's register namespace; they are read from the core's CSFR window instead, and are read-only on this backend.
-
-**The HSM is winIDEA's.** It is core 4 of winIDEA's topology, so `tc3xx_ocds.cfg` creates no HSM target on this backend and does not release it after a halting reset. Examining it from here enables halting debug on it, after which a halt of any TriCore core can stop it through TL1 with nothing to resume it (seen on hardware).
-
-**Synchronous break is winIDEA's.** With winIDEA's multi-core synchronous break on, a halt of one core stops the others (and the HSM, if winIDEA debugs it) through the CBS TL1 capture-and-hold routing. That routing is winIDEA's own setting — it comes back after clearing it — so the server leaves it alone. Code on a halted core that waits for a stopped HSM does not finish a step.
-
-### Flashing
-
-`program`, `flash write_image` and `flash write_images` hand their files to winIDEA (option tree `/IDE/Debug.DownloadFiles`, then `CLoaderController::download`), with **code only and no symbols**: this server keeps its own DWARF reader, and two symbol tables for one target would disagree as soon as the files differ. S-record files, and files with an offset or a type, go over as temporary Intel HEX files built by our own loader: winIDEA's S-record loader rejects comment lines. `verify_image` stays ours on both backends — it reads the image back through ordinary memory, so both report the same thing. `incremental`, `unlock` and the per-sector write statistics are TAS-only.
-
-### Example
+- **Primary instance:** `winidea workspace` when set; else the running instance the core windows are named after (`Project.xjrf` for `Project_CPU1.xjrf`). Two unrelated projects open at once fail the connect and are listed. With none running, `if-required` launches one, `existing` fails.
+- **Further cores:** attached when examined, through winIDEA's session topology (TriCore core *n* = `CPU<n>`). winIDEA opens a window per core and creates its workspace if missing. A core not yet started by the application is reported halted (boot halt) until it starts.
+- **Registers:** GPRs, PCXI, PSW, PC by name. Other CSFRs (ICR, FCX, BTV, DBGSR, …) are read from the CSFR window and are read-only.
+- **HSM:** left to winIDEA; no HSM target is created. Examining it from here lets a TriCore halt stop it over TL1 with nothing to resume it.
+- **Synchronous break:** winIDEA's setting. With it on, a halt of one core stops the others (and the HSM, if winIDEA debugs it). Code on a halted core that waits for a stopped HSM does not finish a step.
+- **Flashing:** `program`, `flash write_image(s)` hand the files to winIDEA's download (code only, no symbols). S-records and files with an offset or type go as temporary Intel HEX. `verify_image` reads back through memory. `incremental`, `unlock` and per-sector statistics are TAS-only. Not tried on hardware.
+- **Speed:** winIDEA's run control is slow (stop ~220 ms, instruction step ~250 ms, run ~1.2 s). Memory reads cost ~4–7 ms each whatever the size.
+  - Source steps are handed to winIDEA when it has loaded the same ELF (its project); the log says when not.
+  - No MCS targets are created; the poll period is 50 ms.
+  - Polled DAQ manages ~250 reads/s across all points; use winIDEA's own DAQ (`DaqController`) for faster sampling.
+- **Version:** the bindings are generated from the winIDEA 9.21.417 SDK; see the [winidea-sdk README](crates/winidea-sdk/README.md) on version skew.
 
 ```powershell
 aurix-dbg.exe --adapter winidea -s server/target/openocd-tcl/tcl `
@@ -655,156 +653,146 @@ aurix-dbg.exe --adapter winidea -s server/target/openocd-tcl/tcl `
     -c "winidea workspace C:/ws/app.xjrf" -c "init"
 ```
 
-From VS Code, no new launch attribute is needed — `configCommands` already forwards `-c`:
+From VS Code (`configCommands` forwards `-c`):
 
 ```json
 "configCommands": ["adapter driver winidea", "winidea workspace C:/ws/app.xjrf", "init"]
 ```
 
-### Status
-
-Run against a BlueBox, winIDEA 9.21.356 and a TC377 (bindings and DLL are 9.21.417; no SDK DLL ships with that winIDEA):
-
-| | Result |
-|---|---|
-| Attach, instance choice, version | works; the primary is found among its core windows |
-| Run control | cpu0 and cpu1: step (PC +4, single-step), resume, halt (debug-request), breakpoint. Halting one core halts the others while winIDEA's synchronous break is on (see above) |
-| Watchpoint by address | write watchpoint on a live RAM word halts with reason watchpoint |
-| Registers | all 52 read (35 by name, 17 through the CSFR window); writes to the latter refused |
-| Memory | reads of a running target, write-back; debug-window reads allowed |
-| Reset | `reset halt`, `reset init`, `reset run` |
-| HSM | left to winIDEA (see above) |
-| Further cores | attached through the session by topology name; cpu1 and cpu2 attached |
-| Flashing | **not tried on hardware** — a download replaces the board's firmware |
-| DAQ | polled DAQ goes through the same reads; not measured end to end |
-
-**Cost per call** (measured): status 0.16 ms running / 1.8 ms halted, register 40–240 µs, memory read **~4–7 ms regardless of size or access flags**, 64 KB in 75 ms (~0.9 MB/s). winIDEA's own run control is slow, whatever the step: stop ~220 ms, instruction step ~250 ms, source step 200–370 ms, run ~1.2 s — the time is spent inside winIDEA, also with a non-blocking timeout. Three things follow:
-
-- **Source steps are winIDEA's.** Stepping a line instruction by instruction, as over TAS, costs ~250 ms per instruction. When winIDEA has loaded the same ELF itself (its project does), step over / into / out are handed to winIDEA as a whole (`RunControl::source_step`); the log says when they are not.
-- **The poll reads little memory.** TriCore cores are asked for their status. `tc3xx_ocds.cfg` creates no MCS targets on this backend: polling all 16 channels took ~220 ms and kept the core thread busy behind every step. Plain-memory cores a cfg does create are polled an eighth per period (`RC_MEMORY_POLL_SHARE`). The poll period is 50 ms on this backend.
-- Measured over TCF (VS Code's requests) with both changes: step over 300–540 ms, step into ~450 ms, instruction step ~300 ms, call stack 15–50 ms, pause ~220 ms. Before: step over 750 ms–11 s, pause 1.3 s.
-
-Polled DAQ is bounded by the read cost — roughly 250 reads per second across all points — so winIDEA's hardware DAQ (`DaqController`) is the way to faster sampling; with winIDEA 9.21.356 note the SDK README's warning that its DAQ read fails against 9.21.417 bindings.
-
-
 ## Cfg scripts and other derivatives
 
-The server holds the chip mechanics; the cfg scripts hold board settings and board policy:
+The server holds the chip mechanics; the cfg scripts hold board settings and policy:
 
 | File | Content |
 |---|---|
 | OpenOCD target cfg (`target/infineon/tc3?x.cfg`, via the board cfg) | TriCore cores with `-coreid`/`-dbgbase`, PFLASH banks. |
-| [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | The generic part of every TC3xx board cfg: finds the chip by the target names, creates the HSM (`tc3xx_hsm_target 1`, to debug it), MCS and SCR targets, sets `ocds sync tl1` and step interrupt masking, defines the DFLASH banks, loads `<tc3xx_sbc>_sbc.cfg` only when `tc3xx_sbc` names one; diagnostics (`tc3xx_status`, `tc3xx_wdt_status`, `tc3xx_scr_enable`). No event handlers. |
-| [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Reset and halt policy for boards with an NXP FS26 SBC (`tc3xx_sbc fs26`): every reset request goes through its `reset_hook`; a halting reset is repeated until it holds (with the debugger reset on the FS26 RSTB: until the FS26 has gone through deep fail-safe, for a lasting halt at the reset vector); the watchdog disarmed by the application once, with a running reset before the first reset after the connection (no application addresses); a halt while the watchdog is not known to be disarmed is watched and recovered; its `halt_check_hook` makes `attach_mode halt` reset first. |
-| [`tc375_lite_example.cfg`](../tc375_lite_example.cfg), [`tc37x_fs26_example.cfg`](../tc37x_fs26_example.cfg) | Example board cfgs, without an SBC and with an FS26 (adapter speed, HSM target, the STM suspend). |
+| [`tc3xx_ocds.cfg`](../tc3xx_ocds.cfg) | Generic part of every TC3xx board cfg: finds the chip by target names; creates HSM (`tc3xx_hsm_target 1`), MCS and SCR targets; sets `ocds sync tl1` and step interrupt masking; defines the DFLASH banks; loads `<tc3xx_sbc>_sbc.cfg` when `tc3xx_sbc` names one; diagnostics (`tc3xx_status`, `tc3xx_wdt_status`, `tc3xx_scr_enable`). Its settings are listed at its top. |
+| [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Policy for boards with an NXP FS26 SBC (`tc3xx_sbc fs26`): every reset goes through its `reset_hook`; a halting reset is repeated until it holds; the FS26 watchdog is disarmed once after connecting (running reset before the first reset); a halt while the watchdog may be armed is watched and recovered; its `halt_check_hook` makes `attach_mode halt` reset first. `sbc_status` shows the state. |
+| [`tc375_lite_example.cfg`](../tc375_lite_example.cfg), [`tc37x_fs26_example.cfg`](../tc37x_fs26_example.cfg) | Example board cfgs, without an SBC and with an FS26 (adapter speed, HSM target, STM suspend). |
 
-What the server does for the cfgs (`help <command>`):
+For another board or derivative: copy an example, set what the board needs, load `tc3xx_ocds.cfg`.
 
-- **`ocds sync tl1|none`**: all cores halt, resume and step together through trigger line TL1 (see below); `ocds tl1_members`, `ocds step all|single`, `ocds step_timers run|frozen`, `ocds tl1_force`.
-- **`suspend add <module>|cores ?soft|hard|off?`**: peripherals stopped with the cores (OCS.SUS), by their names in the chip's SVD description. Each OCS is written as soon as the module is enabled and its ACCEN0 lets the debugger write, never before (a refused write reset one board): right after every reset in the step that switches OCDS on again, by the background poll once the application has enabled a module, before a pause, late at a halt. `suspend status` shows each module's state (`pending`, `idle`, `done`, `locked`, `refused`).
-- **Restore after a reset**: OCDS, the TL1 routing and the peripheral suspend are written again right after every reset, at the access that reports it (the device watch) or right after cpu0's deassert (the server's own reset), before any handler.
-- **`hsm autostart`, `hsm ready_ms`, `hsm status`**: after a halting reset the boot ROM holds the HSM at its first instruction. When PROCONHSMCFG says the HSM boots (or with an HSM target) the server releases it if DHCSR and FP_COMP0 show it held there, and waits for HSM2HTS before it latches TL1 or resumes the cores; no HSM target is needed. A board whose HSM does not boot gets no HSM access. An HSM that boots behind a closed debug window cannot be released: the server warns after a halting reset (a running reset does not leave it held).
+Server commands for the cfgs (details: `help <command>`, [commands.md](docs/commands.md)):
+- **`ocds sync tl1|none`**: all cores halt, resume and step together through TL1 ([below](#multi-core-run-control-ocds-sync-tl1)); `ocds tl1_members`, `ocds step all|single`, `ocds step_timers run|frozen`, `ocds tl1_force`.
+- **`suspend add <module>|cores ?soft|hard|off?`**: peripherals stopped with the cores (OCS.SUS), by SVD name. Each OCS is written once the module is enabled and its ACCEN0 lets the debugger write, never before (a refused write can reset the board). `suspend status` shows each module (`pending`, `idle`, `done`, `locked`, `refused`).
+- **After every reset** the server writes OCDS, the TL1 routing and the peripheral suspend again, before any handler.
+- **`hsm autostart`, `hsm ready_ms`, `hsm status`**: after a halting reset the boot ROM holds the HSM at its first instruction. When the HSM boots (PROCONHSMCFG) or there is an HSM target, the server releases it and waits for HSM2HTS before latching TL1 or resuming. No HSM target needed. An HSM behind a closed debug window cannot be released (warning after a halting reset).
 - **`attach_mode passive|hot|halt|reset_halt|reset_run`** (before `init`, e.g. `"configCommands": ["attach_mode halt", "init"]`), `attach_status`, `halt_all`, `halt_check_hook`, `reset_hook`, `reset_settle`.
 
-For another board or derivative, copy an example, set what your board needs and load `tc3xx_ocds.cfg`; settings of each file are listed at its top. Console procs: `daq` (what the DAQ sessions are sampling, read-only), `tc3xx_status`, `tc3xx_wdt_status`, `sbc_status`.
+Console procs: `daq` (DAQ sessions, read-only), `tc3xx_status`, `tc3xx_wdt_status`, `sbc_status`.
 
 TriCore 1.8 (TC4x) is rejected.
 
 ## Tcl commands
 
-The commands the cfg scripts use behave as in OpenOCD, and the core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points. The multi-core run control and the peripheral suspend are the server's (`ocds`, `suspend`); the events are free for a board policy.
+The commands the cfg scripts use behave as in OpenOCD. The core fires `examine-end`, `halted`, `resume-start/end`, `step-start/end` and the reset events at the OpenOCD points; they are free for a board policy.
 
-Every command, its arguments and options are in the [Tcl command reference](docs/commands.md). The server has the same text built in: `help` lists the commands, `help <command>` describes one (`help reset_config`), and `help <word>` searches the descriptions (`help srst`). In VS Code type them as `monitor help ...` in the Debug Console. The reference is generated from `crates/core/src/help.rs`, and a test fails when a command has no entry there.
+- Reference: [docs/commands.md](docs/commands.md) (generated from `crates/core/src/help.rs`; a test fails when a command has no entry).
+- Built in: `help` lists commands, `help <command>` describes one (`help reset_config`), `help <word>` searches (`help srst`). In VS Code: `monitor help ...`.
+- Unknown commands fail with `not supported by aurix-dbg`.
 
 ## Multi-core run control (`ocds sync tl1`)
 
-With `ocds sync tl1` (set by `tc3xx_ocds.cfg`) every BRKOUT (CPUs, HSM) drives TL1 and capture-and-hold keeps it active: a halt of one core stops all TL1 members (`ocds tl1_members`: CPUs, HSM, DMA, HSSL0) and every suspended peripheral in the same cycle. A pause pulses TL1 (`tricore tl1_halt`). A resume releases the other cores' debug halt while the held TL1 still suspends them, resumes the core, then clears suspend-out and drops the hold in one transaction: all cores start in the same cycle.
+With `ocds sync tl1` (set by `tc3xx_ocds.cfg`):
+- Every BRKOUT (CPUs, HSM) drives TL1; capture-and-hold keeps it active.
+- **Halt:** a halt of one core stops all TL1 members (`ocds tl1_members`: CPUs, HSM, DMA, HSSL0) and every suspended peripheral in the same cycle. A pause pulses TL1.
+- **Resume:** all cores start in the same cycle.
+- **Instruction step** (`ocds step all`, default): all cores run for the stepped instruction and stop together.
+- `ocds step single`: only the stepping core runs; the others stay halted.
+- `ocds sync none`: every core halts and runs alone.
 
-An instruction step (`ocds step all`, default; `tricore tl1_step on` on every core) runs **all** cores for the stepped instruction:
-
-1. The core makes sure TL1 is latched, pulsing it if needed.
-2. In one packed transaction it releases the other cores' debug halt (TL1 still suspends them), arms the step trigger, releases the stepping core and clears the TL1 hold: all cores start in the same cycle.
-3. The step trigger halts the core and pulses BRKOUT: TL1 latches and stops all cores in the same cycle.
-
-With `ocds step single` the other cores are kept in debug halt and only the stepping core runs. `ocds sync none` lets every core halt and run alone.
-
-**STMs.** On the TC377 an STM with `OCS.SUS=2` stops while its CPU is suspended by TL1 *or* has `DBGSR.SUSP` set (measured with raw register writes). A trigger event loads `DBGSR.SUSP` from `TRxEVT.SUSP`; the step carries SUSP into the release and the step trigger:
-
-- `ocds step_timers run` (default): SUSP stays clear. TL1 stops and restarts the STMs in the same cycle as the cores, so they stop at halt, run with continue, and advance together while the cores execute a step.
-- `ocds step_timers frozen`: SUSP is set on every core at a halt, so the STMs also stay stopped during steps.
+**STMs** (with `OCS.SUS=2`) stop while their CPU is suspended by TL1 or has `DBGSR.SUSP` set:
+- `ocds step_timers run` (default): STMs stop at a halt, run on continue, and advance with the cores during a step.
+- `ocds step_timers frozen`: STMs also stay stopped during steps.
 
 ## Interrupts while stepping (`tricore irq_mask`)
 
-`<target> tricore irq_mask step step_over step_out` makes steps run with interrupts masked, like winIDEA's `DisableIRQ_Step`, `DisableIRQ_StepOver` and `DisableIRQ_RunUntilReturn`. `tc3xx_ocds.cfg` enables all three for every core. `tricore irq_mask off` (cfg, `configCommands` or `monitor`) turns it off.
+`<target> tricore irq_mask step step_over step_out` runs steps with interrupts masked (like winIDEA's `DisableIRQ_Step`, `DisableIRQ_StepOver`, `DisableIRQ_RunUntilReturn`). `tc3xx_ocds.cfg` enables all three on every core. `tricore irq_mask off` (cfg, `configCommands` or `monitor`) turns it off.
 
-- **When:** a step of a selected kind (instruction step or step into = `step`, source step over = `step_over`, step out = `step_out`) clears ICR.IE on that core. ICR.IE stays cleared while halted between steps. Continue restores it on every core before the cfg releases them.
-- **What the application sees:** reading ICR (Registers view, `reg icr`) shows the application's IE, not the masked value. Writing ICR while masked sets the application's IE. `mdw` on the CSFR address shows the real chip value.
-- **Instructions that change IE:** a stepped `enable`, `disable`, `disable Dn`, `restore Dn`, `rfe`, `bisr` or `syscall`/trap updates the application's IE instead of being undone on continue. `disable Dn` gets the application's IE in Dn. A trap or `bisr` saves the application's IE in PCXI.PIE, so its RFE restores the right value.
-- **Hardware findings (TC377, TC1.6.2P):** CALL copies ICR.IE into PCXI.PIE and leaves ICR.IE unchanged. RET does not restore ICR.IE from PIE. Masked calls therefore leave nothing behind. Only contexts restored by RFE (traps, interrupts) need PIE fixed.
-- **Limit:** during a masked step over or step out, the callee runs with interrupts masked. If it disables interrupts and does not restore them before the step ends, the debugger can't tell and restores the IE from before the step on continue.
-- **Flash:** `flash info|probe|erase_check|erase_sector|write_image|write_images|verify_image <bank> ...`, `verify_image`, `program <file> [preverify] [verify] [reset] [exit] [offset]`, `aurix_eflash fallback`.
- PFLASH and DFLASH0/1 banks (`tc3x_eflash`); DFLASH banks support `erase_sector` and `erase_check` only, the DF0 bank size is the device's DF0 size (256 KB on the TC377). `tc3xx_ocds.cfg` defines them as `dfls0` (where the chip's DF0 size is known, or `tc3xx_dflash0_size` is set) and `dfls1` (HSM data, 128 KB).
-
-Unknown commands fail with `not supported by aurix-dbg`.
+- **Kinds:** `step` = instruction step and step into; `step_over` = source step over; `step_out` = step out.
+- ICR.IE is cleared on the stepping core and stays cleared while halted between steps. Continue restores it on every core.
+- Reading ICR (Registers view, `reg icr`) shows the application's IE; writing ICR while masked sets the application's IE. `mdw` on the CSFR address shows the real value.
+- Stepped `enable`, `disable`, `disable Dn`, `restore Dn`, `rfe`, `bisr`, `syscall`/trap update the application's IE (`disable Dn` returns it in Dn; a trap or `bisr` saves it in PCXI.PIE).
+- **Limit:** during a masked step over or step out, the callee runs masked. If it disables interrupts and does not restore them before the step ends, continue restores the IE from before the step.
 
 ## TCF services
 
-Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers (read/write), Breakpoints (address, function, file/line; data breakpoints with `AccessMode` and `Size` on an address or expression; `Condition`), StackTrace (CSA unwinding), LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (TriCore via Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS ([OS awareness](#autosar-os-awareness-orti)), AurixTrace ([miniMCDS trace](#on-chip-trace-minimcds): `arm`/`check <config>`, `status`, `stop`, `read <{Max}>`, the same JSON as the REST operations), and Tcl (the debug console `monitor` command).
+Locator, ContextQuery, RunControl (suspend/resume, instruction and source steps), Memory, Registers, Breakpoints (address, function, file/line; data breakpoints with `AccessMode` and `Size` on an address or expression; `Condition`), StackTrace, LineNumbers, Symbols, Expressions (locals, globals, casts, assign, live evaluation while running), Disassembly (Capstone), MemoryMap (loads the ELF), ContextReset, AurixOS, AurixTrace ([trace](#on-chip-trace-minimcds): `arm`/`check <config>`, `status`, `stop`, `read <{Max}>`, `auto`, `insns`, `regs`, `find`, `replay`, `replayMove`), AurixReverse ([reverse debugging](#reverse-debugging)), Tcl (`monitor`).
 
-`AurixOS` carries the ORTI objects on the connection the debug adapter already has, so the extension needs no second port and the awareness dies with the session:
+`AurixOS` ([OS awareness](#autosar-os-awareness-orti)) runs on the debug adapter's connection; the awareness ends with the session:
 
 | Command | Arguments | Reply |
 |---|---|---|
-| `load` | `<file>`, `<target>` or null | the description below |
+| `load` | `<file>`, `<target>` or null | the `getInfo` reply |
 | `getInfo` | — | `{Loaded, File, Implementation, Version, Cores, Types[{Name, Description, Count, Attributes[{Name, Description, Kind, PerCore, Live}]}], Errors}` |
 | `getObjects` | `<kind>`, `<name>` or null, `<liveOnly>` | `{Kind, Objects[{Name, Attributes[{Name, Core?, Value, Number?, Link?, Error?}]}], Reads}` |
-| `getRunning` | — | `{Cores[{Core, CoreId, Task, Priority, Isr, LastError}], Reads}` |
+| `getRunning` | — | `{Cores[{Core, CoreId, Task, Priority, Isr, LastError}], Reads}` (called on every stop to name threads by task; a few reads) |
 | `startProfile` | `<periodUs>`, `<lanes>` or null | `{PeriodUs, Cores, Lanes}` |
 | `getProfileLanes` | — | the lanes the loaded ORTI file offers |
 | `stopProfile` | — | `{Stopped}` |
 | `getProfile` | `<sinceUs>` | `{Running, PeriodUs, NowUs, Lanes, Transitions[{T, Core, Lane, Task}], Totals[{Core, Lane, Task, Us}], Dropped, Missed, TraceLost}` |
 | `getStacks` | `<names>` or null | `{Stacks[{Name, Base, Size, Direction, Pattern, Used?, Free?, Percent?, Error?}], Reads}` |
 
-`getRunning` is the one the adapter calls on every stop, to name each thread after the task it is running; it is a handful of reads.
-
-Context IDs:
-- **Chip:** `S0.D0`.
-- **Core:** `S0.D0.C<coreid>`.
-- **Stack frame:** `…C0.F<n>`.
+Context IDs: chip `S0.D0`, core `S0.D0.C<coreid>`, stack frame `…C0.F<n>`.
 
 ## Flashing (TC3xx PFLASH, `tc3x_eflash`)
 
-All cores are halted first. `flash write_image(s)` then runs a small RAM flash loader on cpu0 (`flash loader on`, the default): the loader goes to the start of cpu0's PSPR, its buffers to the start of its DSPR, and cpu0 runs the DMU command sequences while the debugger moves the data in 8 KB blocks, filling one buffer while the loader programs the other. That takes one probe access per 8 KB instead of about 40 per 256 bytes, which matters most on the BlueBox (every write is a USB message there): measured on a TC377 with an iC5700, 5.9 MB in 361 sectors were erased and programmed in 17 s and verified in 6 s, where the DMU sequences over the debug interface manage about 3.7 KB/s (about 27 minutes for the same image). The loader turns off the CPU0 and safety watchdogs until the next reset; cpu0 gets its registers back afterwards, the RAM keeps the loader. If the loader cannot start (no cpu0, RAM not writable, watchdogs that do not turn off), or with `flash loader off`, the driver runs the DMU command sequences over the debug interface itself. The other `flash` commands always do. Source: `crates/core/src/flash_loader.s`, assembled with Green Hills `astri -nooptimize`; the simulator executes it.
+Commands (full syntax in [commands.md](docs/commands.md#flash)): `flash info|probe|erase_check|erase_sector|write_image|write_images|verify_image <bank> ...`, `verify_image`, `program <file> [preverify] [verify] [reset] [exit] [offset]`, `flash loader on|off`, `aurix_eflash fallback`.
 
-- **`flash write_image [erase] [incremental] <file>`:** DMU-erased sectors are programmed directly. Other touched sectors are erased first, which requires `erase`. `incremental` skips sectors whose image pages already match, but it reads flash, and reading unprogrammed PFLASH raises an ECC error that the application's SMU may turn into a reset.
-- **`flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-type <type>] <file> ...`:** Merges the files into one image (where they overlap, later files win) and writes it like `flash write_image`. `-offset` (added to the file's addresses, the load address of a binary file) and `-type` (`elf`, `ihex`, `s19`/`srec`, `bin`) apply to the file that follows them; the REST/MCP `flash_write` takes them as `{"path", "offset", "type"}` entries. Writing the files one by one would erase data of earlier files in shared 16 KB sectors, and incremental writes would reprogram those sectors every time. With `incremental`, `verify` reads back only the programmed sectors, since the unchanged ones were just compared; otherwise the whole image. Reading runs at about 470 KB/s at `adapter speed 5000` and about 2 MB/s at 30000 (set by `tc37x_fs26_example.cfg`), so comparing large images dominates. The VS Code extension flashes `flashFiles` with this command (`verifyFlash` selects `verify`).
-- **`verify_image`:** reads only the image bytes. Flash is read through the non-cached 0xA segment.
+**RAM flash loader** (`flash loader on`, default):
+- All cores are halted. `flash write_image(s)` copies a small loader to the start of cpu0's PSPR and its buffers to the start of its DSPR; cpu0 programs while the debugger moves data in 8 KB blocks.
+- Much faster than driving the DMU over the debug interface (about 3.7 KB/s there), most of all on the BlueBox.
+- The loader turns off the CPU0 and safety watchdogs until the next reset. cpu0 gets its registers back; the RAM keeps the loader.
+- If it cannot start (no cpu0, RAM not writable, watchdogs that do not turn off), or with `flash loader off`, the driver runs the DMU sequences over the debug interface. The other `flash` commands always do.
+- Source: `crates/core/src/flash_loader.s` (Green Hills `astri -nooptimize`); the simulator executes it.
+
+Commands:
+- **`flash write_image [erase] [incremental] <file>`:** DMU-erased sectors are programmed directly; other touched sectors need `erase`. `incremental` skips sectors that already match, but it reads flash, and reading unprogrammed PFLASH raises an ECC error the application's SMU may turn into a reset.
+- **`flash write_images [erase] [incremental] [unlock] [verify] [-offset <offset>] [-type <type>] <file> ...`:** merges the files into one image (later files win) and writes it. Use it instead of writing files one by one, which would erase earlier files' data in shared 16 KB sectors.
+  - `-offset` (added to the file's addresses; load address of a binary) and `-type` (`elf`, `ihex`, `s19`/`srec`, `bin`) apply to the next file. REST/MCP `flash_write` takes `{"path", "offset", "type"}` entries.
+  - `verify`: with `incremental` reads back only the programmed sectors; otherwise the whole image. Reading runs at ~470 KB/s at `adapter speed 5000`, ~2 MB/s at 30000.
+  - The VS Code extension flashes `flashFiles` with this command (`verifyFlash` selects `verify`).
+- **`verify_image`:** reads only the image bytes, through the non-cached 0xA segment.
 - **`program … preverify`:** leaves flash untouched when the image already matches.
-- **Supported images:** ELF (load segments), Intel HEX, Motorola S-records (S1/S2/S3; lines starting with `;` or `#` are comments, as in flash container files), raw binary. Without an explicit type the format is taken from the ELF magic, the extension (`.hex`, `.srec`/`.s19`/`.s28`/`.s37`/`.mot`/`.sx`) or the first non-comment line. UCB banks are not supported.
-- **Banks:** the bank layout (busy bit, physical sectors) is looked up by `SCU_CHIPID.CHID`. TC36x/37x/38x/39x/3Ex use a table, like OpenOCD's `aurix_eflash`. Other TC3xx variants (e.g. TC33x, TC35x) use the common scheme with a warning: PFn at 0x80000000 + n × 3 MB, up to 3 MB, busy bit 2 + n. A `flash bank` may be smaller than its table entry, for devices with less flash than the largest one in their family. DFLASH0 (0xAF000000, up to 1 MB) and DFLASH1 (0xAFC00000, 128 KB) are the same on all variants.
+
+Images and banks:
+- **Formats:** ELF (load segments), Intel HEX, Motorola S-records (S1/S2/S3; lines starting with `;` or `#` are comments), raw binary. Without a type: ELF magic, extension (`.hex`, `.srec`/`.s19`/`.s28`/`.s37`/`.mot`/`.sx`) or first non-comment line.
+- UCB data in an image is skipped with a warning (with `unlock`: an error). Program UCBs with the `ucb` commands ([commands.md](docs/commands.md#user-configuration-blocks-ucb-tc3xx)).
+- **PFLASH layout** by `SCU_CHIPID.CHID`: TC36x/37x/38x/39x/3Ex from a table, like OpenOCD's `aurix_eflash`. Other TC3xx (e.g. TC33x, TC35x): common scheme with a warning (PFn at 0x80000000 + n × 3 MB, up to 3 MB, busy bit 2 + n). A `flash bank` may be smaller than its table entry.
+- **DFLASH:** DFLASH0 (0xAF000000, up to 1 MB) and DFLASH1 (0xAFC00000, 128 KB), same on all variants; `erase_sector` and `erase_check` only. `tc3xx_ocds.cfg` defines `dfls0` (where the chip's DF0 size is known, or `tc3xx_dflash0_size` is set; TC377: 256 KB) and `dfls1` (HSM data, 128 KB).
 
 ## Tests
 
-- **Offline:** `cargo test --workspace`. `hub/tests/` cover the stdio wrapper (with a hub restart and starting the hub), install/uninstall (versioned copies, the junction, the installation records) and a hub serving other machines (token, `allow_tcl`, uploads, through the LAN address); `aurix-dbg/tests/hub.rs` runs the hub with real worker processes on the simulator: MCP and REST through the hub, sessions from a profile with launch steps, two sessions and the guidance between them, the TCF and DAQ relays, an uploaded file by its ID, ending an MCP session, a hub restart that keeps the workers, a failed start with its log, and closing. Covers TAS packet encoding, TCF framing, the real cfg files against the simulator (event order, TL1 writes, resets), DWARF queries and expressions on a GHS ELF, image and flash layout, and Capstone decoding. It also covers the API: consistency of the operation table and the generated OpenAPI document, the shared breakpoint table (`tcf/tests/session.rs`), and REST, a DAQ WebSocket client and a TCF client on one simulated session (`api/tests/sim_http.rs`), with named clients, the control lease and the launch steps (symbols, flash failure, reset, `run_to` hitting and timing out, `relaunch`). The variable operations run there against two MCS assembler files the test writes (their data labels are globals, one shadowing another); struct members and array elements need `AURIX_TEST_ELF`. Watchpoints run there too: on expressions and core-local RAM, shared between the API and a TCF client, hit by a store the simulator makes (`SimAdapter::store`, which compares start addresses as the chip does), with conditions and running out of hardware events. The sampler itself is covered by `core/tests/daq_sim.rs`, which drives the tick with its own clock: rates, coalescing, budget truncation, backpressure, change detection and the socket-scoped lifetime.
-- **Real files:** tests that need build output of a real application skip unless it is named in environment variables: `AURIX_TEST_ELF` (TriCore application ELF), `AURIX_TEST_FUNCTION` (a function in it, default `main`), `AURIX_TEST_ORTI` (its ORTI file), `AURIX_TEST_HSM_ELF`, `AURIX_TEST_APP_ELF` + `AURIX_TEST_BM_ELF` (application and bootloader), `AURIX_TEST_MCS_DIR` (MCS assembler sources with their GHS output), `AURIX_TEST_SREC` (an S-record image).
-- **Hardware:** run through the extension's debug adapter against a running worker, with the board free (no OpenOCD). The scripts connect to the worker directly on the ports they default to, so start it by hand with them: `aurix-dbg ... -c "tcf_port 1534" -c "api_port 8080"` (or pass the ports a hub session reports). The scripts take the ELF and a breakpoint location as arguments or from `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs a few more variables, listed in its header:
+- **Offline:** `cargo test --workspace`. Uses the simulator (`--adapter sim`) for the cfg files, the API, TCF, DAQ, watchpoints, the hub with real worker processes, install/uninstall and remote access.
+- **Real files:** tests that need a real application's build output skip unless these are set:
+
+  | Variable | Content |
+  |---|---|
+  | `AURIX_TEST_ELF` | TriCore application ELF |
+  | `AURIX_TEST_FUNCTION` | a function in it (default `main`) |
+  | `AURIX_TEST_ORTI` | its ORTI file |
+  | `AURIX_TEST_HSM_ELF` | HSM ELF |
+  | `AURIX_TEST_APP_ELF` + `AURIX_TEST_BM_ELF` | application and bootloader |
+  | `AURIX_TEST_MCS_DIR` | MCS assembler sources with their GHS output |
+  | `AURIX_TEST_SREC` | an S-record image |
+
+- **Hardware:** scripts in `tools/` drive the extension's debug adapter against a running worker (board free, no OpenOCD). Start the worker by hand on the ports they default to: `aurix-dbg ... -c "tcf_port 1534" -c "api_port 8080"` (or pass a hub session's ports). ELF and breakpoint location as arguments or `AURIX_TEST_ELF` / `AURIX_TEST_BP_LOC`; `dap_m6.js` needs more variables (see its header).
   - `node tools/dap_smoke.js`: run control, registers, SFR memory, monitor.
   - `node tools/dap_m5.js`: source breakpoint, call stack, step over/into/out.
   - `node tools/dap_m6.js`: locals, register/global/struct writes, enum names, live watch.
   - `node tools/dap_m8.js`: disassembly and reset.
   - `node tools/tcf_smoke.js`: raw TCF services.
-  - `node tools/dap_external_bp.js [tcf_port] [api_port]`: API breakpoints in VS Code's Breakpoints view (also runs against the simulator).
-  - `node tools/dap_watch.js [tcf_port] [api_port] [expression] [elf]`: data breakpoints on a watch expression, with a condition, from the Live Watch and the editor, and API watchpoints in the Breakpoints view (also runs against the simulator; `HIT=1` also waits for a hit on a running target that writes the variable).
-  - DAQ: `pip install -e python`, then sample a changing global by name and check the rate and jitter from the `t_us` deltas. Verified on a TC377 board with an application running: every increment of a 5 ms counter caught over 5 s at 1 kHz requested, `float32` and enum globals decoded, and a 1 kHz session left a concurrent REST `read_memory` unchanged (median 21.0 ms either way).
+  - `node tools/dap_external_bp.js [tcf_port] [api_port]`: API breakpoints in VS Code's Breakpoints view (also against the simulator).
+  - `node tools/dap_watch.js [tcf_port] [api_port] [expression] [elf]`: data breakpoints and API watchpoints (also against the simulator; `HIT=1` waits for a hit on a running target).
+  - DAQ: `pip install -e python`, sample a changing global by name, check rate and jitter from the `t_us` deltas.
 
 ## Not yet implemented
 
 - gdb RSP frontend (contract in [docs/gdb-frontend.md](docs/gdb-frontend.md)).
-- On the `winidea` backend: flashing and multi-core attach are implemented but not yet confirmed on hardware (see [Backends](#backends-tas_client-sim-winidea)).
-- DFLASH/UCB programming and PFLASH protection unlock.
-- A RAM flash loader.
-- A TCF Flash service; flashing goes through the Tcl `program` command.
+- Flashing on the `winidea` backend is implemented but not confirmed on hardware.
+- DFLASH programming and PFLASH protection unlock.
+- A TCF Flash service (flashing goes through Tcl commands).
 - Frame names for code without DWARF functions (the frame ID is shown).
 - Memory writes to SMPU-protected RAM.
-- Target-side DAQ timestamps. Sampling is timed on the host; reading the STM in the same batch would let a client correlate the two clocks and measure the read latency. Jitter-free values come from the [miniMCDS trace](#on-chip-trace-minimcds) (CPU0's writes only).
-- A DAQ point that follows a pointer. Addresses are resolved once at subscribe time, so `p->x` samples wherever `p` pointed then.
+- Target-side DAQ timestamps (sampling is host-timed; jitter-free values come from the [miniMCDS trace](#on-chip-trace-minimcds), CPU0's writes only).
+- DAQ points that follow a pointer (`p->x` is resolved once, at subscribe time).

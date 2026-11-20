@@ -84,12 +84,12 @@ reset_config [<option> ...]
 
 Set the reset options; without arguments, show them.
 
-Of OpenOCD's options only two change anything:
+Two options have an effect:
 
-- `connect_assert_srst`: `init` connects with a reset and halts the cores at the reset vector (TAS: reset-and-halt connect; BlueBox: probe reset right after the attach). Needed for a device locked with a debug password (`adapter debug_password`), and for a target whose application keeps the debugger out.
-- `connect_deassert_srst`: connect to the running target without a reset (hot attach, the default).
+- `connect_assert_srst`: `init` connects with a reset and halts the cores at the reset vector. Needed for a device locked with a debug password (`adapter debug_password`) and for an application that keeps the debugger out.
+- `connect_deassert_srst`: connect to the running target without a reset (hot attach, default).
 
-The others (`srst_only`, `trst_and_srst`, `srst_nogate`, ...) are stored and shown, but have no effect. The winIDEA adapter ignores the setting: the winIDEA workspace decides how it connects.
+The others (`srst_only`, `trst_and_srst`, `srst_nogate`, ...) are stored and shown, without effect. Ignored by the winIDEA adapter: the winIDEA workspace decides how it connects.
 
 ## Probe (adapter)
 
@@ -285,7 +285,7 @@ The name of target number `<n>`.
 target smp ...
 ```
 
-Ignored with a warning: the cfg scripts synchronise the cores (TL1).
+Ignored with a warning; `ocds sync tl1` runs the cores together.
 
 ### `targets`
 
@@ -466,9 +466,9 @@ Requests from Tcl, the debugger frontends, the API and `program` all go to the p
 ocds_found_off
 ```
 
-1 if OCDS was found off since the last call (which clears it), else 0.
+1 if OCDS was found off since the last call, else 0; each call clears it.
 
-A power-on class reset (debugger reset, an SBC reset, a power cycle) clears OCDS; the examination after it switches it on again. Set also when a probe that owns OCDS (BlueBox) had to bring the target back into debug mode. An application that checks for a debugger at start-up may then have started without seeing it: `fs26_sbc.cfg` disarms the FS26 watchdog again with the next reset. A reset the device watch (`reset_watch`) switched OCDS on again for within its threshold does not set it; a later one does.
+Set when a power-on class reset (debugger reset, SBC reset, power cycle) cleared OCDS and it had to be switched on again, or when a probe that owns OCDS (BlueBox) had to bring the target back into debug mode. Not set when the device watch (`reset_watch`) restored OCDS within its threshold. A 1 means the application may have started without seeing the debugger (e.g. `fs26_sbc.cfg` then disarms the FS26 watchdog again with the next reset). To count resets, use `reset_info`.
 
 ### `reset_info`
 
@@ -478,7 +478,7 @@ reset_info
 
 What the device watch saw of resets, as a dict.
 
-Keys: `count` (resets seen while watching, not the server's own, since the connection), `last_ms` (when the last one was seen, as `clock milliseconds`), `latency_ms` (upper bound of how long the device answered without OCDS before it was switched on again; empty while unknown), `restored` (OCDS is on again), `late` (later than the threshold, or not restored), `watching` (the watch acts in this session). Scripts that detect resets by finding OCDS off compare `count` instead: the watch may have switched it on already.
+Keys: `count` (resets since the connection, not counting the server's own), `last_ms` (when the last one was seen, as `clock milliseconds`), `latency_ms` (upper bound of the time the device ran without OCDS; empty while unknown), `restored` (OCDS is on again), `late` (restored later than the threshold, or not at all), `watching` (the watch is active in this session). To detect resets, compare `count`: OCDS may already be on again when a script looks.
 
 ### `reset_watch`
 
@@ -486,9 +486,13 @@ Keys: `count` (resets seen while watching, not the server's own, since the conne
 reset_watch [on|off] | threshold [<ms>] | slice [<ms>]
 ```
 
-Show or set the device watch, which answers a reset at the access that reports it.
+Show or set the device watch, which switches OCDS on again at the access that reports a reset.
 
-Every access (from a command, a handler, flashing or the poll) collects the resets the probe reported; for a reset the server did not do itself, the watch switches OCDS on again right away, and while the boot ROM keeps the device locked, at each following access (for up to 3 s). Waits in Tcl (`sleep`, `after`) access the device every `slice` ms (default 5) when nothing else did, so that a reset is also answered while a script waits. A restore later than `threshold` ms (default 15) after the device could answer again counts as late and sets `ocds_found_off`. Active for TriCore cores whose OCDS the server drives (not with a probe that does run control itself, the BlueBox, winIDEA). The re-examination after a reset (triggers, the cfg's `examine-end` handlers) still follows in the background poll after the command.
+- `on|off`: switch the watch (default on).
+- `threshold <ms>`: a restore later than this after the device answers again counts as late and sets `ocds_found_off` (default 15).
+- `slice <ms>`: during Tcl waits (`sleep`, `after`) the device is accessed this often, so that a reset is also answered while a script waits (default 5).
+
+Applies to resets the server did not do itself. While the boot ROM keeps the device locked, every following access tries again, for up to 3 s. Only for TriCore cores whose OCDS the server drives (not with the BlueBox or winIDEA). The re-examination after the reset (triggers, `examine-end` handlers) follows in the background poll.
 
 ### `ocd_process_reset`
 
@@ -506,7 +510,12 @@ attach_mode [passive|hot|halt|reset_halt|reset_run]
 
 How `init` attaches to the board (default `hot`); set before `init`.
 
-`passive`: no register written - the targets are not examined (OCDS stays as it is, no trigger is set), TL1 sync, peripheral suspend and the device watch stay off; memory reads work, resets and halts are refused. `hot`: attach to what runs, without reset or halt; the TL1 routing and the peripheral suspend are written, modules still pending or locked are reported. `halt`: `hot`, then all cores halted in the application (`halt_all`); if a halt is not safe now - modules the application locked before their suspend was written, or what `halt_check_hook` says - a running reset first (through `reset_hook`) and `attach_run_ms` of running. `reset_halt`, `reset_run`: `reset halt`, `reset run` through `reset_hook`. The mode runs after the cfg's `init_board`.
+Runs after the cfg's `init_board`.
+
+- `passive`: writes no register. The targets are not examined (OCDS and triggers stay as they are); TL1 sync, peripheral suspend and the device watch stay off. Memory reads work; resets and halts are refused.
+- `hot`: attach to what runs, without reset or halt. The TL1 routing and the peripheral suspend are written; modules still pending or locked are reported (`attach_status`).
+- `halt`: `hot`, then halt all cores where the application is (`halt_all`). If a halt is not safe (modules the application locked before their suspend was written, or a reason from `halt_check_hook`), first a running reset through `reset_hook` and `attach_run_ms` of running.
+- `reset_halt`, `reset_run`: `reset halt` or `reset run`, through `reset_hook`.
 
 ### `attach_run_ms`
 
@@ -522,7 +531,9 @@ How long `attach_mode halt` lets the application run after its reset before the 
 attach_status
 ```
 
-The attach mode, the modules without suspend (`pending`, `locked`) and why a halt is not safe now (`halt_unsafe`), as a dict.
+The attach mode, the modules without suspend and why a halt is not safe now, as a dict.
+
+Keys: `mode`, `pending` and `locked` (module names), `halt_unsafe` (empty when a halt is safe).
 
 ### `halt_check_hook`
 
@@ -532,7 +543,7 @@ halt_check_hook [<proc>]
 
 A proc that returns why a halt is not safe now ("" when it is); without an argument, show it.
 
-Used by `attach_mode halt` (a reason makes it reset first) and reported by `attach_status`. An empty name removes it. `fs26_sbc.cfg` returns the FS26 watchdog state while it is not known to be disarmed.
+Used by `attach_mode halt` (a reason makes it reset first) and reported by `attach_status`. An empty name removes it. Example: `fs26_sbc.cfg` returns the FS26 watchdog state while it is not known to be disarmed.
 
 ### `reset_settle`
 
@@ -542,7 +553,7 @@ reset_settle <max_ms> <quiet_ms>
 
 Let the device run until no reset came for `quiet_ms`, for up to `max_ms`; returns a dict.
 
-Keys: `settled` (1 if quiet in time), `resets` (seen during the wait), `elapsed` (ms), `down` (ms the device has not answered at the end). STM0 is read every 2 ms through the device watch, which answers each reset on the way at once (OCDS, TL1 routing, peripheral suspend), in time for an application that checks for the debugger at start-up: e.g. until an application has disarmed an external watchdog. A reset is one the watch counted, STM0 counting from a lower value, or reads that failed for a while and then find OCDS off.
+Keys: `settled` (1 if quiet in time), `resets` (seen during the wait), `elapsed` (ms), `down` (ms the device has not answered at the end). Each reset on the way is answered at once (OCDS, TL1 routing, peripheral suspend). Use it e.g. to wait until the application has disarmed an external watchdog. Counted as a reset: one the device watch saw, STM0 restarting from a lower value, or the device not answering for a while and coming back with OCDS off.
 
 ### `hsm autostart`
 
@@ -552,7 +563,7 @@ hsm autostart [on|off]
 
 Release the HSM from its boot ROM breakpoint after a reset (default on).
 
-After a halting reset (OCDS on during boot) the boot ROM holds the HSM at its first instruction, and a bootloader that waits for the HSM (HSM2HTS) hangs. The server reads once whether the HSM boots (PROCONHSMCFG.HSMBOOTEN, a host register); when it does, or with an HSM target, it checks the HSM after every reset and deletes the breakpoint and runs it if DHCSR and FP_COMP0 show it held there. It then waits for the HSM to report ready (`hsm ready_ms`) before it latches TL1 or resumes the cores. No HSM target is needed; a board whose HSM does not boot gets no HSM access. If the HSM boots but its firmware has closed the debug window, it cannot be released: after a halting reset the server warns (a running reset does not leave the HSM held). An HSM that stays halted is unrouted from TL1. `off` leaves the HSM at the breakpoint, to debug its boot.
+After a halting reset the boot ROM holds the HSM at its first instruction, and a bootloader that waits for the HSM (HSM2HTS) hangs. With `on`, when the HSM boots (PROCONHSMCFG.HSMBOOTEN) or an HSM target exists, the server checks the HSM after every reset, releases it if held and waits for it to report ready (`hsm ready_ms`) before TL1 is latched or the cores resume. No HSM target is needed. An HSM whose firmware closed the debug window cannot be released: the server warns after a halting reset. An HSM that stays halted is taken off TL1. `off`: leave the HSM at the breakpoint, to debug its boot.
 
 ### `hsm ready_ms`
 
@@ -584,7 +595,9 @@ Wait for HSM2HTS READY|ACTIVE; 1 when ready, 0 after the time.
 hsm status
 ```
 
-What the server knows of the HSM, as a dict: `boots`, `ssw_waits` (PROCONHSMCFG), `target` (an HSM target exists), `last` (the last release: off, not_held, blocked, released, failed).
+What the server knows of the HSM, as a dict.
+
+Keys: `boots`, `ssw_waits` (from PROCONHSMCFG), `target` (an HSM target exists), `last` (result of the last release: `off`, `not_held`, `blocked`, `released`, `failed`).
 
 ### `suspend add`
 
@@ -592,9 +605,13 @@ What the server knows of the HSM, as a dict: `boots`, `ssw_waits` (PROCONHSMCFG)
 suspend add <module>|cores [soft|hard|off] | <name> -ocs <addr> -clc <addr> -accen <addr> [soft|hard|off]
 ```
 
-Suspend a peripheral module while the cores are halted (OCS.SUS), as winIDEA's SuspendPeripheralsWhileStopped.
+Suspend a peripheral module while the cores are halted (OCS.SUS).
 
-`soft` (default) lets the module finish what it is doing, `hard` stops its clock (the only mode GPT12 has), `off` writes SUS=0 (clears a suspend an earlier session left). `cores` adds the STM of every TriCore core. Module names are looked up in the chip's bundled SVD description (`<MODULE>.OCS`, `.CLC`, `.ACCEN0`); the second form gives the addresses. The OCS is written as soon as the write can land (module enabled: CLC.DISS=0, and ACCEN0 lets the debugger write) and never before: right after every reset, in the step that switches OCDS on again; by the background poll while the cores run, once the application enabled the module; before a pause; late, when a halt is seen. A module the application locks first stays `locked` until the next reset; one whose write does not take is left alone after two tries (`refused`); one not enabled 5 s after a reset is checked every 2 s (`idle`). Nothing is suspended unless listed. Not with a probe that owns OCDS (winIDEA).
+- `soft` (default): the module finishes what it is doing. `hard`: its clock stops (the only mode of GPT12). `off`: writes SUS=0, e.g. to clear a suspend an earlier session left.
+- `cores`: the STM of every TriCore core.
+- Module names are looked up in the chip's bundled SVD (`<MODULE>.OCS`, `.CLC`, `.ACCEN0`); the second form gives the addresses.
+
+The OCS is written only when the write can land (module enabled, CLC.DISS=0, and ACCEN0 lets the debugger write): right after every reset, by the background poll while the cores run, before a pause, and when a halt is seen. States (`suspend status`): `pending`, `done`; `locked`: the application locked the module first, until the next reset; `refused`: the write did not take after two tries; `idle`: not enabled after 5 s of run time since a reset or resume, then checked every 2 s. Nothing is suspended unless listed. Equivalent of winIDEA's SuspendPeripheralsWhileStopped. Not with a probe that owns OCDS (winIDEA).
 
 ### `suspend remove`
 
@@ -626,7 +643,9 @@ The suspend list: name, mode and the OCS, CLC and ACCEN0 addresses of each modul
 suspend status
 ```
 
-Each module's state as a dict: name, mode, state (pending, idle, done, locked, refused), after_ms and from (when it got its suspend while the cores ran, counted from the reset or the last resume, `from` saying which; empty when it was set while halted), ocs.
+Each listed module's suspend state, as a dict.
+
+Per module: `name`, `mode`, `state` (`pending`, `idle`, `done`, `locked`, `refused`; see `suspend add`), `after_ms` and `from` (when the suspend was written while the cores ran, counted from the reset or the last resume as `from` says; empty when written while halted), `ocs`.
 
 ### `suspend now`
 
@@ -654,7 +673,7 @@ halt_all [<timeout_ms>]
 
 Halt all cores together as the debugger's pause does; 1 when halted.
 
-Pending peripheral modules get their suspend first; then TL1 is pulsed and cpu0's halt requested (without TL1 sync, every core's), on the registers rather than through the server's state, which a handler or a script can see stale after a reset. Waits up to `timeout_ms` (1000) for the halt, then polls, so the halt is seen at once.
+Writes the suspend of pending peripheral modules first, then halts through TL1 (without TL1 sync: every core). Acts on the debug registers directly, so it also works in a handler right after a reset. Waits up to `timeout_ms` (default 1000).
 
 ### `halt`
 
@@ -688,7 +707,7 @@ step [<address>]
 
 Step one instruction on the current target, from `<address>` if given.
 
-With `tricore tl1_step on`, all cores run for the stepped instruction.
+With TL1 sync (`ocds sync tl1`), all cores run for the instruction unless `ocds step single`.
 
 ### `poll`
 
@@ -768,7 +787,7 @@ mww_seq <address> <value> [<address> <value> ...]
 
 Write 32-bit words to several addresses in one transaction, in order.
 
-For run-control sequences on debug registers (the cfg's step-start handler). On a probe that pays per message (the BlueBox) they share one message, and the writes after a failed one may have run too; the error names the first failed write. On TAS nothing runs after a failed write.
+For run-control sequences on debug registers. On the BlueBox they go in one message, and writes after a failed one may have run too; the error names the first failed write. On TAS nothing runs after a failed write.
 
 ### `read_memory`
 
@@ -802,7 +821,10 @@ daq [status | gap [<bytes>] | merge [0|1]]
 
 Show the live sampling (DAQ) sessions and what the probe can take.
 
-Sessions are opened on the DAQ WebSocket, not here. `gap` is how far the sampler may over-read to merge two points into one bus access (never in peripheral space); `merge 0` stops due points from riding in the run-state poll's batch (to measure what that is worth).
+Sessions are opened on the DAQ WebSocket; this command only shows them.
+
+- `gap [<bytes>]`: how far the sampler may over-read to merge two points into one bus access (never in peripheral space).
+- `merge [0|1]`: 1 (default) reads due points with the run-state poll's access, 0 reads them separately.
 
 ## Breakpoints and watchpoints
 
@@ -848,9 +870,9 @@ Remove a watchpoint, or all of them.
 ocds sync [tl1|none]
 ```
 
-Halt, resume and step all cores of the chip together through trigger line TL1, or each alone (default).
+Halt, resume and step all cores together through trigger line TL1 (`tl1`), or each core alone (`none`, default).
 
-With `tl1` every BRKOUT (CPUs, the HSM) drives TL1 and capture-and-hold keeps it active: a halt of one core stops all TL1 members and every suspended peripheral in the same cycle. A pause pulses TL1 (`tricore tl1_halt` is set on every core), a resume releases the other cores while the held TL1 still suspends them, resumes this one and drops the hold, so all start in the same cycle; a step runs all cores for the instruction (`ocds step`). The routing is cleared by every power-on class reset and written again right after it (with the peripheral suspend), and at the attach; an attach that finds cpu0 halted halts all cores together again. May be set before or after `init`. Not with a probe that owns OCDS (winIDEA).
+With `tl1`, a halt of one core stops all TL1 members (`ocds tl1_members`) and every suspended peripheral (`suspend add`) in the same cycle, and a resume starts them in the same cycle. Steps follow `ocds step`. Sets `tricore tl1_halt` and `tricore tl1_step` on every core. The TL1 routing is written at the attach and again after every power-on class reset; an attach that finds cpu0 halted halts all cores. Can be set before or after `init`. Not with a probe that owns OCDS (winIDEA).
 
 ### `ocds tl1_members`
 
@@ -860,7 +882,7 @@ ocds tl1_members [<list>]
 
 What TL1 suspends: any of `cpus hsm dma hssl` (default all four).
 
-Written to CBS_TL1ST (CPU0-5, the HSM, DMA, HSSL0). `hsm` only counts with an HSM target, which also routes its BRKOUT to TL1 (CBS_TRHSM).
+`cpus` is CPU0-5, `hssl` is HSSL0. `hsm` only takes effect with an HSM target.
 
 ### `ocds step`
 
@@ -870,7 +892,7 @@ ocds step [all|single]
 
 With TL1 sync: a step runs all cores for the instruction (default), or only the stepping one.
 
-`single` keeps the other cores debug halted and drops the TL1 hold, so that only the stepping core runs; it sets `tricore tl1_step` off on every core.
+`single` keeps the other cores halted (sets `tricore tl1_step off` on every core).
 
 ### `ocds step_timers`
 
@@ -898,7 +920,7 @@ tricore tl1_halt [on|off]
 
 Let a halt request also pulse trigger line TL1, so every core stops with this one.
 
-`tc3xx_ocds.cfg` turns it on, so pause in the debugger stops all cores in the same cycle.
+Set on every core by `ocds sync tl1`.
 
 ### `tricore tl1_step`
 
@@ -908,7 +930,7 @@ tricore tl1_step [on|off]
 
 Run all cores for an instruction step, not only the stepping one.
 
-`tc3xx_ocds.cfg` turns it on. The other cores are released by the cfg's `step-start` and stopped again by TL1 in the same cycle as the stepping core.
+Set on every core by `ocds sync tl1` with `ocds step all` (default); `ocds step single` clears it.
 
 ### `tricore irq_mask`
 
@@ -958,9 +980,9 @@ Same as `tricore`, for an MCS channel.
 xc800 ... triggers | mdw <address> [<count>]
 ```
 
-Same as `tricore`, for the SCR: `triggers` lists its hardware breakpoints, `mdw` takes its virtual addresses (code 0x0000-0xFFFF, XDATA 0x10000, IRAM 0x20000-0x200FF, SFRs 0x40000-0x7FFFF with the page in bits 17:15 and the page register in bits 14:8, TC3xx UM Table 558).
+Same as `tricore`, for the SCR.
 
-Only while the SCR is halted: its debug monitor serves the accesses. The SFR window 0x40000-0x7FFFF also reaches the SCR from the other cores' TCF contexts (the Peripheral View reads through the TriCore).
+`triggers` lists its hardware breakpoints. `mdw` takes the SCR's virtual addresses: code 0x0000-0xFFFF, XDATA 0x10000, IRAM 0x20000-0x200FF, SFRs 0x40000-0x7FFFF (page in bits 17:15, page register in bits 14:8; TC3xx UM Table 558). Only while the SCR is halted. The SFR window can also be read from the other cores' TCF contexts (the Peripheral View does).
 
 ## Flash
 
@@ -1004,7 +1026,7 @@ flash loader [on|off]
 
 Program PFLASH through the RAM flash loader on cpu0 (default on).
 
-`flash write_image(s)` copies a small loader to the start of cpu0's PSPR and its buffers to the start of its DSPR, and cpu0 runs the flash commands while the debugger only moves data in 8 KB blocks. The loader turns off the CPU0 and safety watchdogs until the next reset; cpu0 gets its registers back, the RAM keeps the loader. If it cannot start, the debugger drives the flash controller itself (`off`: always).
+Used by `flash write_image` and `flash write_images`. The loader runs from the start of cpu0's PSPR, with its buffers at the start of cpu0's DSPR; that RAM is overwritten. It disables the CPU0 and safety watchdogs until the next reset; cpu0's registers are restored afterwards. If the loader cannot start, the debugger programs the flash itself; `off` always does.
 
 ### `flash erase_sector`
 
@@ -1250,9 +1272,16 @@ Whether writing is enabled, what is staged.
 mcds arm [-json] [-core 0] -data <addr> <len> | -program [-filter <addr> <len>] [-stop full|halt|manual | -stopat <addr> <len>] [-ticks|-tsu]
 ```
 
-Arm a miniMCDS trace of one core: every write into an address range (data), or the program flow, optionally only inside a range.
+Arm a miniMCDS trace of one core: data writes into a range, or the program flow.
 
-Switches the MCDS on, writes the setup, clears the 8 KB trace RAM and starts. `-stop full` keeps the first 8 KB, `halt` and `manual` keep the last 8 KB before the core halts (the debugger stops it when it sees the halt) or before `mcds stop`; `-stopat` stops when the PC enters a range. Time stamps: `-tsu` (default) only with messages, `-ticks` a tick message per step (exact, but fills the buffer in milliseconds). Only CPU0 so far. The trace is shared with traced DAQ points.
+Switches the MCDS on, clears the 8 KB trace RAM and starts.
+
+- `-data <addr> <len>`: every write into the range.
+- `-program [-filter <addr> <len>]`: the program flow, optionally only inside the range.
+- `-stop full`: keep the first 8 KB. `halt`: the last 8 KB before the core halts. `manual`: the last 8 KB before `mcds stop`. `-stopat <addr> <len>`: stop when the PC enters the range.
+- `-tsu` (default): time stamps only with messages. `-ticks`: a tick message per step, exact but fills the buffer within milliseconds.
+
+CPU0 only. The trace is shared with traced DAQ points.
 
 ### `mcds plan`
 
@@ -1268,7 +1297,9 @@ Show the register writes `mcds arm` would make, without touching the target.
 mcds auto [off | <mcds arm options>] [-json]
 ```
 
-Arms the trace whenever the traced core runs (`resume`, not a step) and reads it when the core halts, so every halt comes with the trace up to it: `mcds auto -program -stop halt`. `off` ends it; without arguments it shows the setting. A trace that another owner uses or that is still recording is left alone.
+Arm the trace on every run of the traced core and read it at the halt.
+
+Each `resume` (not a step) arms it, each halt reads it, so every halt comes with the trace up to it, e.g. `mcds auto -program -stop halt`. `off` ends it; without arguments, show the setting. A trace another owner uses or that is still recording is left alone.
 
 ### `mcds status`
 
@@ -1320,9 +1351,15 @@ Switch the MCDS on (clock, enable bits); `mcds arm` does this itself.
 reverse on [-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-maxhits <n>] -region <start> <len> [-private] ...
 ```
 
-Switch reverse debugging on: before every run, step, source step and register or memory write of the core, its registers and the given RAM regions are saved.
+Switch reverse debugging on: save the core's registers and the given RAM regions before every run, step and write.
 
-`reverse back` then writes an earlier state back into the halted core, which really runs from there again. A run already going (switched on after attaching to a running application) is recorded up to its halt, without a checkpoint. `-private` marks a region only this core writes (its stacks, its context save area). `-history` checkpoints are kept (default 50, 0: all). While on, the mode owns the miniMCDS and records each action (CPU0; `-notrace`: not); `mcds arm` and `mcds auto` are refused. The TCF/REST operations take the regions from the ELF. Not rewound: peripherals, timers, other cores.
+Saved before every run, step, source step and register or memory write. `reverse back` writes an earlier state back into the halted core, which then really runs again from there.
+
+- `-region <start> <len>`: RAM to save; repeat for more. `-private` after a region: only this core writes it (its stacks, its context save area).
+- `-history <n>`: checkpoints kept (default 50, 0: all).
+- `-notrace`: do not record each action with the miniMCDS (CPU0).
+
+While on, it owns the miniMCDS: `mcds arm` and `mcds auto` are refused. Switched on while the core runs, the current run is recorded up to its halt, without a checkpoint. Not rewound: peripherals, timers, other cores. The TCF/REST operations take the regions from the ELF.
 
 ### `reverse off`
 
@@ -1646,7 +1683,7 @@ bluebox debug_mode [standard|wide]
 
 The debug channel mode the attach sets up; set before `init`.
 
-`wide` (DAP Wide, the default) is what the built-in attaches were captured with. `standard` (DAP Standard) is the only mode the SCR (`xc800` target) works in; the DAP clock then stays at 10 MHz or below. `tc3xx_scr_target 1` selects it.
+`wide`: DAP Wide (default). `standard`: DAP Standard, needed for the SCR (`xc800` target); the DAP clock then stays at 10 MHz or below. `tc3xx_scr_target 1` selects `standard`.
 
 ### `bluebox daq`
 
@@ -1688,7 +1725,7 @@ bluebox scr_mem <space> <address> <length> [<hex data>]
 
 Protocol aid: read (with data: write) SCR memory in the probe's own terms.
 
-Memory spaces: 0 code/XDATA, 1 directly addressed data (IRAM 0x00-0x7F, the SFRs of the pages the program selected), 2 IDATA, 4 XDATA, 12 the monitor's virtual address map (winIDEA's area 12; the SCR target uses it for upper IRAM and all SFRs). Prints the bytes and how many failed. While the SCR runs, the probe answers with zeros.
+Memory spaces: 0 code/XDATA, 1 directly addressed data (IRAM 0x00-0x7F, the SFRs of the pages the program selected), 2 IDATA, 4 XDATA, 12 the monitor's virtual address map (upper IRAM and all SFRs). Prints the bytes and how many failed. While the SCR runs, the probe answers with zeros.
 
 ## Accepted for OpenOCD compatibility
 

@@ -60,9 +60,11 @@ pub const APP_MARKER: u32 = 0x7000_F000;
 pub const APP_DRIVER_STATE: u32 = 0x6000_F000;
 pub const APP_MARKER_DEBUGGER: u32 = 0xDEB0_0001;
 
-/// The simulated board's settings, as a board's own cfg makes them after the target cfg: the
-/// peripheral suspend list ([`SIM_PERIPHS`], by their names in the bundled SVD description).
+/// The simulated board's settings, as a board's own cfg makes them after the target cfg: the HSM as a
+/// target (before tc3xx_ocds.cfg), the peripheral suspend list ([`SIM_PERIPHS`], by their names in
+/// the bundled SVD description).
 pub const SIM_BOARD_SETTINGS: &str = "
+set tc3xx_hsm_target 1
 suspend add cores
 suspend add SMU
 suspend add GPT120 hard
@@ -836,7 +838,15 @@ impl SimAdapter {
             BatchOp::Read { addr, len, addr_map: 0 } if SimDmu::claims(addr as u32) => {
                 let mut data = Vec::with_capacity(len);
                 for k in (0..len).step_by(4) {
-                    match self.dmu.read32(addr as u32 + k as u32) {
+                    let a = addr as u32 + k as u32;
+                    // PROCONHSMCFG: HSMBOOTEN and SSWWAIT follow `hsm_boots` (the HSM boots, and the
+                    // startup waits for it), the rest is installed from the UCB.
+                    let v = self.dmu.read32(a).map(|v| match a {
+                        crate::ucb::SP_PROCONHSMCFG if self.hsm_boots => v | 3,
+                        crate::ucb::SP_PROCONHSMCFG => v & !3,
+                        _ => v,
+                    });
+                    match v {
                         Some(v) => data.extend_from_slice(&v.to_le_bytes()),
                         None => {
                             data.resize(len, 0);

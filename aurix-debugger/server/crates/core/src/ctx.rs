@@ -110,6 +110,8 @@ pub struct Ctx {
     pub tl1: crate::tl1::Settings,
     /// The HSM after a reset (`hsm ...`), see [`crate::hsm`].
     pub hsm: crate::hsm::Settings,
+    /// What is known of the HSM in this session (its boot configuration, the last release).
+    pub hsm_state: crate::hsm::State,
     /// How `init` attaches (`attach_mode`), see [`crate::attach`].
     pub attach_mode: crate::attach::Mode,
     /// How long `attach_mode halt` lets the application run after its reset (`attach_run_ms`).
@@ -191,6 +193,7 @@ impl Ctx {
             restore: Default::default(),
             tl1: Default::default(),
             hsm: Default::default(),
+            hsm_state: Default::default(),
             attach_mode: Default::default(),
             attach_run_ms: crate::attach::DEFAULT_RUN_MS,
             halt_check_hook: None,

@@ -88,6 +88,7 @@ fn an_hsm_that_does_not_boot_is_left_alone_without_waiting() {
     s.interp.eval("reset run").unwrap();
     assert!(t0.elapsed().as_millis() < 1000, "waited for an HSM that does not boot");
     assert!(!hsm_writes(&s).contains(&(fp_comp(0), 0)), "released an HSM that was not held");
+    assert_eq!(s.interp.eval("hsm status").unwrap(), "boots 0 ssw_waits 0 target 1 last not_held");
     assert!(!with_sim(&s, |sim| sim.writes.contains(&(CBS_TRHSM, 0))), "HSM unrouted from TL1 although not halted");
 }
 
@@ -102,16 +103,50 @@ fn an_hsm_with_debugging_closed_is_left_alone() {
     assert!(!with_sim(&s, |sim| sim.writes.contains(&(CBS_TRHSM, 0))), "unrouted: the release was not even possible");
 }
 
+/// Without an HSM target and with an HSM that does not boot (PROCONHSMCFG.HSMBOOTEN clear), the
+/// HSM debug window is never touched.
 #[test]
-fn without_an_hsm_target_the_hsm_is_never_accessed() {
+fn an_hsm_that_does_not_boot_is_never_accessed_without_a_target() {
     let s = server(false, "ocds sync tl1");
+    with_sim(&s, |sim| sim.hsm_boots = false);
     s.interp.eval("init").unwrap();
     s.interp.eval("reset halt").unwrap();
     s.interp.eval("reset run").unwrap();
-    let w = with_sim(&s, |sim| sim.writes.clone());
-    assert!(!w.iter().any(|&(a, _)| a == HSM_DBGBASE || a == CBS_TRHSM), "HSM accessed without an HSM target: {w:08x?}");
+    assert_eq!(with_sim(&s, |sim| sim.hsm.dbgbase), 0, "HSM window selected");
+    assert!(hsm_writes(&s).is_empty(), "HSM written");
+    assert_eq!(s.interp.eval("hsm status").unwrap(), "boots 0 ssw_waits 0 target 0 last off");
     // TL1 suspends no HSM either.
     assert_eq!(with_sim(&s, |sim| sim.mem_word(0xF000_0494)) & (1 << 31), 0);
+}
+
+/// An HSM that boots is released after a halting reset without an HSM target (the bootloader waits
+/// for it), and is not touched after a running reset, which does not leave it held.
+#[test]
+fn an_hsm_that_boots_is_released_without_a_target() {
+    let s = server(false, "ocds sync tl1; hsm ready_ms 0");
+    s.interp.eval("init").unwrap();
+    hsm_writes(&s);
+    s.interp.eval("reset halt").unwrap();
+    let w = hsm_writes(&s);
+    assert!(w.contains(&(fp_comp(0), 0)) && w.contains(&(DHCSR, 0xA05F_0001)), "not released: {w:08x?}");
+    assert!(!with_sim(&s, |sim| sim.hsm.halted), "HSM still halted");
+    assert_eq!(s.interp.eval("hsm status").unwrap(), "boots 1 ssw_waits 1 target 0 last released");
+    assert!(!s.interp.eval("target names").unwrap().contains("hsm"));
+    s.interp.eval("reset run").unwrap();
+    assert!(!hsm_writes(&s).iter().any(|&(a, _)| a == DHCSR), "an HSM that was not held was written");
+    assert_eq!(s.interp.eval("hsm status").unwrap(), "boots 1 ssw_waits 1 target 0 last not_held");
+}
+
+/// An HSM that boots but whose firmware closed its debug window cannot be released: reported as
+/// blocked (with a warning after a halting reset), nothing written.
+#[test]
+fn an_hsm_that_boots_with_debugging_closed_is_reported() {
+    let s = server(false, "ocds sync tl1");
+    with_sim(&s, |sim| sim.hsm.debug_enabled = false);
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(s.interp.eval("hsm status").unwrap(), "boots 1 ssw_waits 1 target 0 last blocked");
+    assert!(!hsm_writes(&s).iter().any(|&(a, _)| a == DHCSR || a == fp_comp(0)));
 }
 
 #[test]
@@ -124,3 +159,4 @@ fn wait_ready_follows_hsm2hts() {
     with_sim(&s, |sim| sim.set_mem(HSM2HTS, 3));
     assert_eq!(s.interp.eval("hsm wait_ready 50").unwrap(), "1");
 }
+

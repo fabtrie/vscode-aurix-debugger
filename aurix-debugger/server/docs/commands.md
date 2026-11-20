@@ -506,7 +506,7 @@ attach_mode [passive|hot|halt|reset_halt|reset_run]
 
 How `init` attaches to the board (default `hot`); set before `init`.
 
-`passive`: no register written - the targets are not examined (OCDS stays as it is, no trigger is set), TL1 sync,          peripheral suspend and the device watch stay off; memory reads work, resets and halts are refused. `hot`: attach          to what runs, without reset or halt; the TL1 routing and the peripheral suspend are written, modules still          pending or locked are reported. `halt`: `hot`, then all cores halted in the application (`halt_all`); if a halt is          not safe now - modules the application locked before their suspend was written, or what `halt_check_hook` says -          a running reset first (through `reset_hook`) and `attach_run_ms` of running. `reset_halt`, `reset_run`: `reset          halt`, `reset run` through `reset_hook`. The mode runs after the cfg's `init_board`.
+`passive`: no register written - the targets are not examined (OCDS stays as it is, no trigger is set), TL1 sync, peripheral suspend and the device watch stay off; memory reads work, resets and halts are refused. `hot`: attach to what runs, without reset or halt; the TL1 routing and the peripheral suspend are written, modules still pending or locked are reported. `halt`: `hot`, then all cores halted in the application (`halt_all`); if a halt is not safe now - modules the application locked before their suspend was written, or what `halt_check_hook` says - a running reset first (through `reset_hook`) and `attach_run_ms` of running. `reset_halt`, `reset_run`: `reset halt`, `reset run` through `reset_hook`. The mode runs after the cfg's `init_board`.
 
 ### `attach_run_ms`
 
@@ -532,7 +532,7 @@ halt_check_hook [<proc>]
 
 A proc that returns why a halt is not safe now ("" when it is); without an argument, show it.
 
-Used by `attach_mode halt` (a reason makes it reset first) and reported by `attach_status`. An empty name removes it.          `fs26_sbc.cfg` returns the FS26 watchdog state while it is not known to be disarmed.
+Used by `attach_mode halt` (a reason makes it reset first) and reported by `attach_status`. An empty name removes it. `fs26_sbc.cfg` returns the FS26 watchdog state while it is not known to be disarmed.
 
 ### `reset_settle`
 
@@ -542,7 +542,7 @@ reset_settle <max_ms> <quiet_ms>
 
 Let the device run until no reset came for `quiet_ms`, for up to `max_ms`; returns a dict.
 
-Keys: `settled` (1 if quiet in time), `resets` (seen during the wait), `elapsed` (ms), `down` (ms the device has not          answered at the end). STM0 is read every 2 ms through the device watch, which answers each reset on the way at once          (OCDS, TL1 routing, peripheral suspend), in time for an application that checks for the debugger at start-up: e.g.          until an application has disarmed an external watchdog. A reset is one the watch counted, STM0 counting from a          lower value, or reads that failed for a while and then find OCDS off.
+Keys: `settled` (1 if quiet in time), `resets` (seen during the wait), `elapsed` (ms), `down` (ms the device has not answered at the end). STM0 is read every 2 ms through the device watch, which answers each reset on the way at once (OCDS, TL1 routing, peripheral suspend), in time for an application that checks for the debugger at start-up: e.g. until an application has disarmed an external watchdog. A reset is one the watch counted, STM0 counting from a lower value, or reads that failed for a while and then find OCDS off.
 
 ### `hsm autostart`
 
@@ -552,7 +552,7 @@ hsm autostart [on|off]
 
 Release the HSM from its boot ROM breakpoint after a reset (default on).
 
-With a debugger connected the boot ROM holds the HSM at its first instruction after a reset, and a bootloader that          waits for the HSM (HSM2HTS) hangs. After every reset the server deletes the breakpoint and runs the HSM if DHCSR          shows it halted; an HSM that does not boot or whose firmware closed debugging is left alone. Before the server          resumes the cores after a halting reset (`reset run` on a probe that only resets with a halt) it waits for the          HSM to report ready (`hsm ready_ms`). An HSM that stays halted is unrouted from TL1. Only with an HSM target.
+After a halting reset (OCDS on during boot) the boot ROM holds the HSM at its first instruction, and a bootloader that waits for the HSM (HSM2HTS) hangs. The server reads once whether the HSM boots (PROCONHSMCFG.HSMBOOTEN, a host register); when it does, or with an HSM target, it checks the HSM after every reset and deletes the breakpoint and runs it if DHCSR and FP_COMP0 show it held there. It then waits for the HSM to report ready (`hsm ready_ms`) before it latches TL1 or resumes the cores. No HSM target is needed; a board whose HSM does not boot gets no HSM access. If the HSM boots but its firmware has closed the debug window, it cannot be released: after a halting reset the server warns (a running reset does not leave the HSM held). An HSM that stays halted is unrouted from TL1. `off` leaves the HSM at the breakpoint, to debug its boot.
 
 ### `hsm ready_ms`
 
@@ -576,7 +576,15 @@ Release the HSM from its boot ROM breakpoint now, if it is held there; 1 if rele
 hsm wait_ready [<ms>]
 ```
 
-Wait for HSM2HTS READY|ACTIVE; 1 when ready (also without an HSM target), 0 after the time.
+Wait for HSM2HTS READY|ACTIVE; 1 when ready, 0 after the time.
+
+### `hsm status`
+
+```
+hsm status
+```
+
+What the server knows of the HSM, as a dict: `boots`, `ssw_waits` (PROCONHSMCFG), `target` (an HSM target exists), `last` (the last release: off, not_held, blocked, released, failed).
 
 ### `suspend add`
 
@@ -586,7 +594,7 @@ suspend add <module>|cores [soft|hard|off] | <name> -ocs <addr> -clc <addr> -acc
 
 Suspend a peripheral module while the cores are halted (OCS.SUS), as winIDEA's SuspendPeripheralsWhileStopped.
 
-`soft` (default) lets the module finish what it is doing, `hard` stops its clock (the only mode GPT12 has), `off`          writes SUS=0 (clears a suspend an earlier session left). `cores` adds the STM of every TriCore core. Module names          are looked up in the chip's bundled SVD description (`<MODULE>.OCS`, `.CLC`, `.ACCEN0`); the second form gives          the addresses. The OCS is written as soon as the write can land (module enabled: CLC.DISS=0, and ACCEN0 lets the          debugger write) and never before: right after every reset, in the step that switches OCDS on again; by the          background poll while the cores run, once the application enabled the module; before a pause; late, when a          halt is seen. A module the application locks first stays `locked` until the next reset; one whose write does          not take is left alone after two tries (`refused`); one not enabled 5 s after a reset is checked every 2 s          (`idle`). Nothing is suspended unless listed. Not with a probe that owns OCDS (winIDEA).
+`soft` (default) lets the module finish what it is doing, `hard` stops its clock (the only mode GPT12 has), `off` writes SUS=0 (clears a suspend an earlier session left). `cores` adds the STM of every TriCore core. Module names are looked up in the chip's bundled SVD description (`<MODULE>.OCS`, `.CLC`, `.ACCEN0`); the second form gives the addresses. The OCS is written as soon as the write can land (module enabled: CLC.DISS=0, and ACCEN0 lets the debugger write) and never before: right after every reset, in the step that switches OCDS on again; by the background poll while the cores run, once the application enabled the module; before a pause; late, when a halt is seen. A module the application locks first stays `locked` until the next reset; one whose write does not take is left alone after two tries (`refused`); one not enabled 5 s after a reset is checked every 2 s (`idle`). Nothing is suspended unless listed. Not with a probe that owns OCDS (winIDEA).
 
 ### `suspend remove`
 
@@ -646,7 +654,7 @@ halt_all [<timeout_ms>]
 
 Halt all cores together as the debugger's pause does; 1 when halted.
 
-Pending peripheral modules get their suspend first; then TL1 is pulsed and cpu0's halt requested (without TL1 sync,          every core's), on the registers rather than through the server's state, which a handler or a script can see stale          after a reset. Waits up to `timeout_ms` (1000) for the halt, then polls, so the halt is seen at once.
+Pending peripheral modules get their suspend first; then TL1 is pulsed and cpu0's halt requested (without TL1 sync, every core's), on the registers rather than through the server's state, which a handler or a script can see stale after a reset. Waits up to `timeout_ms` (1000) for the halt, then polls, so the halt is seen at once.
 
 ### `halt`
 
@@ -842,7 +850,7 @@ ocds sync [tl1|none]
 
 Halt, resume and step all cores of the chip together through trigger line TL1, or each alone (default).
 
-With `tl1` every BRKOUT (CPUs, the HSM) drives TL1 and capture-and-hold keeps it active: a halt of one core stops all          TL1 members and every suspended peripheral in the same cycle. A pause pulses TL1 (`tricore tl1_halt` is set on every          core), a resume releases the other cores while the held TL1 still suspends them, resumes this one and drops the hold,          so all start in the same cycle; a step runs all cores for the instruction (`ocds step`). The routing is cleared by every          power-on class reset and written again right after it (with the peripheral suspend), and at the attach; an attach          that finds cpu0 halted halts all cores together again. May be set before or after `init`. Not with a probe that owns          OCDS (winIDEA).
+With `tl1` every BRKOUT (CPUs, the HSM) drives TL1 and capture-and-hold keeps it active: a halt of one core stops all TL1 members and every suspended peripheral in the same cycle. A pause pulses TL1 (`tricore tl1_halt` is set on every core), a resume releases the other cores while the held TL1 still suspends them, resumes this one and drops the hold, so all start in the same cycle; a step runs all cores for the instruction (`ocds step`). The routing is cleared by every power-on class reset and written again right after it (with the peripheral suspend), and at the attach; an attach that finds cpu0 halted halts all cores together again. May be set before or after `init`. Not with a probe that owns OCDS (winIDEA).
 
 ### `ocds tl1_members`
 
@@ -852,7 +860,7 @@ ocds tl1_members [<list>]
 
 What TL1 suspends: any of `cpus hsm dma hssl` (default all four).
 
-Written to CBS_TL1ST (CPU0-5, the HSM, DMA, HSSL0). `hsm` only counts with an HSM target, which also routes its BRKOUT          to TL1 (CBS_TRHSM).
+Written to CBS_TL1ST (CPU0-5, the HSM, DMA, HSSL0). `hsm` only counts with an HSM target, which also routes its BRKOUT to TL1 (CBS_TRHSM).
 
 ### `ocds step`
 
@@ -862,7 +870,7 @@ ocds step [all|single]
 
 With TL1 sync: a step runs all cores for the instruction (default), or only the stepping one.
 
-`single` keeps the other cores debug halted and drops the TL1 hold, so that only the stepping core runs; it sets          `tricore tl1_step` off on every core.
+`single` keeps the other cores debug halted and drops the TL1 hold, so that only the stepping core runs; it sets `tricore tl1_step` off on every core.
 
 ### `ocds step_timers`
 
@@ -872,7 +880,7 @@ ocds step_timers [run|frozen]
 
 With TL1 sync: the STMs run during a step (default) or stay stopped.
 
-`frozen` keeps the cores' suspend-out (DBGSR.SUSP) set from the halt until the next resume, so a step does not advance          the timers.
+`frozen` keeps the cores' suspend-out (DBGSR.SUSP) set from the halt until the next resume, so a step does not advance the timers.
 
 ### `ocds tl1_force`
 
@@ -1132,7 +1140,7 @@ ucb compare [-json] [-close] [[-offset <o>] [-type <t>] <file> ...]
 
 Compare the device's UCBs with the UCB records of image files, field by field.
 
-Shows per UCB whether the files hold ORIG, COPY or both, and per field the device and the file value.          Without files it compares again with the files loaded last (e.g. after `ucb apply`); `-close` forgets them.          Passwords are compared but not shown.
+Shows per UCB whether the files hold ORIG, COPY or both, and per field the device and the file value. Without files it compares again with the files loaded last (e.g. after `ucb apply`); `-close` forgets them. Passwords are compared but not shown.
 
 ### `ucb apply`
 
@@ -1142,7 +1150,7 @@ ucb apply all | <UCB> | <UCB>.<word>[.<field>] | <UCB>.PW
 
 Stage values from the files of `ucb compare`: everything, one UCB, one word or field, or the password.
 
-Nothing is written: the staged values go through `ucb review` and `ucb write` like any edit. Boot mode header          IDs and checksums are computed; read-only UCBs are not applied (`all` lists them).
+Nothing is written: the staged values go through `ucb review` and `ucb write` like any edit. Boot mode header IDs and checksums are computed; read-only UCBs are not applied (`all` lists them).
 
 ### `ucb revert`
 
@@ -1216,7 +1224,7 @@ ucb export <file>|- [-ucbs {<UCB> ...}] [-state unlocked|confirmed|errored] [-un
 
 Write a selection of UCBs (whole 512-byte UCBs) to an Intel HEX file.
 
-Classes: boot, protection, hsm, otp, infineon. `-changed`: differing from the delivery state (Infineon data: from the baseline). `-staged`: the staged content instead of the device's. File `-`: the HEX text is          returned (`-json`: in `hex`) instead of written.
+Classes: boot, protection, hsm, otp, infineon. `-changed`: differing from the delivery state (Infineon data: from the baseline). `-staged`: the staged content instead of the device's. File `-`: the HEX text is returned (`-json`: in `hex`) instead of written.
 
 ### `ucb dir`
 

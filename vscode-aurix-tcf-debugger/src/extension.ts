@@ -9,10 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as net from 'net';
 import * as fs from 'fs';
-import * as crypto from 'crypto';
 import { AurixTCFDebugSession, DisassemblyOpcodeBytes, isDisassemblyOpcodeBytes } from './debugProvider';
-import { pipeline } from 'stream/promises';
-import { createGunzip, gunzipSync } from 'zlib';
 import { LiveWatchCommandArgument } from './liveWatchView';
 import { LiveWatchManager, pickIntervalMs } from './liveWatchManager';
 import { OsObjectsPanel } from './osObjectsPanel';
@@ -31,9 +28,8 @@ import {
 } from './liveUpdate';
 import { OsViewProvider } from './osView';
 import { peripheralWatchEntryFromNode } from './peripheralLiveWatch';
-import { findSvdForDevice, SvdCatalogEntry } from './svdCatalog';
-import { mergeSvdPeripherals } from './svdMerge';
-import { SvdPeripheralStore } from './svdPeripheralStore';
+import { findSvdForDevice } from './svdCatalog';
+import { PeripheralOptionsList } from './peripheralOptions';
 import { registerDebuggerActions } from './debuggerActions';
 import { VsCodeBreakpointUi } from './vscodeBreakpointUi';
 import { CoreRef, splitCoreSuffix, withCoreSuffix } from './breakpointCondition';
@@ -70,11 +66,9 @@ const missingSourcesLogged = new Map<string, Set<string>>();
 /** Debug sessions in which "Locate File" was offered (once per session). */
 const missingSourcePromptShown = new Set<string>();
 const LEARNED_SOURCE_MAPPINGS_KEY = 'aurix-debugger.learnedSourceMappings';
-const SVD_CACHE_FOLDER = 'svd-cache';
 let warnedSvdFileReplaced = false;
 /** Command the XPeripherals view gets its peripherals from, instead of parsing the SVD file. */
 const SVD_PERIPHERALS_COMMAND = 'aurix-debugger.svdPeripherals';
-let svdPeripherals: SvdPeripheralStore | undefined;
 const DISASSEMBLY_OPEN_DELAY_MS = 1200;
 const pendingDisassemblyOpenTimers = new Map<string, NodeJS.Timeout>();
 
@@ -86,14 +80,11 @@ export function activate(context: vscode.ExtensionContext) {
 	liveWatches = new LiveWatchManager(context);
 	debugLayout = new DebugLayout(context, liveWatches, (line) => agentOutput?.appendLine(line));
 	context.subscriptions.push(liveWatches);
-	svdPeripherals = new SvdPeripheralStore(getSvdCacheRoot(), (line) => agentOutput?.appendLine(line));
 	context.subscriptions.push(
 		// Called by the XPeripherals view at the session's first stop ("peripherals" in the launch configuration).
-		vscode.commands.registerCommand(SVD_PERIPHERALS_COMMAND, async (session?: vscode.DebugSession) => {
-			const svdPath = session?.configuration?.svdPath;
-			return typeof svdPath === 'string' ? svdPeripherals?.peripherals(svdPath) : undefined;
-		}),
+		vscode.commands.registerCommand(SVD_PERIPHERALS_COMMAND, (session?: vscode.DebugSession) => peripheralDefinitions(session)),
 	);
+	void removeOldSvdCache();
 
 	void ensureMemoryInspectorSettings();
 	applyLiveWatchPauseWhileHalted();
@@ -858,104 +849,47 @@ function resolveConfigPath(session: vscode.DebugSession, p: unknown): string | u
 
 
 
-function getSvdCacheRoot(): string {
-	const fromGlobalStorage = extensionContext?.globalStorageUri?.fsPath;
-	if (typeof fromGlobalStorage === 'string' && fromGlobalStorage.trim() !== '') {
-		return path.join(fromGlobalStorage, SVD_CACHE_FOLDER);
+/** Where the extension unpacked and converted SVD files before the debug server took that over. */
+function oldSvdCacheDirs(): string[] {
+	const dirs = [path.join(extensionContext.extensionPath, '.cache', 'svd-cache')];
+	const storage = extensionContext?.globalStorageUri?.fsPath;
+	if (typeof storage === 'string' && storage.trim() !== '') {
+		dirs.push(path.join(storage, 'svd-cache'));
 	}
-	return path.join(extensionContext.extensionPath, '.cache', SVD_CACHE_FOLDER);
+	return dirs;
 }
 
-async function ensureDirectory(dirPath: string): Promise<void> {
-	await fs.promises.mkdir(dirPath, { recursive: true });
-}
-
-async function materializeCompressedSvd(svdGzPath: string): Promise<string> {
-	const normalizedInput = path.normalize(svdGzPath);
-	if (!fs.existsSync(normalizedInput)) {
-		throw new Error(`Compressed SVD not found: ${normalizedInput}`);
-	}
-
-	const stat = await fs.promises.stat(normalizedInput);
-	const baseName = path.basename(normalizedInput, '.gz');
-	const digest = crypto
-		.createHash('sha256')
-		.update(`${baseName}:${stat.size}`)
-		.digest('hex')
-		.slice(0, 16);
-
-	const cacheDir = getSvdCacheRoot();
-	await ensureDirectory(cacheDir);
-
-	const outputPath = path.join(cacheDir, `${baseName}.${digest}`);
-	if (fs.existsSync(outputPath)) {
-		return outputPath;
-	}
-
-	const tempPath = `${outputPath}.tmp`;
-	agentOutput?.appendLine(`Preparing SVD cache: ${baseName}`);
-	await vscode.window.withProgress(
-		{
-			location: vscode.ProgressLocation.Notification,
-			title: 'AURIX™ Debugger: preparing SVD definitions (first run)',
-			cancellable: false,
-		},
-		async (progress) => {
-			progress.report({ message: baseName });
-			await pipeline(
-				fs.createReadStream(normalizedInput),
-				createGunzip(),
-				fs.createWriteStream(tempPath)
-			);
+/** Removes the SVD cache of earlier versions (unpacked SVD files and converted definitions, 100+ MB). */
+async function removeOldSvdCache(): Promise<void> {
+	for (const dir of oldSvdCacheDirs()) {
+		if (fs.existsSync(dir)) {
+			await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined);
 		}
-	);
-	await fs.promises.rename(tempPath, outputPath);
-	agentOutput?.appendLine(`SVD cache ready: ${outputPath}`);
-	return outputPath;
-}
-
-/** Path of a bundled SVD file the peripheral viewer can read (.svd.gz files are unpacked to the cache). */
-async function usableSvdPath(svdPath: string): Promise<string> {
-	return svdPath.toLowerCase().endsWith('.svd.gz') ? await materializeCompressedSvd(svdPath) : svdPath;
-}
-
-async function readSvdText(svdPath: string): Promise<string> {
-	const data = await fs.promises.readFile(svdPath);
-	return (svdPath.toLowerCase().endsWith('.gz') ? gunzipSync(data) : data).toString('utf8');
+	}
 }
 
 /**
- * The SVD file of a catalog entry for the peripheral viewer: the device SVD with the peripherals
- * of the entry's extra SVD files (e.g. the HSM of the TC3xx) merged in, cached like the device file.
- * Falls back to the device SVD alone if merging fails.
+ * The XPeripherals view's definitions for a debug session: its debug server converts the bundled
+ * SVD file of the launch configuration's "device" (with the files merged into it) and loads it
+ * for the session's peripheral operations too.
  */
-async function sessionSvdPath(entry: SvdCatalogEntry): Promise<string> {
-	const devicePath = await usableSvdPath(entry.absolutePath);
-	if (entry.extraSvd.length === 0) {
-		return devicePath;
+async function peripheralDefinitions(session?: vscode.DebugSession): Promise<PeripheralOptionsList | undefined> {
+	const binding = session ? hubBindings.get(session.id) : undefined;
+	const device = session?.configuration?.device;
+	if (!binding || typeof device !== 'string' || device.trim() === '') {
+		return undefined;
 	}
+	const t0 = Date.now();
 	try {
-		const hash = crypto.createHash('sha256').update(path.basename(devicePath));
-		for (const extra of entry.extraSvd) {
-			hash.update(await fs.promises.readFile(extra.absolutePath));
-			hash.update(JSON.stringify([extra.replace, extra.exclude]));
+		const list = await binding.client.request('GET', `/api/v1/sessions/${encodeURIComponent(binding.session)}/svd/definitions?device=${encodeURIComponent(device.trim())}`, undefined, 120_000);
+		if (!Array.isArray(list)) {
+			return undefined;
 		}
-		const outputPath = path.join(getSvdCacheRoot(), `${entry.id}-merged.svd.${hash.digest('hex').slice(0, 16)}`);
-		if (fs.existsSync(outputPath)) {
-			return outputPath;
-		}
-		let xml = await fs.promises.readFile(devicePath, 'utf8');
-		for (const extra of entry.extraSvd) {
-			xml = mergeSvdPeripherals(xml, await readSvdText(extra.absolutePath), extra);
-		}
-		const tempPath = `${outputPath}.tmp`;
-		await fs.promises.writeFile(tempPath, xml, 'utf8');
-		await fs.promises.rename(tempPath, outputPath);
-		agentOutput?.appendLine(`SVD cache ready: ${outputPath} (${entry.extraSvd.map((e) => path.basename(e.absolutePath)).join(', ')} merged)`);
-		return outputPath;
+		agentOutput?.appendLine(`XPeripherals: ${list.length} peripherals of ${device.trim()} from the debug server in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+		return PeripheralOptionsList.from(list) as PeripheralOptionsList;
 	} catch (e) {
-		agentOutput?.appendLine(`SVD merge for ${entry.id} failed, using the device SVD alone: ${e instanceof Error ? e.message : String(e)}`);
-		return devicePath;
+		agentOutput?.appendLine(`XPeripherals: no peripherals for ${device.trim()}: ${e instanceof Error ? e.message : String(e)}`);
+		return undefined;
 	}
 }
 
@@ -1043,18 +977,12 @@ export class AurixTCFConfigurationProvider implements vscode.DebugConfigurationP
 		if (device) {
 			const entry = await findSvdForDevice(extensionContext.extensionPath, device);
 			if (entry) {
-				try {
-					const svdPath = await sessionSvdPath(entry);
-					(config as any).svdPath = svdPath;
-					// Parsing the SVD file blocks the extension host for seconds (TC3xx: ~60 MB), so the
-					// view gets the peripherals converted beforehand. "svdPath" stays: it is the key of
-					// the view's cache of built peripherals.
-					if ((config as any).peripherals === undefined && svdPeripherals?.canProvide(svdPath)) {
-						(config as any).peripherals = `command:${SVD_PERIPHERALS_COMMAND}`;
-						svdPeripherals.prepare(svdPath);
-					}
-				} catch (e) {
-					agentOutput?.appendLine(`SVD for ${device} unavailable: ${e instanceof Error ? e.message : String(e)}`);
+				// The view takes its definitions from the debug server, which converts the bundled
+				// SVD files (parsing one in the extension host would block it for seconds). The key
+				// of the view's cache of built peripherals names the device and the build.
+				if ((config as any).peripherals === undefined) {
+					(config as any).peripherals = `command:${SVD_PERIPHERALS_COMMAND}`;
+					(config as any).peripheralsCacheKey = `aurix-svd:${entry.id}:${extensionContext.extension.packageJSON.version}`;
 				}
 			} else {
 				void vscode.window.showWarningMessage(`AURIX™ Debugger: unknown device "${device}"; the XPeripherals view is unavailable.`);

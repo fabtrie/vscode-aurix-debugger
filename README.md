@@ -79,7 +79,7 @@ The extension installs its debug server to `%LOCALAPPDATA%\aurix-dbg` and keeps 
 | `ortiFile` | The ORTI file of the AUTOSAR OS: enables the AUTOSAR OS view and task names |
 | `sourceFileMap` | Maps path prefixes in the debug information onto local folders, e.g. `{ "c:/build/project": "${workspaceFolder}" }` |
 | `sourceSearchPaths` | Folders searched for sources that are not found where the debug information says |
-| `device` | Selects the SVD file of the Peripheral view: `TC22x` … `TC39x`, `TC33xEXT`, `TC37xEXT`, `TC4Dx` |
+| `device` | Selects the SVD file of the Peripheral view and of the debug server's peripheral operations (REST/MCP `read_peripheral`, ...): `TC22x` … `TC39x`, `TC33xEXT`, `TC37xEXT`, `TC4Dx`. The debug server converts it (about 0.3 s for a TC3xx) |
 | **Flash and reset** | |
 | `flashFiles` | Images to program: ELF, Intel HEX, S-record or binary files ([details](docs/flashing-and-ucbs.md#flash-files)) |
 | `enableFlashing` | Program `flashFiles` when the session starts (default `false`) |

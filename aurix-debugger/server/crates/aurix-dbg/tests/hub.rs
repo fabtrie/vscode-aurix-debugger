@@ -306,6 +306,12 @@ fn hub_sessions_end_to_end() {
     let log = http.ok("GET", &format!("/api/v1/sessions/{id1}/log?lines=50"), None);
     assert!(log["text"].as_str().unwrap().contains("Registered with the hub"), "{log}");
 
+    // The peripheral viewer's definitions through the session proxy, as VS Code fetches them:
+    // the TC37x description with the HSM and SCR merged.
+    let defs = http.ok("GET", &format!("/api/v1/sessions/{id2}/svd/definitions?device=TC37x"), None);
+    assert_eq!(defs.as_array().map(Vec::len), Some(109));
+    assert_eq!(http.ok("GET", &format!("/api/v1/sessions/{id2}/svd"), None)["device"], "TC37x");
+
     // --- An uploaded file by its ID, and DAQ through the hub ----------------------------------------
     {
         let asm = home.join("daq.asm");

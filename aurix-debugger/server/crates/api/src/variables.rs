@@ -216,7 +216,7 @@ impl GlobalsCache {
 }
 
 /// Case-insensitive glob match: `*` any run of characters, `?` exactly one.
-fn glob(pattern: &[u8], name: &[u8]) -> bool {
+pub(crate) fn glob(pattern: &[u8], name: &[u8]) -> bool {
     let (mut p, mut n) = (0, 0);
     // Where the last `*` was, and the name position it currently swallows up to.
     let mut star: Option<(usize, usize)> = None;
@@ -492,7 +492,7 @@ pub fn evaluate(api: &CoreApi, req: EvaluateRequest) -> Result<VariableValue, Ap
 }
 
 /// An integer given as a JSON number, bool or string; `hex` when it was written as `0x...`.
-fn integer(v: &Json) -> Option<(i128, bool)> {
+pub(crate) fn integer(v: &Json) -> Option<(i128, bool)> {
     match v {
         Json::Bool(b) => Some((*b as i128, false)),
         Json::Number(n) => n

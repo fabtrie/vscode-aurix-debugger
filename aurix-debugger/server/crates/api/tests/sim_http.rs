@@ -767,6 +767,88 @@ fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32, Locals)]
     elf
 }
 
+/// Peripheral registers by name, from the bundled SVD description of the chip the configuration
+/// names (TC37x): listed, described, read and written through the memory paths.
+fn peripherals(http: &Http) {
+    let get = |p: &str| http.request("GET", p, None, &[]);
+    let put = |p: &str, v: Value| http.request("PUT", p, Some(v), &[]);
+    let s = http.ok("GET", "/api/v1/svd", None);
+    assert_eq!((s["loaded"].as_bool(), s["chip"].as_str(), s["chip_device"].as_str()), (Some(false), Some("tc37x"), Some("TC37x")), "{s}");
+    assert!(s["available"].as_array().unwrap().iter().any(|d| d == "TC4Dx"), "{s}");
+
+    // The first peripheral operation loads the chip's description, HSM and SCR merged.
+    let l = http.ok("GET", "/api/v1/peripherals?query=STM*", None);
+    let names: Vec<&str> = l["items"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!((l["device"].as_str(), names), (Some("TC37x"), vec!["STM0", "STM1", "STM2"]), "{l}");
+    let s = http.ok("GET", "/api/v1/svd", None);
+    assert_eq!((s["loaded"].as_bool(), s["source"].as_str(), s["extra_files"].as_array().map(Vec::len), s["peripherals"].as_u64()), (Some(true), Some("chip"), Some(2), Some(109)), "{s}");
+    assert!(http.ok("GET", "/api/v1/peripherals?query=HSM*", None)["total"].as_u64() > Some(10));
+
+    let d = http.ok("GET", "/api/v1/peripherals/stm0.cmcon", None);
+    assert_eq!((d["kind"].as_str(), d["address"].as_u64(), d["registers"][0]["path"].as_str()), (Some("register"), Some(0xF000_1038), Some("STM0.CMCON")), "{d}");
+    let fields: Vec<&str> = d["registers"][0]["fields"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert_eq!(fields, ["MSIZE0", "MSTART0", "MSIZE1", "MSTART1"], "{d}");
+    let d = http.ok("GET", &format!("/api/v1/peripherals/{}", enc("STM0.CMP[0]")), None);
+    assert_eq!(d["address"], 0xF000_1030u32, "{d}");
+    let d = http.ok("GET", "/api/v1/peripherals/STM0?limit=2", None);
+    assert_eq!((d["kind"].as_str(), d["registers"].as_array().map(Vec::len)), (Some("peripheral"), Some(2)), "{d}");
+    assert!(d["total"].as_u64() > Some(10), "{d}");
+    let d = http.ok("GET", "/api/v1/peripherals/STM0.CLC.DISS", None);
+    assert_eq!((d["kind"].as_str(), d["registers"][0]["fields"][0]["access"].as_str()), (Some("field"), Some("read_only")), "{d}");
+
+    // Reading: decoded into fields; a field path reads its register and shows that field.
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0xF0001038", "data": "05080000" })));
+    let r = http.ok("GET", "/api/v1/peripherals/STM0.CMCON/value", None);
+    let reg = &r["registers"][0];
+    assert_eq!((reg["value"].as_u64(), reg["fields"][0]["value"].as_u64(), reg["fields"][1]["value"].as_u64()), (Some(0x805), Some(5), Some(8)), "{r}");
+    let r = http.ok("GET", "/api/v1/peripherals/STM0.CMCON.MSTART0/value", None);
+    assert_eq!((r["registers"][0]["fields"].as_array().map(Vec::len), r["registers"][0]["fields"][0]["value"].as_u64()), (Some(1), Some(8)), "{r}");
+
+    // Writing a field is a read-modify-write; a register takes a hex string.
+    let (status, w) = put("/api/v1/peripherals/STM0.CMCON.MSIZE1/value", json!({ "value": 3 }));
+    assert_eq!((status, w["written"].as_u64(), w["readback"]["value"].as_u64()), (200, Some(0x0003_0805), Some(0x0003_0805)), "{w}");
+    assert!(w.get("note").is_none(), "{w}");
+    assert_eq!(http.ok("GET", "/api/v1/memory?address=0xF0001038&length=4", None)["data"], "05080300");
+    let (status, w) = put("/api/v1/peripherals/STM0.CMCON/value", json!({ "value": "0x0" }));
+    assert_eq!((status, w["written"].as_u64()), (200, Some(0)), "{w}");
+    // Refused: read-only registers and fields, too wide a value, a peripheral, an unknown path.
+    for (path, value) in [("STM0.TIM0", json!(1)), ("STM0.CLC.DISS", json!(1)), ("STM0.CMCON.MSIZE0", json!(32)), ("STM0", json!(0))] {
+        let (status, e) = put(&format!("/api/v1/peripherals/{path}/value"), json!({ "value": value }));
+        assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{path}: {e}");
+    }
+    let (status, e) = get("/api/v1/peripherals/STM0.NOPE");
+    assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
+
+    // A FIFO register with a debug view is not read unless forced; its debug view is.
+    let r = http.ok("GET", "/api/v1/peripherals/ASCLIN0.RXDATA/value", None);
+    let reg = &r["registers"][0];
+    assert!(reg.get("value").is_none() && reg["skipped"].as_str().is_some_and(|s| s.contains("ASCLIN0.RXDATAD")), "{r}");
+    let r = http.ok("GET", "/api/v1/peripherals/ASCLIN0.RXDATA/value?force=true", None);
+    assert!(r["registers"][0]["value"].is_u64(), "{r}");
+    let r = http.ok("GET", "/api/v1/peripherals/ASCLIN0/value", None);
+    let regs = r["registers"].as_array().unwrap();
+    assert!(regs.iter().any(|x| x["path"] == "ASCLIN0.RXDATAD" && x["value"].is_u64()), "{r}");
+    let skipped: Vec<(&str, &str)> = regs.iter().filter_map(|x| Some((x["path"].as_str()?, x["skipped"].as_str()?))).map(|(p, s)| (p, if s == "write-only" { s } else { "side effect" })).collect();
+    let expect = [("ASCLIN0.FLAGSSET", "write-only"), ("ASCLIN0.FLAGSCLEAR", "write-only"), ("ASCLIN0.TXDATA", "write-only"), ("ASCLIN0.RXDATA", "side effect"), ("ASCLIN0.KRSTCLR", "write-only")];
+    assert_eq!(skipped, expect, "{r}");
+
+    // The peripheral viewer's definitions, for the extension.
+    let (status, defs) = get("/api/v1/svd/definitions");
+    assert_eq!((status, defs.as_array().map(Vec::len)), (200, Some(109)));
+    assert!(defs[0]["registers"].is_array() || defs[0]["clusters"].is_array());
+
+    // Another description: an unknown device lists the bundled ones; a file of one's own.
+    let (status, e) = http.request("POST", "/api/v1/svd", Some(json!({ "device": "TC99x" })), &[]);
+    assert_eq!(status, 404, "{e}");
+    assert!(e["message"].as_str().unwrap().contains("TC37x"), "{e}");
+    let fixture = tcl_path(repo().join("server/crates/svd/tests/fixtures/stream.svd"));
+    let s = http.ok("POST", "/api/v1/svd", Some(json!({ "file": fixture })));
+    assert_eq!((s.get("device"), s["peripherals"].as_u64(), s["source"].as_str()), (None, Some(4), Some("load_svd")), "{s}");
+    assert_eq!(http.ok("GET", "/api/v1/peripherals", None)["total"], 4);
+    let s = http.ok("POST", "/api/v1/svd", Some(json!({ "device": "tc37x" })));
+    assert_eq!((s["device"].as_str(), s["peripherals"].as_u64()), (Some("TC37x"), Some(109)), "{s}");
+}
+
 /// The call stack over REST is the one VS Code gets over TCF: the same frames, from a CSA chain
 /// built by hand (`inner` called from `outer`), with functions once symbols are loaded; the target
 /// state says where the core is; `lookup_address` names code and variables.
@@ -1836,6 +1918,7 @@ fn rest_mcp_and_tcf_share_one_session() {
 
     // --- Variables by name ---------------------------------------------------------------------
 
+    peripherals(&http);
     call_stack(&http, &mut vs, &c0);
     variables(&http, &mut vs);
     core_local_variables(&http, &mut vs);

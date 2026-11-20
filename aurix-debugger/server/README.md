@@ -253,6 +253,23 @@ GET /api/v1/expressions?expression=buf.len&target=tc37x.cpu0&frame=1   evaluate 
 - **Locals and parameters.** `list_locals` lists those of a frame (default 0, the top one) with their values, as the VS Code Variables view does, a shadowed outer declaration left out; a local the debug information gives no location for at the frame's PC has an `error` instead of a value. `evaluate`, `write_variable` and `symbol_children` take a `frame` (with `target`, without `@N`) and then resolve names as the VS Code Watch view with that frame selected: the frame's locals first, then the globals. A caller frame's registers are the ones its CSA saved, so they read correctly but cannot be written: a register local can only be written in the top frame, which VS Code hears of as a register change. A local on the stack can be written in any frame.
 - **`lookup_address`** is addr2line over the loaded symbols: the function, offset and line of code at an address (`return_address: true` looks up the call before a saved A11 or LR), and the global or static variable data there lies in, with the offset into it. It reads no target memory. Addresses are as linked, so a variable linked at the core-local alias is found by its `0xD000_0000` address.
 
+### Peripheral registers
+
+```text
+GET  /api/v1/svd                                       svd: the description, the devices available
+POST /api/v1/svd  {"device": "TC39x"}                  load_svd (or {"file": "my.svd"})
+GET  /api/v1/peripherals?query=STM*                    list_peripherals
+GET  /api/v1/peripherals/GTM.TOM0.CH1.CTRL             describe_peripheral
+GET  /api/v1/peripherals/SCU.CCUCON0/value             read_peripheral
+PUT  /api/v1/peripherals/STM0.CMCON.MSIZE0/value  {"value": 31}   write_peripheral
+GET  /api/v1/svd/definitions                           the peripheral viewer's definitions (VS Code)
+```
+
+- **The description** is the device's SVD file as bundled with the extension (`svd/` next to the worker; `hub install` copies it), with its extra files merged (the TC3xx HSM and SCR). Without `load_svd`, the first peripheral operation loads the one of the chip the target configuration names (`tc37x.cpu0` -> `TC37x`, `tc37x_ext` -> `TC37xEXT`); VS Code loads the launch configuration's `device`. `load_svd` with a `file` takes an SVD file of your own. One description per session; converting takes 0.3 s (TC37x) to 1 s (TC4Dx), see `crates/svd`.
+- **Paths** name a peripheral, cluster, register or field, case-insensitively, with arrays named as the SVD names their copies (`STM0.CMP[0]`). `describe_peripheral` gives addresses, sizes, access, reset values, fields and their named values without touching the target, paged for large peripherals.
+- **Reading** reads only the registers the description declares, each at its own width, adjacent ones in one access: gaps are never read, as reserved addresses can raise bus errors and SMU alarms. Fields are decoded with their value names. Registers whose reading has a side effect are skipped unless `force`: an SVD `readAction`, or a debug view next to the register. Infineon's files declare no `readAction`, but a FIFO or result register has a twin described as a debug view that reads without popping or clearing it (`ASCLIN0.RXDATA` / `RXDATAD`, `QSPI0.RXEXIT` / `RXEXITD`, `EVADC.G0RES[0]` / `G0RESD[0]`). Write-only registers are skipped too. A register that cannot be read has its own `error`; the rest are still read. HSM peripherals and the SCR's SFRs go through their core, as with `read_memory`.
+- **Writing** a field reads the register, merges the field and writes it back, with the register's other `modifiedWriteValues` fields (write 1 to clear, ...) set to the value that leaves them alone. A field takes a number or a value name. Read-only registers and fields are refused. The register is read back, and a value that did not stick is reported in `note`: ENDINIT and Safety ENDINIT protected registers ignore writes without the unlock sequence, which this API does not do (it would have to service the watchdog). Writes need the control lease when another client holds it, and VS Code refreshes its views.
+
 ### Watchpoints
 
 `add_watchpoint` takes an `address` (with `length`, default 4) or an `expression`, a `target` (default: every TriCore core) and an `access` (`write`, `read`, `access`). VS Code's data breakpoints are the same breakpoints, set through TCF with `AccessMode` and `Size`. An expression is resolved on each core from that core's symbols, to the object's address and the size of its type (a bit field: its storage unit). It is resolved again when other symbols are loaded, so a rebuilt ELF moves the watchpoint with the variable.

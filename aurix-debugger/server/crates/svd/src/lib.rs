@@ -11,7 +11,9 @@
 //! peripheral at a time (a peripheral `derivedFrom` another, a register derived from another
 //! peripheral's, two peripherals of one name) are read again with all peripherals in memory.
 
+pub mod catalog;
 mod convert;
+mod index;
 mod options;
 mod xml;
 
@@ -21,6 +23,8 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
+pub use catalog::Catalog;
+pub use index::{ClusterInfo, Node, RegisterInfo};
 pub use options::PeripheralOptions;
 
 /// A fast hash for the many short keys of a conversion (tag names, interned strings).

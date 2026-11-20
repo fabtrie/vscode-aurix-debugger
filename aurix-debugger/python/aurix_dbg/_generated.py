@@ -1,7 +1,7 @@
 # Generated from the aurix-dbg API definition (server/crates/api-spec) by `cargo build`. Do not edit.
 """Generated part of the aurix-dbg client: response types and API methods.
 
-Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
+Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, peripheral registers by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
 
 A session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.
 
@@ -47,6 +47,12 @@ LaunchPhase = Literal["idle", "starting", "ready", "failed"]
 
 LaunchResetKeyword = Literal["none"]
 """`none`: do not reset."""
+
+PeripheralNodeKind = Literal["peripheral", "cluster", "register", "field"]
+"""What a peripheral path names."""
+
+RegisterAccess = Literal["read_only", "read_write", "write_only"]
+"""Access type of a register or field."""
 
 RegisterGroup = Literal["core", "debug"]
 """Register group."""
@@ -271,6 +277,67 @@ class EndClientResult:
         return cls(
             released_control=d.get("released_control"),
             removed=d.get("removed"),
+        )
+
+
+@dataclass
+class FieldDescription:
+    access: RegisterAccess
+    """The field's, else its register's."""
+    bit_offset: int
+    bit_width: int
+    name: str
+    description: str | None = None
+    modified_write: str | None = None
+    """What writing does (`one_to_clear`, `one_to_set`, `one_to_toggle`, `zero_to_clear`, ...)."""
+    read_action: str | None = None
+    """Reading changes it (`clear`, `set`, `modify`, `modify_external`)."""
+    values: list[FieldValueName] | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FieldDescription:
+        return cls(
+            access=d.get("access"),
+            bit_offset=d.get("bit_offset"),
+            bit_width=d.get("bit_width"),
+            name=d.get("name"),
+            description=d.get("description"),
+            modified_write=d.get("modified_write"),
+            read_action=d.get("read_action"),
+            values=_list(FieldValueName, d.get("values")),
+        )
+
+
+@dataclass
+class FieldReading:
+    name: str
+    value: int
+    value_name: str | None = None
+    """The value's name, when the SVD names it."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FieldReading:
+        return cls(
+            name=d.get("name"),
+            value=d.get("value"),
+            value_name=d.get("value_name"),
+        )
+
+
+@dataclass
+class FieldValueName:
+    """A named value of a field."""
+
+    name: str
+    value: int
+    description: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FieldValueName:
+        return cls(
+            name=d.get("name"),
+            value=d.get("value"),
+            description=d.get("description"),
         )
 
 
@@ -798,6 +865,114 @@ class OsTypeInfo:
 
 
 @dataclass
+class PeripheralDescription:
+    address: int
+    """Base address of a peripheral or cluster, address of a register."""
+    kind: PeripheralNodeKind
+    offset: int
+    path: str
+    registers: list[RegisterDescription]
+    """In address order; a field's path gives its register with that field only."""
+    total: int
+    """Registers under the path."""
+    description: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PeripheralDescription:
+        return cls(
+            address=d.get("address"),
+            kind=d.get("kind"),
+            offset=d.get("offset"),
+            path=d.get("path"),
+            registers=_list(RegisterDescription, d.get("registers")),
+            total=d.get("total"),
+            description=d.get("description"),
+        )
+
+
+@dataclass
+class PeripheralList:
+    device: str
+    """The bundled device, or the file of your own."""
+    items: list[PeripheralSummary]
+    offset: int
+    total: int
+    """All matches."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PeripheralList:
+        return cls(
+            device=d.get("device"),
+            items=_list(PeripheralSummary, d.get("items")),
+            offset=d.get("offset"),
+            total=d.get("total"),
+        )
+
+
+@dataclass
+class PeripheralSummary:
+    base_address: int
+    length: int
+    """Bytes its address blocks span."""
+    name: str
+    registers: int
+    """Registers, those of its clusters included."""
+    description: str | None = None
+    group: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PeripheralSummary:
+        return cls(
+            base_address=d.get("base_address"),
+            length=d.get("length"),
+            name=d.get("name"),
+            registers=d.get("registers"),
+            description=d.get("description"),
+            group=d.get("group"),
+        )
+
+
+@dataclass
+class PeripheralValues:
+    offset: int
+    path: str
+    registers: list[RegisterReading]
+    total: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PeripheralValues:
+        return cls(
+            offset=d.get("offset"),
+            path=d.get("path"),
+            registers=_list(RegisterReading, d.get("registers")),
+            total=d.get("total"),
+        )
+
+
+@dataclass
+class PeripheralWritten:
+    address: int
+    path: str
+    written: int
+    """The register value written."""
+    note: str | None = None
+    """Something to know: the value did not stick (an ENDINIT-protected register, read-only
+    bits), or the register could not be read first."""
+    readback: RegisterReading | None = None
+    """The register as read back (absent for one that cannot be read without a side effect)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PeripheralWritten:
+        return cls(
+            address=d.get("address"),
+            path=d.get("path"),
+            written=d.get("written"),
+            note=d.get("note"),
+            readback=_obj(RegisterReading, d.get("readback")),
+        )
+
+
+@dataclass
 class PlacedSymbolFile:
     """A symbol file limited to some cores."""
 
@@ -854,6 +1029,34 @@ class ProfileList:
 
 
 @dataclass
+class RegisterDescription:
+    access: RegisterAccess
+    address: int
+    fields: list[FieldDescription]
+    path: str
+    reset_value: int
+    size: int
+    """Bits."""
+    description: str | None = None
+    modified_write: str | None = None
+    read_action: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RegisterDescription:
+        return cls(
+            access=d.get("access"),
+            address=d.get("address"),
+            fields=_list(FieldDescription, d.get("fields")),
+            path=d.get("path"),
+            reset_value=d.get("reset_value"),
+            size=d.get("size"),
+            description=d.get("description"),
+            modified_write=d.get("modified_write"),
+            read_action=d.get("read_action"),
+        )
+
+
+@dataclass
 class RegisterList:
     """Register values of a target."""
 
@@ -866,6 +1069,32 @@ class RegisterList:
         return cls(
             registers=_list(RegisterValue, d.get("registers")),
             target=d.get("target"),
+        )
+
+
+@dataclass
+class RegisterReading:
+    address: int
+    path: str
+    size: int
+    """Bits."""
+    error: str | None = None
+    """The read failed: e.g. the register is protected or its module is not clocked."""
+    fields: list[FieldReading] | None = None
+    skipped: str | None = None
+    """Why it was not read: write-only, or reading has a side effect (`force` reads it)."""
+    value: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RegisterReading:
+        return cls(
+            address=d.get("address"),
+            path=d.get("path"),
+            size=d.get("size"),
+            error=d.get("error"),
+            fields=_list(FieldReading, d.get("fields")),
+            skipped=d.get("skipped"),
+            value=d.get("value"),
         )
 
 
@@ -1149,6 +1378,48 @@ class StackTrace:
             replay=d.get("replay"),
             target=d.get("target"),
             truncated=d.get("truncated"),
+        )
+
+
+@dataclass
+class SvdInfo:
+    """The SVD description of the session."""
+
+    available: list[str]
+    """Devices the bundled SVD files describe."""
+    loaded: bool
+    """A description is loaded. Without one, the first peripheral operation loads the bundled
+    one of `chip_device`."""
+    peripherals: int
+    registers: int
+    chip: str | None = None
+    """The OpenOCD chip name of the target configuration (`tc37x`)."""
+    chip_device: str | None = None
+    """The bundled device that chip name stands for, if there is one."""
+    device: str | None = None
+    """The bundled device it describes (absent for a file of your own)."""
+    extra_files: list[str] | None = None
+    """Files merged into it."""
+    file: str | None = None
+    load_seconds: float | None = None
+    """Seconds the conversion took."""
+    source: str | None = None
+    """How it was chosen: `load_svd`, or `chip` (from the target configuration's chip name)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SvdInfo:
+        return cls(
+            available=d.get("available"),
+            loaded=d.get("loaded"),
+            peripherals=d.get("peripherals"),
+            registers=d.get("registers"),
+            chip=d.get("chip"),
+            chip_device=d.get("chip_device"),
+            device=d.get("device"),
+            extra_files=d.get("extra_files"),
+            file=d.get("file"),
+            load_seconds=d.get("load_seconds"),
+            source=d.get("source"),
         )
 
 
@@ -2103,6 +2374,97 @@ class GeneratedClient:
             target: Use this target's symbols (default: the first core that has symbols).
         """
         return AddressInfo.from_dict(self._call("GET", self._session_path() + "/symbols/address", _args({"address": address, "return_address": return_address, "target": target}), None))
+
+    def load_svd(self, *, device: str | None = None, file: str | None = None) -> SvdInfo:
+        """Load the SVD description the peripheral operations use: a bundled device's, or a file.
+
+        Without it, the first peripheral operation loads the bundled description of the chip the
+        target configuration names (`tc37x` -> `TC37x`, with the HSM and SCR merged). VS Code
+        loads the launch configuration's `device` when a debug session starts. Converting takes
+        about half a second (TC3xx). Fails with `not_found` for a device no bundled file describes
+        (the message lists them) or a missing file, and with `bad_request` for a file that is not
+        an SVD description.
+
+        Args:
+            device: A device the bundled SVD files describe (`TC37x`, `TC39x`, ...; see `svd` `available`), with its extra files merged (the TC3xx HSM and SCR). Case and `_` do not matter.
+            file: An SVD file of your own instead (`.svd` or `.svd.gz`).
+        """
+        return SvdInfo.from_dict(self._call("POST", self._session_path() + "/svd", None, _args({"device": device, "file": file})))
+
+    def svd(self) -> SvdInfo:
+        """The SVD description of the session: device, files, size, and the devices available.
+
+        Loads nothing: before the first peripheral operation it says which device the chip name
+        stands for.
+        """
+        return SvdInfo.from_dict(self._call("GET", self._session_path() + "/svd", None, None))
+
+    def list_peripherals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None) -> PeripheralList:
+        """List the peripherals of the SVD description, filtered by a name pattern.
+
+        Reads nothing from the target. `describe_peripheral` gives a peripheral's registers and
+        fields, `read_peripheral` their values.
+
+        Args:
+            limit: At most this many (default 200).
+            offset: 
+            query: Case-insensitive glob over the name and the group (`*`, `?`), e.g. `STM*`, `GTM`.
+        """
+        return PeripheralList.from_dict(self._call("GET", self._session_path() + "/peripherals", _args({"limit": limit, "offset": offset, "query": query}), None))
+
+    def describe_peripheral(self, path: str, *, limit: int | None = None, offset: int | None = None) -> PeripheralDescription:
+        """The registers of a peripheral, cluster or register path, with their fields, access, reset
+        values and named field values, as the SVD description has them.
+
+        Reads nothing from the target. Large peripherals (GTM: thousands of registers) are paged
+        with `offset` and `limit`. Fails with `not_found` for a path the description does not have.
+
+        Args:
+            path: `PERIPHERAL`, `PERIPHERAL.REGISTER`, `PERIPHERAL.CLUSTER.REGISTER` or `....REGISTER.FIELD`, case-insensitive: `STM0`, `STM0.TIM0`, `GTM.TOM0.CH1.CTRL`, `SCU.CCUCON0.CLKSEL`. Arrays are named as the SVD names their copies, e.g. `STM0.CMP[0]`.
+            limit: At most this many registers (default 200).
+            offset: Skip this many registers (default 0).
+        """
+        return PeripheralDescription.from_dict(self._call("GET", self._session_path() + f"/peripherals/{quote(str(path), safe='')}", _args({"limit": limit, "offset": offset}), None))
+
+    def read_peripheral(self, path: str, *, force: bool | None = None, limit: int | None = None, offset: int | None = None) -> PeripheralValues:
+        """Read the registers of a peripheral, cluster, register or field path, decoded into their
+        fields and named values.
+
+        Only the registers the description declares are read, each at its own address and width:
+        gaps between them are never read (reserved addresses can raise bus errors and safety
+        alarms). Registers whose reading has a side effect and write-only registers are skipped
+        and say so, unless `force`. A side effect is an SVD `readAction` (clear on read), or a
+        debug view next to the register: Infineon's descriptions declare no `readAction`, but give
+        FIFO and result registers a twin that reads without popping or clearing (`ASCLIN0.RXDATA`
+        and `ASCLIN0.RXDATAD`, `EVADC.G0RES[0]` and `EVADC.G0RESD[0]`). A register that cannot
+        be read (protected, a module not clocked) has an `error`; the others are still read.
+        HSM peripherals and the SCR's SFRs are read through their core, as `read_memory` does.
+        Works while the cores run.
+
+        Args:
+            path: As for `describe_peripheral`.
+            force: Also read registers whose reading has a side effect (SVD `readAction`: clear on read, a FIFO pop, ...). They are skipped by default.
+            limit: At most this many registers (default 200).
+            offset: 
+        """
+        return PeripheralValues.from_dict(self._call("GET", self._session_path() + f"/peripherals/{quote(str(path), safe='')}/value", _args({"force": force, "limit": limit, "offset": offset}), None))
+
+    def write_peripheral(self, path: str, *, value: float | bool | str) -> PeripheralWritten:
+        """Write a register, or a field (read-modify-write of its register), and read it back.
+
+        A field takes a number or the name of one of its values. When a field is written, the
+        register's other write-to-clear/set/toggle fields (SVD `modifiedWriteValues`) are written
+        with the value that leaves them unchanged, so they are not cleared by accident. Read-only
+        registers and fields are refused (`bad_request`). A value that does not stick is reported
+        in `note`: registers protected by ENDINIT or Safety ENDINIT ignore writes without the
+        unlock sequence, which this operation does not do. Connected debugger clients (VS Code)
+        are told to refresh their views.
+
+        Args:
+            path: A register or field (see `describe_peripheral`).
+            value: A number, a decimal or `0x` string, or for a field the name of one of its values.
+        """
+        return PeripheralWritten.from_dict(self._call("PUT", self._session_path() + f"/peripherals/{quote(str(path), safe='')}/value", None, _args({"value": value})))
 
     def list_globals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None, target: str | None = None) -> GlobalList:
         """List the global and static variables of the loaded symbols, filtered by a name pattern, one

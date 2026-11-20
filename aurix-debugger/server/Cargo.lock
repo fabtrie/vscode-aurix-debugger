@@ -20,6 +20,7 @@ dependencies = [
  "openocd-tcl",
  "orti",
  "serde_json",
+ "svd",
  "symbols",
  "tcf",
  "tokio",

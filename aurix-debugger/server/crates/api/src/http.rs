@@ -163,6 +163,18 @@ async fn rest(api: Arc<CoreApi>, op: &'static OpMeta, kinds: Arc<HashMap<String,
     }
 }
 
+/// `GET /api/v1/svd/definitions[?device=TC37x]`: the peripheral viewer's definitions (its
+/// `PeripheralOptions`) of the session's SVD description, or of a bundled device's, which is
+/// then loaded for the session (as `load_svd` does).
+async fn svd_definitions(api: Arc<CoreApi>, q: HashMap<String, String>) -> Response {
+    let device = q.get("device").cloned();
+    let r = tokio::task::spawn_blocking(move || crate::peripherals::definitions(&api, device.as_deref())).await;
+    match r.unwrap_or_else(|e| Err(ApiError::failed(format!("definitions failed: {e}")))) {
+        Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
 /// `POST /api/v1/ops/{op}` with the arguments as JSON object: any operation by name.
 async fn by_name(api: Arc<CoreApi>, name: String, headers: HeaderMap, body: Bytes) -> Response {
     let client = match caller(&headers) {
@@ -242,6 +254,7 @@ pub fn router(api: Arc<CoreApi>) -> Router {
 
     let hub = api.hub.clone();
     let daq_api = api.clone();
+    let svd_api = api.clone();
     let ops_api = api.clone();
     router
         .route("/api/v1/events", get(move || events(hub)))
@@ -249,6 +262,9 @@ pub fn router(api: Arc<CoreApi>) -> Router {
         // below and gets the same origin check. That matters more here than for REST: browsers
         // exempt WebSocket from CORS entirely, so the Origin check is the only defence.
         .route("/api/v1/daq", get(move |ws| crate::daq_ws::handler(daq_api, ws)))
+        // Not an operation: the definitions are tens of MB (TC4Dx: 118), streamed as they are
+        // written rather than built into a JSON value, and of no use as an MCP tool.
+        .route("/api/v1/svd/definitions", get(move |Query(q): Query<HashMap<String, String>>| svd_definitions(svd_api, q)))
         .route("/api/v1/ops/{op}", post(move |Path(op): Path<String>, headers: HeaderMap, body: Bytes| by_name(ops_api, op, headers, body)))
         .route("/", get(|| async { (StatusCode::OK, "aurix-dbg worker: its API is served by the hub (aurix-hub)\n") }))
         .layer(middleware::from_fn(check_origin))

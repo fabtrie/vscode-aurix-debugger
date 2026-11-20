@@ -2115,3 +2115,261 @@ pub struct RegistrationReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+// --- Peripherals (SVD) -----------------------------------------------------------------------
+
+/// Which SVD description to use.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoadSvdRequest {
+    /// A device the bundled SVD files describe (`TC37x`, `TC39x`, ...; see `svd` `available`),
+    /// with its extra files merged (the TC3xx HSM and SCR). Case and `_` do not matter.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// An SVD file of your own instead (`.svd` or `.svd.gz`).
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// The SVD description of the session.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SvdInfo {
+    /// A description is loaded. Without one, the first peripheral operation loads the bundled
+    /// one of `chip_device`.
+    pub loaded: bool,
+    /// The bundled device it describes (absent for a file of your own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Files merged into it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_files: Vec<String>,
+    /// How it was chosen: `load_svd`, or `chip` (from the target configuration's chip name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub peripherals: u32,
+    pub registers: u32,
+    /// Seconds the conversion took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_seconds: Option<f64>,
+    /// The OpenOCD chip name of the target configuration (`tc37x`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chip: Option<String>,
+    /// The bundled device that chip name stands for, if there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chip_device: Option<String>,
+    /// Devices the bundled SVD files describe.
+    pub available: Vec<String>,
+}
+
+/// Which peripherals to list.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListPeripheralsRequest {
+    /// Case-insensitive glob over the name and the group (`*`, `?`), e.g. `STM*`, `GTM`.
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// At most this many (default 200).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PeripheralSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub base_address: u32,
+    /// Bytes its address blocks span.
+    pub length: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Registers, those of its clusters included.
+    pub registers: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PeripheralList {
+    /// The bundled device, or the file of your own.
+    pub device: String,
+    /// All matches.
+    pub total: u32,
+    pub offset: u32,
+    pub items: Vec<PeripheralSummary>,
+}
+
+/// What a peripheral path names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PeripheralNodeKind {
+    Peripheral,
+    Cluster,
+    Register,
+    Field,
+}
+
+/// Access type of a register or field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RegisterAccess {
+    ReadOnly,
+    ReadWrite,
+    WriteOnly,
+}
+
+/// A path's registers to describe, a page at a time.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DescribePeripheralRequest {
+    /// `PERIPHERAL`, `PERIPHERAL.REGISTER`, `PERIPHERAL.CLUSTER.REGISTER` or `....REGISTER.FIELD`,
+    /// case-insensitive: `STM0`, `STM0.TIM0`, `GTM.TOM0.CH1.CTRL`, `SCU.CCUCON0.CLKSEL`. Arrays
+    /// are named as the SVD names their copies, e.g. `STM0.CMP[0]`.
+    pub path: String,
+    /// Skip this many registers (default 0).
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// At most this many registers (default 200).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// A named value of a field.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FieldValueName {
+    pub value: u64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FieldDescription {
+    pub name: String,
+    pub bit_offset: u32,
+    pub bit_width: u32,
+    /// The field's, else its register's.
+    pub access: RegisterAccess,
+    /// Reading changes it (`clear`, `set`, `modify`, `modify_external`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_action: Option<String>,
+    /// What writing does (`one_to_clear`, `one_to_set`, `one_to_toggle`, `zero_to_clear`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_write: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<FieldValueName>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RegisterDescription {
+    pub path: String,
+    pub address: u32,
+    /// Bits.
+    pub size: u32,
+    pub access: RegisterAccess,
+    pub reset_value: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_write: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub fields: Vec<FieldDescription>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PeripheralDescription {
+    pub path: String,
+    pub kind: PeripheralNodeKind,
+    /// Base address of a peripheral or cluster, address of a register.
+    pub address: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Registers under the path.
+    pub total: u32,
+    pub offset: u32,
+    /// In address order; a field's path gives its register with that field only.
+    pub registers: Vec<RegisterDescription>,
+}
+
+/// Registers to read.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPeripheralRequest {
+    /// As for `describe_peripheral`.
+    pub path: String,
+    /// Also read registers whose reading has a side effect (SVD `readAction`: clear on read,
+    /// a FIFO pop, ...). They are skipped by default.
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// At most this many registers (default 200).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FieldReading {
+    pub name: String,
+    pub value: u64,
+    /// The value's name, when the SVD names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RegisterReading {
+    pub path: String,
+    pub address: u32,
+    /// Bits.
+    pub size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<u64>,
+    /// Why it was not read: write-only, or reading has a side effect (`force` reads it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+    /// The read failed: e.g. the register is protected or its module is not clocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FieldReading>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PeripheralValues {
+    pub path: String,
+    pub total: u32,
+    pub offset: u32,
+    pub registers: Vec<RegisterReading>,
+}
+
+/// A register or field to write.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WritePeripheralRequest {
+    /// A register or field (see `describe_peripheral`).
+    pub path: String,
+    /// A number, a decimal or `0x` string, or for a field the name of one of its values.
+    #[schemars(schema_with = "scalar_schema")]
+    pub value: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PeripheralWritten {
+    pub path: String,
+    pub address: u32,
+    /// The register value written.
+    pub written: u64,
+    /// The register as read back (absent for one that cannot be read without a side effect).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readback: Option<RegisterReading>,
+    /// Something to know: the value did not stick (an ENDINIT-protected register, read-only
+    /// bits), or the register could not be read first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}

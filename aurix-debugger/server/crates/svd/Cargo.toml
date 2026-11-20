@@ -10,7 +10,7 @@ publish = false
 flate2 = "1"
 quick-xml = "0.38"
 serde = "1"
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 sha2 = "0.10"

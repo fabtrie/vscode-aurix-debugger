@@ -802,6 +802,40 @@
         },
         "type": "object"
       },
+      "DescribePeripheralRequest": {
+        "additionalProperties": false,
+        "description": "A path's registers to describe, a page at a time.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "At most this many registers (default 200).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Skip this many registers (default 0).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "`PERIPHERAL`, `PERIPHERAL.REGISTER`, `PERIPHERAL.CLUSTER.REGISTER` or `....REGISTER.FIELD`,\ncase-insensitive: `STM0`, `STM0.TIM0`, `GTM.TOM0.CH1.CTRL`, `SCU.CCUCON0.CLKSEL`. Arrays\nare named as the SVD names their copies, e.g. `STM0.CMP[0]`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
       "EndClientResult": {
         "description": "What ending a client removed.",
         "properties": {
@@ -917,6 +951,102 @@
         },
         "required": [
           "expression"
+        ],
+        "type": "object"
+      },
+      "FieldDescription": {
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/RegisterAccess",
+            "description": "The field's, else its register's."
+          },
+          "bit_offset": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bit_width": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "modified_write": {
+            "description": "What writing does (`one_to_clear`, `one_to_set`, `one_to_toggle`, `zero_to_clear`, ...).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "read_action": {
+            "description": "Reading changes it (`clear`, `set`, `modify`, `modify_external`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "values": {
+            "items": {
+              "$ref": "#/components/schemas/FieldValueName"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "bit_offset",
+          "bit_width",
+          "access"
+        ],
+        "type": "object"
+      },
+      "FieldReading": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "value_name": {
+            "description": "The value's name, when the SVD names it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "FieldValueName": {
+        "description": "A named value of a field.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value",
+          "name"
         ],
         "type": "object"
       },
@@ -1701,6 +1831,40 @@
         ],
         "type": "object"
       },
+      "ListPeripheralsRequest": {
+        "additionalProperties": false,
+        "description": "Which peripherals to list.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "At most this many (default 200).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "default": null,
+            "description": "Case-insensitive glob over the name and the group (`*`, `?`), e.g. `STM*`, `GTM`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "LoadOrtiRequest": {
         "description": "Which ORTI file to load.",
         "properties": {
@@ -1720,6 +1884,29 @@
         "required": [
           "file"
         ],
+        "type": "object"
+      },
+      "LoadSvdRequest": {
+        "additionalProperties": false,
+        "description": "Which SVD description to use.",
+        "properties": {
+          "device": {
+            "default": null,
+            "description": "A device the bundled SVD files describe (`TC37x`, `TC39x`, ...; see `svd` `available`),\nwith its extra files merged (the TC3xx HSM and SCR). Case and `_` do not matter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "default": null,
+            "description": "An SVD file of your own instead (`.svd` or `.svd.gz`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "LoadSymbolsRequest": {
@@ -2409,6 +2596,206 @@
         ],
         "type": "object"
       },
+      "PeripheralDescription": {
+        "properties": {
+          "address": {
+            "description": "Base address of a peripheral or cluster, address of a register.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PeripheralNodeKind"
+          },
+          "offset": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "registers": {
+            "description": "In address order; a field's path gives its register with that field only.",
+            "items": {
+              "$ref": "#/components/schemas/RegisterDescription"
+            },
+            "type": "array"
+          },
+          "total": {
+            "description": "Registers under the path.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "address",
+          "total",
+          "offset",
+          "registers"
+        ],
+        "type": "object"
+      },
+      "PeripheralList": {
+        "properties": {
+          "device": {
+            "description": "The bundled device, or the file of your own.",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PeripheralSummary"
+            },
+            "type": "array"
+          },
+          "offset": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "description": "All matches.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "device",
+          "total",
+          "offset",
+          "items"
+        ],
+        "type": "object"
+      },
+      "PeripheralNodeKind": {
+        "description": "What a peripheral path names.",
+        "enum": [
+          "peripheral",
+          "cluster",
+          "register",
+          "field"
+        ],
+        "type": "string"
+      },
+      "PeripheralSummary": {
+        "properties": {
+          "base_address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "length": {
+            "description": "Bytes its address blocks span.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "registers": {
+            "description": "Registers, those of its clusters included.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "base_address",
+          "length",
+          "registers"
+        ],
+        "type": "object"
+      },
+      "PeripheralValues": {
+        "properties": {
+          "offset": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "registers": {
+            "items": {
+              "$ref": "#/components/schemas/RegisterReading"
+            },
+            "type": "array"
+          },
+          "total": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "total",
+          "offset",
+          "registers"
+        ],
+        "type": "object"
+      },
+      "PeripheralWritten": {
+        "properties": {
+          "address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "note": {
+            "description": "Something to know: the value did not stick (an ENDINIT-protected register, read-only\nbits), or the register could not be read first.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "readback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RegisterReading"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The register as read back (absent for one that cannot be read without a side effect)."
+          },
+          "written": {
+            "description": "The register value written.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "address",
+          "written"
+        ],
+        "type": "object"
+      },
       "PlacedSymbolFile": {
         "additionalProperties": false,
         "description": "A symbol file limited to some cores.",
@@ -2530,6 +2917,44 @@
         ],
         "type": "object"
       },
+      "ReadPeripheralRequest": {
+        "additionalProperties": false,
+        "description": "Registers to read.",
+        "properties": {
+          "force": {
+            "default": false,
+            "description": "Also read registers whose reading has a side effect (SVD `readAction`: clear on read,\na FIFO pop, ...). They are skipped by default.",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": null,
+            "description": "At most this many registers (default 200).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "As for `describe_peripheral`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
       "ReadRegistersRequest": {
         "additionalProperties": false,
         "description": "Register list arguments.",
@@ -2553,6 +2978,71 @@
         },
         "required": [
           "target"
+        ],
+        "type": "object"
+      },
+      "RegisterAccess": {
+        "description": "Access type of a register or field.",
+        "enum": [
+          "read_only",
+          "read_write",
+          "write_only"
+        ],
+        "type": "string"
+      },
+      "RegisterDescription": {
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/RegisterAccess"
+          },
+          "address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FieldDescription"
+            },
+            "type": "array"
+          },
+          "modified_write": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "read_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reset_value": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "size": {
+            "description": "Bits.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "address",
+          "size",
+          "access",
+          "reset_value",
+          "fields"
         ],
         "type": "object"
       },
@@ -2588,6 +3078,58 @@
         "required": [
           "target",
           "registers"
+        ],
+        "type": "object"
+      },
+      "RegisterReading": {
+        "properties": {
+          "address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "description": "The read failed: e.g. the register is protected or its module is not clocked.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FieldReading"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "description": "Bits.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Why it was not read: write-only, or reading has a side effect (`force` reads it).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "address",
+          "size"
         ],
         "type": "object"
       },
@@ -3437,6 +3979,88 @@
         },
         "required": [
           "target"
+        ],
+        "type": "object"
+      },
+      "SvdInfo": {
+        "description": "The SVD description of the session.",
+        "properties": {
+          "available": {
+            "description": "Devices the bundled SVD files describe.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "chip": {
+            "description": "The OpenOCD chip name of the target configuration (`tc37x`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chip_device": {
+            "description": "The bundled device that chip name stands for, if there is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device": {
+            "description": "The bundled device it describes (absent for a file of your own).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extra_files": {
+            "description": "Files merged into it.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "load_seconds": {
+            "description": "Seconds the conversion took.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "loaded": {
+            "description": "A description is loaded. Without one, the first peripheral operation loads the bundled\none of `chip_device`.",
+            "type": "boolean"
+          },
+          "peripherals": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "registers": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "description": "How it was chosen: `load_svd`, or `chip` (from the target configuration's chip name).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "loaded",
+          "peripherals",
+          "registers",
+          "available"
         ],
         "type": "object"
       },
@@ -4571,6 +5195,35 @@
         ],
         "type": "object"
       },
+      "WritePeripheralRequest": {
+        "additionalProperties": false,
+        "description": "A register or field to write.",
+        "properties": {
+          "path": {
+            "description": "A register or field (see `describe_peripheral`).",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "A number, a decimal or `0x` string, or for a field the name of one of its values."
+          }
+        },
+        "required": [
+          "path",
+          "value"
+        ],
+        "type": "object"
+      },
       "WriteRegisterRequest": {
         "additionalProperties": false,
         "description": "Register write arguments.",
@@ -4655,7 +5308,7 @@
     }
   },
   "info": {
-    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
+    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, peripheral registers by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
     "title": "aurix-dbg API",
     "version": "0.1.0"
   },
@@ -6628,6 +7281,345 @@
         ]
       }
     },
+    "/api/v1/sessions/{session}/peripherals": {
+      "get": {
+        "description": "List the peripherals of the SVD description, filtered by a name pattern.\n\nReads nothing from the target. `describe_peripheral` gives a peripheral's registers and\nfields, `read_peripheral` their values.",
+        "operationId": "list_peripherals",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many (default 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Case-insensitive glob over the name and the group (`*`, `?`), e.g. `STM*`, `GTM`.",
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeripheralList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "List the peripherals of the SVD description, filtered by a name pattern.",
+        "tags": [
+          "peripherals"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/peripherals/{path}": {
+      "get": {
+        "description": "The registers of a peripheral, cluster or register path, with their fields, access, reset\nvalues and named field values, as the SVD description has them.\n\nReads nothing from the target. Large peripherals (GTM: thousands of registers) are paged\nwith `offset` and `limit`. Fails with `not_found` for a path the description does not have.",
+        "operationId": "describe_peripheral",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many registers (default 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Skip this many registers (default 0).",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "`PERIPHERAL`, `PERIPHERAL.REGISTER`, `PERIPHERAL.CLUSTER.REGISTER` or `....REGISTER.FIELD`,\ncase-insensitive: `STM0`, `STM0.TIM0`, `GTM.TOM0.CH1.CTRL`, `SCU.CCUCON0.CLKSEL`. Arrays\nare named as the SVD names their copies, e.g. `STM0.CMP[0]`.",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeripheralDescription"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The registers of a peripheral, cluster or register path, with their fields, access, reset values and named field values, as the SVD description has them.",
+        "tags": [
+          "peripherals"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/peripherals/{path}/value": {
+      "get": {
+        "description": "Read the registers of a peripheral, cluster, register or field path, decoded into their\nfields and named values.\n\nOnly the registers the description declares are read, each at its own address and width:\ngaps between them are never read (reserved addresses can raise bus errors and safety\nalarms). Registers whose reading has a side effect and write-only registers are skipped\nand say so, unless `force`. A side effect is an SVD `readAction` (clear on read), or a\ndebug view next to the register: Infineon's descriptions declare no `readAction`, but give\nFIFO and result registers a twin that reads without popping or clearing (`ASCLIN0.RXDATA`\nand `ASCLIN0.RXDATAD`, `EVADC.G0RES[0]` and `EVADC.G0RESD[0]`). A register that cannot\nbe read (protected, a module not clocked) has an `error`; the others are still read.\nHSM peripherals and the SCR's SFRs are read through their core, as `read_memory` does.\nWorks while the cores run.",
+        "operationId": "read_peripheral",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Also read registers whose reading has a side effect (SVD `readAction`: clear on read,\na FIFO pop, ...). They are skipped by default.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "At most this many registers (default 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "As for `describe_peripheral`.",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeripheralValues"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Read the registers of a peripheral, cluster, register or field path, decoded into their fields and named values.",
+        "tags": [
+          "peripherals"
+        ]
+      },
+      "put": {
+        "description": "Write a register, or a field (read-modify-write of its register), and read it back.\n\nA field takes a number or the name of one of its values. When a field is written, the\nregister's other write-to-clear/set/toggle fields (SVD `modifiedWriteValues`) are written\nwith the value that leaves them unchanged, so they are not cleared by accident. Read-only\nregisters and fields are refused (`bad_request`). A value that does not stick is reported\nin `note`: registers protected by ENDINIT or Safety ENDINIT ignore writes without the\nunlock sequence, which this operation does not do. Connected debugger clients (VS Code)\nare told to refresh their views.",
+        "operationId": "write_peripheral",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A register or field (see `describe_peripheral`).",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "A register or field to write.",
+                "properties": {
+                  "value": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "description": "A number, a decimal or `0x` string, or for a field the name of one of its values."
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeripheralWritten"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Write a register, or a field (read-modify-write of its register), and read it back.",
+        "tags": [
+          "peripherals"
+        ]
+      }
+    },
     "/api/v1/sessions/{session}/relaunch": {
       "post": {
         "description": "Run the last launch again, e.g. after a rebuild: flash (incremental), reset, breakpoints,\n`run_to`.",
@@ -7220,6 +8212,120 @@
         "summary": "The checkpoints, oldest first: the action that followed each (`Action`), where it started (`Pc`, `At`) and ended (`EndPc`), whether it was recorded.",
         "tags": [
           "reverse"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/svd": {
+      "get": {
+        "description": "The SVD description of the session: device, files, size, and the devices available.\n\nLoads nothing: before the first peripheral operation it says which device the chip name\nstands for.",
+        "operationId": "svd",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SvdInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The SVD description of the session: device, files, size, and the devices available.",
+        "tags": [
+          "peripherals"
+        ]
+      },
+      "post": {
+        "description": "Load the SVD description the peripheral operations use: a bundled device's, or a file.\n\nWithout it, the first peripheral operation loads the bundled description of the chip the\ntarget configuration names (`tc37x` -> `TC37x`, with the HSM and SCR merged). VS Code\nloads the launch configuration's `device` when a debug session starts. Converting takes\nabout half a second (TC3xx). Fails with `not_found` for a device no bundled file describes\n(the message lists them) or a missing file, and with `bad_request` for a file that is not\nan SVD description.",
+        "operationId": "load_svd",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Which SVD description to use.",
+                "properties": {
+                  "device": {
+                    "default": null,
+                    "description": "A device the bundled SVD files describe (`TC37x`, `TC39x`, ...; see `svd` `available`),\nwith its extra files merged (the TC3xx HSM and SCR). Case and `_` do not matter.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "file": {
+                    "default": null,
+                    "description": "An SVD file of your own instead (`.svd` or `.svd.gz`).",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SvdInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Load the SVD description the peripheral operations use: a bundled device's, or a file.",
+        "tags": [
+          "peripherals"
         ]
       }
     },

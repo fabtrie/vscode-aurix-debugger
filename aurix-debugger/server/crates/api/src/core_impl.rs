@@ -55,6 +55,8 @@ pub struct CoreApi {
     pub meta: WorkerMeta,
     pub control: Mutex<Option<Lease>>,
     pub launcher: Launcher,
+    /// The SVD description the peripheral operations use, once loaded.
+    pub svd: crate::peripherals::Slot,
     /// This API itself, for work that outlives a call (the launch steps).
     pub me: OnceLock<Weak<CoreApi>>,
 }
@@ -308,6 +310,7 @@ impl CoreApi {
             meta,
             control: Mutex::new(None),
             launcher: Launcher::default(),
+            svd: Default::default(),
             me: OnceLock::new(),
         });
         let _ = api.me.set(Arc::downgrade(&api));
@@ -360,7 +363,7 @@ impl CoreApi {
     }
 
     /// Runs `f` on the core thread.
-    fn call<R, F>(&self, f: F) -> Result<R, ApiError>
+    pub(crate) fn call<R, F>(&self, f: F) -> Result<R, ApiError>
     where
         R: Send + 'static,
         F: for<'a, 'b> FnOnce(&'b Cx<'a>) -> Result<R, ApiError> + Send + 'static,
@@ -1236,6 +1239,31 @@ impl DebuggerApi for CoreApi {
 
     fn lookup_address(&self, req: LookupAddressRequest) -> Result<AddressInfo, ApiError> {
         variables::lookup_address(self, req)
+    }
+
+    fn load_svd(&self, req: LoadSvdRequest) -> Result<SvdInfo, ApiError> {
+        crate::peripherals::load_svd(self, req)
+    }
+
+    fn svd(&self, _: NoArgs) -> Result<SvdInfo, ApiError> {
+        Ok(crate::peripherals::svd_info(self))
+    }
+
+    fn list_peripherals(&self, req: ListPeripheralsRequest) -> Result<PeripheralList, ApiError> {
+        crate::peripherals::list_peripherals(self, req)
+    }
+
+    fn describe_peripheral(&self, req: DescribePeripheralRequest) -> Result<PeripheralDescription, ApiError> {
+        crate::peripherals::describe_peripheral(self, req)
+    }
+
+    fn read_peripheral(&self, req: ReadPeripheralRequest) -> Result<PeripheralValues, ApiError> {
+        crate::peripherals::read_peripheral(self, req)
+    }
+
+    fn write_peripheral(&self, req: WritePeripheralRequest) -> Result<PeripheralWritten, ApiError> {
+        self.check_control()?;
+        crate::peripherals::write_peripheral(self, req)
     }
 
     fn list_globals(&self, req: ListGlobalsRequest) -> Result<GlobalList, ApiError> {

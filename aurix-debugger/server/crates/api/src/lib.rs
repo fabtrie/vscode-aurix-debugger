@@ -18,6 +18,7 @@ mod http;
 pub mod hub_client;
 mod launch;
 mod orti_state;
+mod peripherals;
 mod variables;
 
 use std::net::TcpListener;

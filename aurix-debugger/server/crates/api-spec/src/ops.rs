@@ -268,6 +268,61 @@ api! {
     /// `not_found` when no symbols are loaded.
     op lookup_address [symbols]: GET "/api/v1/symbols/address" (LookupAddressRequest) -> AddressInfo;
 
+    /// Load the SVD description the peripheral operations use: a bundled device's, or a file.
+    ///
+    /// Without it, the first peripheral operation loads the bundled description of the chip the
+    /// target configuration names (`tc37x` -> `TC37x`, with the HSM and SCR merged). VS Code
+    /// loads the launch configuration's `device` when a debug session starts. Converting takes
+    /// about half a second (TC3xx). Fails with `not_found` for a device no bundled file describes
+    /// (the message lists them) or a missing file, and with `bad_request` for a file that is not
+    /// an SVD description.
+    op load_svd [peripherals]: POST "/api/v1/svd" (LoadSvdRequest) -> SvdInfo;
+
+    /// The SVD description of the session: device, files, size, and the devices available.
+    ///
+    /// Loads nothing: before the first peripheral operation it says which device the chip name
+    /// stands for.
+    op svd [peripherals]: GET "/api/v1/svd" (NoArgs) -> SvdInfo;
+
+    /// List the peripherals of the SVD description, filtered by a name pattern.
+    ///
+    /// Reads nothing from the target. `describe_peripheral` gives a peripheral's registers and
+    /// fields, `read_peripheral` their values.
+    op list_peripherals [peripherals]: GET "/api/v1/peripherals" (ListPeripheralsRequest) -> PeripheralList;
+
+    /// The registers of a peripheral, cluster or register path, with their fields, access, reset
+    /// values and named field values, as the SVD description has them.
+    ///
+    /// Reads nothing from the target. Large peripherals (GTM: thousands of registers) are paged
+    /// with `offset` and `limit`. Fails with `not_found` for a path the description does not have.
+    op describe_peripheral [peripherals]: GET "/api/v1/peripherals/{path}" (DescribePeripheralRequest) -> PeripheralDescription;
+
+    /// Read the registers of a peripheral, cluster, register or field path, decoded into their
+    /// fields and named values.
+    ///
+    /// Only the registers the description declares are read, each at its own address and width:
+    /// gaps between them are never read (reserved addresses can raise bus errors and safety
+    /// alarms). Registers whose reading has a side effect and write-only registers are skipped
+    /// and say so, unless `force`. A side effect is an SVD `readAction` (clear on read), or a
+    /// debug view next to the register: Infineon's descriptions declare no `readAction`, but give
+    /// FIFO and result registers a twin that reads without popping or clearing (`ASCLIN0.RXDATA`
+    /// and `ASCLIN0.RXDATAD`, `EVADC.G0RES[0]` and `EVADC.G0RESD[0]`). A register that cannot
+    /// be read (protected, a module not clocked) has an `error`; the others are still read.
+    /// HSM peripherals and the SCR's SFRs are read through their core, as `read_memory` does.
+    /// Works while the cores run.
+    op read_peripheral [peripherals]: GET "/api/v1/peripherals/{path}/value" (ReadPeripheralRequest) -> PeripheralValues;
+
+    /// Write a register, or a field (read-modify-write of its register), and read it back.
+    ///
+    /// A field takes a number or the name of one of its values. When a field is written, the
+    /// register's other write-to-clear/set/toggle fields (SVD `modifiedWriteValues`) are written
+    /// with the value that leaves them unchanged, so they are not cleared by accident. Read-only
+    /// registers and fields are refused (`bad_request`). A value that does not stick is reported
+    /// in `note`: registers protected by ENDINIT or Safety ENDINIT ignore writes without the
+    /// unlock sequence, which this operation does not do. Connected debugger clients (VS Code)
+    /// are told to refresh their views.
+    op write_peripheral [peripherals]: PUT "/api/v1/peripherals/{path}/value" (WritePeripheralRequest) -> PeripheralWritten;
+
     /// List the global and static variables of the loaded symbols, filtered by a name pattern, one
     /// page at a time.
     ///

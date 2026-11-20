@@ -1,8 +1,8 @@
 //! Installing the hub to a fixed per-user location, and starting it at logon.
 //!
 //! The VS Code extension lives in a versioned directory that every update replaces, so a logon
-//! entry or an MCP configuration cannot point there. `install` copies `aurix-hub`, `aurix-dbg`
-//! and the OpenOCD scripts to `%LOCALAPPDATA%\aurix-dbg\versions\<version>-<hash>\` and points
+//! entry or an MCP configuration cannot point there. `install` copies `aurix-hub`, `aurix-dbg`,
+//! the OpenOCD scripts and the SVD files to `%LOCALAPPDATA%\aurix-dbg\versions\<version>-<hash>\` and points
 //! the junction `current` at it; the logon entry and MCP configurations name
 //! `current\aurix-hub.exe`, which never changes. A junction needs no admin rights, and moving it
 //! does not disturb running processes (they hold files in the version directory).
@@ -229,6 +229,10 @@ pub fn install(o: &InstallOptions) -> Result<Vec<String>, String> {
             }
             if src.join("openocd").is_dir() {
                 copy_dir(&src.join("openocd"), &tmp.join("openocd")).map_err(|e| format!("copying the OpenOCD scripts: {e}"))?;
+            }
+            // The SVD descriptions the peripheral operations read, next to the worker.
+            if src.join("svd").is_dir() {
+                copy_dir(&src.join("svd"), &tmp.join("svd")).map_err(|e| format!("copying the SVD files: {e}"))?;
             }
             std::fs::write(tmp.join("build.txt"), format!("{build}\n")).map_err(|e| e.to_string())?;
             let _ = std::fs::remove_dir_all(&dest);

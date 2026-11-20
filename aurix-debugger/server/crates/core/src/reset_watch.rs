@@ -85,6 +85,8 @@ pub struct Watched {
     restoring: Option<Restoring>,
     late: bool,
     info: ResetInfo,
+    /// The set-up to restore after a reset, besides OCDS ([`crate::restore`]).
+    restore: Option<crate::restore::SharedRestore>,
 }
 
 impl Watched {
@@ -100,7 +102,13 @@ impl Watched {
             restoring: None,
             late: false,
             info: ResetInfo::default(),
+            restore: None,
         }
+    }
+
+    /// What to set up again after a reset, once OCDS is back (set at `init`).
+    pub fn set_restore(&mut self, rs: crate::restore::SharedRestore) {
+        self.restore = Some(rs);
     }
 
     pub fn set_settings(&mut self, s: WatchSettings) {
@@ -186,6 +194,9 @@ impl Watched {
             if self.restoring.is_none() {
                 self.restoring = Some(Restoring { since: now, bound: self.last_clean });
             }
+            if let Some(rs) = &self.restore {
+                crate::restore::mark_reset(rs);
+            }
         } else if ok && self.restoring.is_none() {
             self.last_clean = Some(now);
         }
@@ -212,6 +223,11 @@ impl Watched {
                 self.late |= late;
                 self.restoring = None;
                 self.last_clean = Some(now);
+                // The rest of what the reset cleared, right behind OCDS.
+                if let Some(rs) = self.restore.clone() {
+                    crate::restore::after_reset(&mut crate::adapter::Io::new(self.inner.as_mut()), &rs);
+                    self.for_poll += self.inner.take_resets();
+                }
                 match ms {
                     Some(ms) if !late => crate::log_info!("Device reset: OCDS on again within {ms} ms"),
                     Some(ms) => crate::log_warn!(

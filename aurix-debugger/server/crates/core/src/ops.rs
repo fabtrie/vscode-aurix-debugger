@@ -334,6 +334,11 @@ pub fn poll_all(cx: &Cx) {
     let mut failed_all = false;
     match res {
         Ok((transitions, resets, failed)) => {
+            // A halt the debugger did not cause (breakpoint, another core): modules the
+            // application enabled since the last poll step get their suspend now, late.
+            if resets == 0 && transitions.iter().any(|(_, tr)| matches!(tr, Transition::Rehalted | Transition::Halted { boot: false, .. })) {
+                crate::suspend::attempt_now(cx, crate::suspend::Why::Halted, crate::suspend::Select::Active);
+            }
             // Report transitions even when a reset was flagged: poll_apply has
             // already updated the state, so skipping them would lose the event.
             for (i, tr) in transitions {
@@ -425,6 +430,9 @@ pub fn poll_all(cx: &Cx) {
     for target in unreachable {
         emit(Event::Unreachable { target });
     }
+    if !failed_all {
+        crate::suspend::poll_tick(cx);
+    }
 }
 
 /// Tells the frontends what the adapter reports about the target connection when it changes, and
@@ -497,6 +505,8 @@ fn require_examined(cx: &Cx, t: usize) -> Result<()> {
 
 pub fn halt(cx: &Cx, t: usize) -> Result<()> {
     require_examined(cx, t)?;
+    // Modules the application enabled since the last check: suspended before the halt, not after.
+    crate::suspend::attempt_now(cx, crate::suspend::Why::Pause, crate::suspend::Select::Active);
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
         e.core.halt(&mut io)
@@ -823,9 +833,20 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     for &t in &all {
         fire(cx, t, "reset-deassert-pre");
     }
-    for &t in &all {
-        arp_reset_deassert(cx, t, halt)?;
-    }
+    // What the reset cleared besides OCDS (peripheral suspend) follows cpu0's deassert at once,
+    // before the other cores and any handler: the modules that are on after a reset get their
+    // suspend before the application can lock them.
+    let cpu0 = cx.with(|c| c.targets.iter().position(|e| matches!(e.core, Core::Tricore(_))));
+    let deassert_all = || -> Result<()> {
+        for &t in &all {
+            arp_reset_deassert(cx, t, halt)?;
+            if Some(t) == cpu0 {
+                crate::restore::after_own_reset(cx);
+            }
+        }
+        Ok(())
+    };
+    deassert_all()?;
     // Seen with TasServer: now and then a reset-and-halt connect is a plain power-on reset; another one holds.
     for retry in 1..=RESET_HALT_RETRIES {
         if !halt || !cx.with(|c| c.targets.iter().any(|e| e.core.reset_halt_missed())) {
@@ -835,9 +856,7 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
         for &t in &all {
             arp_reset_assert(cx, t, halt)?;
         }
-        for &t in &all {
-            arp_reset_deassert(cx, t, halt)?;
-        }
+        deassert_all()?;
     }
     for &t in &all {
         fire(cx, t, "reset-deassert-post");
@@ -1016,11 +1035,15 @@ pub fn init(cx: &Cx) -> Result<()> {
         let own_ocds = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_none());
         let tricore = c.targets.iter().any(|e| matches!(e.core, Core::Tricore(_)));
         let settings = c.reset_watch;
+        let rs = c.restore.clone();
+        rs.suspend.borrow_mut().active = own_ocds && tricore;
         if let Some(w) = c.watch() {
             w.set_settings(settings);
             w.set_active(own_ocds && tricore);
+            w.set_restore(rs);
         }
     });
+    crate::restore::on_attach(cx);
     if cx.interp.command_exists("init_board") {
         cx.interp.eval_global("init_board").map_err(other)?;
     }

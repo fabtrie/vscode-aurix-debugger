@@ -45,19 +45,13 @@ const MAX_LIMIT: u32 = 2000;
 /// Longest run of adjacent registers read in one access.
 const MAX_RUN: usize = 4096;
 
-/// The bundled SVD files: `AURIX_SVD_DIR`, else `svd` next to the executable (the extension's
-/// `bin`, an installation), else the extension's in this source tree (development builds).
+/// The bundled SVD files (see [`svd::catalog::default_dir`]).
 pub fn svd_dir() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var_os("AURIX_SVD_DIR").map(PathBuf::from),
-        std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("svd"))),
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../vscode-aurix-tcf-debugger/bin/svd")),
-    ];
-    candidates.into_iter().flatten().find(|d| d.join(svd::catalog::INDEX).is_file())
+    svd::catalog::default_dir()
 }
 
 fn catalog() -> svd::Catalog {
-    svd_dir().and_then(|d| svd::Catalog::load(&d).ok()).unwrap_or_default()
+    svd::Catalog::bundled()
 }
 
 fn svd_err(e: svd::Error) -> ApiError {

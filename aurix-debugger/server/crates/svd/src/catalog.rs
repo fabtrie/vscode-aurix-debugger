@@ -10,6 +10,24 @@ use crate::{Device, Error, Extra};
 /// The index file of an SVD directory.
 pub const INDEX: &str = "svd-index.json";
 
+/// The bundled SVD files: `AURIX_SVD_DIR`, else `svd` next to the executable (the extension's
+/// `bin`, an installation), else the extension's in this source tree (development builds).
+pub fn default_dir() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var_os("AURIX_SVD_DIR").map(PathBuf::from),
+        std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("svd"))),
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../vscode-aurix-tcf-debugger/bin/svd")),
+    ];
+    candidates.into_iter().flatten().find(|d| d.join(INDEX).is_file())
+}
+
+impl Catalog {
+    /// The devices of the bundled SVD files ([`default_dir`]); empty when there are none.
+    pub fn bundled() -> Catalog {
+        default_dir().and_then(|d| Catalog::load(&d).ok()).unwrap_or_default()
+    }
+}
+
 /// The devices of an SVD directory.
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {

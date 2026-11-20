@@ -59,21 +59,19 @@ pub const APP_MARKER: u32 = 0x7000_F000;
 pub const APP_DRIVER_STATE: u32 = 0x6000_F000;
 pub const APP_MARKER_DEBUGGER: u32 = 0xDEB0_0001;
 
-/// The simulated board's settings for the example board cfg (`tc37x_ocds_init.cfg`), as a board's
-/// own cfg would set them before loading it: the peripheral suspend list ([`SIM_PERIPHS`] without
-/// the STMs, which `tc3xx_setup` adds).
+/// The simulated board's settings, as a board's own cfg makes them after the target cfg: the
+/// peripheral suspend list ([`SIM_PERIPHS`], by their names in the bundled SVD description).
 pub const SIM_BOARD_SETTINGS: &str = "
-set tc3xx_periph {
-    {SMU      0xF0036FE8 0xF0036800 0xF0036FFC 2 reset}
-    {GPT120   0xF00018E8 0xF0001800 0xF00018FC 1 app}
-    {QSPI2    0xF0001EE8 0xF0001E00 0xF0001EFC 2 app}
-    {QSPI4    0xF00020E8 0xF0002000 0xF00020FC 2 app}
-    {EVADC    0xF0020028 0xF0020000 0xF002003C 2 app}
-    {CONVCTRL 0xF0025028 0xF0025000 0xF002503C 2 app}
-    {GTM      0xF019FD38 0xF019FD00 0xF019FD10 0 app}
-    {CAN0     0xF02080E8 0xF0208000 0xF02080FC 2 app}
-    {CAN1     0xF02180E8 0xF0218000 0xF02180FC 2 app}
-}
+suspend add cores
+suspend add SMU
+suspend add GPT120 hard
+suspend add QSPI2
+suspend add QSPI4
+suspend add EVADC
+suspend add CONVCTRL
+suspend add GTM off
+suspend add CAN0
+suspend add CAN1
 ";
 
 const STM0_TIM0: u32 = 0xF000_1010;
@@ -86,6 +84,9 @@ pub struct SimApp {
     pub check_ms: u64,
     pub enable_ms: u64,
     pub fs26_ms: u64,
+    /// Modules (by their CLC address) the application enables at another time than `enable_ms`
+    /// after it starts (`Some(ms)`), or never (`None`).
+    pub enable_at: HashMap<u32, Option<u64>>,
     /// Start-up began (cores running after a reset, or cpu0 resumed after a halting reset).
     started: Option<Instant>,
     /// Halted at the reset vector: starts when cpu0 is resumed.
@@ -96,7 +97,7 @@ pub struct SimApp {
 
 impl SimApp {
     fn new() -> Self {
-        SimApp { check_ms: 25, enable_ms: 34, fs26_ms: 40, started: None, pending: false, stage: 3, saw_debugger: true }
+        SimApp { check_ms: 25, enable_ms: 34, fs26_ms: 40, enable_at: HashMap::new(), started: None, pending: false, stage: 3, saw_debugger: true }
     }
 }
 
@@ -457,8 +458,9 @@ impl SimAdapter {
                 self.mem.insert(0xF000_11FC, 0x40);
             }
             2 => {
+                let later: Vec<u32> = app.enable_at.keys().copied().collect();
                 for &(_, clc, accen, on) in SIM_PERIPHS {
-                    if !on {
+                    if !on && !later.contains(&clc) {
                         self.mem.insert(clc, 0x8);
                         self.mem.insert(accen, 0x1000_0044);
                     }
@@ -553,6 +555,7 @@ impl SimAdapter {
             if let (Some(t0), false) = (app.started, self.halted[0]) {
                 let ms = now.duration_since(t0).as_millis() as u64;
                 let (stage, check, enable, fs26) = (app.stage, app.check_ms, app.enable_ms, app.fs26_ms);
+                let due: Vec<u32> = app.enable_at.iter().filter(|(_, at)| at.is_some_and(|at| ms >= at)).map(|(&clc, _)| clc).collect();
                 if stage < 1 && ms >= check {
                     self.app_stage(1);
                 }
@@ -561,6 +564,15 @@ impl SimAdapter {
                 }
                 if stage < 3 && ms >= fs26 {
                     self.app_stage(3);
+                }
+                // Modules enabled at their own time.
+                for clc in due {
+                    if self.mem.get(&clc).is_some_and(|c| c & 2 != 0) {
+                        if let Some(&(_, _, accen, _)) = SIM_PERIPHS.iter().find(|p| p.1 == clc) {
+                            self.mem.insert(clc, 0x8);
+                            self.mem.insert(accen, 0x1000_0044);
+                        }
+                    }
                 }
             }
         }

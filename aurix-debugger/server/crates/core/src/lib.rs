@@ -28,6 +28,7 @@ pub mod ops;
 pub mod reverse;
 pub mod reverse_cmd;
 pub mod reset_watch;
+pub mod restore;
 pub mod scr_monitor;
 pub mod server;
 pub mod sim;
@@ -36,6 +37,7 @@ pub mod sim_mcds;
 pub mod sim_mcs;
 pub mod sim_scr;
 pub mod sim_tricore;
+pub mod suspend;
 pub mod target;
 pub mod tas_adapter;
 #[cfg(feature = "bluebox")]

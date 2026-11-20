@@ -592,12 +592,12 @@ fn reset_run_suspends_stm_before_the_application_locks_it() {
     s.interp.eval("reset run").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(STM0_OCS, 0x1200_0000)), "STM0 suspend not written: {w:08x?}");
-    assert_eq!(mem(&s, 0xF000_10FC), 0x4, "application did not lock STM0");
+    wait_polling(&s, "the application locks STM0", |s| mem(s, 0xF000_10FC) == 0x4);
     assert_eq!(ocs_sus(&s, STM0_OCS), 2);
     assert_eq!(ocs_sus(&s, STM1_OCS), 2);
-    assert_eq!(ocs_sus(&s, EVADC_OCS), 2, "app-class module not suspended after the start");
+    // The modules the application enables later get their suspend from the background poll.
+    wait_polling(&s, "EVADC suspended by the poll", |s| ocs_sus(s, EVADC_OCS) == 2);
     assert_eq!(with_sim(&s, |sim| sim.mem_word(APP_MARKER)), APP_MARKER_DEBUGGER);
-    ops::poll_all(&s.cx());
     assert_eq!(curstate(&s, "tc37x.cpu0"), "running");
     no_violations(&s);
 }
@@ -756,10 +756,14 @@ fn attach_halt_resets_first_when_stm_is_not_suspended() {
     assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
     assert_eq!(ocs_sus(&s, STM0_OCS), 2);
     assert_eq!(ocs_sus(&s, STM1_OCS), 2);
-    assert_eq!(ocs_sus(&s, EVADC_OCS), 2);
+    // EVADC: suspended if the application had enabled it before the halt, else once it does.
+    let evadc_clc = 0xF002_0000;
+    assert!(ocs_sus(&s, EVADC_OCS) == 2 || mem(&s, evadc_clc) & 2 != 0, "EVADC enabled but not suspended at the halt");
     // Halted in the application (it ran: it locked STM0 against the debugger), not at the vector.
     assert_eq!(mem(&s, 0xF000_10FC), 0x4, "the application did not run before the halt");
     assert_eq!(mem(&s, APP_MARKER), APP_MARKER_DEBUGGER);
+    s.interp.eval("resume").unwrap();
+    wait_polling(&s, "EVADC suspended by the poll", |s| ocs_sus(s, EVADC_OCS) == 2);
     no_violations(&s);
 }
 
@@ -786,15 +790,16 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     s.interp.eval("reset halt").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset halt: {w:08x?}");
-    // The quick reset-end releases the HSM first (boot ROM breakpoint deleted, then run: it needs
-    // ~32 ms to report ready) and suspends the STMs meanwhile; once the halt holds, TL1 is routed
-    // and latched (its edge halts the HSM with the cores; continue releases it as after any halt).
+    // The server suspends the STMs right after cpu0's deassert, before any handler; the quick
+    // reset-end then releases the HSM (boot ROM breakpoint deleted, then run: it needs ~32 ms to
+    // report ready); once the halt holds, TL1 is routed and latched (its edge halts the HSM with the
+    // cores; continue releases it as after any halt).
+    let ocs = pos(&w, (0xF000_10E8, 0x1200_0000));
     let bp = pos(&w, (0xF005_2008, 0));
     let run = bp + pos(&w[bp..], (0xF005_EDF0, 0xA05F_0001));
-    let ocs = pos(&w, (0xF000_10E8, 0x1200_0000));
     let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched after reset halt");
-    assert!(bp < run && run < ocs, "HSM release, then STM suspend: {w:08x?}");
-    assert!(ocs < latch, "TL1 latched once the halt holds: {w:08x?}");
+    assert!(ocs < bp && bp < run, "STM suspend, then HSM release: {w:08x?}");
+    assert!(run < latch, "TL1 latched once the halt holds: {w:08x?}");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
 
     // A reset without halt is halted for the init (STM0/1 before the application locks them), then
@@ -1175,6 +1180,19 @@ fn mcs_server() -> Server {
     });
     ops::poll_all(&s.cx());
     s
+}
+
+/// Polls (as the server loop does, every 5 ms) until `f` holds, for up to 2 s.
+fn wait_polling(s: &Server, what: &str, f: impl Fn(&Server) -> bool) {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(2) {
+        ops::poll_all(&s.cx());
+        if f(s) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("timed out waiting for {what}");
 }
 
 fn poll_until(s: &Server, what: &str, f: impl Fn(&Server) -> bool) {

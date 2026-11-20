@@ -498,6 +498,64 @@ ocd_process_reset <mode>
 
 Same as `reset <mode>` (OpenOCD's name for it).
 
+### `suspend add`
+
+```
+suspend add <module>|cores [soft|hard|off] | <name> -ocs <addr> -clc <addr> -accen <addr> [soft|hard|off]
+```
+
+Suspend a peripheral module while the cores are halted (OCS.SUS), as winIDEA's SuspendPeripheralsWhileStopped.
+
+`soft` (default) lets the module finish what it is doing, `hard` stops its clock (the only mode GPT12 has), `off`          writes SUS=0 (clears a suspend an earlier session left). `cores` adds the STM of every TriCore core. Module names          are looked up in the chip's bundled SVD description (`<MODULE>.OCS`, `.CLC`, `.ACCEN0`); the second form gives          the addresses. The OCS is written as soon as the write can land (module enabled: CLC.DISS=0, and ACCEN0 lets the          debugger write) and never before: right after every reset, in the step that switches OCDS on again; by the          background poll while the cores run, once the application enabled the module; before a pause; late, when a          halt is seen. A module the application locks first stays `locked` until the next reset; one whose write does          not take is left alone after two tries (`refused`); one not enabled 5 s after a reset is checked every 2 s          (`idle`). Nothing is suspended unless listed. Not with a probe that owns OCDS (winIDEA).
+
+### `suspend remove`
+
+```
+suspend remove <name>
+```
+
+Take a module off the suspend list (its OCS stays as it is).
+
+### `suspend clear`
+
+```
+suspend clear
+```
+
+Empty the suspend list.
+
+### `suspend list`
+
+```
+suspend list
+```
+
+The suspend list: name, mode and the OCS, CLC and ACCEN0 addresses of each module.
+
+### `suspend status`
+
+```
+suspend status
+```
+
+Each module's state as a dict: name, mode, state (pending, idle, done, locked, refused), after_ms (when it got its suspend, counted from the reset), ocs.
+
+### `suspend now`
+
+```
+suspend now
+```
+
+Try every pending module now; returns the names still pending.
+
+### `suspend pending`
+
+```
+suspend pending [locked]
+```
+
+The modules still without their suspend (or only those locked by the application).
+
 ## Run control
 
 ### `halt`

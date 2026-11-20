@@ -317,6 +317,9 @@ fn wait_for_hit(api: &CoreApi, id: &str, loc: &str, timeout: Duration, since: In
         let list = api.breakpoint_list()?;
         let ours = list.breakpoints.iter().find(|b| b.id == id);
         let addrs: Vec<u32> = ours.map(|b| b.instances.iter().filter(|i| i.error.is_none()).map(|i| i.address).collect()).unwrap_or_default();
+        // The debugger's other breakpoints: a halt elsewhere (the HSM at its boot ROM breakpoint
+        // after a reset) is not one that came first.
+        let others: Vec<u32> = list.breakpoints.iter().filter(|b| b.id != id).flat_map(|b| b.instances.iter().map(|i| i.address)).collect();
         let targets = api.targets(NoArgs {})?.targets;
         for t in targets.iter().filter(|t| t.state == RunState::Halted && t.reason == "breakpoint") {
             let Some(pc) = t.pc else { continue };
@@ -325,6 +328,9 @@ fn wait_for_hit(api: &CoreApi, id: &str, loc: &str, timeout: Duration, since: In
                     .and_then(|b| b.instances.iter().find(|i| i.address == pc))
                     .and_then(|i| Some(format!(" ({}:{})", i.file.as_deref()?, i.line?)));
                 return Ok(format!("{} halted at {loc}{}", t.name, line.unwrap_or_default()));
+            }
+            if !others.contains(&pc) {
+                continue;
             }
             // Another breakpoint came first: the target stopped there, as it would in VS Code.
             return Err(ApiError::new(

@@ -51,6 +51,7 @@ dependencies = [
  "mcds",
  "openocd-tcl",
  "serde_json",
+ "svd",
  "tas",
  "winidea-sdk",
 ]

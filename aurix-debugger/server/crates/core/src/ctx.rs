@@ -103,6 +103,11 @@ pub struct Ctx {
     pub ocds_found_off: bool,
     /// Settings of the device watch (`reset_watch`), see [`crate::reset_watch`].
     pub reset_watch: crate::reset_watch::WatchSettings,
+    /// What a reset clears and the server sets up again (peripheral suspend), shared with the
+    /// device watch ([`crate::restore`]).
+    pub restore: crate::restore::SharedRestore,
+    /// The chip's bundled SVD description, once a module name had to be looked up in it.
+    pub svd_device: Option<std::sync::Arc<svd::Device>>,
     /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
     pub health: Option<crate::adapter::LinkHealth>,
     /// Since when the adapter reports the probe lost.
@@ -173,6 +178,8 @@ impl Ctx {
             in_reset_hook: false,
             ocds_found_off: false,
             reset_watch: Default::default(),
+            restore: Default::default(),
+            svd_device: None,
             health: None,
             probe_lost_since: None,
             probe_lost_reported: false,

@@ -11,6 +11,7 @@ tas.workspace = true
 jim.workspace = true
 isa.workspace = true
 mcds.workspace = true
+svd.workspace = true
 winidea-sdk = { workspace = true, optional = true }
 bluebox = { workspace = true, optional = true }
 serde_json.workspace = true

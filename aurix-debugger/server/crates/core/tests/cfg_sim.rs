@@ -1650,6 +1650,31 @@ fn scr_target_set_after_the_cfg_files() {
     assert_eq!(i.eval("tc37x.scr curstate").unwrap(), "halted");
 }
 
+/// `tc3xx_hsm_target` set after the cfg files, as the SCR and MCS settings: the HSM target is created
+/// by init_targets, with its step masking, and routed on TL1 at init.
+#[test]
+fn hsm_target_set_after_the_cfg_files() {
+    aurix_core::log::set_debug_level(1);
+    let s = Server::new();
+    s.cx().with(|c| {
+        c.adapter_override = Some("sim".into());
+        c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
+    });
+    let i = &s.interp;
+    i.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+    i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc375_lite_example.cfg"))))).unwrap();
+    assert!(!i.eval("target names").unwrap().contains("hsm"));
+    i.eval_global("set tc3xx_hsm_target 1").unwrap();
+    i.eval("hsm ready_ms 0").unwrap();
+    i.eval("init").unwrap();
+    assert!(i.eval("target names").unwrap().contains("tc37x.hsm"));
+    assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
+    assert_eq!(i.eval("tc37x.hsm cget -coreid").unwrap(), "6");
+    assert_eq!(i.eval("tc37x.hsm cortex_m irq_mask").unwrap(), "irq_mask step step_over step_out");
+    assert_eq!(i.eval("tc37x.hsm cortex_m tl1_halt").unwrap(), "tl1_halt on");
+    assert_eq!(i.eval("tc37x.hsm was_examined").unwrap(), "1");
+}
+
 /// An Intel HEX file in the temp folder, as a quoted Tcl path.
 fn hex_file(name: &str, img: &aurix_core::image::Image) -> String {
     let p = std::env::temp_dir().join(format!("aurix-{name}-{}.hex", std::process::id()));

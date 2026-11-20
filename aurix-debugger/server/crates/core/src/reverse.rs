@@ -746,9 +746,18 @@ pub fn restore(c: &mut Ctx, k: usize, written: Option<&Written>) -> Result<Repor
         let list = if closed_private.is_empty() { &report.refused } else { &closed_private };
         let n: u32 = list.iter().map(|x| x.1).sum();
         let first: Vec<String> = list.iter().take(3).map(|(a, n)| format!("{a:#010x} ({n} bytes)")).collect();
+        // An application that opens its stacks to the debugger only when it sees the debugger at
+        // start-up (OCDS on in its init) closes them after a hot attach, or after a reset it went
+        // through without the debugger (OCDS off at start-up).
+        let hint = if closed_private.is_empty() {
+            ""
+        } else {
+            " (if the application opens its stacks to the debugger when it starts with the debugger connected: \
+             it started without it - reset the target from the debugger)"
+        };
         return Err(Error::Other(format!(
             "the application's RAM protection closes {n} bytes the restore has to write to the debugger ({}{}): \
-             the state cannot be restored, nothing was changed",
+             the state cannot be restored, nothing was changed{hint}",
             first.join(", "),
             if list.len() > 3 { ", ..." } else { "" }
         )));

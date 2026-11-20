@@ -62,6 +62,12 @@ pub struct Ctx {
     /// Target selected while an event handler runs.
     pub override_stack: Vec<usize>,
     pub active_events: HashSet<(usize, String)>,
+    /// Source-level steps running (`ops::begin_source_step`): the `halted` handlers of the
+    /// instruction steps' halts inside them are deferred to the step's end, as frontends hear of
+    /// one stop per step.
+    pub source_steps: usize,
+    /// Targets whose `halted` handler was deferred by a source step.
+    pub halted_deferred: std::collections::BTreeSet<usize>,
     pub flash_banks: Vec<FlashBank>,
     pub search_dirs: Vec<PathBuf>,
     pub poll_enabled: bool,
@@ -137,6 +143,8 @@ impl Ctx {
             current: None,
             override_stack: Vec::new(),
             active_events: HashSet::new(),
+            source_steps: 0,
+            halted_deferred: Default::default(),
             flash_banks: Vec::new(),
             search_dirs: Vec::new(),
             poll_enabled: true,

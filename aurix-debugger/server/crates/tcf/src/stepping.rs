@@ -68,6 +68,8 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
     shared.invalidate_stack(idx);
     shared.broadcast(&wire::event("RunControl", "contextResumed", &[json!(ctx).to_string()]));
     thread::spawn(move || {
+        // The cfg's halted handlers run once, for the stop the step ends with.
+        let scope = SourceStepScope::begin(&shared.handle);
         // Reverse debugging: one checkpoint (and one recording) for the whole step.
         let (kind, rm) = match mode {
             3 => ("step over", RunMode::StepOver),
@@ -90,6 +92,7 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
                 ops::wait_state(cx, idx, TargetState::Halted, 2000)
             });
         }
+        drop(scope);
         let _ = h.call(move |cx| cx.with(|c| aurix_core::reverse::end_scope(c, idx)));
         // The forwarder still has the events of the instruction steps queued: let it drop them
         // while this core counts as stepping, before the one stop below.
@@ -109,6 +112,23 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
         forwarder::halted(&shared, idx, reason, pc, false);
         forwarder::sync_others(&shared, idx);
     });
+}
+
+/// [`ops::begin_source_step`] until dropped (also when the step panics): the targets' `halted`
+/// handlers wait for the stop the step ends with.
+struct SourceStepScope(ServerHandle);
+
+impl SourceStepScope {
+    fn begin(h: &ServerHandle) -> Self {
+        let _ = h.call(|cx| ops::begin_source_step(cx));
+        SourceStepScope(h.clone())
+    }
+}
+
+impl Drop for SourceStepScope {
+    fn drop(&mut self) {
+        let _ = self.0.call(|cx| ops::end_source_step(cx));
+    }
 }
 
 fn call<R: Send + 'static>(h: &ServerHandle, f: impl for<'a, 'b> FnOnce(&'b aurix_core::Cx<'a>) -> Result<R, String> + Send + 'static) -> Result<R, String> {

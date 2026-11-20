@@ -168,7 +168,22 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
             }
             emit(Event::Halted { target: t, name, reason, pc, trigger });
             if !boot {
-                fire(cx, t, if debug { "debug-halted" } else { "halted" });
+                // Inside a source step the handler of an instruction step's halt runs once at its
+                // end (`end_source_step`). The halt of a run in it (`run_to` over a call) is
+                // handled at once: the resume-end handler switched suspend-out off, and the
+                // instruction steps after it arm their triggers with the suspend-out it restores.
+                let deferred = !debug
+                    && reason == DebugReason::SingleStep
+                    && cx.with(|c| {
+                        if c.source_steps == 0 {
+                            return false;
+                        }
+                        c.halted_deferred.insert(t);
+                        true
+                    });
+                if !deferred {
+                    fire(cx, t, if debug { "debug-halted" } else { "halted" });
+                }
             }
         }
         Transition::Running => {
@@ -642,6 +657,34 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
     };
     fire(cx, t, "step-end");
     r
+}
+
+/// A source-level step begins (the instruction steps and runs a frontend makes one line step
+/// of): until [`end_source_step`], the `halted` handlers of instruction steps' halts wait (a
+/// run's halt is handled at once, see `handle_transition`). Through a BlueBox the
+/// cfg's (peripheral suspend checks, the FS26 watchdog check) cost several milliseconds per
+/// instruction step, and they need to see the stop the user gets, not each step to it.
+/// Instruction steps and runs outside a source step (Tcl, the API, VS Code's instruction
+/// stepping) are not affected.
+pub fn begin_source_step(cx: &Cx) {
+    cx.with(|c| c.source_steps += 1);
+}
+
+/// Ends a source-level step: the deferred `halted` handlers run once, for the targets still halted.
+pub fn end_source_step(cx: &Cx) {
+    let due = cx.with(|c| {
+        c.source_steps = c.source_steps.saturating_sub(1);
+        if c.source_steps > 0 {
+            return Vec::new();
+        }
+        std::mem::take(&mut c.halted_deferred)
+            .into_iter()
+            .filter(|&t| c.targets.get(t).is_some_and(|e| e.core.state() == TargetState::Halted))
+            .collect()
+    });
+    for t in due {
+        fire(cx, t, "halted");
+    }
 }
 
 /// `arp_reset assert <halt>`

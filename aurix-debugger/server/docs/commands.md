@@ -498,6 +498,42 @@ ocd_process_reset <mode>
 
 Same as `reset <mode>` (OpenOCD's name for it).
 
+### `attach_mode`
+
+```
+attach_mode [passive|hot|halt|reset_halt|reset_run]
+```
+
+How `init` attaches to the board (default `hot`); set before `init`.
+
+`passive`: no register written - the targets are not examined (OCDS stays as it is, no trigger is set), TL1 sync,          peripheral suspend and the device watch stay off; memory reads work, resets and halts are refused. `hot`: attach          to what runs, without reset or halt; the TL1 routing and the peripheral suspend are written, modules still          pending or locked are reported. `halt`: `hot`, then all cores halted in the application (`halt_all`); if a halt is          not safe now - modules the application locked before their suspend was written, or what `halt_check_hook` says -          a running reset first (through `reset_hook`) and `attach_run_ms` of running. `reset_halt`, `reset_run`: `reset          halt`, `reset run` through `reset_hook`. The mode runs after the cfg's `init_board`.
+
+### `attach_run_ms`
+
+```
+attach_run_ms [<ms>]
+```
+
+How long `attach_mode halt` lets the application run after its reset before the halt (default 100).
+
+### `attach_status`
+
+```
+attach_status
+```
+
+The attach mode, the modules without suspend (`pending`, `locked`) and why a halt is not safe now (`halt_unsafe`), as a dict.
+
+### `halt_check_hook`
+
+```
+halt_check_hook [<proc>]
+```
+
+A proc that returns why a halt is not safe now ("" when it is); without an argument, show it.
+
+Used by `attach_mode halt` (a reason makes it reset first) and reported by `attach_status`. An empty name removes it.          `fs26_sbc.cfg` returns the FS26 watchdog state while it is not known to be disarmed.
+
 ### `reset_settle`
 
 ```
@@ -601,6 +637,16 @@ suspend pending [locked]
 The modules still without their suspend (or only those locked by the application).
 
 ## Run control
+
+### `halt_all`
+
+```
+halt_all [<timeout_ms>]
+```
+
+Halt all cores together as the debugger's pause does; 1 when halted.
+
+Pending peripheral modules get their suspend first; then TL1 is pulsed and cpu0's halt requested (without TL1 sync,          every core's), on the registers rather than through the server's state, which a handler or a script can see stale          after a reset. Waits up to `timeout_ms` (1000) for the halt, then polls, so the halt is seen at once.
 
 ### `halt`
 

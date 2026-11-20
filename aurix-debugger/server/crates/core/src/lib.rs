@@ -10,6 +10,7 @@ pub mod log;
 
 pub mod adapter;
 pub mod arch;
+pub mod attach;
 pub mod commands;
 pub mod cortex_m;
 pub mod crash;

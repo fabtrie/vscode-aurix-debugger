@@ -130,6 +130,11 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "ocds", crate::tl1::cmd_ocds);
     reg(interp, sh, "hsm", crate::hsm::cmd_hsm);
     reg(interp, sh, "reset_settle", crate::settle::cmd_reset_settle);
+    reg(interp, sh, "attach_mode", crate::attach::cmd_attach_mode);
+    reg(interp, sh, "attach_run_ms", crate::attach::cmd_attach_run_ms);
+    reg(interp, sh, "attach_status", crate::attach::cmd_attach_status);
+    reg(interp, sh, "halt_check_hook", crate::attach::cmd_halt_check_hook);
+    reg(interp, sh, "halt_all", crate::attach::cmd_halt_all);
     // probe_lost_timeout ?ms?: how long the probe (BlueBox USB, miniWiggler, TasServer) may be
     // gone before the frontends end their debug sessions; 0 keeps reconnecting for ever.
     reg(interp, sh, "probe_lost_timeout", |cx, a| {

@@ -110,6 +110,12 @@ pub struct Ctx {
     pub tl1: crate::tl1::Settings,
     /// The HSM after a reset (`hsm ...`), see [`crate::hsm`].
     pub hsm: crate::hsm::Settings,
+    /// How `init` attaches (`attach_mode`), see [`crate::attach`].
+    pub attach_mode: crate::attach::Mode,
+    /// How long `attach_mode halt` lets the application run after its reset (`attach_run_ms`).
+    pub attach_run_ms: u64,
+    /// Tcl proc that says why a halt is not safe now (`halt_check_hook`), "" if it is.
+    pub halt_check_hook: Option<String>,
     /// The chip's bundled SVD description, once a module name had to be looked up in it.
     pub svd_device: Option<std::sync::Arc<svd::Device>>,
     /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
@@ -185,6 +191,9 @@ impl Ctx {
             restore: Default::default(),
             tl1: Default::default(),
             hsm: Default::default(),
+            attach_mode: Default::default(),
+            attach_run_ms: crate::attach::DEFAULT_RUN_MS,
+            halt_check_hook: None,
             svd_device: None,
             health: None,
             probe_lost_since: None,

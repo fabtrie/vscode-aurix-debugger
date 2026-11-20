@@ -751,7 +751,7 @@ fn halting_reset_after_a_failed_reset_still_resets() {
 #[test]
 fn attach_halt_resets_first_when_stm_is_not_suspended() {
     let s = server();
-    s.interp.eval("set sbc_attach_mode halt").unwrap();
+    s.interp.eval("attach_mode halt").unwrap();
     s.interp.eval("init").unwrap();
     assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
     assert_eq!(ocs_sus(&s, STM0_OCS), 2);
@@ -772,7 +772,7 @@ fn attach_halt_resets_first_when_stm_is_not_suspended() {
 #[test]
 fn passive_attach_writes_nothing() {
     let s = server();
-    s.interp.eval("set sbc_attach_mode passive").unwrap();
+    s.interp.eval("attach_mode passive").unwrap();
     s.interp.eval("init").unwrap();
     ops::poll_all(&s.cx());
     assert_eq!(take_writes(&s), vec![]);

@@ -157,7 +157,7 @@ impl Plan {
 pub fn apply(c: &mut Ctx) {
     let s = c.tl1;
     // Not where the probe does run control itself and owns OCDS (winIDEA).
-    let own_ocds = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_none());
+    let own_ocds = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_none()) && c.attach_mode != crate::attach::Mode::Passive;
     let plan = Plan::build(c, &s, own_ocds);
     let was_on = c.restore.tl1.borrow().on;
     let peers: Vec<u32> = plan.cores.iter().map(|&(_, d)| d).collect();

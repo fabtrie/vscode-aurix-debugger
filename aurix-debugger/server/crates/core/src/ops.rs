@@ -505,6 +505,7 @@ fn require_examined(cx: &Cx, t: usize) -> Result<()> {
 }
 
 pub fn halt(cx: &Cx, t: usize) -> Result<()> {
+    crate::attach::refuse_passive(cx, "halt")?;
     require_examined(cx, t)?;
     // Modules the application enabled since the last check: suspended before the halt, not after.
     crate::suspend::attempt_now(cx, crate::suspend::Why::Pause, crate::suspend::Select::Active);
@@ -755,6 +756,7 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
         "run" => false,
         _ => return Err(usage(format!("Invalid mode: {mode}, must be one of: halt, init, or run"))),
     };
+    crate::attach::refuse_passive(cx, "reset")?;
     cx.with(|c| {
         crate::reverse::clear(c, "reset");
         crate::mcds_trace::on_device_reset(c);
@@ -1011,6 +1013,14 @@ pub fn init(cx: &Cx) -> Result<()> {
         }
         Ok(())
     })?;
+    // A passive attach examines nothing: that would switch OCDS on and set triggers.
+    cx.with(|c| {
+        if c.attach_mode == crate::attach::Mode::Passive {
+            for e in &mut c.targets {
+                e.defer_examine = true;
+            }
+        }
+    });
     let n = cx.with(|c| c.targets.len());
     for t in 0..n {
         if !cx.with(|c| c.targets[t].defer_examine) {
@@ -1029,7 +1039,7 @@ pub fn init(cx: &Cx) -> Result<()> {
     // switches on itself (not where the probe does run control and owns OCDS).
     cx.with(|c| {
         c.adapter.as_deref_mut().map(|a| a.take_resets());
-        let own_ocds = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_none());
+        let own_ocds = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_none()) && c.attach_mode != crate::attach::Mode::Passive;
         let tricore = c.targets.iter().any(|e| matches!(e.core, Core::Tricore(_)));
         let settings = c.reset_watch;
         let rs = c.restore.clone();
@@ -1045,6 +1055,11 @@ pub fn init(cx: &Cx) -> Result<()> {
     crate::restore::on_attach(cx);
     if cx.interp.command_exists("init_board") {
         cx.interp.eval_global("init_board").map_err(other)?;
+    }
+    // The attach mode, once a board policy has set up its state (`init_board`): a failed one
+    // (a reset that went wrong) leaves the session connected.
+    if let Err(e) = crate::attach::run(cx) {
+        log_warn!("attach {}: {e}", cx.with(|c| c.attach_mode.name()));
     }
     Ok(())
 }

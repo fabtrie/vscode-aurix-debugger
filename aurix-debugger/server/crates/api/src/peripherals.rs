@@ -303,9 +303,25 @@ fn skip_reason(r: &RegisterInfo) -> Option<String> {
     r.debug_view.as_ref().map(|d| format!("reading it pops or clears its content: `{d}` is its debug view, which reads without that"))
 }
 
+/// The target that serves `addr` (the HSM for its peripherals, the SCR for its SFRs), or none
+/// for host memory. An address only a core reaches, with no such core in the session, is refused:
+/// on the system bus it would be another address (the SCR's map is segment 0 there).
+fn route(cx: &Cx, addr: u32, len: usize) -> Result<Option<usize>, String> {
+    let t = ops::own_access_target(cx, None, addr, len);
+    if t.is_none() {
+        if aurix_core::xc800::Xc800::sfr_window(addr) || addr < 0x8_0000 {
+            return Err(format!("0x{addr:08x} is an SCR address: the session has no SCR target to read it through"));
+        }
+        if aurix_core::cortex_m::hsm_peripheral(addr) {
+            return Err(format!("0x{addr:08x} is an HSM address: the session has no HSM target to read it through"));
+        }
+    }
+    Ok(t)
+}
+
 /// Reads memory through the path that serves it (the HSM's peripherals, the SCR's SFRs).
 fn read_routed(cx: &Cx, addr: u32, len: usize) -> Result<Vec<u8>, String> {
-    match ops::own_access_target(cx, None, addr, len) {
+    match route(cx, addr, len)? {
         Some(t) => ops::read_memory_as(cx, t, addr, len),
         None => ops::read_memory(cx, addr, len),
     }
@@ -313,7 +329,7 @@ fn read_routed(cx: &Cx, addr: u32, len: usize) -> Result<Vec<u8>, String> {
 }
 
 fn write_routed(cx: &Cx, addr: u32, data: &[u8]) -> Result<Option<usize>, String> {
-    let t = ops::own_access_target(cx, None, addr, data.len());
+    let t = route(cx, addr, data.len())?;
     match t {
         Some(t) => ops::write_memory_as(cx, t, addr, data),
         None => ops::write_memory(cx, addr, data),
@@ -499,8 +515,15 @@ pub fn write_peripheral(api: &CoreApi, req: WritePeripheralRequest) -> Result<Pe
         }
     };
     let data = value.to_le_bytes()[..n].to_vec();
+    let what = path.clone();
+    let refused = move |e: String| {
+        ApiError::new(
+            ErrorCode::Memory,
+            format!("`{what}`: the write was refused ({e}). Registers protected by ENDINIT or Safety ENDINIT refuse writes without the unlock sequence, which this operation does not do"),
+        )
+    };
     let (written_by, back) = api.call(move |cx| {
-        let t = write_routed(cx, addr, &data).map_err(|e| ApiError::new(ErrorCode::Memory, e))?;
+        let t = write_routed(cx, addr, &data).map_err(refused)?;
         emit(Event::MemoryChanged { target: t, addr, len: data.len() as u32 });
         Ok((t, readable.then(|| read_routed(cx, addr, data.len()))))
     })?;

@@ -832,6 +832,12 @@ fn peripherals(http: &Http) {
     let expect = [("ASCLIN0.FLAGSSET", "write-only"), ("ASCLIN0.FLAGSCLEAR", "write-only"), ("ASCLIN0.TXDATA", "write-only"), ("ASCLIN0.RXDATA", "side effect"), ("ASCLIN0.KRSTCLR", "write-only")];
     assert_eq!(skipped, expect, "{r}");
 
+    // SCR registers have no host address: without an SCR target they are not read at all.
+    let r = http.ok("GET", "/api/v1/peripherals/SCR_PORT/value?limit=1", None);
+    assert!(r["registers"][0]["error"].as_str().is_some_and(|e| e.contains("no SCR target")), "{r}");
+    let (status, e) = put("/api/v1/peripherals/SCR_PORT.P0_DATA/value", json!({ "value": 0 }));
+    assert!(status == 422 || status == 404, "{e}");
+
     // The peripheral viewer's definitions, for the extension.
     let (status, defs) = get("/api/v1/svd/definitions");
     assert_eq!((status, defs.as_array().map(Vec::len)), (200, Some(109)));

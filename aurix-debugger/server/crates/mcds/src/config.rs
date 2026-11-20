@@ -321,6 +321,26 @@ impl TraceConfig {
     }
 }
 
+impl Plan {
+    /// The writes that arm this plan again when the MCDS still holds its configuration (the same
+    /// plan was written last and nothing changed it since): the recorder reset, the action slots
+    /// the stop pulse clears ([`regs::STOP_PULSE`]), the event the flush toggles, the ring bounds
+    /// and [`regs::REG_404`], in the order of [`Self::writes`]. The start ([`Self::start`]) follows.
+    pub fn restart_writes(&self) -> Vec<(u32, u32)> {
+        let mut keep: Vec<u32> = vec![regs::CTRL, regs::FIFO_BOTTOM, regs::FIFO_WRAP, regs::FIFO_END, regs::REG_404.0];
+        keep.extend_from_slice(&regs::STOP_PULSE);
+        keep.extend(self.flush.iter().map(|&(a, _)| a));
+        self.writes.iter().copied().filter(|(a, _)| keep.contains(a)).collect()
+    }
+
+    /// Configuration registers read back at an arm to see that the MCDS still holds this plan:
+    /// `(address, value written)`, the last write of each address.
+    pub fn check_words(&self) -> Vec<(u32, u32)> {
+        let last = |addr: u32| self.writes.iter().rev().find(|(a, _)| *a == addr).copied();
+        [regs::FIFO_END, regs::Action::PtuEnable.addr()].into_iter().filter_map(last).collect()
+    }
+}
+
 /// Writes that switch the MCDS on after a reset, given the current CLC and 0x010 values
 /// (winIDEA's first session): clock on, 0x010 |= 0x8000 (0x00A0 -> 0x80A0, reads back 0x8020A0),
 /// Cerberus 0x47C = 0x300.
@@ -380,6 +400,25 @@ fn combo_name(names: &[&str]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_rewrites_what_the_stop_changes() {
+        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None }, stop: Stop::Manual, timestamps: Timestamps::Messages };
+        let plan = cfg.plan().unwrap();
+        let r = plan.restart_writes();
+        // The recorder reset first, the ring bounds and 0x404 last, as in the full write.
+        assert_eq!(r[0], (regs::CTRL, regs::CTRL_CONFIG));
+        assert_eq!(r.last().copied(), Some(regs::REG_404));
+        for a in regs::STOP_PULSE.iter().chain(plan.flush.iter().map(|(a, _)| a)) {
+            let want = plan.writes.iter().rev().find(|(x, _)| x == a).copied();
+            assert_eq!(r.iter().rev().find(|(x, _)| x == a).copied(), want, "{a:#x}");
+        }
+        assert!(r.len() < 15, "{}", r.len());
+        assert!(plan.writes.len() > 90);
+        let check = plan.check_words();
+        assert_eq!(check.len(), 2);
+        assert!(check.contains(&(regs::FIFO_END, regs::TRAM_SIZE - 1)));
+    }
 
     /// winIDEA's data trace session on a TC377 (DAP capture `dap-mcds-winidea-data1`), without the
     /// trace RAM clearing and the start.

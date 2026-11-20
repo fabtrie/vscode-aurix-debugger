@@ -1299,7 +1299,7 @@ mcds auto [off | <mcds arm options>] [-json]
 
 Arm the trace on every run of the traced core and read it at the halt.
 
-Each `resume` (not a step) arms it, each halt reads it, so every halt comes with the trace up to it, e.g. `mcds auto -program -stop halt`. `off` ends it; without arguments, show the setting. A trace another owner uses or that is still recording is left alone.
+Each `resume` (not a step) arms it, each halt reads it, so every halt comes with the trace up to it, e.g. `mcds auto -program -stop halt`. Set while the core runs, it arms at once. A run that starts where the last recording halted continues it: the program trace is decoded with the earlier recordings in front, one 8 KB trace RAM's worth in all. `off` ends it; without arguments, show the setting. A trace another owner uses or that is still recording is left alone.
 
 ### `mcds status`
 
@@ -1348,7 +1348,7 @@ Switch the MCDS on (clock, enable bits); `mcds arm` does this itself.
 ### `reverse on`
 
 ```
-reverse on [-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-maxhits <n>] -region <start> <len> [-private] ...
+reverse on [-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-verify] [-maxhits <n>] -region <start> <len> [-private] ...
 ```
 
 Switch reverse debugging on: save the core's registers and the given RAM regions before every run, step and write.
@@ -1358,6 +1358,7 @@ Saved before every run, step, source step and register or memory write. `reverse
 - `-region <start> <len>`: RAM to save; repeat for more. `-private` after a region: only this core writes it (its stacks, its context save area).
 - `-history <n>`: checkpoints kept (default 50, 0: all).
 - `-notrace`: do not record each action with the miniMCDS (CPU0).
+- `-verify`: read the private regions in full at every checkpoint, also when the decoded writes of the last action say where they changed, and log any difference (a check; slower).
 
 While on, it owns the miniMCDS: `mcds arm` and `mcds auto` are refused. Switched on while the core runs, the current run is recorded up to its halt, without a checkpoint. Not rewound: peripherals, timers, other cores. The TCF/REST operations take the regions from the ELF.
 

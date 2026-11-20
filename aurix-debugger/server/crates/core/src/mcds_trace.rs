@@ -150,6 +150,9 @@ pub struct TraceState {
     /// Arm this configuration whenever the traced core is run (`ops::resume`), and read the
     /// recording when it halts ([`auto_arm`], [`on_halted`]).
     pub auto: Option<TraceConfig>,
+    /// The configuration last written to the MCDS: arming it again writes only the restart set
+    /// ([`Plan::restart_writes`]) after checking that the MCDS still holds it ([`arm`]).
+    pub configured: Option<TraceConfig>,
 }
 
 /// Why a manual trace is refused while reverse debugging is on.
@@ -185,7 +188,28 @@ pub fn status(c: &mut Ctx) -> Result<Status> {
     Ok(Status { ctrl: v[0], write_ptr: v[1], done: v[0] & regs::CTRL_DONE != 0 })
 }
 
-/// Arms `cfg` for `owner`: MCDS on, configuration, trace RAM cleared, start.
+/// Whether the MCDS still holds `plan` (written last, see [`TraceState::configured`]): its clock
+/// is on (a reset switches it off) and the check words read back as written. One batch.
+fn still_configured(c: &mut Ctx, plan: &Plan) -> bool {
+    let check = plan.check_words();
+    let mut addrs = vec![regs::CLC];
+    addrs.extend(check.iter().map(|&(a, _)| a));
+    match io(c).and_then(|mut io| io.read32_many(&addrs)) {
+        Ok(v) => v[0] == 0 && v[1..].iter().zip(&check).all(|(got, &(_, want))| *got == want),
+        Err(_) => false,
+    }
+}
+
+/// Whether `owner`'s recordings are only read through [`stop`]: then the trace RAM needs no full
+/// clear at the arm, the stop reads only what was written. The DAQ drain reads paragraphs while
+/// recording ([`read_pieces`]) and keeps the full clear.
+fn partial_ram(owner: Owner) -> bool {
+    owner != Owner::Daq
+}
+
+/// Arms `cfg` for `owner`: MCDS on, configuration, trace RAM cleared, start. When the MCDS still
+/// holds `cfg` from the last arm, only the restart set is written; the configuration writes go
+/// as one packed sequence (a BlueBox sends them in a few messages instead of one per write).
 pub fn arm(c: &mut Ctx, cfg: TraceConfig, owner: Owner) -> Result<Plan> {
     if owner != Owner::Reverse && c.reverse.enabled() {
         return Err(Error::Resource(REVERSE_OWNS.into()));
@@ -196,12 +220,23 @@ pub fn arm(c: &mut Ctx, cfg: TraceConfig, owner: Owner) -> Result<Plan> {
         }
     }
     let plan = cfg.plan().map_err(Error::Usage)?;
-    init(c)?;
+    let quick = c.mcds.configured.as_ref() == Some(&cfg) && still_configured(c, &plan);
+    // Unknown until the writes below succeed (a failed one leaves a half-written configuration).
+    c.mcds.configured = None;
+    if !quick {
+        init(c)?;
+    }
     let mut io = io(c)?;
-    io.write32_seq(&plan.writes)?;
-    // Cleared completely, so paragraphs the recording never reaches read as unwritten.
-    io.write(regs::TRAM, &vec![0u8; regs::TRAM_SIZE as usize])?;
+    io.write32_seq_packed(if quick { plan.restart_writes() } else { plan.writes.clone() }.as_slice())?;
+    if partial_ram(owner) {
+        // The lap marker only (see `fill`): `stop` reads up to the write pointer.
+        io.write(regs::TRAM + regs::TRAM_SIZE - regs::PARAGRAPH, &vec![0u8; regs::PARAGRAPH as usize])?;
+    } else {
+        // Cleared completely, so paragraphs the recording never reaches read as unwritten.
+        io.write(regs::TRAM, &vec![0u8; regs::TRAM_SIZE as usize])?;
+    }
     io.write32(regs::CTRL, plan.start)?;
+    c.mcds.configured = Some(cfg.clone());
     c.mcds.armed = Some(Armed { cfg, plan: plan.clone(), owner, since: SystemTime::now(), finished: false, lapped: false, continues: None });
     c.mcds.lost_by_reset = false;
     Ok(plan)
@@ -239,15 +274,17 @@ pub fn stop(c: &mut Ctx, owner: Owner) -> Result<Recording> {
     }
     let mut st = status(c)?;
     let mut io = io(c)?;
+    let mut w = Vec::new();
     if !st.done {
         // Still recording: push the last word out first, else its messages are lost.
-        io.write32_seq(&a.plan.flush)?;
-        io.write32(regs::CTRL, regs::CTRL_STOP_HOST)?;
+        w.extend_from_slice(&a.plan.flush);
+        w.push((regs::CTRL, regs::CTRL_STOP_HOST));
         st.done = true;
     }
-    io.write32_seq(&config::stop_writes(st.done))?;
+    w.extend(config::stop_writes(st.done));
+    io.write32_seq_packed(&w)?;
     let wp = io.read32(regs::FIFONOW)?;
-    let raw = io.read(regs::TRAM, regs::TRAM_SIZE as usize)?;
+    let raw = if partial_ram(a.owner) { read_written(&mut io, wp)? } else { io.read(regs::TRAM, regs::TRAM_SIZE as usize)? };
     let halt_pc = halted_pc(c, a.cfg.core as u32);
     let halt_regs = halt_pc.and_then(|_| halted_regs(c, a.cfg.core as u32));
     let mut rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc, halt_regs, ran_since: None, earlier: Vec::new() };
@@ -259,13 +296,34 @@ pub fn stop(c: &mut Ctx, owner: Owner) -> Result<Recording> {
     Ok(rec)
 }
 
-/// Stops without reading (the DAQ owner releasing the trace).
+/// The trace RAM of a recording armed with only the lap marker cleared ([`partial_ram`]): the
+/// whole RAM once the ring went round (the last paragraph holds data), else only the bytes before
+/// the write pointer; the rest reads as zero, as after a full clear.
+fn read_written(io: &mut crate::adapter::Io<'_>, wp: u32) -> Result<Vec<u8>> {
+    let size = regs::TRAM_SIZE as usize;
+    let last = size - regs::PARAGRAPH as usize;
+    let wp = (wp as usize).min(size);
+    if wp >= last {
+        return io.read(regs::TRAM, size);
+    }
+    let v = io.read_many(&[(regs::TRAM + last as u32, size - last), (regs::TRAM, wp)])?;
+    if v[0].iter().any(|&b| b != 0) {
+        // Lapped: everything is this recording's.
+        return io.read(regs::TRAM, size);
+    }
+    let mut raw = vec![0u8; size];
+    raw[..wp].copy_from_slice(&v[1]);
+    Ok(raw)
+}
+
+/// Stops without reading (the DAQ owner releasing the trace, reverse debugging switched off or
+/// its history cleared).
 pub fn release(c: &mut Ctx, owner: Owner) -> Result<()> {
     match &c.mcds.armed {
         Some(a) if a.owner == owner => {
             c.mcds.armed = None;
             let mut io = io(c)?;
-            io.write32_seq(&config::stop_writes(false))
+            io.write32_seq_packed(&config::stop_writes(false))
         }
         _ => Ok(()),
     }
@@ -285,10 +343,9 @@ pub fn on_halted(c: &mut Ctx, t: usize) {
     if !is_traced {
         return;
     }
-    let r = io(c).and_then(|mut io| {
-        io.write32_seq(&flush)?;
-        io.write32(regs::CTRL, regs::CTRL_STOP_HOST)
-    });
+    let mut w = flush;
+    w.push((regs::CTRL, regs::CTRL_STOP_HOST));
+    let r = io(c).and_then(|mut io| io.write32_seq_packed(&w));
     match r {
         Ok(()) => {
             if let Some(a) = c.mcds.armed.as_mut() {
@@ -378,7 +435,16 @@ pub fn auto_arm(c: &mut Ctx, t: usize) {
 pub fn flush(c: &mut Ctx) -> Result<()> {
     let Some(a) = &c.mcds.armed else { return Ok(()) };
     let flush = a.plan.flush.clone();
-    io(c)?.write32_seq(&flush)
+    io(c)?.write32_seq_packed(&flush)
+}
+
+/// A frontend writes `addr..addr + len`: a write into the MCDS registers may change the
+/// configuration the next arm would reuse ([`TraceState::configured`]).
+pub fn on_write_memory(c: &mut Ctx, addr: u32, len: usize) {
+    let end = addr as u64 + len as u64;
+    if (addr as u64) < regs::BASE as u64 + 0x4000 && end > regs::BASE as u64 {
+        c.mcds.configured = None;
+    }
 }
 
 /// Reads the given trace RAM pieces (`(paragraph, length)`), for the incremental drain.

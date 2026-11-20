@@ -20,6 +20,7 @@ mod symstore;
 pub mod trace;
 pub mod reverse;
 pub mod trace_insns;
+pub mod trace_history;
 mod wire;
 
 use std::collections::HashMap;
@@ -118,6 +119,10 @@ pub struct Shared {
     /// Reverse debugging: the decoded recordings of the actions, by checkpoint ID (with the
     /// recording's stop time).
     pub reverse_cache: Mutex<HashMap<u64, (std::time::SystemTime, Arc<trace_insns::ProgramTrace>)>>,
+    /// The code image of the last symbol set it was asked for ([`trace::Image::of`]).
+    pub(crate) code_image: Mutex<Option<(Arc<symstore::SymbolSet>, Arc<trace::Image>)>>,
+    /// The instruction trace of the whole reverse debugging history, while it is current.
+    pub trace_history: Mutex<Option<Arc<trace_history::HistoryView>>>,
     /// The trace replay the debugger shows instead of the halted core, while one is active.
     pub replay: Mutex<Option<trace_insns::ReplayView>>,
     /// The live sets of every connection (`AurixTarget.setLiveSet`).
@@ -391,6 +396,8 @@ pub fn session(handle: ServerHandle) -> Arc<Shared> {
         profile: Mutex::new(None),
         trace: Mutex::new(None),
         reverse_cache: Mutex::new(HashMap::new()),
+        trace_history: Mutex::new(None),
+        code_image: Mutex::new(None),
         replay: Mutex::new(None),
         live: Mutex::new(live::LiveSets::default()),
         listeners: Mutex::new(Vec::new()),

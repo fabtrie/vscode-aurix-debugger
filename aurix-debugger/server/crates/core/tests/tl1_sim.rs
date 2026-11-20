@@ -84,7 +84,25 @@ fn pause_halts_all_cores_and_resume_starts_them_together() {
     assert!(others < own && own < drop, "{w:08x?}");
     assert_eq!(halted(&s), [false; 3]);
     assert!(!with_sim(&s, |sim| sim.tl1_held));
-    wait_polling(&s, "all cores running", |s| (0..3).all(|i| s.interp.eval(&format!("tc37x.cpu{i} curstate")).unwrap() == "running"));
+    // The released cores count as running at once, before any background poll.
+    for i in 0..3 {
+        assert_eq!(s.interp.eval(&format!("tc37x.cpu{i} curstate")).unwrap(), "running", "cpu{i}");
+    }
+}
+
+#[test]
+fn reverse_debugging_sees_a_run_started_by_another_core_of_the_group() {
+    let s = server("ocds sync tl1");
+    s.interp.eval("halt 1000").unwrap();
+    s.interp.eval("targets tc37x.cpu0").unwrap();
+    s.interp.eval("reverse on -notrace -region 0x70000000 0x100").unwrap();
+    s.interp.eval("mww 0x70000010 0x5").unwrap();
+    assert_eq!(s.cx().with(|c| c.reverse.history.len()), 1);
+    // Resuming cpu1 runs cpu0 too: its history no longer leads to its state.
+    s.interp.eval("targets tc37x.cpu1; resume").unwrap();
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "running");
+    assert_eq!(s.cx().with(|c| c.reverse.history.len()), 0);
+    assert!(s.cx().with(|c| c.reverse.cleared.clone()).is_some_and(|w| w.contains("outside")));
 }
 
 #[test]

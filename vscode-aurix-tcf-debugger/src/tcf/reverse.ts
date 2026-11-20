@@ -20,6 +20,7 @@ export interface ReverseLaunchConfig {
 	csaSymbols?: Array<[string, string]>;
 	maxHits?: number;
 	strict?: boolean;
+	verify?: boolean;
 }
 
 /** The service's `enable` argument for a launch configuration's `reverse` attribute. */
@@ -35,6 +36,7 @@ export function reverseEnableArgs(cfg: ReverseLaunchConfig | true, context: stri
 		CsaSymbols: c.csaSymbols,
 		MaxHits: c.maxHits,
 		Strict: c.strict,
+		Verify: c.verify,
 	};
 }
 

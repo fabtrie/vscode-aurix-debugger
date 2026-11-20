@@ -312,6 +312,12 @@ pub trait Adapter {
     fn deassert_srst(&mut self, halt_after_reset: bool) -> Result<()>;
     /// Number of device resets noticed since the last call.
     fn take_resets(&mut self) -> u64;
+    /// Writes into CPU RAM (not SFRs, not the trace RAM) since the connection was made: reverse
+    /// debugging sees from it that something wrote RAM between two of its checkpoints. Counted by
+    /// the wrapper every adapter runs in ([`crate::reset_watch::Watched`]); 0 elsewhere.
+    fn ram_writes(&self) -> u64 {
+        0
+    }
     /// Whether every reset this probe performs leaves the cores halted (the
     /// BlueBox has only a halting reset). `reset run` then resets as a halting
     /// reset, so the cfg's reset hooks see halted cores, and resumes the
@@ -486,6 +492,52 @@ impl<'a> Io<'a> {
         let mut r = self.read_op(addr, len)?;
         check(&r, addr as u64, false)?;
         Ok(std::mem::take(&mut r.data))
+    }
+
+    /// Reads several ranges `(addr, len)` in one batch, which the adapter splits by its limits
+    /// (on the BlueBox the reads share messages instead of one message per range). Memory that
+    /// only allows word access (the HSM bridge) is read range by range ([`Self::read`]). Fails at
+    /// the first range that does not read completely, naming its address.
+    pub fn read_many(&mut self, ranges: &[(u32, usize)]) -> Result<Vec<Vec<u8>>> {
+        let mut b = Batch::new();
+        let mut batched = Vec::new();
+        for (i, &(a, n)) in ranges.iter().enumerate() {
+            let ba = bus_address(a);
+            if n > 0 && !word_only(ba, n) {
+                b.read(ba as u64, n);
+                batched.push(i);
+            }
+        }
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; ranges.len()];
+        if !batched.is_empty() {
+            let mut r = self.batch(&b)?;
+            for (k, &i) in batched.iter().enumerate() {
+                let Some(res) = r.get_mut(k) else {
+                    return Err(Error::Memory { addr: ranges[i].0 as u64, write: false, detail: "no result".into() });
+                };
+                check(res, ranges[i].0 as u64, false)?;
+                out[i] = Some(std::mem::take(&mut res.data));
+            }
+        }
+        ranges
+            .iter()
+            .zip(out)
+            .map(|(&(a, n), d)| match d {
+                Some(d) => Ok(d),
+                None if n == 0 => Ok(Vec::new()),
+                None => self.read(a, n),
+            })
+            .collect()
+    }
+
+    /// Writes `blocks` (addresses as for [`Self::write`]) in order through
+    /// [`Adapter::write_bulk`]: an adapter that pays per write message packs them. `Ok(false)` if
+    /// any byte failed, without saying which: the caller reads back.
+    pub fn write_bulk(&mut self, blocks: &[(u32, &[u8])]) -> Result<bool> {
+        if blocks.is_empty() {
+            return Ok(true);
+        }
+        self.adapter.write_bulk(blocks)
     }
 
     pub fn write(&mut self, addr: u32, data: &[u8]) -> Result<()> {

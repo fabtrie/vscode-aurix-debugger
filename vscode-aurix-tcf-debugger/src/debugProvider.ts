@@ -5165,9 +5165,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				const arg = op === 'arm' || op === 'check' ? args?.config ?? {}
 					: op === 'read' ? { Max: args?.max }
 					: op === 'auto' ? (args && 'config' in args ? { Config: args.config ?? null } : {})
-					: op === 'insns' ? { From: args?.from ?? 0, Count: args?.count ?? 500 }
-					: op === 'regs' ? { At: args?.at }
-					: op === 'find' ? { Query: String(args?.query ?? ''), From: args?.from, Back: Boolean(args?.back) }
+					: op === 'insns' ? { From: args?.from ?? 0, Count: args?.count ?? 500, Scope: args?.scope }
+					: op === 'regs' ? { At: args?.at, Scope: args?.scope }
+					: op === 'find' ? { Query: String(args?.query ?? ''), From: args?.from, Back: Boolean(args?.back), Scope: args?.scope }
 					: undefined;
 				response.body = await this.tcfClient.sendCommand(new TraceCommand(op, arg));
 				this.sendResponse(response);

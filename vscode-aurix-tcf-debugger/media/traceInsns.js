@@ -30,6 +30,16 @@
 	let active = false;
 	let regsTimer;
 	let wide = 0; // widest row drawn so far: the horizontal scroll width only grows
+	let wholeHistory = true; // reverse debugging: every action of the history, not only the last
+
+	/** Reverse debugging shows the whole history: the rows carry their action (Act) and row (R). */
+	function historyMode() {
+		return !!window.aurixReverse && wholeHistory;
+	}
+	/** The scope argument of insns / regs / find. */
+	function scope() {
+		return window.aurixReverse ? (wholeHistory ? 'history' : 'action') : undefined;
+	}
 
 	function esc(s) {
 		return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -81,14 +91,14 @@
 		$('insnRows').innerHTML = '';
 		$('insnRegs').innerHTML = '';
 		$('insnSummary').textContent = '';
-		if (active && r && r.Kind === 'program') load();
+		if (active && ((r && r.Kind === 'program') || historyMode())) load();
 	}
 
 	function load() {
 		if (loading || (total && loaded >= total)) return;
 		loading = true;
 		$('insnSummary').textContent = 'Loading the instructions…';
-		vscode.postMessage({ type: 'insns', from: loaded, count: PAGE });
+		vscode.postMessage({ type: 'insns', from: loaded, count: PAGE, scope: scope() });
 	}
 
 	function onPage(m) {
@@ -108,7 +118,7 @@
 		if (loaded < total && (r.Rows || []).length > 0) {
 			$('insnSummary').textContent = `Loading the instructions… ${loaded} of ${total}`;
 			loading = true;
-			vscode.postMessage({ type: 'insns', from: loaded, count: PAGE });
+			vscode.postMessage({ type: 'insns', from: loaded, count: PAGE, scope: scope() });
 			return;
 		}
 		showSummary();
@@ -121,6 +131,13 @@
 		const s = summary || {};
 		const pct = (x) => (x === null || x === undefined ? '?' : Math.round(100 * x) + ' %');
 		let text = `${total} instructions`;
+		if (s.History) {
+			const h = s.History;
+			text += ` in ${h.Actions} action${h.Actions === 1 ? '' : 's'} of the reverse history (${h.Recorded} recorded` +
+				(h.LostStart ? `, ${h.LostStart} without their start` : '') + ')';
+			$('insnSummary').innerHTML = text;
+			return;
+		}
 		const old = result && result.RanSince;
 		if (old) {
 			text = `<span class="warn">This trace ${esc(window.traceRanSinceText(old))}; it does not lead to the current halt.</span> ` + text;
@@ -154,9 +171,21 @@
 		rowPos = new Map();
 		let fn;
 		let loc;
+		let act;
 		for (let i = 0; i < total; i++) {
 			const r = rows[i];
 			if (!r) continue;
+			if (r.Act !== undefined && r.Act !== act) {
+				act = r.Act;
+				display.push({ k: 'act', i, d: 0, act: r.Act, what: r.ActKind });
+				fn = undefined;
+				loc = undefined;
+			}
+			if (r.K === 'm') {
+				display.push({ k: 'mark', i, d: 0 });
+				rowPos.set(i, display.length - 1);
+				continue;
+			}
 			if (r.K === 'g') {
 				display.push({ k: 'gap', i, d: 0 });
 				rowPos.set(i, display.length - 1);
@@ -230,8 +259,14 @@
 				const text = lines ? (lines[it.line - 1] ?? '').trim() : '';
 				return `<div class="it src" ${pad}><a href="#" class="src" data-file="${esc(it.file)}" data-line="${it.line}">${esc(baseName(it.file))}:${it.line}</a> <span class="code">${esc(text)}</span></div>`;
 			}
-			case 'gap':
-				return `<div class="it gap" ${pad} data-i="${it.i}">⋯ gap: code ran that the trace does not show (registers unknown after it)</div>`;
+			case 'gap': {
+				const note = rows[it.i] && rows[it.i].Note;
+				return `<div class="it gap" ${pad} data-i="${it.i}">⋯ ${note ? esc(note) : 'gap: code ran that the trace does not show (registers unknown after it)'}</div>`;
+			}
+			case 'act':
+				return `<div class="it act" ${pad}>▸ action ${it.act}: ${esc(it.what || '')}</div>`;
+			case 'mark':
+				return `<div class="it mark${it.i === sel ? ' sel' : ''}" ${pad} data-i="${it.i}">◆ ${esc(rows[it.i].Note || '')}</div>`;
 			case 'entry': {
 				const r = rows[it.i];
 				return `<div class="it entry${it.i === sel ? ' sel' : ''}" ${pad} data-i="${it.i}">↘ interrupt or trap entry at ${hex(r.A)}${r.Resume ? `, returns to ${hex(r.Resume)}` : ''}</div>`;
@@ -292,12 +327,12 @@
 		draw();
 		clearTimeout(regsTimer);
 		regsTimer = setTimeout(() => {
-			if (regsFor !== sel) vscode.postMessage({ type: 'regs', at: sel });
+			if (regsFor !== sel) vscode.postMessage({ type: 'regs', at: sel, scope: scope() });
 		}, 60);
 	}
 
 	function move(delta) {
-		const selectable = (x) => x && (x.k === 'row' || x.k === 'entry');
+		const selectable = (x) => x && (x.k === 'row' || x.k === 'entry' || x.k === 'mark');
 		let n = rowPos.get(sel) ?? 0;
 		n = Math.max(0, Math.min(display.length - 1, n + delta));
 		const step = delta < 0 ? -1 : 1;
@@ -329,7 +364,7 @@
 		}
 		const p = by.get(pick);
 		const r = rows[regs.At];
-		const what = r && r.K === 'i' ? `${(r.A >>> 0).toString(16)}  ${esc(r.M)} ${esc(r.O)}` : r && r.K === 'e' ? 'interrupt entry' : 'gap';
+		const what = r && r.K === 'i' ? `${(r.A >>> 0).toString(16)}  ${esc(r.M)} ${esc(r.O)}` : r && r.K === 'e' ? 'interrupt entry' : r && r.Note ? esc(r.Note) : 'gap';
 		const frames = (regs.Frames || []).map((f, k) => {
 			const where = f.File ? `<a href="#" class="src" data-file="${esc(f.File)}" data-line="${f.Line || 0}">${esc(baseName(f.File))}:${f.Line || '?'}</a>` : hex(f.Pc);
 			return `<div class="frame${k === 0 ? ' top' : ''}">${esc(f.Function || '?')} <span class="hint">${where}</span></div>`;
@@ -403,19 +438,33 @@
 	toggle('insnSrc', () => (showSrc = !showSrc));
 	toggle('insnEff', () => (showEff = !showEff));
 	toggle('insnCalls', () => (callsOnly = !callsOnly));
+	$('insnHistory').addEventListener('click', () => {
+		wholeHistory = !wholeHistory;
+		$('insnHistory').classList.toggle('on', wholeHistory);
+		reset(result);
+	});
+	// Reverse debugging switched on or off, or its history changed (also by steps, which record
+	// nothing): the whole-history view is read again.
+	window.addEventListener('reverse-changed', () => {
+		$('insnHistory').hidden = !window.aurixReverse;
+		if (historyMode() || total) reset(result);
+	});
 	$('insnStart').addEventListener('click', () => select(0, true));
 	$('insnEnd').addEventListener('click', () => select(total - 1, true));
 	$('insnFind').addEventListener('keydown', (e) => {
 		if (e.key === 'Enter') {
-			vscode.postMessage({ type: 'find', query: $('insnFind').value, from: sel >= 0 ? sel : undefined, back: e.shiftKey });
+			vscode.postMessage({ type: 'find', query: $('insnFind').value, from: sel >= 0 ? sel : undefined, back: e.shiftKey, scope: scope() });
 			e.preventDefault();
 		}
 	});
 	$('insnReplay').addEventListener('click', () => {
 		if (sel < 0) return;
 		if (window.aurixReverse) {
-			// Reverse debugging: restore the target to the point before the selected row.
-			vscode.postMessage({ type: 'reverseGoto', row: sel });
+			// Reverse debugging: restore the target to the point before the selected row (whole
+			// history: the row's action and its row there; else a row of the last action).
+			const r = rows[sel];
+			if (r && r.Act !== undefined) vscode.postMessage({ type: 'reverseGoto', index: r.Act, row: r.R ?? 0 });
+			else vscode.postMessage({ type: 'reverseGoto', row: sel });
 		} else {
 			vscode.postMessage({ type: 'replayAt', at: sel });
 		}

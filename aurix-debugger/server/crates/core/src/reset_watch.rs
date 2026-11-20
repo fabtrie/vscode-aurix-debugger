@@ -87,6 +87,24 @@ pub struct Watched {
     info: ResetInfo,
     /// The set-up to restore after a reset, besides OCDS ([`crate::restore`]).
     restore: Option<crate::restore::SharedRestore>,
+    /// [`Adapter::ram_writes`].
+    ram_writes: u64,
+}
+
+/// Whether a write to `addr` (host address) goes to CPU RAM: DSPR/PSPR (global and local
+/// segments), LMU/DLMU (cached and non-cached segments); not SFRs, flash or the trace RAM.
+fn is_ram(addr: u64) -> bool {
+    let a = addr as u32;
+    let tram = (a & 0x0FFF_FFFF) >= 0x0800_0000;
+    match a >> 28 {
+        0x5 | 0x6 | 0x7 | 0xC | 0xD => true,
+        0x9 | 0xB => !tram,
+        _ => false,
+    }
+}
+
+fn count_ram_writes(batch: &Batch) -> u64 {
+    batch.iter().filter(|op| matches!(op, tas::BatchOp::Write { addr, .. } if is_ram(*addr))).count() as u64
 }
 
 impl Watched {
@@ -103,6 +121,7 @@ impl Watched {
             late: false,
             info: ResetInfo::default(),
             restore: None,
+            ram_writes: 0,
         }
     }
 
@@ -272,16 +291,19 @@ impl Adapter for Watched {
         self.inner.initialized()
     }
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        self.ram_writes += count_ram_writes(batch);
         let r = self.inner.execute(batch);
         self.after_access(access_ok(&r));
         r
     }
     fn execute_packed(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        self.ram_writes += count_ram_writes(batch);
         let r = self.inner.execute_packed(batch);
         self.after_access(access_ok(&r));
         r
     }
     fn write_bulk(&mut self, blocks: &[(u32, &[u8])]) -> Result<bool> {
+        self.ram_writes += blocks.iter().filter(|(a, _)| is_ram(*a as u64)).count() as u64;
         let r = self.inner.write_bulk(blocks);
         self.after_access(matches!(r, Ok(true)));
         r
@@ -297,6 +319,9 @@ impl Adapter for Watched {
     }
     fn take_resets(&mut self) -> u64 {
         std::mem::take(&mut self.for_poll) + self.inner.take_resets()
+    }
+    fn ram_writes(&self) -> u64 {
+        self.ram_writes
     }
     fn reset_always_halts(&self) -> bool {
         self.inner.reset_always_halts()

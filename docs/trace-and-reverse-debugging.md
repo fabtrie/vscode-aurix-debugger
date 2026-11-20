@@ -63,8 +63,9 @@ Enable it with `"reverse": true` in the launch configuration, or with **Enable R
   - If the rerun takes another path, it stops there and says so.
 - **Reverse Continue** goes back to the last breakpoint or data breakpoint hit, or to the start of the history.
 - The Trace panel's **History** tab lists the checkpoints and goes back to any of them. **Show Reverse Debugging History** opens it.
-- **Go here** in the Instructions tab goes back to an instruction of the last action.
-- At the start, the Debug Console shows how much RAM is saved and how long a checkpoint takes.
+- The Instructions tab shows the instructions of the whole history, action by action, oldest first; **Whole history** switches to the last action only. **Go here** goes back to the selected instruction.
+- At the start, the Debug Console shows how much RAM is saved and how long a checkpoint takes. The History tab shows what each checkpoint cost.
+- The core's own stacks and context save area are read again only where the last action wrote, when its trace or its instruction tells (no other core writes them). Everything else is read in full at every checkpoint.
 
 ### What is not rewound
 
@@ -96,3 +97,4 @@ Reverse debugging uses the on-chip trace, so the Trace panel's own setup is off.
 | `stackSymbols`, `csaSymbols` | iLLD/HighTec and TASKING symbols | Linker symbol pairs bounding the stacks and the context save area |
 | `maxHits` | `200` | Most breakpoint hits a Step Back inside a run may count |
 | `strict` | `false` | Refuse a Step Back that cannot restore everything (peripheral or unknown writes) |
+| `verify` | `false` | Check: read the stacks and the context save area in full at every checkpoint anyway and log any difference to what the decoded writes predict (slower) |

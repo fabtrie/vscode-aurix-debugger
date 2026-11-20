@@ -1322,6 +1322,7 @@ fn cmd_mww_seq(cx: &Cx, a: &[&str]) -> CmdResult {
     let writes = args.chunks(2).map(|p| Ok((num32(p[0])?, num(p[1])? as u32))).collect::<Result<Vec<_>, String>>()?;
     cx.with(|c| {
         for &(addr, _) in &writes {
+            crate::mcds_trace::on_write_memory(c, addr, 4);
             crate::reverse::on_write_memory(c, addr, 4);
         }
         c.io()?.write32_seq_packed(&writes)

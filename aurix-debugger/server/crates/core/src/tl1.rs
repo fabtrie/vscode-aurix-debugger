@@ -13,7 +13,7 @@
 use crate::adapter::Io;
 use crate::arch::*;
 use crate::ctx::{Ctx, Cx};
-use crate::target::{Core, TargetState};
+use crate::target::{Core, DebugReason, TargetState};
 
 pub const CBS_TL1ST: u32 = 0xF000_0494;
 pub const CBS_TLCHE: u32 = 0xF000_0498;
@@ -225,6 +225,22 @@ pub fn before_resume(cx: &Cx, t: usize) {
             }
         });
     }
+}
+
+/// The other TriCore cores of `t`'s TL1 group in a debug halt now: a resume of `t` releases them
+/// ([`before_resume`]). Not a core in boot halt: the release does not start it.
+pub fn halted_peers(cx: &Cx, t: usize) -> Vec<usize> {
+    cx.with(|c| {
+        let plan = c.restore.tl1.borrow();
+        if !plan.member(t) {
+            return Vec::new();
+        }
+        plan.cores
+            .iter()
+            .map(|&(i, _)| i)
+            .filter(|&i| i != t && c.targets.get(i).is_some_and(|e| e.core.state() == TargetState::Halted && e.core.reason() != DebugReason::BootHalt))
+            .collect()
+    })
 }
 
 /// After a member resumed: suspend-out off on all cores, then the TL1 hold dropped, in one

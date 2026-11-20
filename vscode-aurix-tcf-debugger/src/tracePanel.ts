@@ -226,7 +226,7 @@ export class TracePanel {
 				void this.reverseRefresh();
 				break;
 			case 'reverseGoto': {
-				// History tab ({index, row: 0}) or the Instructions tab ({row}: the last action).
+				// History tab ({index, row: 0}) or the Instructions tab ({index, row} of the whole history, or {row}: the last action).
 				const s = this.session();
 				try {
 					if (!s) {
@@ -304,13 +304,13 @@ export class TracePanel {
 				}
 				break;
 			case 'insns':
-				await this.forward('insnsPage', 'insns', { from: m.from, count: m.count }, { from: m.from });
+				await this.forward('insnsPage', 'insns', { from: m.from, count: m.count, scope: m.scope }, { from: m.from });
 				break;
 			case 'regs':
-				await this.forward('regs', 'regs', { at: m.at }, { at: m.at });
+				await this.forward('regs', 'regs', { at: m.at, scope: m.scope }, { at: m.at });
 				break;
 			case 'find':
-				await this.forward('found', 'find', { query: m.query, from: m.from, back: m.back }, { query: m.query });
+				await this.forward('found', 'find', { query: m.query, from: m.from, back: m.back, scope: m.scope }, { query: m.query });
 				break;
 			case 'sources':
 				this.post({ type: 'sources', sources: await this.readSources((m.files ?? []) as string[]) });
@@ -591,6 +591,7 @@ export class TracePanel {
     <button id="insnSrc" type="button" class="toggle on" title="Source lines between the instructions">Source</button>
     <button id="insnEff" type="button" class="toggle on" title="What each instruction wrote">Effects</button>
     <button id="insnCalls" type="button" class="toggle" title="Only calls, returns and interrupt entries">Calls only</button>
+    <button id="insnHistory" type="button" class="toggle on" hidden title="Reverse debugging: the instructions of every action in the history, oldest first (off: the last action only)">Whole history</button>
     <button id="insnStart" type="button" class="secondary" title="First instruction">⇤</button>
     <button id="insnEnd" type="button" class="secondary" title="Last instruction (the halt)">⇥</button>
     <span class="spacer"></span>

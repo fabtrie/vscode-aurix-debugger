@@ -454,14 +454,16 @@ pub static ENTRIES: &[Entry] = &[
     e!(Trace, "mcds decode", "[-json] [<max>]", "List the events of the last recording: data trace writes with address, value and time; program trace messages raw.",
         "Program flow with source lines needs the code and the symbols: the trace panel and the REST/MCP trace operations decode it."),
     e!(Trace, "mcds dump", "<file>", "Save the last recording (8 KB trace RAM with a winIDEA-style 60-byte header)."),
-    e!(Reverse, "reverse on", "[-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-maxhits <n>] -region <start> <len> [-private] ...",
+    e!(Reverse, "reverse on", "[-json] [-target <name>] [-history <n>] [-notrace] [-strict] [-verify] [-maxhits <n>] -region <start> <len> [-private] ...",
         "Switch reverse debugging on: save the core's registers and the given RAM regions before every run, step and write.",
         "Saved before every run, step, source step and register or memory write. `reverse back` writes an earlier \
          state back into the halted core, which then really runs again from there.\n\n\
          - `-region <start> <len>`: RAM to save; repeat for more. `-private` after a region: only this core writes it \
            (its stacks, its context save area).\n\
          - `-history <n>`: checkpoints kept (default 50, 0: all).\n\
-         - `-notrace`: do not record each action with the miniMCDS (CPU0).\n\n\
+         - `-notrace`: do not record each action with the miniMCDS (CPU0).\n\
+         - `-verify`: read the private regions in full at every checkpoint, also when the decoded writes of the last \
+           action say where they changed, and log any difference (a check; slower).\n\n\
          While on, it owns the miniMCDS: `mcds arm` and `mcds auto` are refused. Switched on while the core runs, the \
          current run is recorded up to its halt, without a checkpoint. Not rewound: peripherals, timers, other cores. \
          The TCF/REST operations take the regions from the ELF."),

@@ -557,6 +557,7 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
             crate::mcds_trace::auto_arm(c, t);
         }
         crate::mcds_trace::on_run(c, t, "run");
+        crate::reverse::note_run(c, t);
     });
     // A breakpoint on the PC would stop the resume before the first instruction: step past it
     // first (not reported: to the frontends this is one run).
@@ -569,12 +570,30 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
     }
     unmask_irq_except(cx, t);
     fire(cx, t, "resume-start");
+    let peers = crate::tl1::halted_peers(cx, t);
     crate::tl1::before_resume(cx, t);
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
         e.core.resume(&mut io, addr, mode)
     })?;
     crate::tl1::after_resume(cx, t);
+    // The other cores of the TL1 group run now too. Marked running at once: the poll cannot see a
+    // run that already ended at a nearby breakpoint (halted then, halted now), so they would keep
+    // the old halt's registers, and an action on one of them (a reverse debugging checkpoint above
+    // all) would start from a stale state. The poll right after reports a halt they reached.
+    for p in peers {
+        let released = cx.with(|c| match &mut c.targets[p].core {
+            Core::Tricore(tc) => {
+                tc.released();
+                true
+            }
+            _ => false,
+        });
+        if released {
+            handle_transition(cx, p, Transition::Running);
+            poll_one(cx, p);
+        }
+    }
     crate::suspend::on_resumed(cx, t);
     emit(Event::Resumed { target: t, name: target_name(cx, t) });
     fire(cx, t, "resumed");
@@ -640,6 +659,7 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
             crate::reverse::begin_action(c, t, action_name(mode, false), mode);
         }
         crate::mcds_trace::on_run(c, t, "step");
+        crate::reverse::note_run(c, t);
     });
     let tl1_step = cx.with(|c| c.targets[t].core.run().tl1_step);
     if tl1_step {
@@ -1198,6 +1218,7 @@ pub fn read_memory_partial(cx: &Cx, addr: u32, len: usize) -> Result<adapter::Pa
 
 pub fn write_memory(cx: &Cx, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| {
+        crate::mcds_trace::on_write_memory(c, addr, data.len());
         crate::reverse::on_write_memory(c, addr, data.len());
         c.io()?.write(addr, data)
     })
@@ -1238,6 +1259,7 @@ pub fn read_memory_partial_as(cx: &Cx, t: usize, addr: u32, len: usize) -> Resul
 
 pub fn write_memory_as(cx: &Cx, t: usize, addr: u32, data: &[u8]) -> Result<()> {
     cx.with(|c| {
+        crate::mcds_trace::on_write_memory(c, addr, data.len());
         crate::reverse::on_write_memory(c, addr, data.len());
         let (mut io, e) = c.target_io(t)?;
         e.core.write_memory(&mut io, addr, data)

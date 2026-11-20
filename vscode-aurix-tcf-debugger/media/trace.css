@@ -149,6 +149,9 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 #insnList .src { padding-left: calc(4px + var(--d) * 12px); background: var(--vscode-editorWidget-background); }
 #insnList .src .code { color: var(--vscode-debugTokenExpression-name, var(--vscode-foreground)); }
 #insnList .it.gap { text-align: center; font-style: italic; border: 0; }
+#insnList .it.act { font-weight: 600; opacity: 0.85; border-top: 1px solid var(--vscode-panel-border); }
+#insnList .it.mark { font-style: italic; cursor: pointer; }
+#insnList .it.mark.sel { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 #insnList .entry { padding-left: calc(4px + var(--d) * 12px); color: var(--vscode-charts-orange); }
 #insnList .halt { padding-left: 4px; color: var(--vscode-errorForeground); }
 .v-exact { color: var(--vscode-foreground); }

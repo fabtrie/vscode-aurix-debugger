@@ -50,6 +50,7 @@ pub fn start(shared: Arc<Shared>) {
                     crate::trace_insns::end_replay(&shared, None);
                     if !shared.any_stepping() {
                         halted(&shared, target, reason, pc, true);
+                        crate::reverse::note_last_action(&shared);
                     }
                 }
                 // Reverse debugging restored a state from Tcl (the TCF operations report their own).

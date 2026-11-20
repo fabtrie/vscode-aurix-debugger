@@ -70,6 +70,9 @@ pub struct Config {
     pub strict: bool,
     /// Re-execution: most breakpoint hits counted.
     pub max_hits: u32,
+    /// Read the private regions in full at every checkpoint also when the last action's writes
+    /// are known, and log where the patched snapshot differs (a check of [`note_private_writes`]).
+    pub verify: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +91,45 @@ pub struct End {
     pub reason: DebugReason,
     /// Registers at the end (the next checkpoint's, unless something changed in between).
     pub regs: Vec<u32>,
+}
+
+/// Where a checkpoint and the end of its action spent their time (microseconds), and the RAM
+/// read for the snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct Cost {
+    /// Registers at the checkpoint.
+    pub regs_us: u64,
+    /// The snapshot read.
+    pub snapshot_us: u64,
+    /// Bytes read for the snapshot.
+    pub snapshot_bytes: u64,
+    /// Arming the recording.
+    pub arm_us: u64,
+    /// Stopping and reading the recording at the action's end.
+    pub stop_us: u64,
+    /// Registers at the action's end.
+    pub end_regs_us: u64,
+}
+
+fn ms(us: u64) -> f64 {
+    (us as f64 / 100.0).round() / 10.0
+}
+
+impl Cost {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "RegsMs": ms(self.regs_us),
+            "SnapshotMs": ms(self.snapshot_us),
+            "SnapshotBytes": self.snapshot_bytes,
+            "ArmMs": ms(self.arm_us),
+            "StopMs": ms(self.stop_us),
+            "EndRegsMs": ms(self.end_regs_us),
+        })
+    }
+}
+
+fn us(t0: Instant) -> u64 {
+    t0.elapsed().as_micros() as u64
 }
 
 /// A checkpoint and the action that followed it.
@@ -112,6 +154,14 @@ pub struct Checkpoint {
     pub end: Option<End>,
     /// Time the checkpoint took (registers, snapshot, arming).
     pub cost_ms: u64,
+    /// The checkpoint's and the action end's time, by part.
+    pub cost: Cost,
+    /// The bytes of the private regions the action wrote, when known completely
+    /// ([`note_private_writes`]): the next checkpoint reads only those of the private regions.
+    pub private_note: Option<Written>,
+    /// [`marks`] when the action ended: anything that ran the core or wrote RAM after it changes
+    /// them, and the note no longer tells what changed.
+    pub end_marks: Option<(u64, u64)>,
 }
 
 impl Checkpoint {
@@ -144,6 +194,11 @@ pub struct State {
     pub watching: bool,
     /// Why the history was last cleared.
     pub cleared: Option<String>,
+    /// Runs and steps of the reversed core, by anyone ([`note_run`]).
+    pub run_seq: u64,
+    /// [`marks`] right after the last restore: while they hold, memory still equals the restored
+    /// checkpoint's snapshot.
+    restored_marks: Option<(u64, u64)>,
     next_id: u64,
 }
 
@@ -173,6 +228,12 @@ pub struct Report {
     /// regions: not undone.
     pub refused: Vec<(u32, u32)>,
     pub ms: u64,
+    /// Time spent reading memory (current state, protection windows, old bytes, read-back), µs.
+    pub read_us: u64,
+    /// Time spent writing memory, µs.
+    pub write_us: u64,
+    /// Time spent reading and writing registers, µs.
+    pub regs_us: u64,
 }
 
 /// Bytes an action (or several) wrote: sorted `(start, len)` ranges in global addresses.
@@ -247,6 +308,7 @@ fn watch(c: &mut Ctx, t: usize) {
 /// script): the history no longer leads to the core's state, so it is dropped; the run is
 /// recorded up to its halt.
 pub fn on_untracked_run(c: &mut Ctx, t: usize) {
+    note_run(c, t);
     if c.reverse.target() != Some(t) || c.reverse.open || c.reverse.scope > 0 || c.reverse.suspended > 0 || c.reverse.watching {
         return;
     }
@@ -299,12 +361,27 @@ pub fn bus(a: u32) -> u32 {
     crate::tricore::bus_address(a)
 }
 
-fn read_regions(c: &mut Ctx, regions: &[Region]) -> Result<Vec<Vec<u8>>> {
+/// Reads `regions` in one batch ([`crate::adapter::Io::read_many`]); an error names the region.
+pub fn read_regions(c: &mut Ctx, regions: &[Region]) -> Result<Vec<Vec<u8>>> {
     let mut io = c.io()?;
-    regions
-        .iter()
-        .map(|r| io.read(bus(r.start), r.len as usize).map_err(|e| Error::Other(format!("reverse: cannot read {} ({:#010x}, {} bytes): {e}", r.name, r.start, r.len))))
-        .collect()
+    let ranges: Vec<(u32, usize)> = regions.iter().map(|r| (bus(r.start), r.len as usize)).collect();
+    io.read_many(&ranges).map_err(|e| {
+        // The error names the bus address the read failed at.
+        let at = match &e {
+            Error::Memory { addr, .. } => regions.iter().find(|r| (bus(r.start)..bus(r.start).wrapping_add(r.len)).contains(&(*addr as u32))),
+            _ => None,
+        };
+        match at {
+            Some(r) => Error::Other(format!("reverse: cannot read {} ({:#010x}, {} bytes): {e}", r.name, r.start, r.len)),
+            None => Error::Other(format!("reverse: cannot read the saved regions: {e}")),
+        }
+    })
+}
+
+/// Reads `(addr, len)` ranges (global addresses) in one batch.
+fn read_ranges<T: AsRef<[u8]>>(io: &mut crate::adapter::Io<'_>, list: &[(u32, T)]) -> Result<Vec<Vec<u8>>> {
+    let ranges: Vec<(u32, usize)> = list.iter().map(|(a, b)| (bus(*a), b.as_ref().len())).collect();
+    io.read_many(&ranges)
 }
 
 /// Master tags of the debugger's accesses (TC3xx): Cerberus / IOC32E JTAG = 28, IOC32E DAP = 30.
@@ -326,8 +403,15 @@ pub fn protection_windows(io: &mut crate::adapter::Io, coreids: &[u32]) -> Vec<(
         let base = 0xF880_E000 + 0x2_0000 * n;
         let dspr = 0x7000_0000u32.wrapping_sub(0x1000_0000 * n);
         for (block, mem_start, mem_end, alias) in [(0x000u32, dspr, dspr + 0x10_0000, 0u32), (0x200, 0x9000_0000 + 0x1_0000 * n, 0x9001_0000 + 0x1_0000 * n, 0x2000_0000)] {
-            let addrs: Vec<u32> = (0..8).flat_map(|i| (0..4).map(move |k| base + block + 0x10 * i + 4 * k)).collect();
-            let Ok(v) = io.read32_many(&addrs) else { continue };
+            // 8 regions x 4 words: 0x80 contiguous bytes, one block read (single reads if refused).
+            let v: Vec<u32> = match io.read(base + block, 0x80) {
+                Ok(d) => d.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect(),
+                Err(_) => {
+                    let addrs: Vec<u32> = (0..32).map(|i| base + block + 4 * i).collect();
+                    let Ok(v) = io.read32_many(&addrs) else { continue };
+                    v
+                }
+            };
             if v.iter().all(|&x| x == 0) {
                 // Not configured (a model without the registers): the reset state is open.
                 continue;
@@ -390,6 +474,19 @@ fn diff_runs(a: &[u8], b: &[u8]) -> Vec<(usize, usize)> {
         match out.last_mut() {
             Some((ls, ll)) if s - (*ls + *ll) < 8 => *ll = i - *ls,
             _ => out.push((s, i - s)),
+        }
+    }
+    out
+}
+
+/// Sorted, overlapping and touching ranges joined.
+fn merge_ranges(mut v: Written) -> Written {
+    v.sort();
+    let mut out: Written = Vec::new();
+    for (a, n) in v {
+        match out.last_mut() {
+            Some((la, ln)) if a <= la.wrapping_add(*ln) => *ln = (*ln).max(a.wrapping_add(n) - *la),
+            _ => out.push((a, n)),
         }
     }
     out
@@ -471,6 +568,9 @@ pub fn begin_action(c: &mut Ctx, t: usize, kind: &str, mode: RunMode) {
         cp.end = None;
         cp.outside.clear();
         cp.wrote.clear();
+        cp.cost = Cost::default();
+        cp.private_note = None;
+        cp.end_marks = None;
     } else if let Err(e) = take_checkpoint(c, t, kind, mode) {
         crate::log_warn!("{e}");
         clear(c, &format!("checkpoint failed: {e}"));
@@ -479,6 +579,7 @@ pub fn begin_action(c: &mut Ctx, t: usize, kind: &str, mode: RunMode) {
     c.reverse.at_checkpoint = false;
     c.reverse.open = true;
     let trace = c.reverse.cfg.as_ref().is_some_and(|cfg| cfg.trace) && !matches!(kind, "step" | "write" | "write register");
+    let t1 = Instant::now();
     if let (true, Some(core)) = (trace, traced_core(c, t)) {
         match mt::arm(c, trace_config(core), Owner::Reverse) {
             Ok(_) => {
@@ -490,14 +591,104 @@ pub fn begin_action(c: &mut Ctx, t: usize, kind: &str, mode: RunMode) {
         }
     }
     if let Some(cp) = c.reverse.history.last_mut() {
+        cp.cost.arm_us = if trace { us(t1) } else { 0 };
         cp.cost_ms = t0.elapsed().as_millis() as u64;
     }
 }
 
+/// The reversed core ran or stepped (by anyone, also inside an action or while nothing is
+/// checkpointed): a note of the last action's writes ([`note_private_writes`]) no longer holds.
+pub fn note_run(c: &mut Ctx, t: usize) {
+    if c.reverse.target() == Some(t) {
+        c.reverse.run_seq += 1;
+    }
+}
+
+/// What changes whenever the reversed core runs or anything writes RAM: `(runs, RAM writes)`.
+fn marks(c: &Ctx) -> (u64, u64) {
+    (c.reverse.run_seq, c.adapter.as_ref().map_or(0, |a| a.ram_writes()))
+}
+
+/// The frontend that decoded the action of checkpoint `id` tells which bytes of the private
+/// regions it wrote (`complete`: every store of the action is known; else `ranges` is ignored).
+/// Only the reversed core writes its private regions (its stacks and context save area), so the
+/// next checkpoint reads only those bytes of them, unless the core ran or RAM was written since
+/// the action ended ([`marks`]).
+pub fn note_private_writes(c: &mut Ctx, id: u64, ranges: Written, complete: bool) {
+    let now = marks(c);
+    let Some(cp) = c.reverse.history.last_mut().filter(|cp| cp.id == id) else { return };
+    if c.reverse.open || cp.end_marks != Some(now) {
+        return;
+    }
+    cp.private_note = complete.then_some(ranges);
+}
+
+/// Reads the snapshot of `regions` for a new checkpoint: every region in full, except the private
+/// regions when the last action's note says which of their bytes it wrote (then only those,
+/// patched into the last snapshot). Returns the snapshot and the bytes read.
+fn read_snapshot(c: &mut Ctx, regions: &[Region]) -> Result<(Vec<Vec<u8>>, u64)> {
+    let all: u64 = regions.iter().map(|r| r.len as u64).sum();
+    let now = marks(c);
+    let verify = c.reverse.cfg.as_ref().is_some_and(|cfg| cfg.verify);
+    let note = c.reverse.history.last().filter(|cp| !c.reverse.open && cp.end_marks == Some(now) && matches!(cp.snap, Snap::Full(_))).and_then(|cp| cp.private_note.clone());
+    let (Some(note), Some(Snap::Full(prev))) = (note, c.reverse.history.last().map(|cp| cp.snap.clone())) else {
+        // A note that no longer holds is dropped: a Step Back must not rely on it either.
+        if let Some(cp) = c.reverse.history.last_mut() {
+            cp.private_note = None;
+        }
+        return Ok((read_regions(c, regions)?, all));
+    };
+    // The written bytes of each private region (region index, offset, length).
+    let mut pieces: Vec<(usize, usize, usize)> = Vec::new();
+    for &(a, n) in &note {
+        for (i, r) in regions.iter().enumerate().filter(|(_, r)| r.private) {
+            let s = a.max(r.start);
+            let e = a.wrapping_add(n).min(r.end());
+            if s < e {
+                pieces.push((i, (s - r.start) as usize, (e - s) as usize));
+            }
+        }
+    }
+    let full: Vec<usize> = (0..regions.len()).filter(|&i| !regions[i].private || verify).collect();
+    let mut ranges: Vec<(u32, usize)> = full.iter().map(|&i| (bus(regions[i].start), regions[i].len as usize)).collect();
+    ranges.extend(pieces.iter().map(|&(i, off, n)| (bus(regions[i].start + off as u32), n)));
+    let data = c.io()?.read_many(&ranges).map_err(|e| Error::Other(format!("reverse: cannot read the saved regions: {e}")))?;
+    let mut snap = prev;
+    for (k, &i) in full.iter().enumerate().filter(|&(_, &i)| !regions[i].private) {
+        snap[i] = data[k].clone();
+    }
+    for (k, &(i, off, n)) in pieces.iter().enumerate() {
+        snap[i][off..off + n].copy_from_slice(&data[full.len() + k]);
+    }
+    let read: u64 = ranges.iter().map(|r| r.1 as u64).sum();
+    if verify {
+        for (k, &i) in full.iter().enumerate().filter(|&(_, &i)| regions[i].private) {
+            let r = &regions[i];
+            let diff = diff_runs(&snap[i], &data[k]);
+            if !diff.is_empty() {
+                let first: Vec<String> = diff.iter().take(4).map(|(o, n)| format!("{:#010x} ({n} bytes)", r.start + *o as u32)).collect();
+                crate::log_warn!("reverse verify: {} differs from the patched snapshot at {}{}", r.name, first.join(", "), if diff.len() > 4 { ", ..." } else { "" });
+                if let Some(cp) = c.reverse.history.last_mut() {
+                    cp.private_note = None;
+                }
+            }
+            // The full read is the truth.
+            snap[i] = data[k].clone();
+        }
+    }
+    Ok((snap, read))
+}
+
 fn take_checkpoint(c: &mut Ctx, t: usize, kind: &str, mode: RunMode) -> Result<()> {
     let regions = c.reverse.cfg.as_ref().map(|c| c.regions.clone()).unwrap_or_default();
+    let mut cost = Cost::default();
+    let t0 = Instant::now();
     let regs = read_regs(c, t)?;
-    let snap = read_regions(c, &regions)?;
+    cost.regs_us = us(t0);
+    let t0 = Instant::now();
+    let (snap, read) = read_snapshot(c, &regions)?;
+    cost.snapshot_us = us(t0);
+    cost.snapshot_bytes = read;
     let st = &mut c.reverse;
     if let Some(prev) = st.history.last_mut() {
         if let Snap::Full(old) = &prev.snap {
@@ -519,6 +710,9 @@ fn take_checkpoint(c: &mut Ctx, t: usize, kind: &str, mode: RunMode) -> Result<(
         from_start: false,
         end: None,
         cost_ms: 0,
+        cost,
+        private_note: None,
+        end_marks: None,
     });
     let limit = st.cfg.as_ref().map_or(0, |c| c.history);
     if limit > 0 && st.history.len() > limit {
@@ -554,6 +748,7 @@ pub fn finish_action(c: &mut Ctx, t: usize) {
         return;
     }
     c.reverse.open = false;
+    let t0 = Instant::now();
     let rec = if c.mcds.armed.as_ref().is_some_and(|a| a.owner == Owner::Reverse) {
         match mt::stop(c, Owner::Reverse) {
             Ok(r) => Some(r),
@@ -565,14 +760,33 @@ pub fn finish_action(c: &mut Ctx, t: usize) {
     } else {
         None
     };
+    let stop_us = us(t0);
+    let end_marks = marks(c);
     let reason = c.targets.get(t).map(|e| e.core.reason()).unwrap_or(DebugReason::Undefined);
+    let t0 = Instant::now();
     let end = read_regs(c, t).ok().map(|regs| End { pc: regs[REG_PC], pcxi: regs[REG_PCXI], reason, regs });
+    let end_regs_us = us(t0);
     if let Some(cp) = c.reverse.history.last_mut() {
         if rec.is_none() {
             cp.from_start = false;
         }
         cp.recording = rec;
         cp.end = end;
+        cp.end_marks = Some(end_marks);
+        cp.cost.stop_us = stop_us;
+        cp.cost.end_regs_us = end_regs_us;
+        cp.private_note = None;
+        let k = &cp.cost;
+        crate::log_debug!(
+            "reverse: {} cost: registers {} ms, snapshot {} KB {} ms, arm {} ms; end: stop {} ms, registers {} ms",
+            cp.kind,
+            ms(k.regs_us),
+            k.snapshot_bytes / 1024,
+            ms(k.snapshot_us),
+            ms(k.arm_us),
+            ms(k.stop_us),
+            ms(k.end_regs_us)
+        );
     }
 }
 
@@ -686,14 +900,39 @@ pub fn restore(c: &mut Ctx, k: usize, written: Option<&Written>) -> Result<Repor
     let snap = snapshot_of(&c.reverse, k).ok_or_else(|| Error::Other("reverse: the snapshot is missing".into()))?;
     let mut report = Report { checkpoint: c.reverse.history[k].id, kind: c.reverse.history[k].kind.clone(), by_difference: written.is_none(), ..Default::default() };
 
+    // The private regions only where the actions from `k` on wrote, when every one of them noted it
+    // ([`note_private_writes`], kept only where the next checkpoint could use it) and nothing ran
+    // or wrote RAM since the last one ended.
+    // Standing at a restored checkpoint (no action since), the actions up to it count.
+    let now = marks(c);
+    let upto = if c.reverse.at_checkpoint {
+        (c.reverse.restored_marks == Some(now)).then(|| c.reverse.history.len() - 1)
+    } else {
+        c.reverse.history.last().is_some_and(|cp| cp.end_marks == Some(now)).then_some(c.reverse.history.len())
+    };
+    let private_known: Option<Written> = upto.filter(|&u| u >= k).and_then(|u| c.reverse.history[k..u].iter().map(|cp| cp.private_note.clone()).collect::<Option<Vec<Written>>>().map(|v| merge_ranges(v.concat())));
     // Memory: private regions (and all of them without the written bytes) by difference.
-    let diff_regions: Vec<usize> = (0..cfg.regions.len()).filter(|&i| cfg.regions[i].private || (written.is_none() && !cfg.regions[i].foreign)).collect();
+    let diff_regions: Vec<usize> = (0..cfg.regions.len())
+        .filter(|&i| (cfg.regions[i].private && private_known.is_none()) || (written.is_none() && !cfg.regions[i].private && !cfg.regions[i].foreign))
+        .collect();
+    let t1 = Instant::now();
     let current = read_regions(c, &diff_regions.iter().map(|&i| cfg.regions[i].clone()).collect::<Vec<_>>())?;
+    report.read_us += us(t1);
     let mut writes: Vec<(u32, Vec<u8>)> = Vec::new();
     for (n, &i) in diff_regions.iter().enumerate() {
         let r = &cfg.regions[i];
         for (off, len) in diff_runs(&current[n], &snap[i]) {
             writes.push((r.start + off as u32, snap[i][off..off + len].to_vec()));
+        }
+    }
+    for &(a, n) in private_known.iter().flatten() {
+        for (i, r) in cfg.regions.iter().enumerate().filter(|(_, r)| r.private) {
+            let s = a.max(r.start);
+            let e = a.wrapping_add(n).min(r.end());
+            if s < e {
+                let off = (s - r.start) as usize;
+                writes.push((s, snap[i][off..off + (e - s) as usize].to_vec()));
+            }
         }
     }
     if let Some(w) = written {
@@ -714,7 +953,9 @@ pub fn restore(c: &mut Ctx, k: usize, written: Option<&Written>) -> Result<Repor
     // a write raises a safety alarm (a reset on the TC377 board). In the core's own regions that
     // makes the restore impossible; elsewhere those bytes are not undone.
     let coreids: Vec<u32> = c.targets.iter().filter_map(|e| match &e.core { Core::Tricore(tc) => Some(tc.coreid), _ => None }).collect();
+    let t1 = Instant::now();
     let windows = protection_windows(&mut c.io()?, &coreids);
+    report.read_us += us(t1);
     let mut closed_private: Vec<(u32, u32)> = Vec::new();
     let mut keep = |list: &mut Vec<(u32, Vec<u8>)>, report: &mut Report| {
         let mut out = Vec::new();
@@ -764,26 +1005,41 @@ pub fn restore(c: &mut Ctx, k: usize, written: Option<&Written>) -> Result<Repor
     }
     {
         let mut io = c.io()?;
+        // In order: the snapshot runs, then the outside bytes newest first (the oldest value stays).
+        let all: Vec<(u32, Vec<u8>)> = writes.iter().chain(outside.iter()).cloned().collect();
+        let private_at = |at: u32| cfg.regions.iter().any(|r| r.private && r.contains(at));
         // What is there now, for putting it back if the restore cannot be completed.
-        let mut before: Vec<(u32, Vec<u8>)> = Vec::with_capacity(writes.len() + outside.len());
-        for (a, bytes) in writes.iter().chain(outside.iter()) {
-            before.push((*a, io.read(bus(*a), bytes.len())?));
-        }
-        for (a, bytes) in &writes {
-            io.write(bus(*a), bytes)?;
-            report.bytes += bytes.len() as u64;
-        }
-        for (a, old) in &outside {
-            io.write(bus(*a), old)?;
-            report.outside_bytes += old.len() as u64;
-        }
-        // Read back: an application's RAM protection can drop the debugger's writes silently.
+        let t1 = Instant::now();
+        let before = read_ranges(&mut io, &all)?;
+        report.read_us += us(t1);
+        // One bulk write (the BlueBox packs it into few messages); which byte failed is found by
+        // the read-back, which an application's RAM protection makes necessary anyway (it drops
+        // the debugger's writes silently).
+        let t1 = Instant::now();
+        let blocks: Vec<(u32, &[u8])> = all.iter().map(|(a, b)| (bus(*a), b.as_slice())).collect();
+        let wrote = io.write_bulk(&blocks);
+        report.write_us += us(t1);
+        let put_back = |io: &mut crate::adapter::Io<'_>| {
+            let back: Vec<(u32, &[u8])> = all.iter().zip(&before).rev().map(|((a, _), old)| (bus(*a), old.as_slice())).collect();
+            let _ = io.write_bulk(&back);
+        };
+        let t1 = Instant::now();
+        let got = match read_ranges(&mut io, &all) {
+            Ok(g) => g,
+            Err(e) => {
+                put_back(&mut io);
+                return Err(match wrote {
+                    Err(w) => w,
+                    _ => e,
+                });
+            }
+        };
+        report.read_us += us(t1);
         let mut refused_private: Vec<(u32, u32)> = Vec::new();
-        for (a, bytes) in writes.iter().chain(outside.iter()) {
-            let got = io.read(bus(*a), bytes.len())?;
-            for (off, len) in diff_runs(&got, bytes) {
+        for ((a, bytes), got) in all.iter().zip(&got) {
+            for (off, len) in diff_runs(got, bytes) {
                 let at = a + off as u32;
-                if cfg.regions.iter().any(|r| r.private && r.contains(at)) {
+                if private_at(at) {
                     refused_private.push((at, len as u32));
                 } else {
                     report.refused.push((at, len as u32));
@@ -792,33 +1048,32 @@ pub fn restore(c: &mut Ctx, k: usize, written: Option<&Written>) -> Result<Repor
         }
         if !refused_private.is_empty() || (cfg.strict && !report.refused.is_empty()) {
             // Leave the core as it was: memory back, registers untouched, history kept.
-            for (a, old) in before.iter().rev() {
-                let _ = io.write(bus(*a), old);
-            }
+            put_back(&mut io);
             let list = |v: &[(u32, u32)]| v.iter().take(4).map(|(a, n)| format!("{a:#010x} ({n} bytes)")).collect::<Vec<_>>().join(", ");
             let what = if refused_private.is_empty() { list(&report.refused) } else { list(&refused_private) };
             return Err(Error::Other(format!(
-                "the target refused the debugger's writes to {what}{} (memory protection of the application?): \
-                 the state cannot be restored, nothing was changed",
+                "the target refused the debugger's writes to {what}{} (memory protection of the application?):                  the state cannot be restored, nothing was changed",
                 if refused_private.len() + report.refused.len() > 4 { ", ..." } else { "" }
             )));
         }
+        report.bytes = writes.iter().map(|(_, b)| b.len() as u64).sum();
+        report.outside_bytes = outside.iter().map(|(_, b)| b.len() as u64).sum();
     }
 
-    // Registers that differ.
+    // Registers that differ, in one sequence with a read-back.
+    let t1 = Instant::now();
     let regs = c.reverse.history[k].regs.clone();
     let now = read_regs(c, t)?;
+    let diff: Vec<(usize, u32)> = (0..NREGS).filter(|&i| now.get(i) != regs.get(i)).map(|i| (i, regs[i])).collect();
     {
         let (mut io, e) = c.target_io(t)?;
-        for i in 0..NREGS {
-            if now.get(i) != regs.get(i) {
-                e.core.write_reg(&mut io, i, regs[i])?;
-                report.registers.push(REG_NAMES[i]);
-            }
-        }
+        e.core.write_regs(&mut io, &diff)?;
     }
+    report.registers = diff.iter().map(|&(i, _)| REG_NAMES[i]).collect();
+    report.regs_us = us(t1);
 
     // The core stands at checkpoint k: later checkpoints are gone.
+    let now_marks = marks(c);
     let st = &mut c.reverse;
     st.history.truncate(k + 1);
     let cp = st.history.last_mut().unwrap();
@@ -828,8 +1083,11 @@ pub fn restore(c: &mut Ctx, k: usize, written: Option<&Written>) -> Result<Repor
     cp.end = None;
     cp.outside.clear();
     cp.wrote.clear();
+    cp.private_note = None;
+    cp.end_marks = None;
     st.at_checkpoint = true;
     st.open = false;
+    st.restored_marks = Some(now_marks);
     report.ms = t0.elapsed().as_millis() as u64;
     Ok(report)
 }
@@ -854,6 +1112,7 @@ pub fn history_json(c: &Ctx) -> serde_json::Value {
                 "recorded": cp.recording.is_some(),
                 "from_start": cp.from_start,
                 "cost_ms": cp.cost_ms,
+                "cost": cp.cost.json(),
             })
         })
         .collect();
@@ -922,9 +1181,12 @@ mod tests {
             from_start: false,
             end: None,
             cost_ms: 0,
+            cost: Cost::default(),
+            private_note: None,
+            end_marks: None,
         };
         let st = State {
-            cfg: Some(Config { target: 0, history: 0, trace: false, regions: regions.clone(), strict: false, max_hits: 0 }),
+            cfg: Some(Config { target: 0, history: 0, trace: false, regions: regions.clone(), strict: false, max_hits: 0, verify: false }),
             history: vec![mk(Snap::Delta(to_delta(&regions, &s0, &s1))), mk(Snap::Delta(to_delta(&regions, &s1, &s2))), mk(Snap::Full(s2.clone()))],
             ..Default::default()
         };

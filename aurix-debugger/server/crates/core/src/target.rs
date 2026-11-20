@@ -456,6 +456,19 @@ impl Core {
     }
     forward!(read_regs(idxs: &[usize]) -> Vec<u32>);
     forward!(write_reg(idx: usize, value: u32) -> ());
+    /// Several registers at once: on a TriCore driven over its debug registers one packed
+    /// sequence with a read-back ([`Tricore::write_regs`]); one by one otherwise.
+    pub fn write_regs(&mut self, io: &mut Io, regs: &[(usize, u32)]) -> Result<()> {
+        match self {
+            Core::Tricore(c) if io.adapter.run_control().is_none() => c.write_regs(io, regs),
+            _ => {
+                for &(i, v) in regs {
+                    self.write_reg(io, i, v)?;
+                }
+                Ok(())
+            }
+        }
+    }
     forward!(add_breakpoint(addr: u32, len: u32) -> u8);
     forward!(add_watchpoint(addr: u32, len: u32, access: u32) -> u8);
     forward!(remove_trigger(slot: u8) -> ());

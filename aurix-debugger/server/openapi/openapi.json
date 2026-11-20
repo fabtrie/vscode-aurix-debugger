@@ -3422,6 +3422,14 @@
               "boolean",
               "null"
             ]
+          },
+          "verify": {
+            "default": null,
+            "description": "Check of the faster checkpoints: read the core's stacks and context save area in full at\nevery checkpoint anyway and log where they differ from what the decoded writes predict.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -4455,6 +4463,14 @@
           },
           "query": {
             "type": "string"
+          },
+          "scope": {
+            "default": null,
+            "description": "With reverse debugging on: `history` (default) numbers the rows of every action of the\nhistory one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),\n`action` only the last action's recording.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4482,6 +4498,14 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "scope": {
+            "default": null,
+            "description": "With reverse debugging on: `history` (default) numbers the rows of every action of the\nhistory one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),\n`action` only the last action's recording.",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -4549,6 +4573,14 @@
             "default": false,
             "description": "The registers before the row instead of after it.",
             "type": "boolean"
+          },
+          "scope": {
+            "default": null,
+            "description": "With reverse debugging on: `history` (default) numbers the rows of every action of the\nhistory one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),\n`action` only the last action's recording.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -8141,6 +8173,14 @@
                       "boolean",
                       "null"
                     ]
+                  },
+                  "verify": {
+                    "default": null,
+                    "description": "Check of the faster checkpoints: read the core's stacks and context save area in full at\nevery checkpoint anyway and log where they differ from what the decoded writes predict.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   }
                 },
                 "type": "object"
@@ -9769,6 +9809,19 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "With reverse debugging on: `history` (default) numbers the rows of every action of the\nhistory one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),\n`action` only the last action's recording.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -9839,6 +9892,19 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "With reverse debugging on: `history` (default) numbers the rows of every action of the\nhistory one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),\n`action` only the last action's recording.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
                 "null"
               ]
             }
@@ -9967,6 +10033,19 @@
             "schema": {
               "default": false,
               "type": "boolean"
+            }
+          },
+          {
+            "description": "With reverse debugging on: `history` (default) numbers the rows of every action of the\nhistory one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),\n`action` only the last action's recording.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],

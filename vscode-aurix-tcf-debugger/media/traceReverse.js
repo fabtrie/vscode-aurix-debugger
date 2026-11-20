@@ -1,7 +1,7 @@
 // Trace panel webview, reverse debugging: while the mode is on it owns the trace, so the setup is
 // off (banner); the History tab lists the checkpoints and goes back to one; the Instructions tab
-// shows the last action's recording and its row action restores the target ("Go here") instead
-// of the view-only replay ("Show in debugger").
+// shows the instructions of the whole history (or of the last action) and its row action
+// restores the target ("Go here") instead of the view-only replay ("Show in debugger").
 (function () {
 	const vscode = window.traceVscode;
 	const $ = (id) => document.getElementById(id);
@@ -83,6 +83,7 @@
 			history = (m.history && m.history.Checkpoints) || [];
 			setControls();
 			render();
+			window.dispatchEvent(new Event('reverse-changed'));
 		}
 	});
 })();

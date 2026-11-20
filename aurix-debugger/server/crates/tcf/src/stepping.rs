@@ -94,6 +94,7 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
         }
         drop(scope);
         let _ = h.call(move |cx| cx.with(|c| aurix_core::reverse::end_scope(c, idx)));
+        crate::reverse::note_last_action(&shared);
         // The forwarder still has the events of the instruction steps queued: let it drop them
         // while this core counts as stepping, before the one stop below.
         shared.flush_events(Duration::from_secs(2));

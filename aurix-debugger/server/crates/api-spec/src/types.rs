@@ -891,6 +891,11 @@ pub struct TraceInsnsRequest {
     /// Rows (default 500, at most 5000).
     #[serde(default)]
     pub count: Option<u32>,
+    /// With reverse debugging on: `history` (default) numbers the rows of every action of the
+    /// history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),
+    /// `action` only the last action's recording.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -902,6 +907,11 @@ pub struct TraceRegsRequest {
     /// The registers before the row instead of after it.
     #[serde(default)]
     pub before: bool,
+    /// With reverse debugging on: `history` (default) numbers the rows of every action of the
+    /// history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),
+    /// `action` only the last action's recording.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -912,6 +922,11 @@ pub struct TraceFindRequest {
     pub from: Option<u32>,
     #[serde(default)]
     pub back: bool,
+    /// With reverse debugging on: `history` (default) numbers the rows of every action of the
+    /// history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`),
+    /// `action` only the last action's recording.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// A RAM range for reverse debugging.
@@ -963,6 +978,10 @@ pub struct ReverseEnableRequest {
     /// Most breakpoint hits a run again may count (default 200).
     #[serde(default)]
     pub max_hits: Option<u32>,
+    /// Check of the faster checkpoints: read the core's stacks and context save area in full at
+    /// every checkpoint anyway and log where they differ from what the decoded writes predict.
+    #[serde(default)]
+    pub verify: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]

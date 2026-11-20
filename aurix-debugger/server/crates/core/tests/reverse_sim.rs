@@ -169,3 +169,105 @@ fn a_run_already_going_is_recorded_up_to_its_halt() {
     assert_eq!(r["checkpoints"], 0, "no action, no checkpoint");
     assert!(json(&s, "mcds decode -json 10")["total"].as_u64().is_some(), "the recording is the last one");
 }
+
+fn with_sim<R>(s: &Server, f: impl FnOnce(&mut aurix_core::sim::SimAdapter) -> R) -> R {
+    s.cx().with(|c| f(c.adapter.as_mut().unwrap().as_any_mut().downcast_mut::<aurix_core::sim::SimAdapter>().unwrap()))
+}
+
+/// The word at `addr` in the snapshot of history entry `k`.
+fn saved(s: &Server, k: usize, addr: u32) -> u32 {
+    let snap = s.cx().with(|c| aurix_core::reverse::snapshot(c, k)).unwrap();
+    let (start, b) = snap.iter().find(|(st, b)| addr >= *st && addr + 4 <= st + b.len() as u32).unwrap();
+    let o = (addr - start) as usize;
+    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
+}
+
+fn last_id(s: &Server) -> u64 {
+    s.cx().with(|c| c.reverse.history.last().unwrap().id)
+}
+
+fn snapshot_bytes(s: &Server) -> u64 {
+    s.cx().with(|c| c.reverse.history.last().unwrap().cost.snapshot_bytes)
+}
+
+#[test]
+fn the_private_regions_are_read_only_where_the_last_action_wrote() {
+    let s = server();
+    json(&s, "reverse on -notrace -region 0x70000000 0x100 -region 0x70001000 0x40 -private -json");
+    tcl(&s, "step");
+    assert_eq!(snapshot_bytes(&s), 0x140);
+    // The core stores a word in its own region and one in shared memory (the simulator's memory
+    // changes without a debugger write); the decoded step says where it wrote.
+    with_sim(&s, |m| {
+        m.set_mem(0x7000_1008, 0xAA);
+        m.set_mem(0x7000_0020, 0xBB);
+    });
+    let id = last_id(&s);
+    s.cx().with(|c| aurix_core::reverse::note_private_writes(c, id, vec![(0x7000_1008, 4)], true));
+    tcl(&s, "step");
+    assert_eq!(snapshot_bytes(&s), 0x100 + 4, "shared in full, of the private region only the noted word");
+    assert_eq!(saved(&s, 1, 0x7000_1008), 0xAA);
+    assert_eq!(saved(&s, 1, 0x7000_0020), 0xBB);
+
+    // A note from before a RAM write of the debugger's is not used.
+    let id = last_id(&s);
+    s.cx().with(|c| c.io().unwrap().write(0x7000_1010, &[1, 2, 3, 4]).unwrap());
+    s.cx().with(|c| aurix_core::reverse::note_private_writes(c, id, Vec::new(), true));
+    tcl(&s, "step");
+    assert_eq!(snapshot_bytes(&s), 0x140);
+    assert_eq!(saved(&s, 2, 0x7000_1010), 0x0403_0201);
+
+    // Nor one from before another run of the core.
+    let id = last_id(&s);
+    s.cx().with(|c| {
+        let t = c.reverse.target().unwrap();
+        aurix_core::reverse::note_run(c, t);
+        aurix_core::reverse::note_private_writes(c, id, Vec::new(), true);
+    });
+    tcl(&s, "step");
+    assert_eq!(snapshot_bytes(&s), 0x140);
+
+    // Step Back through the patched checkpoints restores what was there.
+    json(&s, "reverse back -json");
+    json(&s, "reverse back -json");
+    json(&s, "reverse back -json");
+    assert_eq!(word(&s, 0x7000_1008), 0xAA);
+    json(&s, "reverse back -json");
+    assert_eq!(word(&s, 0x7000_1008), 0);
+    assert_eq!(word(&s, 0x7000_0020), 0);
+}
+
+#[test]
+fn verify_reads_the_private_regions_anyway_and_trusts_the_full_read() {
+    let s = server();
+    json(&s, "reverse on -notrace -verify -region 0x70000000 0x100 -region 0x70001000 0x40 -private -json");
+    tcl(&s, "step");
+    with_sim(&s, |m| m.set_mem(0x7000_1020, 0x55));
+    // A wrong note (claims nothing was written).
+    let id = last_id(&s);
+    s.cx().with(|c| aurix_core::reverse::note_private_writes(c, id, Vec::new(), true));
+    tcl(&s, "step");
+    assert_eq!(saved(&s, 1, 0x7000_1020), 0x55);
+}
+
+#[test]
+fn step_back_restores_the_private_regions_where_the_notes_say() {
+    let s = server();
+    json(&s, "reverse on -notrace -region 0x70000000 0x100 -region 0x70001000 0x40 -private -json");
+    tcl(&s, "step");
+    tcl(&s, "step");
+    // The last step stored a word in the private region, and says so.
+    with_sim(&s, |m| m.set_mem(0x7000_100C, 0xCC));
+    let id = last_id(&s);
+    s.cx().with(|c| aurix_core::reverse::note_private_writes(c, id, vec![(0x7000_100C, 4)], true));
+    // A change the note does not name (a wrong note, for the test): a restore by difference would
+    // take it back, a restore from the notes leaves it.
+    with_sim(&s, |m| m.set_mem(0x7000_1030, 0x77));
+    let b = json(&s, "reverse back -json");
+    assert_eq!(b["bytes"], 4, "{b}");
+    assert_eq!(word(&s, 0x7000_100C), 0);
+    assert_eq!(word(&s, 0x7000_1030), 0x77);
+    // Without a note (the step before): by difference.
+    let b = json(&s, "reverse back -json");
+    assert_eq!(word(&s, 0x7000_1030), 0, "{b}");
+}

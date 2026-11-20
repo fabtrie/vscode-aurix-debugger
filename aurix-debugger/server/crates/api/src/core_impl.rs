@@ -1018,17 +1018,17 @@ impl DebuggerApi for CoreApi {
     }
 
     fn trace_insns(&self, req: TraceInsnsRequest) -> Result<TraceData, ApiError> {
-        let v = tcf::trace_insns::insns_cmd(&self.session, &serde_json::json!({ "From": req.from, "Count": req.count })).map_err(api_msg)?;
+        let v = tcf::trace_insns::insns_cmd(&self.session, &serde_json::json!({ "From": req.from, "Count": req.count, "Scope": req.scope })).map_err(api_msg)?;
         Ok(TraceData { data: v })
     }
 
     fn trace_regs(&self, req: TraceRegsRequest) -> Result<TraceData, ApiError> {
-        let v = tcf::trace_insns::regs_cmd(&self.session, &serde_json::json!({ "At": req.at, "Before": req.before })).map_err(api_msg)?;
+        let v = tcf::trace_insns::regs_cmd(&self.session, &serde_json::json!({ "At": req.at, "Before": req.before, "Scope": req.scope })).map_err(api_msg)?;
         Ok(TraceData { data: v })
     }
 
     fn trace_find(&self, req: TraceFindRequest) -> Result<TraceData, ApiError> {
-        let v = tcf::trace_insns::find_cmd(&self.session, &serde_json::json!({ "Query": req.query, "From": req.from, "Back": req.back })).map_err(api_msg)?;
+        let v = tcf::trace_insns::find_cmd(&self.session, &serde_json::json!({ "Query": req.query, "From": req.from, "Back": req.back, "Scope": req.scope })).map_err(api_msg)?;
         Ok(TraceData { data: v })
     }
 
@@ -1045,6 +1045,7 @@ impl DebuggerApi for CoreApi {
             "CsaSymbols": req.csa_symbols,
             "Strict": req.strict,
             "MaxHits": req.max_hits,
+            "Verify": req.verify,
         });
         let data = tcf::reverse::enable_cmd(&self.session, &v).map_err(api_msg)?;
         Ok(ReverseData { data })

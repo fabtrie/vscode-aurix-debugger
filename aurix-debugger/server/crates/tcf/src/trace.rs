@@ -189,6 +189,20 @@ impl Image {
         Image { segs }
     }
 
+    /// The image of `set`, read once per symbol set and kept in [`Shared::code_image`]: reading a
+    /// large ELF takes tens of milliseconds, too much for every decoded step.
+    pub fn of(sh: &crate::Shared, set: &std::sync::Arc<SymbolSet>) -> std::sync::Arc<Image> {
+        let mut cache = sh.code_image.lock().unwrap();
+        if let Some((s, img)) = cache.as_ref() {
+            if std::sync::Arc::ptr_eq(s, set) {
+                return img.clone();
+            }
+        }
+        let img = std::sync::Arc::new(Image::load(set));
+        *cache = Some((set.clone(), img.clone()));
+        img
+    }
+
     pub fn read(&self, a: u32, n: usize) -> Option<Vec<u8>> {
         self.segs.iter().find(|(b, d)| a >= *b && ((a - b) as usize) < d.len()).map(|(b, d)| {
             let o = (a - b) as usize;

@@ -96,6 +96,23 @@ pub struct Tricore {
     pub examined: bool,
     /// The last halting reset cleared OCDS and the core ran: the probe's halt after reset was lost.
     pub reset_halt_missed: bool,
+    /// The blocks of [`REG_BLOCKS`] (bit n: block n) this core refused to read as a block (a
+    /// reserved offset in it, e.g. 0xFE00 on a TC375): their registers are read one by one.
+    block_refused: u8,
+}
+
+/// CSFR blocks `(offset, bytes)` that hold the registers a halted core's state is made of: PCXI
+/// PSW PC, SYSCON .. ICR, FCX LCX, D0-D15, A0-A15. Read as blocks when several of their registers
+/// are wanted: 5 accesses for all 42 instead of 42 (each costs about 0.45 ms on the BlueBox). The
+/// gaps between the first three are offsets a TC375 refuses (0xFE0C, 0xFE10, 0xFE30, 0xFE34:
+/// measured 2026-11-20), which fail a block read over them.
+const REG_BLOCKS: [(u16, u16); 5] = [(0xFE00, 12), (0xFE14, 28), (0xFE38, 8), (0xFF00, 64), (0xFF80, 64)];
+/// Fewest wanted registers of a block that make it read as a block.
+const REG_BLOCK_MIN: usize = 2;
+
+/// The block of [`REG_BLOCKS`] (index) that holds CSFR `offset`.
+fn reg_block(offset: u16) -> Option<usize> {
+    REG_BLOCKS.iter().position(|&(s, n)| offset >= s && offset < s + n)
 }
 
 impl Default for Tricore {
@@ -123,6 +140,7 @@ impl Tricore {
             irq_run: None,
             examined: false,
             reset_halt_missed: false,
+            block_refused: 0,
         }
     }
 
@@ -132,6 +150,15 @@ impl Tricore {
 
     pub fn invalidate(&mut self) {
         self.cache.iter_mut().for_each(|c| *c = None);
+    }
+
+    /// Another core's resume released this one (TL1 group): it runs now, whatever the last poll
+    /// saw. It may halt again before the next poll (at a nearby breakpoint), which the poll then
+    /// reports as a new halt instead of keeping the old halt's registers.
+    pub fn released(&mut self) {
+        self.state = TargetState::Running;
+        self.reason = DebugReason::NotHalted;
+        self.invalidate();
     }
 
     fn is_v18(&self) -> bool {
@@ -602,13 +629,63 @@ impl Tricore {
         Ok(self.app_value(idx, v))
     }
 
+    /// Reads the CSFRs of registers `idxs` in one transaction: on a halted core the blocks of
+    /// [`REG_BLOCKS`] with at least [`REG_BLOCK_MIN`] of them as one read each, the rest one by
+    /// one. A block the core refuses as a whole (a reserved offset in it) is read register by
+    /// register from then on.
+    fn read_csfrs(&mut self, io: &mut Io, idxs: &[usize]) -> Result<Vec<u32>> {
+        let addrs: Vec<u32> = idxs.iter().map(|&i| self.csfr(REGS[i].offset)).collect();
+        let block_of = |i: usize| reg_block(REGS[i].offset);
+        let blocks: Vec<usize> = if self.state == TargetState::Halted && !self.is_v18() {
+            (0..REG_BLOCKS.len())
+                .filter(|&n| self.block_refused & (1 << n) == 0)
+                .filter(|&n| idxs.iter().filter(|&&i| block_of(i) == Some(n)).count() >= REG_BLOCK_MIN)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if blocks.is_empty() {
+            return io.read32_many(&addrs);
+        }
+        let singles: Vec<usize> = (0..idxs.len()).filter(|&k| !block_of(idxs[k]).is_some_and(|n| blocks.contains(&n))).collect();
+        let mut b = Batch::new();
+        for &n in &blocks {
+            let (off, len) = REG_BLOCKS[n];
+            b.read(self.csfr(off) as u64, len as usize);
+        }
+        for &k in &singles {
+            b.read32(addrs[k] as u64);
+        }
+        let r = io.batch(&b)?;
+        if let Some(bad) = r.iter().take(blocks.len()).position(|x| !x.ok()) {
+            let n = blocks[bad];
+            crate::log_debug!("[cpu{}] CSFR block {:#06x} not readable as a block: its registers are read one by one from now on", self.coreid, REG_BLOCKS[n].0);
+            self.block_refused |= 1 << n;
+            return self.read_csfrs(io, idxs);
+        }
+        let mut out = vec![0u32; idxs.len()];
+        for (k, &i) in idxs.iter().enumerate() {
+            match block_of(i).and_then(|n| blocks.iter().position(|&x| x == n)) {
+                Some(p) => {
+                    let off = (REGS[i].offset - REG_BLOCKS[blocks[p]].0) as usize;
+                    out[k] = u32::from_le_bytes(r[p].data[off..off + 4].try_into().unwrap());
+                }
+                None => {
+                    let s = blocks.len() + singles.iter().position(|&x| x == k).unwrap();
+                    check(&r[s], addrs[k] as u64, false)?;
+                    out[k] = r[s].u32();
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Reads several registers in one transaction.
     pub fn read_regs(&mut self, io: &mut Io, idxs: &[usize]) -> Result<Vec<u32>> {
         let halted = self.state == TargetState::Halted;
         let missing: Vec<usize> = idxs.iter().copied().filter(|&i| !halted || self.cache[i].is_none()).collect();
         if !missing.is_empty() {
-            let addrs: Vec<u32> = missing.iter().map(|&i| self.csfr(REGS[i].offset)).collect();
-            let vals = io.read32_many(&addrs)?;
+            let vals = self.read_csfrs(io, &missing)?;
             for (&i, v) in missing.iter().zip(&vals) {
                 self.cache[i] = Some(*v);
             }
@@ -619,6 +696,42 @@ impl Tricore {
             }
         }
         Ok(idxs.iter().map(|&i| self.app_value(i, self.cache[i].unwrap_or(0))).collect())
+    }
+
+    /// Writes several registers of a halted core as one packed sequence
+    /// ([`Io::write32_seq_packed`], in the given order; the ICR as in [`Self::write_reg`]) and
+    /// reads them back: on a probe that runs the whole sequence the writes after a failed one still
+    /// happen, so a failure is found by the read-back, which names the registers.
+    pub fn write_regs(&mut self, io: &mut Io, regs: &[(usize, u32)]) -> Result<()> {
+        if regs.is_empty() {
+            return Ok(());
+        }
+        let mut writes = Vec::with_capacity(regs.len());
+        let mut want = Vec::with_capacity(regs.len());
+        for &(idx, value) in regs {
+            let mut value = value;
+            if idx == REG_ICR && self.irq_saved_ie.is_some() {
+                self.irq_saved_ie = Some(value & ICR_IE != 0);
+                value &= !ICR_IE;
+            }
+            writes.push((self.csfr(REGS[idx].offset), value));
+            want.push((idx, value));
+            self.cache[idx] = None;
+        }
+        let written = io.write32_seq_packed(&writes);
+        let idxs: Vec<usize> = want.iter().map(|&(i, _)| i).collect();
+        let got = self.read_csfrs(io, &idxs)?;
+        let bad: Vec<&str> = want.iter().zip(&got).filter(|((_, w), g)| *w != **g).map(|((i, _), _)| REGS[*i].name).collect();
+        if !bad.is_empty() {
+            written?;
+            return Err(other(format!("registers {} did not take the written values", bad.join(", "))));
+        }
+        if self.state == TargetState::Halted {
+            for (&(i, _), &g) in want.iter().zip(&got) {
+                self.cache[i] = Some(g);
+            }
+        }
+        Ok(())
     }
 
     pub fn write_reg(&mut self, io: &mut Io, idx: usize, value: u32) -> Result<()> {

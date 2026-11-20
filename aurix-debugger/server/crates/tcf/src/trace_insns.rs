@@ -100,7 +100,7 @@ pub fn program_trace(sh: &Shared, r: &Recording) -> Result<Arc<ProgramTrace>, St
 /// from them too; `mem`: memory at the end of the recording.
 pub fn build_with(sh: &Shared, r: &Recording, entry: Option<&[u32]>, mem: MemAt) -> Result<ProgramTrace, String> {
     let set = sh.symbols_for("");
-    let img = set.as_deref().map(Image::load).unwrap_or_default();
+    let img = set.as_ref().map(|s| Image::of(sh, s)).unwrap_or_default();
     if img.segs.is_empty() {
         return Err("no code to decode the program trace with (load the ELF of the application)".into());
     }
@@ -562,8 +562,17 @@ fn ran_since_text(why: &str) -> String {
     format!("the trace ends at an earlier halt ({what} since): there is no trace up to the current halt; arm it and run again")
 }
 
-/// `insns {From, Count}`: a page of rows.
+/// `insns {From, Count, Scope}`: a page of rows. With reverse debugging on, the rows of the whole
+/// history ([`crate::trace_history`]) unless `Scope` is `"action"` (the last recording only).
 pub fn insns_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
+    if crate::trace_history::wanted(sh, v) {
+        let h = crate::trace_history::view(sh)?;
+        let n = h.rows();
+        let from = (v.get("From").and_then(Value::as_u64).unwrap_or(0) as usize).min(n);
+        let count = v.get("Count").and_then(Value::as_u64).unwrap_or(500).min(5000) as usize;
+        let rows: Vec<Value> = (from..(from + count).min(n)).map(|i| h.row_json(i)).collect();
+        return Ok(json!({"Total": n, "From": from, "Rows": rows, "Functions": h.funcs, "Files": h.files, "EndNs": Value::Null, "HaltPc": Value::Null, "Reached": true, "Replay": h.summary(), "RanSince": Value::Null, "Scope": "history"}));
+    }
     let (t, ran_since) = current_with(sh)?;
     let n = t.rows();
     let from = (v.get("From").and_then(Value::as_u64).unwrap_or(0) as usize).min(n);
@@ -572,8 +581,22 @@ pub fn insns_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
     Ok(json!({"Total": n, "From": from, "Rows": rows, "Functions": t.funcs, "Files": t.files, "EndNs": t.t_end.map(|e| mcds::units_to_ns(e.saturating_sub(t.t_start.unwrap_or(0)))), "HaltPc": t.halt_pc, "Reached": t.reached, "Replay": t.summary(), "RanSince": ran_since}))
 }
 
-/// `regs {At}`: the registers after a row.
+/// `regs {At, Scope}`: the registers after a row (rows as `insns` numbers them).
 pub fn regs_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
+    if crate::trace_history::wanted(sh, v) {
+        let h = crate::trace_history::view(sh)?;
+        let n = h.rows();
+        if n == 0 {
+            return Err("the history has no instructions".into());
+        }
+        let at = (v.get("At").and_then(Value::as_u64).unwrap_or(n as u64 - 1) as usize).min(n - 1);
+        if v.get("Before").and_then(Value::as_bool) == Some(true) {
+            let mut r = h.regs_before_json(sh, at);
+            r["Before"] = json!(at);
+            return Ok(r);
+        }
+        return Ok(h.regs_json(sh, at));
+    }
     let t = current(sh)?;
     let n = t.rows();
     if n == 0 {
@@ -588,12 +611,16 @@ pub fn regs_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
     Ok(t.regs_json(sh, at))
 }
 
-/// `find {Query, From, Back}`.
+/// `find {Query, From, Back, Scope}`.
 pub fn find_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
-    let t = current(sh)?;
     let q = v.get("Query").and_then(Value::as_str).unwrap_or("");
     let from = v.get("From").and_then(Value::as_u64).map(|x| x as usize);
     let back = v.get("Back").and_then(Value::as_bool).unwrap_or(false);
+    if crate::trace_history::wanted(sh, v) {
+        let h = crate::trace_history::view(sh)?;
+        return Ok(json!({"At": h.find(q, from, back)}));
+    }
+    let t = current(sh)?;
     Ok(json!({"At": t.find(q, from, back)}))
 }
 

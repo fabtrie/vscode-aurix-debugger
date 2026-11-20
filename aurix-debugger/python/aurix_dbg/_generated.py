@@ -2247,7 +2247,7 @@ class GeneratedClient:
         """
         return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/read", _args({"max": max}), None))
 
-    def trace_insns(self, *, count: int | None = None, from_: int | None = None) -> TraceData:
+    def trace_insns(self, *, count: int | None = None, from_: int | None = None, scope: str | None = None) -> TraceData:
         """The last program recording as instructions, a page at a time: each row (`I`) with its time
         (`T`, ns from the first), kind (`K`: `i` instruction, `e` interrupt entry, `g` gap), address
         (`A`), mnemonic and operands (`M`, `O`), function and file (`F`, `Fl`: indices into
@@ -2259,20 +2259,22 @@ class GeneratedClient:
         Args:
             count: Rows (default 500, at most 5000).
             from_: First row (default 0).
+            scope: With reverse debugging on: `history` (default) numbers the rows of every action of the history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`), `action` only the last action's recording.
         """
-        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/insns", _args({"count": count, "from": from_}), None))
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/insns", _args({"count": count, "from": from_, "scope": scope}), None))
 
-    def trace_regs(self, *, at: int | None = None, before: bool | None = None) -> TraceData:
+    def trace_regs(self, *, at: int | None = None, before: bool | None = None, scope: str | None = None) -> TraceData:
         """All registers after one row of the instruction trace, each with how sure it is and where
         it came from (`Why`), and the call stack at that point.
 
         Args:
             at: The row (default: the last, where the core halted).
             before: The registers before the row instead of after it.
+            scope: With reverse debugging on: `history` (default) numbers the rows of every action of the history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`), `action` only the last action's recording.
         """
-        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/regs", _args({"at": at, "before": before}), None))
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/regs", _args({"at": at, "before": before, "scope": scope}), None))
 
-    def trace_find(self, *, query: str, back: bool | None = None, from_: int | None = None) -> TraceData:
+    def trace_find(self, *, query: str, back: bool | None = None, from_: int | None = None, scope: str | None = None) -> TraceData:
         """The next row of the instruction trace matching `query`: an address (`0x80001234`), a
         register value (`d15=0xC`), a register write (`a4 changes`), or text in the instruction,
         function or file name. `from`: start after this row; `back`: search backwards.
@@ -2281,10 +2283,11 @@ class GeneratedClient:
             query: 
             back: 
             from_: 
+            scope: With reverse debugging on: `history` (default) numbers the rows of every action of the history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`), `action` only the last action's recording.
         """
-        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/find", _args({"query": query, "back": back, "from": from_}), None))
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/find", _args({"query": query, "back": back, "from": from_, "scope": scope}), None))
 
-    def reverse_enable(self, *, csa_symbols: list[list[str]] | None = None, exclude: list[ReverseRegion] | None = None, history: int | None = None, max_hits: int | None = None, regions: list[ReverseRegion] | None = None, stack_symbols: list[list[str]] | None = None, strict: bool | None = None, target: str | None = None, trace: bool | None = None) -> ReverseData:
+    def reverse_enable(self, *, csa_symbols: list[list[str]] | None = None, exclude: list[ReverseRegion] | None = None, history: int | None = None, max_hits: int | None = None, regions: list[ReverseRegion] | None = None, stack_symbols: list[list[str]] | None = None, strict: bool | None = None, target: str | None = None, trace: bool | None = None, verify: bool | None = None) -> ReverseData:
         """Switch reverse debugging on for a TriCore core: before every action (run, step, source
         step, register or memory write) the core's registers and the RAM regions are saved, and
         `reverse_back` / `reverse_continue` write an earlier state back into the halted core, which
@@ -2303,8 +2306,9 @@ class GeneratedClient:
             strict: Refuse a Step Back that cannot restore everything.
             target: The core (default: CPU0).
             trace: Record every action with the miniMCDS (default true; CPU0 only).
+            verify: Check of the faster checkpoints: read the core's stacks and context save area in full at every checkpoint anyway and log where they differ from what the decoded writes predict.
         """
-        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/enable", None, _args({"csa_symbols": csa_symbols, "exclude": exclude, "history": history, "max_hits": max_hits, "regions": regions, "stack_symbols": stack_symbols, "strict": strict, "target": target, "trace": trace})))
+        return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/enable", None, _args({"csa_symbols": csa_symbols, "exclude": exclude, "history": history, "max_hits": max_hits, "regions": regions, "stack_symbols": stack_symbols, "strict": strict, "target": target, "trace": trace, "verify": verify})))
 
     def reverse_disable(self) -> ReverseData:
         """Switch reverse debugging off (the history is dropped, the trace released).

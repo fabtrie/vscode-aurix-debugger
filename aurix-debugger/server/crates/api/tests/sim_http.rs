@@ -560,6 +560,25 @@ fn reverse(http: &Http, vs: &mut Tcf, c0: &str) {
     assert_eq!(list.len(), 1, "{h}");
     assert_eq!(list[0]["Action"], "write", "{h}");
 
+    // The instruction trace of the whole history: the write as a marker, the step as its one
+    // instruction, each with its place in the history.
+    http.ok("POST", "/api/v1/targets/tc37x.cpu0/step", None);
+    let t = http.ok("GET", "/api/v1/trace/insns", None);
+    assert_eq!(t["data"]["Scope"], "history", "{t}");
+    let rows = t["data"]["Rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{t}");
+    assert_eq!((rows[0]["K"].as_str(), rows[0]["Act"].as_u64()), (Some("m"), Some(0)), "{t}");
+    assert_eq!((rows[1]["K"].as_str(), rows[1]["Act"].as_u64(), rows[1]["R"].as_u64()), (Some("i"), Some(1), Some(0)), "{t}");
+    let regs = http.ok("GET", "/api/v1/trace/regs?at=1", None);
+    assert_eq!(regs["data"]["At"], 1, "{regs}");
+    assert!(regs["data"]["Regs"].as_array().is_some_and(|r| r.iter().all(|x| x["V"].is_u64())), "{regs}");
+    let found = http.ok("GET", "/api/v1/trace/find?query=memory%20written", None);
+    assert_eq!(found["data"]["At"], 0, "{found}");
+    let r = http.ok("POST", "/api/v1/reverse/back", Some(json!({ "granularity": "action" })));
+    assert_eq!(r["data"]["Action"], "step", "{r}");
+    vs.event("RunControl", "contextResumed", c0);
+    vs.event("RunControl", "contextSuspended", c0);
+
     let r = http.ok("POST", "/api/v1/reverse/back", Some(json!({ "granularity": "action" })));
     assert_eq!(r["data"]["Action"], "write", "{r}");
     assert_eq!(r["data"]["Bytes"], 4, "{r}");

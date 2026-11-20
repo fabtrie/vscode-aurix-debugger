@@ -13,7 +13,7 @@ use crate::events::{emit, Event};
 use crate::reverse::{self, Config, Region};
 use crate::util::parse_u32;
 
-pub const USAGE: &str = "usage: reverse on ?-target <name>? ?-history <n>? ?-notrace? ?-strict? ?-maxhits <n>? -region <start> <len> ?-private? ... | off | status | history | back | goto <index> ?-json?";
+pub const USAGE: &str = "usage: reverse on ?-target <name>? ?-history <n>? ?-notrace? ?-strict? ?-verify? ?-maxhits <n>? -region <start> <len> ?-private? ... | off | status | history | back | goto <index> ?-json?";
 
 /// Default most breakpoint hits counted by a re-execution.
 pub const DEFAULT_MAX_HITS: u32 = 200;
@@ -22,7 +22,7 @@ pub const DEFAULT_HISTORY: usize = 50;
 
 fn parse_on(cx: &Cx, a: &[&str]) -> Result<Config, String> {
     let mut target = None;
-    let mut cfg = Config { target: 0, history: DEFAULT_HISTORY, trace: true, regions: Vec::new(), strict: false, max_hits: DEFAULT_MAX_HITS };
+    let mut cfg = Config { target: 0, history: DEFAULT_HISTORY, trace: true, regions: Vec::new(), strict: false, max_hits: DEFAULT_MAX_HITS, verify: false };
     let mut i = 0;
     let arg = |i: usize, what: &str| a.get(i + 1).copied().ok_or_else(|| format!("missing {what}"));
     while i < a.len() {
@@ -46,6 +46,10 @@ fn parse_on(cx: &Cx, a: &[&str]) -> Result<Config, String> {
             }
             "-strict" => {
                 cfg.strict = true;
+                i += 1;
+            }
+            "-verify" => {
+                cfg.verify = true;
                 i += 1;
             }
             "-region" => {

@@ -244,6 +244,7 @@ pub fn enable_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
         regions: regions.clone(),
         strict: v.get("Strict").and_then(Value::as_bool).unwrap_or(false),
         max_hits: v.get("MaxHits").and_then(Value::as_u64).map(|x| x as u32).unwrap_or(aurix_core::reverse_cmd::DEFAULT_MAX_HITS),
+        verify: v.get("Verify").and_then(Value::as_bool).unwrap_or(false),
     };
     let r2 = regions.clone();
     let coreids: Vec<u32> = cores(&sh.handle).iter().filter(|c| c.arch.name == "tricore").map(|c| c.coreid).collect();
@@ -252,11 +253,9 @@ pub fn enable_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
             rv::enable(c, cfg).map_err(|e| e.to_string())?;
             // One read of every region: what a checkpoint will cost.
             let t0 = Instant::now();
-            let mut io = c.io().map_err(|e| e.to_string())?;
-            for r in &r2 {
-                io.read(r.start, r.len as usize).map_err(|e| format!("cannot read {} ({:#010x}, {} bytes): {e}", r.name, r.start, r.len))?;
-            }
+            rv::read_regions(c, &r2).map_err(|e| e.to_string())?;
             let ms = t0.elapsed().as_millis() as u64;
+            let mut io = c.io().map_err(|e| e.to_string())?;
             // What the debugger may write: the cores' safety protection regions (read only; a
             // test write could raise an alarm).
             let windows = rv::protection_windows(&mut io, &coreids);
@@ -278,6 +277,7 @@ pub fn enable_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
         }
     };
     sh.reverse_cache.lock().unwrap().clear();
+    *sh.trace_history.lock().unwrap() = None;
     crate::trace_insns::end_replay(sh, None);
     let mut notes = notes;
     for (name, n, private) in &refused {
@@ -299,6 +299,7 @@ pub fn enable_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
 pub fn disable_cmd(sh: &Shared) -> Result<Value, String> {
     call(sh, |cx| cx.with(rv::disable))?;
     sh.reverse_cache.lock().unwrap().clear();
+    *sh.trace_history.lock().unwrap() = None;
     broadcast_changed(sh);
     status_cmd(sh)
 }
@@ -359,6 +360,7 @@ pub fn history_cmd(sh: &Shared) -> Result<Value, String> {
                 "Recorded": cp.recording.is_some(),
                 "FromStart": cp.from_start,
                 "CostMs": cp.cost_ms,
+                "Cost": cp.cost.json(),
                 "Current": h.at_checkpoint && i + 1 == h.cps.len(),
             })
         })
@@ -368,17 +370,17 @@ pub fn history_cmd(sh: &Shared) -> Result<Value, String> {
 
 // ---- the history as the core keeps it ----------------------------------------------------------
 
-struct History {
-    cfg: Option<rv::Config>,
-    cps: Vec<rv::Checkpoint>,
-    at_checkpoint: bool,
-    open: bool,
-    coreid: u8,
+pub(crate) struct History {
+    pub(crate) cfg: Option<rv::Config>,
+    pub(crate) cps: Vec<rv::Checkpoint>,
+    pub(crate) at_checkpoint: bool,
+    pub(crate) open: bool,
+    pub(crate) coreid: u8,
 }
 
 impl History {
     /// The last action that happened (the core stands at its end).
-    fn current(&self) -> Option<usize> {
+    pub(crate) fn current(&self) -> Option<usize> {
         let n = self.cps.len();
         if self.at_checkpoint {
             n.checked_sub(2)
@@ -388,7 +390,7 @@ impl History {
     }
 }
 
-fn snapshot_history(sh: &Shared) -> Result<History, String> {
+pub(crate) fn snapshot_history(sh: &Shared) -> Result<History, String> {
     call(sh, |cx| {
         cx.with(|c| {
             let coreid = c.reverse.target().and_then(|t| match &c.targets[t].core {
@@ -401,7 +403,7 @@ fn snapshot_history(sh: &Shared) -> Result<History, String> {
 }
 
 /// The decoded recording of action `j`, if it has one.
-fn action_trace(sh: &Shared, h: &History, j: usize) -> Option<Arc<ProgramTrace>> {
+pub(crate) fn action_trace(sh: &Shared, h: &History, j: usize) -> Option<Arc<ProgramTrace>> {
     let cp = h.cps.get(j)?;
     let rec = cp.recording.as_ref()?;
     if let Some((key, t)) = sh.reverse_cache.lock().unwrap().get(&cp.id) {
@@ -481,7 +483,7 @@ fn effects(sh: &Shared, h: &History, j: usize) -> Effects {
     // An instruction step: one instruction between two known states.
     if let (Some(end), "step") = (cp.end.as_ref(), cp.kind.as_str()) {
         let set = sh.symbols_for("");
-        let img = set.as_deref().map(crate::trace::Image::load).unwrap_or_default();
+        let img = set.as_ref().map(|s| crate::trace::Image::of(sh, s)).unwrap_or_default();
         if let Ok(mut code) = mcds::flow::CapstoneCode::new(|a: u32, n: usize| img.read(a, n)) {
             let steps = vec![Step::Insn { addr: cp.pc(), time: None }];
             let r = replay::Replay::build_between(&steps, &mut code, Some(&replay::HaltRegs(cp.regs.clone())), Some(&replay::HaltRegs(end.regs.clone())), &mut |_, _| None, core);
@@ -496,6 +498,97 @@ fn effects(sh: &Shared, h: &History, j: usize) -> Effects {
         }
     }
     Effects { why: Some(if h.cfg.as_ref().is_some_and(|c| c.trace) { "the action was not recorded" } else { "recording is off" }), ..Default::default() }
+}
+
+// ---- the core's own stacks and context save area: only where the action wrote --------------
+
+/// After an action ended (the core halted, a source step finished): tells the core which bytes of
+/// its private regions (the reversed core's stacks and context save area, written by no one else)
+/// the action wrote, so the next checkpoint reads only those of them
+/// ([`rv::note_private_writes`]). In the background: a next action that starts before the note
+/// is there reads them in full, as without it.
+pub fn note_last_action(sh: &Arc<Shared>) {
+    let sh = sh.clone();
+    std::thread::spawn(move || note_now(&sh));
+}
+
+fn note_now(sh: &Shared) {
+    let Ok(h) = snapshot_history(sh) else { return };
+    let Some(cfg) = h.cfg.clone() else { return };
+    if h.open || h.at_checkpoint {
+        return;
+    }
+    let Some(j) = h.current() else { return };
+    let cp = &h.cps[j];
+    if cp.end.is_none() || cp.kind.starts_with("write") {
+        return;
+    }
+    let t0 = Instant::now();
+    let (written, complete) = private_writes(sh, &h, j);
+    let mut ranges: Written = Vec::new();
+    for &(a, n) in &written {
+        for r in cfg.regions.iter().filter(|r| r.private) {
+            let s = a.max(r.start);
+            let e = a.wrapping_add(n).min(r.end());
+            if s < e {
+                ranges.push((s, e - s));
+            }
+        }
+    }
+    ranges.sort();
+    let (id, n) = (cp.id, ranges.len());
+    let _ = call(sh, move |cx| cx.with(|c| rv::note_private_writes(c, id, ranges, complete)));
+    aurix_core::log_debug!("reverse: {} (checkpoint {id}): {} {n} ranges of the core's own regions written ({} ms)", cp.kind, if complete { "known," } else { "not all known," }, t0.elapsed().as_millis());
+}
+
+/// Every store of action `j` and whether that is all of them, decoded without reading the target
+/// (which would cost more than the checkpoint saves): the recording replayed from both exact
+/// register states with only program flash as memory, or an instruction step's one instruction.
+/// Not complete when a store address is unknown, the recording has gaps or lost its start, an
+/// instruction is not modelled (its stores would be missing), or the replay conflicts with the
+/// registers at the end (an interrupt the trace does not show).
+fn private_writes(sh: &Shared, h: &History, j: usize) -> (Written, bool) {
+    let cp = &h.cps[j];
+    let core = h.coreid;
+    let check = |e: &mut Effects, r: &replay::Replay| {
+        for row in 0..r.rows.len() {
+            add_accesses(e, core, &r.accesses(row));
+        }
+        let gaps = r.rows.iter().any(|x| matches!(x, Row::Gap { .. }));
+        !gaps && e.unknown == 0 && r.stats.unmodelled.is_empty() && r.stats.conflicts == 0
+    };
+    if let Some(rec) = cp.recording.as_ref() {
+        if !cp.from_start {
+            return (Vec::new(), false);
+        }
+        let Ok(pt) = crate::trace_insns::build_with(sh, rec, Some(&cp.regs), MemAt::Saved(Vec::new())) else { return (Vec::new(), false) };
+        let mut e = Effects::default();
+        let ok = check(&mut e, &pt.replay) && pt.from_entry && pt.reached;
+        return (e.written, ok);
+    }
+    let (Some(end), "step") = (cp.end.as_ref(), cp.kind.as_str()) else { return (Vec::new(), false) };
+    let set = sh.symbols_for("");
+    let img = set.as_ref().map(|s| crate::trace::Image::of(sh, s)).unwrap_or_default();
+    let Ok(mut code) = mcds::flow::CapstoneCode::new(|a: u32, n: usize| img.read(a, n)) else { return (Vec::new(), false) };
+    let steps = vec![Step::Insn { addr: cp.pc(), time: None }];
+    let r = replay::Replay::build_between(&steps, &mut code, Some(&replay::HaltRegs(cp.regs.clone())), Some(&replay::HaltRegs(end.regs.clone())), &mut |_, _| None, core);
+    let mut e = Effects::default();
+    let mut ok = check(&mut e, &r);
+    // Where the instruction leads must be where the core stopped: else something else ran (an
+    // interrupt or trap taken by the step).
+    if let Some(Row::Insn { addr, d, .. }) = r.rows.first() {
+        let fall = addr.wrapping_add(d.size as u32);
+        let leads = match replay::operand::parse(&d.ops).map(|ops| replay::model::classify(&d.mnemonic, &ops)) {
+            Some(replay::model::Next::Seq) => end.pc == fall,
+            Some(replay::model::Next::Direct(t)) => end.pc == t,
+            Some(replay::model::Next::Cond(t)) => end.pc == t || end.pc == fall,
+            _ => true,
+        };
+        ok &= leads;
+    } else {
+        ok = false;
+    }
+    (e.written, ok)
 }
 
 /// What undoing actions `k..=last` needs: the written bytes when known for all of them.
@@ -804,6 +897,11 @@ fn report_json(rep: &rv::Report, undo: &Undo) -> Value {
         "ByDifference": rep.by_difference,
         "Why": undo.why,
         "OutsideBytes": rep.outside_bytes,
+        "Cost": {
+            "ReadMs": (rep.read_us as f64 / 100.0).round() / 10.0,
+            "WriteMs": (rep.write_us as f64 / 100.0).round() / 10.0,
+            "RegsMs": (rep.regs_us as f64 / 100.0).round() / 10.0,
+        },
         "NotUndone": {
             "Peripheral": undo.sfr.iter().map(|a| format!("{a:#010x}")).collect::<Vec<_>>(),
             "Protected": rep.refused.iter().map(|(a, n)| json!([format!("{a:#010x}"), n])).collect::<Vec<_>>(),

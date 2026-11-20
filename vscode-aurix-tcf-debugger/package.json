@@ -1250,7 +1250,8 @@
 											"stackSymbols": { "type": "array", "description": "Linker symbol pairs bounding the stacks, e.g. [[\"__USTACK0_END\", \"__USTACK0\"]] (defaults for iLLD/HighTec and TASKING).", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
 											"csaSymbols": { "type": "array", "description": "Linker symbol pairs bounding the context save area, e.g. [[\"__CSA0\", \"__CSA0_END\"]].", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
 											"maxHits": { "type": "number", "default": 200, "description": "Step Back inside a run runs there again from its checkpoint: most breakpoint hits it may count." },
-											"strict": { "type": "boolean", "default": false, "description": "Refuse a Step Back that cannot restore everything (peripheral writes, unknown writes)." }
+											"strict": { "type": "boolean", "default": false, "description": "Refuse a Step Back that cannot restore everything (peripheral writes, unknown writes)." },
+											"verify": { "type": "boolean", "default": false, "description": "Check: read the core's stacks and context save area in full at every checkpoint, also when the decoded writes of the last action say where they changed, and log any difference (slower)." }
 										}
 									}
 								]

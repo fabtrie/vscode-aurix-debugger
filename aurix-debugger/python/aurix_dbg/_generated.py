@@ -1,7 +1,7 @@
 # Generated from the aurix-dbg API definition (server/crates/api-spec) by `cargo build`. Do not edit.
 """Generated part of the aurix-dbg client: response types and API methods.
 
-Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
+Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.
 
 A session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.
 
@@ -68,6 +68,28 @@ WaitFor = Literal["halted", "running"]
 
 WatchAccess = Literal["read", "write", "access"]
 """Access that triggers a watchpoint."""
+
+
+@dataclass
+class AddressInfo:
+    """What the symbols say about an address."""
+
+    address: int
+    location: SourceLocation | None = None
+    """Function and line of code at the address."""
+    variable: str | None = None
+    """The global or static variable the address lies in."""
+    variable_offset: int | None = None
+    """Offset of the address into `variable`."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> AddressInfo:
+        return cls(
+            address=d.get("address"),
+            location=_obj(SourceLocation, d.get("location")),
+            variable=d.get("variable"),
+            variable_offset=d.get("variable_offset"),
+        )
 
 
 @dataclass
@@ -966,6 +988,80 @@ class SessionLog:
 
 
 @dataclass
+class SourceLocation:
+    """A code address in the source: its function and line, as far as the symbols describe it."""
+
+    column: int | None = None
+    file: str | None = None
+    """Source file (as the compiler recorded its path)."""
+    function: str | None = None
+    """The function the address is in."""
+    function_offset: int | None = None
+    """Offset of the address from the start of the function."""
+    line: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SourceLocation:
+        return cls(
+            column=d.get("column"),
+            file=d.get("file"),
+            function=d.get("function"),
+            function_offset=d.get("function_offset"),
+            line=d.get("line"),
+        )
+
+
+@dataclass
+class StackFrame:
+    """A frame of a call stack."""
+
+    index: int
+    """0 for the top (innermost) frame, the one the core is halted in."""
+    pc: int
+    """Where the frame executes: the PC of the top frame, the return address of the others."""
+    location: SourceLocation | None = None
+    """Function and line. For a caller frame the call is looked up: its `pc` is the return
+    address, which may already lie on the next line or past the calling function."""
+    return_address: int | None = None
+    """Where the frame's function returns to (TriCore A11, Cortex-M LR), where it is known."""
+    sp: int | None = None
+    """Stack pointer of the frame (TriCore A10, Cortex-M SP), where it is known."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> StackFrame:
+        return cls(
+            index=d.get("index"),
+            pc=d.get("pc"),
+            location=_obj(SourceLocation, d.get("location")),
+            return_address=d.get("return_address"),
+            sp=d.get("sp"),
+        )
+
+
+@dataclass
+class StackTrace:
+    """The call stack of a halted target."""
+
+    frames: list[StackFrame]
+    """Top (innermost) frame first."""
+    replay: bool
+    """The frames are those of an instruction trace replay (VS Code shows the core at a trace
+    row), not of the live core."""
+    target: str
+    truncated: bool
+    """More frames exist than were returned (`max_frames`, or the limit of 64)."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> StackTrace:
+        return cls(
+            frames=_list(StackFrame, d.get("frames")),
+            replay=d.get("replay"),
+            target=d.get("target"),
+            truncated=d.get("truncated"),
+        )
+
+
+@dataclass
 class SymbolChildren:
     """The members of a struct or union, or the elements of an array. Anything else has none."""
 
@@ -1051,6 +1147,9 @@ class TargetInfo:
     """Why the target halted (`breakpoint`, `debug-request`, `single-step`, `reset`, ...),
     `not halted` while running."""
     state: RunState
+    location: SourceLocation | None = None
+    """Where the PC is in the source, when halted and the loaded symbols describe it. Left out
+    while symbols are loading."""
     pc: int | None = None
     """Program counter, when halted."""
 
@@ -1064,6 +1163,7 @@ class TargetInfo:
             reachable=d.get("reachable"),
             reason=d.get("reason"),
             state=d.get("state"),
+            location=_obj(SourceLocation, d.get("location")),
             pc=d.get("pc"),
         )
 
@@ -1475,6 +1575,22 @@ class GeneratedClient:
         """
         return TargetList.from_dict(self._call("POST", self._session_path() + "/reset", None, _args({"mode": mode})))
 
+    def stack_trace(self, target: str, *, max_frames: int | None = None) -> StackTrace:
+        """The call stack of a halted target: each frame's PC, stack pointer, return address,
+        function and source line, top frame first.
+
+        The same frames VS Code shows: TriCore frames come from the CSA chain, Cortex-M (HSM) ones
+        from the function prologues; a GTM MCS channel has at most two frames, the SCR one. While
+        VS Code shows the core at a trace row (instruction trace replay), the frames are the
+        replay's. Functions and lines need loaded symbols (`load_symbols`). Fails with
+        `not_halted` while the target runs and with `busy` during a source-level step of VS Code.
+
+        Args:
+            target: Target name or index.
+            max_frames: Return at most this many frames, from the top (default: all, up to 64).
+        """
+        return StackTrace.from_dict(self._call("GET", self._session_path() + f"/targets/{quote(str(target), safe='')}/stack", _args({"max_frames": max_frames}), None))
+
     def read_registers(self, target: str, *, group: RegisterGroup | None = None) -> RegisterList:
         """Read the registers of a target (the core registers need a halted target).
 
@@ -1881,6 +1997,21 @@ class GeneratedClient:
         """The symbol files loaded per target (by this API or by a VS Code debug session).
         """
         return SymbolsInfo.from_dict(self._call("GET", self._session_path() + "/symbols", None, None))
+
+    def lookup_address(self, *, address: int | str, return_address: bool | None = None, target: str | None = None) -> AddressInfo:
+        """What the loaded symbols say about an address: the function, offset and source line of
+        code there, and the global or static variable data there lies in.
+
+        Reads no target memory. Addresses are as linked: a variable in core-local RAM linked at
+        its `0xD000_0000` alias is found by that address, not by a core's global one. Fails with
+        `not_found` when no symbols are loaded.
+
+        Args:
+            address: Code or data address.
+            return_address: The address is a return address (e.g. a saved A11 or LR): look up the call before it.
+            target: Use this target's symbols (default: the first core that has symbols).
+        """
+        return AddressInfo.from_dict(self._call("GET", self._session_path() + "/symbols/address", _args({"address": address, "return_address": return_address, "target": target}), None))
 
     def list_globals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None, target: str | None = None) -> GlobalList:
         """List the global and static variables of the loaded symbols, filtered by a name pattern, one

@@ -150,6 +150,47 @@
         },
         "type": "object"
       },
+      "AddressInfo": {
+        "description": "What the symbols say about an address.",
+        "properties": {
+          "address": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceLocation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Function and line of code at the address."
+          },
+          "variable": {
+            "description": "The global or static variable the address lies in.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variable_offset": {
+            "description": "Offset of the address into `variable`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "type": "object"
+      },
       "ApiError": {
         "description": "Error of an operation (HTTP error responses, MCP tool errors).",
         "properties": {
@@ -1667,6 +1708,43 @@
         ],
         "type": "object"
       },
+      "LookupAddressRequest": {
+        "additionalProperties": false,
+        "description": "Address lookup arguments.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                "type": "string"
+              }
+            ],
+            "description": "Code or data address."
+          },
+          "return_address": {
+            "default": false,
+            "description": "The address is a return address (e.g. a saved A11 or LR): look up the call before it.",
+            "type": "boolean"
+          },
+          "target": {
+            "default": null,
+            "description": "Use this target's symbols (default: the first core that has symbols).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "type": "object"
+      },
       "MemoryData": {
         "description": "Memory contents.",
         "properties": {
@@ -3026,6 +3104,156 @@
           }
         ]
       },
+      "SourceLocation": {
+        "description": "A code address in the source: its function and line, as far as the symbols describe it.",
+        "properties": {
+          "column": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file": {
+            "description": "Source file (as the compiler recorded its path).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "function": {
+            "description": "The function the address is in.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "function_offset": {
+            "description": "Offset of the address from the start of the function.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "line": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StackFrame": {
+        "description": "A frame of a call stack.",
+        "properties": {
+          "index": {
+            "description": "0 for the top (innermost) frame, the one the core is halted in.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceLocation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Function and line. For a caller frame the call is looked up: its `pc` is the return\naddress, which may already lie on the next line or past the calling function."
+          },
+          "pc": {
+            "description": "Where the frame executes: the PC of the top frame, the return address of the others.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "return_address": {
+            "description": "Where the frame's function returns to (TriCore A11, Cortex-M LR), where it is known.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sp": {
+            "description": "Stack pointer of the frame (TriCore A10, Cortex-M SP), where it is known.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "index",
+          "pc"
+        ],
+        "type": "object"
+      },
+      "StackTrace": {
+        "description": "The call stack of a halted target.",
+        "properties": {
+          "frames": {
+            "description": "Top (innermost) frame first.",
+            "items": {
+              "$ref": "#/components/schemas/StackFrame"
+            },
+            "type": "array"
+          },
+          "replay": {
+            "description": "The frames are those of an instruction trace replay (VS Code shows the core at a trace\nrow), not of the live core.",
+            "type": "boolean"
+          },
+          "target": {
+            "type": "string"
+          },
+          "truncated": {
+            "description": "More frames exist than were returned (`max_frames`, or the limit of 64).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "target",
+          "frames",
+          "truncated",
+          "replay"
+        ],
+        "type": "object"
+      },
+      "StackTraceRequest": {
+        "additionalProperties": false,
+        "description": "Call stack arguments.",
+        "properties": {
+          "max_frames": {
+            "default": null,
+            "description": "Return at most this many frames, from the top (default: all, up to 64).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
       "SymbolChildren": {
         "description": "The members of a struct or union, or the elements of an array. Anything else has none.",
         "properties": {
@@ -3187,6 +3415,17 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceLocation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the PC is in the source, when halted and the loaded symbols describe it. Left out\nwhile symbols are loading."
           },
           "name": {
             "description": "Target name (e.g. `tc37x.cpu0`).",
@@ -4210,7 +4449,7 @@
     }
   },
   "info": {
-    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
+    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
     "title": "aurix-dbg API",
     "version": "0.1.0"
   },
@@ -6857,6 +7096,91 @@
         ]
       }
     },
+    "/api/v1/sessions/{session}/symbols/address": {
+      "get": {
+        "description": "What the loaded symbols say about an address: the function, offset and source line of\ncode there, and the global or static variable data there lies in.\n\nReads no target memory. Addresses are as linked: a variable in core-local RAM linked at\nits `0xD000_0000` alias is found by that address, not by a core's global one. Fails with\n`not_found` when no symbols are loaded.",
+        "operationId": "lookup_address",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Code or data address.",
+            "in": "query",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 4294967295,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^(0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})$",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          {
+            "description": "The address is a return address (e.g. a saved A11 or LR): look up the call before it.",
+            "in": "query",
+            "name": "return_address",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Use this target's symbols (default: the first core that has symbols).",
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddressInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "What the loaded symbols say about an address: the function, offset and source line of code there, and the global or static variable data there lies in.",
+        "tags": [
+          "symbols"
+        ]
+      }
+    },
     "/api/v1/sessions/{session}/targets": {
       "get": {
         "description": "List the targets (cores) with their run state.",
@@ -7307,6 +7631,73 @@
           }
         },
         "summary": "Resume a halted target, optionally at another address.",
+        "tags": [
+          "run_control"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/targets/{target}/stack": {
+      "get": {
+        "description": "The call stack of a halted target: each frame's PC, stack pointer, return address,\nfunction and source line, top frame first.\n\nThe same frames VS Code shows: TriCore frames come from the CSA chain, Cortex-M (HSM) ones\nfrom the function prologues; a GTM MCS channel has at most two frames, the SCR one. While\nVS Code shows the core at a trace row (instruction trace replay), the frames are the\nreplay's. Functions and lines need loaded symbols (`load_symbols`). Fails with\n`not_halted` while the target runs and with `busy` during a source-level step of VS Code.",
+        "operationId": "stack_trace",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return at most this many frames, from the top (default: all, up to 64).",
+            "in": "query",
+            "name": "max_frames",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StackTrace"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The call stack of a halted target: each frame's PC, stack pointer, return address, function and source line, top frame first.",
         "tags": [
           "run_control"
         ]

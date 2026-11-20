@@ -10,6 +10,22 @@ use crate::Shared;
 
 pub const MAX_FRAMES: usize = 64;
 
+/// The call stack of a halted core, top frame first, and whether it is a trace replay's (the core
+/// shown at a trace row) rather than the live core's. Unwound once and cached until the core runs
+/// or a frontend writes registers or memory. The caller checks that the core is halted and not
+/// in a source-level step.
+pub fn frames(sh: &Shared, idx: usize) -> Result<(Vec<Frame>, bool), String> {
+    if let Some(f) = crate::trace_insns::replay_frames(sh, idx) {
+        return Ok((f, true));
+    }
+    if let Some(f) = sh.stacks.lock().unwrap().get(&idx) {
+        return Ok((f.clone(), false));
+    }
+    let f = unwind_core(sh, idx)?;
+    sh.stacks.lock().unwrap().insert(idx, f.clone());
+    Ok((f, false))
+}
+
 pub fn unwind_core(sh: &Shared, idx: usize) -> Result<Vec<Frame>, String> {
     let core = find_core(&sh.handle, &crate::contexts::core_id_of(&sh.handle, idx)).ok_or("invalid core")?;
     if core.arch.name == "cortex_m" {

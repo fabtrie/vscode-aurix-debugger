@@ -38,7 +38,8 @@ use breakpoints::{BpTable, Resolver};
 use channel::Writer;
 use expressions::ExprTable;
 pub use expressions::{evaluate_global, home_core, split_core, symbol_ref, CoreSel, GlobalError, GlobalValue};
-pub use symstore::{elf_id, Elf, SymbolSet, SymbolStore};
+pub use stack::{frames as stack_frames, MAX_FRAMES};
+pub use symstore::{elf_id, CodeLocation, Elf, SymbolSet, SymbolStore};
 
 pub use breakpoints::{access_bits, Bp, Instance, Kind};
 pub use contexts::{core_id, cores, owning_core, CoreInfo, CONTAINER};

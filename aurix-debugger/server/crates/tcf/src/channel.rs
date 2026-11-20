@@ -897,15 +897,7 @@ impl Channel {
     // --- StackTrace --------------------------------------------------------------------
 
     fn frames(&self, c: &CoreInfo) -> Result<Vec<Frame>, TcfError> {
-        if let Some(f) = crate::trace_insns::replay_frames(&self.shared, c.idx) {
-            return Ok(f);
-        }
-        if let Some(f) = self.shared.stacks.lock().unwrap().get(&c.idx) {
-            return Ok(f.clone());
-        }
-        let frames = crate::stack::unwind_core(&self.shared, c.idx).map_err(|e| err(ERR_OTHER, e))?;
-        self.shared.stacks.lock().unwrap().insert(c.idx, frames.clone());
-        Ok(frames)
+        crate::stack::frames(&self.shared, c.idx).map(|(f, _)| f).map_err(|e| err(ERR_OTHER, e))
     }
 
     fn st_children(&self, a: &Args, range: Option<(i64, i64)>) -> Reply {

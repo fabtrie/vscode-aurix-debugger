@@ -27,8 +27,8 @@ pub use ops::{dispatch, DebuggerApi, OPS};
 /// Overall API description (OpenAPI `info.description`, MCP server instructions).
 pub const API_DOC: &str = "\
 Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then \
-run control, registers, memory, variables by name, breakpoints, watchpoints, flash programming \
-and the OpenOCD-compatible Tcl console.
+run control, call stacks, registers, memory, variables by name, breakpoints, watchpoints, flash \
+programming and the OpenOCD-compatible Tcl console.
 
 A session is one board connection (one worker process). `list_sessions` shows the open ones; \
 `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run \
@@ -55,8 +55,9 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// `trace_stop`, `trace_read`; DAQ points with `mode: "trace"`. 8: `trace_insns`, `trace_regs`,
 /// `trace_find` (instruction trace with rebuilt registers), `trace_auto`. 9: `reverse_enable`,
 /// `reverse_disable`, `reverse_status`, `reverse_history`, `reverse_back`, `reverse_continue`,
-/// `reverse_goto` (reverse debugging on the hardware).
-pub const API_VERSION: u32 = 9;
+/// `reverse_goto` (reverse debugging on the hardware). 10: `stack_trace`, `lookup_address`,
+/// `location` in the target state.
+pub const API_VERSION: u32 = 10;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

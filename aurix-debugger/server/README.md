@@ -239,6 +239,17 @@ dbg.write_variable(expression="g_motor.mode", value="MODE_RUN")
 - **`info`** is what a client polls to see that the server is up: `api_version` is an integer raised whenever an operation or field is added or changed, `core_lag_ms` the time since the core thread last finished a job or poll (it grows while one long operation holds it), and `symbols_loading` is set while `load_symbols` parses an ELF.
 - Query parameters are URL-encoded as usual; note that `+` in an expression must be sent as `%2B`, or it arrives as a space.
 
+### Call stack and code locations
+
+```text
+GET /api/v1/targets/tc37x.cpu0/stack?max_frames=10          stack_trace
+GET /api/v1/symbols/address?address=0x80001234               lookup_address
+```
+
+- **`stack_trace`** returns the frames VS Code shows, top frame first, from the same unwinder and cache: TriCore from the CSA chain, the HSM from the Cortex-M prologues, a GTM MCS channel with at most two frames, the SCR with one. Each frame has its `pc` (the return address for caller frames), `sp` and `return_address` where the core has them, and a `location` (function, offset, file, line) once symbols are loaded. A caller frame's location is that of its call: the return address can already lie on the next line, or past the end of the calling function. While VS Code shows the core at a trace row, the frames are the replay's (`replay: true`). The target must be halted (`not_halted`), and not in a source-level step of VS Code (`busy`).
+- **The target state carries the location.** `state`, `halt`, `step`, `resume`, `wait_state`, `targets` and `reset` add a `location` to a halted target whose PC the symbols describe. It costs a symbol lookup and no target access. It is left out while symbols are loading, rather than waiting for them.
+- **`lookup_address`** is addr2line over the loaded symbols: the function, offset and line of code at an address (`return_address: true` looks up the call before a saved A11 or LR), and the global or static variable data there lies in, with the offset into it. It reads no target memory. Addresses are as linked, so a variable linked at the core-local alias is found by its `0xD000_0000` address.
+
 ### Watchpoints
 
 `add_watchpoint` takes an `address` (with `length`, default 4) or an `expression`, a `target` (default: every TriCore core) and an `access` (`write`, `read`, `access`). VS Code's data breakpoints are the same breakpoints, set through TCF with `AccessMode` and `Size`. An expression is resolved on each core from that core's symbols, to the object's address and the size of its type (a bit field: its storage unit). It is resolved again when other symbols are loaded, so a rebuilt ELF moves the watchpoint with the variable.

@@ -58,6 +58,63 @@ impl SymbolSet {
         }
     }
 
+    /// Where the code at `addr` is: its function, the offset from the function's start, and its
+    /// source line. A caller frame's PC is a return address, which may already lie past the end
+    /// of the calling function or line; with `return_address` the call before it is looked up,
+    /// as the VS Code call stack does. The offset is from `addr` itself.
+    pub fn code_location(&self, addr: u32, return_address: bool) -> CodeLocation {
+        let look = if return_address { addr.wrapping_sub(1) } else { addr };
+        let f = self.function_at(look);
+        let line = self.line_at(look);
+        CodeLocation {
+            function: f.map(|f| f.name.clone()),
+            // Cortex-M (Thumb) functions have bit 0 set in their DWARF start address.
+            function_offset: f.map(|f| addr.wrapping_sub(f.low & !1)),
+            file: line.as_ref().map(|l| l.file.clone()),
+            line: line.as_ref().map(|l| l.line),
+            column: line.as_ref().map(|l| l.column).filter(|&c| c != 0),
+        }
+    }
+
+    /// The global or static variable `addr` lies in, as its name and the offset into it. Only a
+    /// variable whose type has a size can contain an address past its start. Addresses are as
+    /// linked: a variable in core-local RAM linked at its `0xD000_0000` alias is found by that.
+    pub fn variable_at(&self, addr: u32) -> Option<(String, u32)> {
+        let mut best: Option<(&Arc<Symbols>, usize)> = None;
+        for (_, s) in &self.elfs {
+            for (i, g) in s.globals.iter().enumerate() {
+                if g.addr <= addr && g.addr != 0 && best.is_none_or(|(b, j)| b.globals[j].addr < g.addr) {
+                    best = Some((s, i));
+                }
+            }
+        }
+        let (s, i) = best?;
+        let g = &s.globals[i];
+        let off = addr - g.addr;
+        let size = s.type_info(&s.global_type(i)).size;
+        (off == 0 || off < size).then(|| (g.name.clone(), off))
+    }
+}
+
+/// A code address in the source (see [`SymbolSet::code_location`]). Empty where the symbols do
+/// not describe the address.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodeLocation {
+    pub function: Option<String>,
+    pub function_offset: Option<u32>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+impl CodeLocation {
+    pub fn is_empty(&self) -> bool {
+        self.function.is_none() && self.file.is_none()
+    }
+}
+
+impl SymbolSet {
+
     /// Line entries overlapping `start..end`, from every file. A disassembly window often starts
     /// in data or a gap (MCS `.var` areas between the tasks), so asking only the file that owns
     /// `start` would leave the whole window without source. The owner of `start` comes first, so

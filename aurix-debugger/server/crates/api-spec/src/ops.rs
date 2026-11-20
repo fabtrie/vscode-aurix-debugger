@@ -55,6 +55,16 @@ api! {
     /// a source-level step.
     op reset [run_control]: POST "/api/v1/reset" (ResetRequest) -> TargetList;
 
+    /// The call stack of a halted target: each frame's PC, stack pointer, return address,
+    /// function and source line, top frame first.
+    ///
+    /// The same frames VS Code shows: TriCore frames come from the CSA chain, Cortex-M (HSM) ones
+    /// from the function prologues; a GTM MCS channel has at most two frames, the SCR one. While
+    /// VS Code shows the core at a trace row (instruction trace replay), the frames are the
+    /// replay's. Functions and lines need loaded symbols (`load_symbols`). Fails with
+    /// `not_halted` while the target runs and with `busy` during a source-level step of VS Code.
+    op stack_trace [run_control]: GET "/api/v1/targets/{target}/stack" (StackTraceRequest) -> StackTrace;
+
     /// Read the registers of a target (the core registers need a halted target).
     op read_registers [registers]: GET "/api/v1/targets/{target}/registers" (ReadRegistersRequest) -> RegisterList;
 
@@ -249,6 +259,14 @@ api! {
 
     /// The symbol files loaded per target (by this API or by a VS Code debug session).
     op symbols [symbols]: GET "/api/v1/symbols" (NoArgs) -> SymbolsInfo;
+
+    /// What the loaded symbols say about an address: the function, offset and source line of
+    /// code there, and the global or static variable data there lies in.
+    ///
+    /// Reads no target memory. Addresses are as linked: a variable in core-local RAM linked at
+    /// its `0xD000_0000` alias is found by that address, not by a core's global one. Fails with
+    /// `not_found` when no symbols are loaded.
+    op lookup_address [symbols]: GET "/api/v1/symbols/address" (LookupAddressRequest) -> AddressInfo;
 
     /// List the global and static variables of the loaded symbols, filtered by a name pattern, one
     /// page at a time.

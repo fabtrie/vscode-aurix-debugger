@@ -65,6 +65,15 @@ fn evaluate_in(api: &CoreApi, target: Option<&str>, expression: &str) -> Result<
     tcf::evaluate_global(&api.session, &ctx, expression.trim()).map_err(eval_error)
 }
 
+/// What the symbols of the request's target say about an address: code location and variable.
+pub fn lookup_address(api: &CoreApi, req: LookupAddressRequest) -> Result<AddressInfo, ApiError> {
+    let (_, set) = symbol_set(api, req.target.as_deref())?;
+    let address = req.address.0;
+    let location = crate::core_impl::source_location(set.code_location(address, req.return_address));
+    let (variable, variable_offset) = set.variable_at(address).map_or((None, None), |(n, o)| (Some(n), Some(o)));
+    Ok(AddressInfo { address, location, variable, variable_offset })
+}
+
 fn page(offset: Option<u32>, limit: Option<u32>) -> (usize, usize) {
     (offset.unwrap_or(0) as usize, limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize)
 }

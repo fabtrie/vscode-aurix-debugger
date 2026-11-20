@@ -156,6 +156,100 @@ pub struct TargetInfo {
     /// Program counter, when halted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc: Option<u32>,
+    /// Where the PC is in the source, when halted and the loaded symbols describe it. Left out
+    /// while symbols are loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
+/// A code address in the source: its function and line, as far as the symbols describe it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceLocation {
+    /// The function the address is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// Offset of the address from the start of the function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_offset: Option<u32>,
+    /// Source file (as the compiler recorded its path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+}
+
+/// Call stack arguments.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StackTraceRequest {
+    /// Target name or index.
+    pub target: String,
+    /// Return at most this many frames, from the top (default: all, up to 64).
+    #[serde(default)]
+    pub max_frames: Option<u32>,
+}
+
+/// A frame of a call stack.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct StackFrame {
+    /// 0 for the top (innermost) frame, the one the core is halted in.
+    pub index: u32,
+    /// Where the frame executes: the PC of the top frame, the return address of the others.
+    pub pc: u32,
+    /// Stack pointer of the frame (TriCore A10, Cortex-M SP), where it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sp: Option<u32>,
+    /// Where the frame's function returns to (TriCore A11, Cortex-M LR), where it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_address: Option<u32>,
+    /// Function and line. For a caller frame the call is looked up: its `pc` is the return
+    /// address, which may already lie on the next line or past the calling function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
+/// The call stack of a halted target.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct StackTrace {
+    pub target: String,
+    /// Top (innermost) frame first.
+    pub frames: Vec<StackFrame>,
+    /// More frames exist than were returned (`max_frames`, or the limit of 64).
+    pub truncated: bool,
+    /// The frames are those of an instruction trace replay (VS Code shows the core at a trace
+    /// row), not of the live core.
+    pub replay: bool,
+}
+
+/// Address lookup arguments.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LookupAddressRequest {
+    /// Code or data address.
+    pub address: Addr,
+    /// Use this target's symbols (default: the first core that has symbols).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// The address is a return address (e.g. a saved A11 or LR): look up the call before it.
+    #[serde(default)]
+    pub return_address: bool,
+}
+
+/// What the symbols say about an address.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AddressInfo {
+    pub address: u32,
+    /// Function and line of code at the address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+    /// The global or static variable the address lies in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variable: Option<String>,
+    /// Offset of the address into `variable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variable_offset: Option<u32>,
 }
 
 /// The targets.

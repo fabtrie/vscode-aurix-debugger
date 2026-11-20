@@ -136,16 +136,29 @@ fn run_state(s: TargetState) -> RunState {
     }
 }
 
-fn info(cx: &Cx, t: usize) -> TargetInfo {
-    let (name, arch, state, reason, examined, reachable, pc_reg) = cx.with(|c| {
+/// A target's state as read on the core thread, with its core context: the symbol lookup of the
+/// location happens off the core thread ([`CoreApi::located`]).
+struct State(TargetInfo, String);
+
+fn info(cx: &Cx, t: usize) -> State {
+    let (name, arch, state, reason, examined, reachable, pc_reg, coreid) = cx.with(|c| {
         let e = &c.targets[t];
         let arch = e.core.arch();
-        (e.name.clone(), arch.name, e.core.state(), e.core.reason(), e.core.examined(), !e.unreachable, arch.pc)
+        (e.name.clone(), arch.name, e.core.state(), e.core.reason(), e.core.examined(), !e.unreachable, arch.pc, e.core.coreid())
     });
     let halted = examined && state == TargetState::Halted;
     let pc = if halted { ops::read_reg(cx, t, pc_reg).ok() } else { None };
     let reason = if halted { reason } else { DebugReason::NotHalted };
-    TargetInfo { index: t as u32, name, arch: arch.into(), state: run_state(state), reason: reason.name().into(), examined, reachable, pc }
+    let info = TargetInfo { index: t as u32, name, arch: arch.into(), state: run_state(state), reason: reason.name().into(), examined, reachable, pc, location: None };
+    State(info, tcf::core_id(coreid))
+}
+
+fn infos(cx: &Cx) -> Vec<State> {
+    (0..cx.with(|c| c.targets.len())).map(|t| info(cx, t)).collect()
+}
+
+pub(crate) fn source_location(l: tcf::CodeLocation) -> Option<SourceLocation> {
+    (!l.is_empty()).then_some(SourceLocation { function: l.function, function_offset: l.function_offset, file: l.file, line: l.line, column: l.column })
 }
 
 fn halted(cx: &Cx, t: usize) -> bool {
@@ -361,7 +374,21 @@ impl CoreApi {
     }
 
     fn state_of(&self, t: usize) -> Result<TargetInfo, ApiError> {
-        self.call(move |cx| Ok(info(cx, t)))
+        self.call(move |cx| Ok(info(cx, t))).map(|s| self.located(s))
+    }
+
+    /// The state with the PC's location in the source. Skipped while a symbol load holds the
+    /// symbol store: the state must not wait for it.
+    fn located(&self, State(mut info, ctx): State) -> TargetInfo {
+        if let Some(pc) = info.pc {
+            let set = self.session.symbols.try_lock().ok().and_then(|store| store.set(&ctx));
+            info.location = set.and_then(|s| source_location(s.code_location(pc, false)));
+        }
+        info
+    }
+
+    fn located_all(&self, states: Vec<State>) -> TargetList {
+        TargetList { targets: states.into_iter().map(|s| self.located(s)).collect() }
     }
 
     fn names(&self) -> Result<HashMap<usize, String>, ApiError> {
@@ -604,11 +631,11 @@ impl DebuggerApi for CoreApi {
     }
 
     fn targets(&self, _: NoArgs) -> Result<TargetList, ApiError> {
-        self.call(|cx| Ok(TargetList { targets: (0..cx.with(|c| c.targets.len())).map(|t| info(cx, t)).collect() }))
+        self.call(|cx| Ok(infos(cx))).map(|s| self.located_all(s))
     }
 
     fn state(&self, req: TargetRef) -> Result<TargetInfo, ApiError> {
-        self.call(move |cx| Ok(info(cx, resolve(cx, &req.target)?)))
+        self.call(move |cx| Ok(info(cx, resolve(cx, &req.target)?))).map(|s| self.located(s))
     }
 
     fn halt(&self, req: TargetRef) -> Result<TargetInfo, ApiError> {
@@ -638,6 +665,7 @@ impl DebuggerApi for CoreApi {
             ops::resume(cx, t, addr).map_err(api_err)?;
             Ok(info(cx, t))
         })
+        .map(|s| self.located(s))
     }
 
     fn step(&self, req: TargetRef) -> Result<TargetInfo, ApiError> {
@@ -655,6 +683,42 @@ impl DebuggerApi for CoreApi {
             ops::step(cx, t, None).map_err(api_err)?;
             Ok(info(cx, t))
         })
+        .map(|s| self.located(s))
+    }
+
+    fn stack_trace(&self, req: StackTraceRequest) -> Result<StackTrace, ApiError> {
+        let target = req.target.clone();
+        let (t, name, arch, ctx, is_halted) = self.call(move |cx| {
+            let t = resolve(cx, &target)?;
+            let (name, arch, coreid) = cx.with(|c| (c.targets[t].name.clone(), c.targets[t].core.arch().name, c.targets[t].core.coreid()));
+            Ok((t, name, arch, tcf::core_id(coreid), halted(cx, t)))
+        })?;
+        if self.session.is_stepping(t) {
+            return Err(busy(&name));
+        }
+        if !is_halted {
+            return Err(ApiError::new(ErrorCode::NotHalted, format!("[{name}] target not halted (the call stack needs a halted target)")));
+        }
+        let (frames, replay) = tcf::stack_frames(&self.session, t).map_err(|e| ApiError::failed(format!("[{name}] cannot unwind the call stack: {e}")))?;
+        let set = self.session.symbols_for(&ctx);
+        // The stack pointer and return address registers of the frames: DWARF numbering for the
+        // SCR and MCS frames, where A10/A11 mean other registers.
+        let has_sp = matches!(arch, "tricore" | "cortex_m");
+        let max = req.max_frames.map_or(frames.len(), |m| m as usize);
+        let truncated = frames.len() > max || frames.len() >= tcf::MAX_FRAMES;
+        let frames = frames
+            .iter()
+            .take(max)
+            .enumerate()
+            .map(|(i, f)| StackFrame {
+                index: i as u32,
+                pc: f.pc,
+                sp: f.sp().filter(|_| has_sp),
+                return_address: f.ra().filter(|_| has_sp),
+                location: set.as_ref().and_then(|s| source_location(s.code_location(f.pc, i > 0))),
+            })
+            .collect();
+        Ok(StackTrace { target: name, frames, truncated, replay })
     }
 
     fn wait_state(&self, req: WaitRequest) -> Result<TargetInfo, ApiError> {
@@ -675,8 +739,9 @@ impl DebuggerApi for CoreApi {
         };
         self.call(move |cx| {
             ops::reset(cx, mode).map_err(api_err)?;
-            Ok(TargetList { targets: (0..cx.with(|c| c.targets.len())).map(|t| info(cx, t)).collect() })
+            Ok(infos(cx))
         })
+        .map(|s| self.located_all(s))
     }
 
     fn read_registers(&self, req: ReadRegistersRequest) -> Result<RegisterList, ApiError> {
@@ -1167,6 +1232,10 @@ impl DebuggerApi for CoreApi {
 
     fn symbols(&self, _: NoArgs) -> Result<SymbolsInfo, ApiError> {
         Ok(self.symbols_info())
+    }
+
+    fn lookup_address(&self, req: LookupAddressRequest) -> Result<AddressInfo, ApiError> {
+        variables::lookup_address(self, req)
     }
 
     fn list_globals(&self, req: ListGlobalsRequest) -> Result<GlobalList, ApiError> {

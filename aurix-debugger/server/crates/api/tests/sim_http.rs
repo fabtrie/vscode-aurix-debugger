@@ -659,14 +659,20 @@ fn launch_steps(http: &Http) {
 /// store reads variables from DWARF only, and the MCS assembler cannot place data at
 /// `0xD000_0000`.
 fn dwarf_elf(vars: &[(&str, u32, bool)]) -> Vec<u8> {
+    dwarf_elf_with(vars, &[])
+}
+
+/// [`dwarf_elf`] with `(name, start, end)` functions as well.
+fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32)]) -> Vec<u8> {
     // (code, tag, has children, [(attribute, form)]): compile_unit, base_type, structure_type,
-    // member, variable.
-    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 5] = [
+    // member, variable, subprogram.
+    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 6] = [
         (1, 0x11, true, &[(0x03, 0x08)]),
         (2, 0x24, false, &[(0x03, 0x08), (0x3e, 0x0b), (0x0b, 0x0b)]),
         (3, 0x13, true, &[(0x03, 0x08), (0x0b, 0x0b)]),
         (4, 0x0d, false, &[(0x03, 0x08), (0x49, 0x13), (0x38, 0x0b)]),
         (5, 0x34, false, &[(0x03, 0x08), (0x49, 0x13), (0x3f, 0x19), (0x02, 0x18)]),
+        (6, 0x2e, false, &[(0x03, 0x08), (0x11, 0x01), (0x12, 0x06)]),
     ];
     let mut abbrev = Vec::new();
     for (code, tag, children, attrs) in abbrevs {
@@ -705,6 +711,12 @@ fn dwarf_elf(vars: &[(&str, u32, bool)]) -> Vec<u8> {
         info.extend([5, 0x03]); // a 5-byte location: DW_OP_addr
         info.extend(addr.to_le_bytes());
     }
+    for &(name, low, high) in funcs {
+        info.push(6);
+        cstr(&mut info, name);
+        info.extend(low.to_le_bytes());
+        info.extend((high - low).to_le_bytes()); // DW_AT_high_pc as a length
+    }
     info.push(0);
     let len = (info.len() - 4) as u32;
     info[..4].copy_from_slice(&len.to_le_bytes());
@@ -735,6 +747,91 @@ fn dwarf_elf(vars: &[(&str, u32, bool)]) -> Vec<u8> {
     half(&mut elf, 48, 4);
     half(&mut elf, 50, 3);
     elf
+}
+
+/// The call stack over REST is the one VS Code gets over TCF: the same frames, from a CSA chain
+/// built by hand (`inner` called from `outer`), with functions once symbols are loaded; the target
+/// state says where the core is; `lookup_address` names code and variables.
+fn call_stack(http: &Http, vs: &mut Tcf, c0: &str) {
+    const CPU0: &str = "tc37x.cpu0";
+    let get = |path: &str| http.request("GET", path, None, &[]);
+    let was_running = http.ok("GET", &format!("/api/v1/targets/{CPU0}"), None)["state"] == "running";
+    http.ok("POST", &format!("/api/v1/targets/{CPU0}/halt"), None);
+    let reg = |name: &str| http.ok("GET", &format!("/api/v1/targets/{CPU0}/registers/{name}"), None)["value"].clone();
+    let saved: Vec<(&str, Value)> = ["pc", "a10", "a11", "pcxi"].into_iter().map(|r| (r, reg(r))).collect();
+    let set = |name: &str, v: u32| http.ok("PUT", &format!("/api/v1/targets/{CPU0}/registers/{name}"), Some(json!({ "value": v })));
+
+    // inner (0x80001000..) runs at +0x10; its A11 returns into outer (0x80000200..) at +8. The
+    // PCXI links an upper context (UL set) at 0x70000800 that holds outer's SP and ends the chain.
+    let mut csa = [0u32; 16];
+    csa[1] = 0x0000_0b80; // PSW
+    csa[2] = 0x7000_1f00; // outer's A10
+    csa[3] = 0x8000_0050; // outer's A11
+    let hex: String = csa.iter().flat_map(|w| w.to_le_bytes()).map(|b| format!("{b:02x}")).collect();
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000800", "data": hex })));
+    set("pc", 0x8000_1010);
+    set("a10", 0x7000_1e00);
+    set("a11", 0x8000_0208);
+    set("pcxi", 0x0017_0020);
+
+    // Without symbols: addresses only, the frames TCF reports.
+    let st = http.ok("GET", &format!("/api/v1/targets/{CPU0}/stack"), None);
+    let pcs: Vec<u64> = st["frames"].as_array().unwrap().iter().map(|f| f["pc"].as_u64().unwrap()).collect();
+    assert_eq!(pcs, [0x8000_1010, 0x8000_0208], "{st}");
+    assert_eq!((st["truncated"].as_bool(), st["replay"].as_bool()), (Some(false), Some(false)), "{st}");
+    let f0 = &st["frames"][0];
+    assert_eq!((f0["index"].as_u64(), f0["sp"].as_u64(), f0["return_address"].as_u64()), (Some(0), Some(0x7000_1e00), Some(0x8000_0208)), "{st}");
+    let f1 = &st["frames"][1];
+    assert_eq!((f1["sp"].as_u64(), f1["return_address"].as_u64()), (Some(0x7000_1f00), Some(0x8000_0050)), "{st}");
+    assert!(f0.get("location").is_none(), "{st}");
+    let r = vs.command("StackTrace", "getChildrenRange", &[json!(c0), json!(0), json!(63)]);
+    let ids: Vec<String> = serde_json::from_str(&r[1]).unwrap();
+    let r = vs.command("StackTrace", "getContext", &[json!(ids)]);
+    let tcf_pcs: Vec<u64> = serde_json::from_str::<Vec<Value>>(&r[0]).unwrap().iter().map(|c| c["IP"].as_u64().unwrap()).collect();
+    assert_eq!(tcf_pcs, pcs, "TCF {r:?}");
+
+    let st = http.ok("GET", &format!("/api/v1/targets/{CPU0}/stack?max_frames=1"), None);
+    assert_eq!((st["frames"].as_array().unwrap().len(), st["truncated"].as_bool()), (1, Some(true)), "{st}");
+
+    // With symbols: functions, the caller's looked up at its call.
+    let dir = std::env::temp_dir().join(format!("aurix-stack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let elf = dir.join("stack.elf");
+    let funcs = [("outer", 0x8000_0200, 0x8000_0208), ("inner", 0x8000_1000, 0x8000_1100)];
+    std::fs::write(&elf, dwarf_elf_with(&[("g_pair", 0x7000_0400, true)], &funcs)).unwrap();
+    let (status, e) = get("/api/v1/symbols/address?address=0x80001010");
+    assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [tcl_path(elf)] })));
+    let st = http.ok("GET", &format!("/api/v1/targets/{CPU0}/stack"), None);
+    let loc = |i: usize| (st["frames"][i]["location"]["function"].as_str(), st["frames"][i]["location"]["function_offset"].as_u64());
+    // outer ends with its call: the return address lies past it, the call does not.
+    assert_eq!((loc(0), loc(1)), ((Some("inner"), Some(0x10)), (Some("outer"), Some(8))), "{st}");
+    let state = http.ok("GET", &format!("/api/v1/targets/{CPU0}"), None);
+    assert_eq!((state["location"]["function"].as_str(), state["location"]["function_offset"].as_u64()), (Some("inner"), Some(0x10)), "{state}");
+    let step = http.ok("POST", &format!("/api/v1/targets/{CPU0}/step"), None);
+    assert_eq!(step["location"]["function"], "inner", "{step}");
+
+    let a = http.ok("GET", "/api/v1/symbols/address?address=0x80000208", None);
+    assert!(a.get("location").is_none(), "the return address is past outer: {a}");
+    let a = http.ok("GET", "/api/v1/symbols/address?address=0x80000208&return_address=true", None);
+    assert_eq!((a["location"]["function"].as_str(), a["location"]["function_offset"].as_u64()), (Some("outer"), Some(8)), "{a}");
+    let a = http.ok("GET", "/api/v1/symbols/address?address=0x70000404", None);
+    assert_eq!((a["variable"].as_str(), a["variable_offset"].as_u64()), (Some("g_pair"), Some(4)), "{a}");
+    let a = http.ok("GET", "/api/v1/symbols/address?address=0x70000408", None);
+    assert!(a.get("variable").is_none(), "past the end of g_pair: {a}");
+
+    // Running: no call stack, no location.
+    for (name, v) in &saved {
+        http.ok("PUT", &format!("/api/v1/targets/{CPU0}/registers/{name}"), Some(json!({ "value": v })));
+    }
+    http.ok("POST", &format!("/api/v1/targets/{CPU0}/resume"), None);
+    let (status, e) = get(&format!("/api/v1/targets/{CPU0}/stack"));
+    assert_eq!((status, e["code"].as_str()), (409, Some("not_halted")), "{e}");
+    assert!(http.ok("GET", &format!("/api/v1/targets/{CPU0}"), None).get("location").is_none());
+    if !was_running {
+        http.ok("POST", &format!("/api/v1/targets/{CPU0}/halt"), None);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Variables in core-local RAM (`0xD000_0000`), which exists once per TriCore core: a name means
@@ -1652,6 +1749,7 @@ fn rest_mcp_and_tcf_share_one_session() {
 
     // --- Variables by name ---------------------------------------------------------------------
 
+    call_stack(&http, &mut vs, &c0);
     variables(&http, &mut vs);
     core_local_variables(&http, &mut vs);
     watchpoints(&http, &mut vs, &h, &sse);

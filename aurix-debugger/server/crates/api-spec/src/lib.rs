@@ -15,6 +15,7 @@ pub mod gen;
 mod hub_ops;
 pub mod mcp;
 mod ops;
+pub mod reference;
 pub mod types;
 
 use schemars::generate::SchemaGenerator;
@@ -35,6 +36,10 @@ A session is one board connection (one worker process). `list_sessions` shows th
 the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to \
 a function. The session operations take a `session` (ID or name); it can be left out while \
 exactly one session is open.
+
+A board without a profile needs cfg scripts: `reference` (topic `cfg`) explains how to write a \
+board cfg and a profile, and serves the Tcl command reference and the aurix-dbg scripts to copy. \
+It needs no session.
 
 Every client shares a session with the others: actions taken here are reflected in a connected \
 VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there \
@@ -59,7 +64,8 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// `location` in the target state. 11: `list_locals`, `frame` in `evaluate`, `write_variable` and
 /// `symbol_children`. 12: `load_svd`, `svd`, `list_peripherals`, `describe_peripheral`,
 /// `read_peripheral`, `write_peripheral` (peripheral registers by name from the SVD description).
-pub const API_VERSION: u32 = 12;
+/// 13: `reference` (cfg guide, Tcl command reference and cfg scripts, without a session).
+pub const API_VERSION: u32 = 13;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

@@ -5,6 +5,8 @@ Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions
 
 A session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.
 
+A board without a profile needs cfg scripts: `reference` (topic `cfg`) explains how to write a board cfg and a profile, and serves the Tcl command reference and the aurix-dbg scripts to copy. It needs no session.
+
 Every client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).
 
 Targets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.
@@ -1029,6 +1031,23 @@ class ProfileList:
 
 
 @dataclass
+class Reference:
+    """A part of the reference."""
+
+    text: str
+    """The text (markdown, or the cfg script itself)."""
+    topic: str
+    """The topic asked for."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Reference:
+        return cls(
+            text=d.get("text"),
+            topic=d.get("topic"),
+        )
+
+
+@dataclass
 class RegisterDescription:
     access: RegisterAccess
     address: int
@@ -1856,6 +1875,21 @@ class GeneratedClient:
         """List the session profiles stored on the hub machine.
         """
         return ProfileList.from_dict(self._call("GET", "/api/v1/profiles", None, None))
+
+    def reference(self, *, topic: str | None = None) -> Reference:
+        """How to write the cfg scripts and profiles a session opens with, the Tcl command
+        reference, and the aurix-dbg cfg scripts to copy next to a board cfg. Needs no session.
+
+        Read topic `cfg` before writing a board cfg or a profile. `commands` lists every Tcl
+        command (cfg scripts, the `tcl` operation); a command name (`reset_config`, `suspend add`)
+        gives its full description, any other word searches the descriptions. A file name
+        (`tc3xx_ocds.cfg`, `fs26_sbc.cfg`, `tc375_lite_example.cfg`, `tc37x_fs26_example.cfg`)
+        gives the script's text. Without a topic: the list of topics.
+
+        Args:
+            topic: `cfg` (how to write a board cfg and a profile), `commands` (all Tcl commands), a command name (`reset_config`, `suspend add`), a word to search the command descriptions for, or a file name (`tc3xx_ocds.cfg`). Empty: the list of topics.
+        """
+        return Reference.from_dict(self._call("GET", "/api/v1/reference", _args({"topic": topic}), None))
 
     def info(self) -> ServerInfo:
         """What is serving: server version and API revision, process, probe connection, targets and

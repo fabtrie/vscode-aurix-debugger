@@ -2014,6 +2014,26 @@ pub struct ProfileInfo {
     pub error: Option<String>,
 }
 
+/// Asking for a part of the reference (`reference`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceRequest {
+    /// `cfg` (how to write a board cfg and a profile), `commands` (all Tcl commands), a command
+    /// name (`reset_config`, `suspend add`), a word to search the command descriptions for, or a
+    /// file name (`tc3xx_ocds.cfg`). Empty: the list of topics.
+    #[serde(default)]
+    pub topic: Option<String>,
+}
+
+/// A part of the reference.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Reference {
+    /// The topic asked for.
+    pub topic: String,
+    /// The text (markdown, or the cfg script itself).
+    pub text: String,
+}
+
 /// The profiles of the hub machine.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ProfileList {

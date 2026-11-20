@@ -36,4 +36,14 @@ api! {
 
     /// List the session profiles stored on the hub machine.
     op list_profiles [hub]: GET "/api/v1/profiles" (NoArgs) -> ProfileList;
+
+    /// How to write the cfg scripts and profiles a session opens with, the Tcl command
+    /// reference, and the aurix-dbg cfg scripts to copy next to a board cfg. Needs no session.
+    ///
+    /// Read topic `cfg` before writing a board cfg or a profile. `commands` lists every Tcl
+    /// command (cfg scripts, the `tcl` operation); a command name (`reset_config`, `suspend add`)
+    /// gives its full description, any other word searches the descriptions. A file name
+    /// (`tc3xx_ocds.cfg`, `fs26_sbc.cfg`, `tc375_lite_example.cfg`, `tc37x_fs26_example.cfg`)
+    /// gives the script's text. Without a topic: the list of topics.
+    op reference [hub]: GET "/api/v1/reference" (ReferenceRequest) -> Reference;
 }

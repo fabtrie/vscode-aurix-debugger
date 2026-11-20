@@ -670,7 +670,7 @@ The server holds the chip mechanics; the cfg scripts hold board settings and pol
 | [`fs26_sbc.cfg`](../fs26_sbc.cfg) | Policy for boards with an NXP FS26 SBC (`tc3xx_sbc fs26`): every reset goes through its `reset_hook`; a halting reset is repeated until it holds; the FS26 watchdog is disarmed once after connecting (running reset before the first reset); a halt while the watchdog may be armed is watched and recovered; its `halt_check_hook` makes `attach_mode halt` reset first. `sbc_status` shows the state. |
 | [`tc375_lite_example.cfg`](../tc375_lite_example.cfg), [`tc37x_fs26_example.cfg`](../tc37x_fs26_example.cfg) | Example board cfgs, without an SBC and with an FS26 (adapter speed, HSM target, STM suspend). |
 
-For another board or derivative: copy an example, set what the board needs, load `tc3xx_ocds.cfg`.
+For another board or derivative: copy an example, set what the board needs, load `tc3xx_ocds.cfg`. Step by step: [docs/cfg-guide.md](docs/cfg-guide.md). The hub serves the guide, the Tcl command reference and these scripts without a session through the `reference` operation (MCP, REST), so an AI client can write a board cfg before it connects.
 
 Server commands for the cfgs (details: `help <command>`, [commands.md](docs/commands.md)):
 - **`ocds sync tl1|none`**: all cores halt, resume and step together through TL1 ([below](#multi-core-run-control-ocds-sync-tl1)); `ocds tl1_members`, `ocds step all|single`, `ocds step_timers run|frozen`, `ocds tl1_force`.

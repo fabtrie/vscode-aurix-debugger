@@ -108,6 +108,7 @@ impl Mcp<'_> {
         assert_eq!(status, 200, "{init}");
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(init["result"]["serverInfo"]["name"], "aurix-hub");
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("`reference` (topic `cfg`)"), "{init}");
         let session = headers.iter().find(|(k, _)| k == "mcp-session-id").map(|(_, v)| v.clone()).expect("Mcp-Session-Id");
         Mcp { http, session, id: 1 }
     }
@@ -214,6 +215,9 @@ fn hub_sessions_end_to_end() {
     let profiles = mcp.ok("list_profiles", json!({}));
     assert_eq!(profiles["profiles"][0]["name"], "sim", "{profiles}");
     assert_eq!(profiles["profiles"][0]["connect"]["adapter"], "sim");
+    // The cfg guide and the command reference need no session.
+    assert!(mcp.ok("reference", json!({ "topic": "cfg" }))["text"].as_str().unwrap().contains("tc3xx_ocds.cfg"));
+    assert!(mcp.ok("reference", json!({ "topic": "attach_mode" }))["text"].as_str().unwrap().contains("reset_halt"));
 
     // --- Open a session from the profile: connect + launch -------------------------------------
     let s1 = mcp.ok("open_session", json!({ "profile": "sim" }));

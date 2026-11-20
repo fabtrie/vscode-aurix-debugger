@@ -1463,6 +1463,11 @@ mod backend_guard {
         assert_eq!(i.eval("reset_hook").unwrap(), "sbc_reset_hook");
         assert_eq!(i.eval("halt_check_hook").unwrap(), "sbc_halt_check");
         assert_eq!(i.eval("ocds sync").unwrap(), "tl1");
+        // The procs a user calls are documented for `help`.
+        let help = i.eval("help").unwrap();
+        assert!(help.contains("tc3xx_status") && help.contains("sbc_status"), "{help}");
+        assert_eq!(i.eval("usage tc3xx_mcs_halt_all").unwrap(), "tc3xx_mcs_halt_all <mcs target>");
+        assert!(i.eval("help tc3xx_mcs_halt_all").unwrap().contains("configure -event halted \"tc3xx_mcs_halt_all $t\""));
     }
 
     /// The winIDEA backend skips the OCDS handlers and leaves the HSM to

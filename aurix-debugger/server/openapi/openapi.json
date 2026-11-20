@@ -2981,6 +2981,39 @@
         ],
         "type": "object"
       },
+      "Reference": {
+        "description": "A part of the reference.",
+        "properties": {
+          "text": {
+            "description": "The text (markdown, or the cfg script itself).",
+            "type": "string"
+          },
+          "topic": {
+            "description": "The topic asked for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "text"
+        ],
+        "type": "object"
+      },
+      "ReferenceRequest": {
+        "additionalProperties": false,
+        "description": "Asking for a part of the reference (`reference`).",
+        "properties": {
+          "topic": {
+            "default": null,
+            "description": "`cfg` (how to write a board cfg and a profile), `commands` (all Tcl commands), a command\nname (`reset_config`, `suspend add`), a word to search the command descriptions for, or a\nfile name (`tc3xx_ocds.cfg`). Empty: the list of topics.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RegisterAccess": {
         "description": "Access type of a register or field.",
         "enum": [
@@ -5308,7 +5341,7 @@
     }
   },
   "info": {
-    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, peripheral registers by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
+    "description": "Control and inspect AURIX targets through the aurix-dbg hub: open debug sessions on boards, then run control, call stacks, registers, memory, variables by name, peripheral registers by name, breakpoints, watchpoints, flash programming and the OpenOCD-compatible Tcl console.\n\nA session is one board connection (one worker process). `list_sessions` shows the open ones; `open_session` starts one from a profile (`list_profiles`) or configuration scripts and can run the launch steps of a VS Code launch configuration: symbols, flash, reset, breakpoints, run to a function. The session operations take a `session` (ID or name); it can be left out while exactly one session is open.\n\nA board without a profile needs cfg scripts: `reference` (topic `cfg`) explains how to write a board cfg and a profile, and serves the Tcl command reference and the aurix-dbg scripts to copy. It needs no session.\n\nEvery client shares a session with the others: actions taken here are reflected in a connected VS Code debug session (TCF) and the other way round, e.g. a breakpoint set here shows up there and a halt from VS Code is seen in `wait_state` and the event stream. A client that needs the target to itself takes the control lease (`acquire_control`).\n\nTargets are named as in the OpenOCD configuration (e.g. `tc37x.cpu0`); `targets` lists them. Addresses accept numbers or strings in decimal or `0x` hex; memory contents are hex strings.",
     "title": "aurix-dbg API",
     "version": "0.1.0"
   },
@@ -5395,6 +5428,53 @@
           }
         },
         "summary": "List the session profiles stored on the hub machine.",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/reference": {
+      "get": {
+        "description": "How to write the cfg scripts and profiles a session opens with, the Tcl command\nreference, and the aurix-dbg cfg scripts to copy next to a board cfg. Needs no session.\n\nRead topic `cfg` before writing a board cfg or a profile. `commands` lists every Tcl\ncommand (cfg scripts, the `tcl` operation); a command name (`reset_config`, `suspend add`)\ngives its full description, any other word searches the descriptions. A file name\n(`tc3xx_ocds.cfg`, `fs26_sbc.cfg`, `tc375_lite_example.cfg`, `tc37x_fs26_example.cfg`)\ngives the script's text. Without a topic: the list of topics.",
+        "operationId": "reference",
+        "parameters": [
+          {
+            "description": "`cfg` (how to write a board cfg and a profile), `commands` (all Tcl commands), a command\nname (`reset_config`, `suspend add`), a word to search the command descriptions for, or a\nfile name (`tc3xx_ocds.cfg`). Empty: the list of topics.",
+            "in": "query",
+            "name": "topic",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reference"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "How to write the cfg scripts and profiles a session opens with, the Tcl command reference, and the aurix-dbg cfg scripts to copy next to a board cfg.",
         "tags": [
           "hub"
         ]

@@ -290,7 +290,7 @@ impl Hub {
                         let profiles: Vec<String> = list_profiles().profiles.into_iter().map(|p| p.name).collect();
                         return Err(Choose::Guidance(json!({
                             "status": "no_session",
-                            "message": "No debug session is open. Open one with `open_session` (a `profile`, or `connect` with the board's configuration scripts) and retry. Opening a session connects to the hardware and may reset the target, so ask the user which board to use if unsure.",
+                            "message": "No debug session is open. Open one with `open_session` (a `profile`, or `connect` with the board's configuration scripts) and retry. Opening a session connects to the hardware and may reset the target, so ask the user which board to use if unsure. A board without a profile needs cfg scripts: `reference` with topic `cfg` explains how to write them.",
                             "profiles": profiles,
                         })));
                     }
@@ -926,7 +926,7 @@ impl HubApi for Hub {
         let connect = merge_connect(base_connect, req.connect.clone());
         let launch = merge_launch(base_launch, req.launch.clone());
         if connect.config_files.is_empty() && connect.commands.is_empty() {
-            return Err(ApiError::bad_request("give a `profile` or `connect` with the board's `config_files` (see `list_profiles`)"));
+            return Err(ApiError::bad_request("give a `profile` or `connect` with the board's `config_files` (see `list_profiles`; `reference` with topic `cfg` explains how to write them)"));
         }
         let exe = self.cfg.worker_exe();
         if !exe.is_file() {
@@ -1079,6 +1079,10 @@ impl HubApi for Hub {
 
     fn list_profiles(&self, _: NoArgs) -> Result<ProfileList, ApiError> {
         Ok(list_profiles())
+    }
+
+    fn reference(&self, req: ReferenceRequest) -> Result<Reference, ApiError> {
+        Ok(api_spec::reference::lookup(req.topic.as_deref().unwrap_or_default()))
     }
 }
 

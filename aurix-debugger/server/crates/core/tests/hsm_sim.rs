@@ -8,7 +8,6 @@ use aurix_core::cortex_m::{fp_comp, DHCSR};
 use aurix_core::sim::SimAdapter;
 use aurix_core::Server;
 
-const HSM_DBGBASE: u32 = 0xF004_1010;
 const HSM2HTS: u32 = 0xF004_0034;
 const CBS_TRHSM: u32 = 0xF000_0438;
 
@@ -160,3 +159,34 @@ fn wait_ready_follows_hsm2hts() {
     assert_eq!(s.interp.eval("hsm wait_ready 50").unwrap(), "1");
 }
 
+
+/// After a halting reset the HSM thread is resumed (the frontend had it selected): through TL1 that
+/// starts the TriCore cores too, and the suspend times count from that resume, not from the reset.
+#[test]
+fn resuming_the_hsm_after_a_halting_reset_counts_as_the_cores_resume() {
+    let s = server(true, "ocds sync tl1; hsm ready_ms 0; suspend add CAN0");
+    with_sim(&s, |sim| sim.app.as_mut().unwrap().enable_at.insert(0xF020_8000, Some(50)));
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| sim.set_mem(HSM2HTS, 3));
+    s.interp.eval("reset halt").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    // The simulated TL1 latch holds the HSM without halting it: halted here, as the hardware's is.
+    with_sim(&s, |sim| sim.hsm.halted = true);
+    aurix_core::ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("tc37x.hsm curstate").unwrap(), "halted");
+    assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    s.interp.eval("tc37x.hsm arp_resume").unwrap();
+    let t0 = Instant::now();
+    loop {
+        aurix_core::ops::poll_all(&s.cx());
+        if (with_sim(&s, |sim| sim.mem_word(0xF020_80E8)) >> 24) & 0xF == 2 {
+            break;
+        }
+        assert!(t0.elapsed().as_millis() < 1000, "CAN0 not suspended after the resume");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let st = s.interp.eval("dict get [lindex [suspend status] 0] from").unwrap();
+    assert_eq!(st, "resume");
+    let ms: u64 = s.interp.eval("dict get [lindex [suspend status] 0] after_ms").unwrap().parse().unwrap();
+    assert!(ms < 300, "counted from the reset: {ms} ms");
+}

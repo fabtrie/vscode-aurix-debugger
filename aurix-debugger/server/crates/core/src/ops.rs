@@ -562,6 +562,7 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
     if addr.is_none() && cx.with(|c| c.target_io(t).and_then(|(mut io, e)| e.core.breakpoint_at_pc(&mut io))).unwrap_or(false) {
         step_inner(cx, t, None, RunMode::Step, false)?;
         if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
+            crate::suspend::on_resumed(cx, t);
             return Ok(());
         }
     }
@@ -573,6 +574,7 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
         e.core.resume(&mut io, addr, mode)
     })?;
     crate::tl1::after_resume(cx, t);
+    crate::suspend::on_resumed(cx, t);
     emit(Event::Resumed { target: t, name: target_name(cx, t) });
     fire(cx, t, "resumed");
     fire(cx, t, "resume-end");

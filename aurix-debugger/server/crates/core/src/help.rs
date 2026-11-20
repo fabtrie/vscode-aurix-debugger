@@ -267,7 +267,7 @@ pub static ENTRIES: &[Entry] = &[
     e!(Reset, "suspend remove", "<name>", "Take a module off the suspend list (its OCS stays as it is)."),
     e!(Reset, "suspend clear", "", "Empty the suspend list."),
     e!(Reset, "suspend list", "", "The suspend list: name, mode and the OCS, CLC and ACCEN0 addresses of each module."),
-    e!(Reset, "suspend status", "", "Each module's state as a dict: name, mode, state (pending, idle, done, locked, refused), after_ms (when it got its suspend, counted from the reset), ocs."),
+    e!(Reset, "suspend status", "", "Each module's state as a dict: name, mode, state (pending, idle, done, locked, refused), after_ms and from (when it got its suspend while the cores ran, counted from the reset or the last resume, `from` saying which; empty when it was set while halted), ocs."),
     e!(Reset, "suspend now", "", "Try every pending module now; returns the names still pending."),
     e!(Reset, "suspend pending", "[locked]", "The modules still without their suspend (or only those locked by the application)."),
     // --- run control ---------------------------------------------------------------------

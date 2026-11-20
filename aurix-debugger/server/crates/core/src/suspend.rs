@@ -18,7 +18,8 @@
 //!
 //! A module that the application locks (ACCEN0) before its suspend was written stays `locked`
 //! until the next reset; one whose write does not take is left alone after [`MAX_TRIES`]
-//! (`refused`); one not enabled [`IDLE_AFTER`] after a reset is checked only every [`IDLE_RETRY`].
+//! (`refused`); one not enabled [`IDLE_AFTER`] after a reset or resume (run time: a halt does not count) is
+//! checked only every [`IDLE_RETRY`].
 //!
 //! Addresses come from the chip's bundled SVD description (`<MODULE>.OCS`, `.CLC`, `.ACCEN0`), or
 //! are given (`suspend add NAME -ocs A -clc A -accen A`).
@@ -34,7 +35,7 @@ use crate::ctx::{Ctx, Cx};
 use crate::target::{Core, TargetState};
 use crate::{log_info, log_warn};
 
-/// A module not enabled this long after a reset is checked only every [`IDLE_RETRY`].
+/// A module not enabled this long after a reset or resume is checked only every [`IDLE_RETRY`].
 pub const IDLE_AFTER: Duration = Duration::from_secs(5);
 pub const IDLE_RETRY: Duration = Duration::from_secs(2);
 /// How often the background poll checks the pending modules while the cores run.
@@ -117,10 +118,29 @@ pub struct Module {
     pub mode: Mode,
     pub state: State,
     tries: u8,
-    /// When it got its suspend, counted from the reset (or the attach).
-    pub done_after: Option<Duration>,
+    /// When it got its suspend while the cores ran, counted from the start (the reset, the attach
+    /// or the last resume). `None` when set while halted, where the time says nothing.
+    pub done_after: Option<(Duration, Start)>,
     /// Last check of an idle module.
     idle_checked: Option<Instant>,
+}
+
+/// What the times are counted from: the cores' last start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// The reset (or the attach), with the cores running since.
+    Reset,
+    /// The last resume: the halt before it does not count.
+    Resume,
+}
+
+impl Start {
+    pub fn name(self) -> &'static str {
+        match self {
+            Start::Reset => "reset",
+            Start::Resume => "resume",
+        }
+    }
 }
 
 /// What occasion tries the modules (for the log).
@@ -151,7 +171,10 @@ pub struct SuspendSet {
     pub modules: Vec<Module>,
     /// Whether this server writes OCS (set at `init`: not where the probe owns OCDS).
     pub active: bool,
-    reset_at: Instant,
+    /// The cores' last start (the reset, the attach or the last resume): times and the idle switch
+    /// count from it, so a halt does not count as the application's run time.
+    started: Instant,
+    start: Start,
     /// Counts the resets: an attempt that spans one does not apply its stale results.
     epoch: u64,
     last_poll: Option<Instant>,
@@ -159,14 +182,15 @@ pub struct SuspendSet {
 
 impl Default for SuspendSet {
     fn default() -> Self {
-        SuspendSet { modules: Vec::new(), active: false, reset_at: Instant::now(), epoch: 0, last_poll: None }
+        SuspendSet { modules: Vec::new(), active: false, started: Instant::now(), start: Start::Reset, epoch: 0, last_poll: None }
     }
 }
 
 impl SuspendSet {
     /// After a reset (or at the attach): every module pending again.
     pub fn mark_reset(&mut self) {
-        self.reset_at = Instant::now();
+        self.started = Instant::now();
+        self.start = Start::Reset;
         self.epoch += 1;
         for m in &mut self.modules {
             m.state = State::Pending;
@@ -176,8 +200,18 @@ impl SuspendSet {
         }
     }
 
+    /// After a resume of the cores: times count from here, and the idle modules are active again
+    /// (the application runs on from where it halted, and may enable them any time now).
+    pub fn mark_resumed(&mut self) {
+        self.started = Instant::now();
+        self.start = Start::Resume;
+        for m in &mut self.modules {
+            m.idle_checked = None;
+        }
+    }
+
     fn idle(&self, now: Instant) -> bool {
-        now.duration_since(self.reset_at) >= IDLE_AFTER
+        now.duration_since(self.started) >= IDLE_AFTER
     }
 
     fn wanted(&self, m: &Module, now: Instant, sel: Select) -> bool {
@@ -323,17 +357,18 @@ fn apply(set: &RefCell<SuspendSet>, epoch: u64, why: Why, now: Instant, plan: &[
     if s.epoch != epoch {
         return;
     }
-    let since = now.duration_since(s.reset_at);
+    // The time only says when the module was enabled while the cores ran since the start.
+    let since = matches!(why, Why::Reset | Why::Attach | Why::Poll | Why::Pause).then(|| (now.duration_since(s.started), s.start));
     let idle = s.idle(now);
     for (&(i, ..), o) in plan.iter().zip(outcomes) {
         let Some(m) = s.modules.get_mut(i) else { continue };
         match o {
             Outcome::Done => {
                 m.state = State::Done;
-                m.done_after = Some(since);
-                match why {
-                    Why::Halted => log_warn!("Suspend: {} ({}) set only after the halt, {} ms after the reset", m.name, m.mode.name(), since.as_millis()),
-                    Why::Poll => log_info!("Suspend: {} ({}) set, {} ms after the reset", m.name, m.mode.name(), since.as_millis()),
+                m.done_after = since;
+                match (why, since) {
+                    (Why::Halted, _) => log_warn!("Suspend: {} ({}) set only after the halt (it ran on unsuspended until then)", m.name, m.mode.name()),
+                    (Why::Poll, Some((d, from))) => log_info!("Suspend: {} ({}) set, {} ms after the {}", m.name, m.mode.name(), d.as_millis(), from.name()),
                     _ => {}
                 }
             }
@@ -379,6 +414,16 @@ pub fn poll_tick(cx: &Cx) {
         }
         if let Ok(mut io) = c.io() {
             attempt(&mut io, &rs.suspend, Why::Poll, Select::Due);
+        }
+    });
+}
+
+/// After a resume that started the TriCore cores (one of them, or any TL1 member such as the HSM,
+/// whose resume releases them all): times and the idle switch count from now.
+pub fn on_resumed(cx: &Cx, t: usize) {
+    cx.with(|c| {
+        if matches!(c.targets[t].core, Core::Tricore(_)) || c.restore.tl1.borrow().member(t) {
+            c.restore.suspend.borrow_mut().mark_resumed();
         }
     });
 }
@@ -481,9 +526,9 @@ pub fn cmd_suspend(cx: &Cx, a: &[&str]) -> Result<String, String> {
                 .modules
                 .iter()
                 .map(|m| {
-                    let after = m.done_after.map_or_else(|| "{}".to_string(), |d| d.as_millis().to_string());
+                    let (after, from) = m.done_after.map_or_else(|| ("{}".to_string(), "{}"), |(d, f)| (d.as_millis().to_string(), f.name()));
                     let state = if m.state == State::Pending && s.idle(Instant::now()) { "idle" } else { m.state.name() };
-                    format!("name {} mode {} state {} after_ms {} ocs 0x{:08X}", m.name, m.mode.name(), state, after, m.ocs)
+                    format!("name {} mode {} state {} after_ms {} from {} ocs 0x{:08X}", m.name, m.mode.name(), state, after, from, m.ocs)
                 })
                 .collect();
             Ok(tcl_list(&items))

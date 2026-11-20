@@ -145,6 +145,35 @@ fn modules_enabled_later_are_suspended_by_the_poll_without_a_halt() {
     no_violations(&s);
 }
 
+/// The module's `suspend status` field.
+fn status_field(s: &Server, name: &str, field: &str) -> String {
+    let list = s.interp.eval("suspend status").unwrap();
+    let items = s.interp.eval(&format!("lmap m {{{list}}} {{ if {{[dict get $m name] eq \"{name}\"}} {{ dict get $m {field} }} else continue }}")).unwrap();
+    items.trim().to_string()
+}
+
+/// After a halting reset the halt does not count as the application's run time: a module enabled
+/// after the resume is suspended by the poll at once (not as an idle module, although the halt took
+/// longer than the idle time), and its time counts from the resume.
+#[test]
+fn a_halt_does_not_count_as_run_time() {
+    let s = server("suspend add CAN0");
+    with_sim(&s, |sim| sim.app.as_mut().unwrap().enable_at.insert(CAN0_CLC, Some(50)));
+    s.interp.eval("hsm ready_ms 0").unwrap();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(state(&s, "CAN0"), "pending");
+    std::thread::sleep(Duration::from_millis(5200));
+    assert_eq!(state(&s, "CAN0"), "idle", "idle while halted, by the time since the reset");
+    s.interp.eval("resume").unwrap();
+    assert_eq!(state(&s, "CAN0"), "pending", "active again after the resume");
+    wait_polling(&s, "CAN0 suspended", 1000, |s| sus(s, CAN0_OCS) == 2);
+    assert_eq!(status_field(&s, "CAN0", "from"), "resume");
+    let ms: u64 = status_field(&s, "CAN0", "after_ms").parse().unwrap();
+    assert!((50..300).contains(&ms), "CAN0 set {ms} ms after the resume");
+    no_violations(&s);
+}
+
 /// A reset the debugger did not cause (a supply or SBC reset) while the cores run: the reset
 /// modules are suspended again at once, the application's modules once it enables them.
 #[test]

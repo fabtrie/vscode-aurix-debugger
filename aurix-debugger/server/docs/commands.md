@@ -626,7 +626,7 @@ The suspend list: name, mode and the OCS, CLC and ACCEN0 addresses of each modul
 suspend status
 ```
 
-Each module's state as a dict: name, mode, state (pending, idle, done, locked, refused), after_ms (when it got its suspend, counted from the reset), ocs.
+Each module's state as a dict: name, mode, state (pending, idle, done, locked, refused), after_ms and from (when it got its suspend while the cores ran, counted from the reset or the last resume, `from` saying which; empty when it was set while halted), ocs.
 
 ### `suspend now`
 

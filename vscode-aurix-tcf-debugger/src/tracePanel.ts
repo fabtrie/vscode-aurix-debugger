@@ -117,9 +117,10 @@ export class TracePanel {
 				this.stopPolling();
 				this.forgetResult();
 			}),
-			// A stop (or a reset seen as one): the shown recording may no longer end where the core is.
+			// A stop (or a reset seen as one): the shown recording may no longer end where the core is,
+			// and another client (Tcl, MCP) may have armed the trace or set arming on every run.
 			vscode.debug.onDidChangeActiveStackItem(() => {
-				if (this.result && !this.reading) {
+				if (!this.reading) {
 					void this.status();
 				}
 			}),
@@ -136,6 +137,12 @@ export class TracePanel {
 	/** The debugger moved the trace replay (or left it): the Instructions view follows. */
 	static replayMoved(active: boolean, at: number | undefined): void {
 		TracePanel.current?.post({ type: 'replay', active, at });
+	}
+
+	/** The launch configuration armed the trace or set arming on every run: the state is read
+	 * again (the panel read it when the session started, before the launch got that far). */
+	static traceChanged(): void {
+		void TracePanel.current?.status();
 	}
 
 	/** Reverse debugging was switched on or off, or a stop changed its history. */

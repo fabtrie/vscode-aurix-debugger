@@ -650,6 +650,11 @@ export function activate(context: vscode.ExtensionContext) {
 				traceReplay(b);
 				return;
 			}
+			if (e.event === 'aurix/traceChanged') {
+				// The launch configuration armed the trace or set arming on every run.
+				TracePanel.traceChanged();
+				return;
+			}
 			if (e.event === 'aurix/reverse') {
 				// Reverse debugging switched on or off, or its history changed.
 				reverseStatus(e.body);

@@ -2710,6 +2710,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			try {
 				await this.tcfClient.sendCommand(new TraceCommand('auto', { Config: { Stop: 'halt', ...config } }));
 				this.sendEvent(new OutputEvent('Trace armed on every run (launch configuration).\n', 'console'));
+				// The Trace panel read the trace state when the session started, before this.
+				this.sendEvent(new Event('aurix/traceChanged'));
 			} catch (e) {
 				this.sendEvent(new OutputEvent(`Trace on run from the launch configuration not set: ${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
 			}
@@ -2718,6 +2720,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		try {
 			await this.tcfClient.sendCommand(new TraceCommand('arm', cfg));
 			this.sendEvent(new OutputEvent('Trace armed from the launch configuration.\n', 'console'));
+			this.sendEvent(new Event('aurix/traceChanged'));
 		} catch (e) {
 			this.sendEvent(new OutputEvent(`Trace from the launch configuration not armed: ${AurixTCFDebugSession.formatError(e)}\n`, 'stderr'));
 		}

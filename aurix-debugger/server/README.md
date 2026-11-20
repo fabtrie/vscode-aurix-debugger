@@ -563,6 +563,7 @@ A conditional attribute's read set depends on which branch is live, so an attrib
 | `symbols` | DWARF (GHS DWARF 2 and GCC): functions, globals, line table, types, locals with location lists, C expression evaluator with assignment. |
 | `mcds` | miniMCDS trace: the register setup (as winIDEA writes it), the message framing, the data and program trace decoders, program flow reconstruction from the code. |
 | `orti` | ORTI files: the AUTOSAR/OSEK OS awareness description a generator emits. Parser (generic over the object types a file declares), and planning each attribute into the reads it costs. |
+| `svd` | CMSIS-SVD peripheral descriptions: a streaming reader straight from the `.svd.gz` (one peripheral in memory at a time; TC4Dx: 1 s, 65 MB), merged extra files (HSM, SCR), the register model, and the peripheral viewer's definitions, as the extension converted them. |
 | `tcf` | TCF frontend: wire protocol, services, source-level stepping, expressions, disassembly (Capstone). Also holds the debug session (breakpoints, symbols, stepping state) that the API shares. |
 | `api-spec` | The API definition: operations, types, documentation; OpenAPI and Python generators. |
 | `api` | The worker's REST routes, event stream, DAQ WebSocket, the launch steps, clients and the lease (axum on its own thread), and its registration with the hub; its build script writes the generated files. |

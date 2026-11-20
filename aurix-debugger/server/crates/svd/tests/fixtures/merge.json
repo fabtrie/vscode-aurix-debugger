@@ -1,0 +1,45 @@
+[
+ {
+  "accessType": 2,
+  "baseAddress": 4026793984,
+  "description": "",
+  "name": "HSM",
+  "registers": [
+   {
+    "addressOffset": 0,
+    "description": "",
+    "fields": [],
+    "name": "ID"
+   }
+  ],
+  "resetValue": 0,
+  "size": 32,
+  "totalLength": 0
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026925056,
+  "description": "",
+  "name": "HSM_CRYPTO",
+  "resetValue": 0,
+  "size": 32,
+  "totalLength": 0
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026535936,
+  "description": "",
+  "name": "STM0",
+  "registers": [
+   {
+    "addressOffset": 16,
+    "description": "",
+    "fields": [],
+    "name": "TIM0"
+   }
+  ],
+  "resetValue": 0,
+  "size": 32,
+  "totalLength": 0
+ }
+]

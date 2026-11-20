@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device>
+  <name>EXTRA</name>
+  <size>8</size>
+  <peripherals>
+    <peripheral>
+      <name>HSM</name>
+      <baseAddress>0xF0040000</baseAddress>
+      <interrupt><name>HSM_IRQ</name><value>3</value></interrupt>
+      <registers>
+        <register><name>ID</name><addressOffset>0x0</addressOffset></register>
+      </registers>
+    </peripheral>
+    <peripheral>
+      <name>HSM_BRIDGE_HSMSIDE</name>
+      <baseAddress>0xF0050000</baseAddress>
+    </peripheral>
+    <peripheral>
+      <name>HSM_CRYPTO</name>
+      <baseAddress>0xF0060000</baseAddress>
+    </peripheral>
+  </peripherals>
+</device>

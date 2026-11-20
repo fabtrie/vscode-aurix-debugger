@@ -1,0 +1,16 @@
+[package]
+name = "svd"
+description = "CMSIS-SVD peripheral descriptions: a streaming reader, the register model, and the peripheral viewer's definitions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+flate2 = "1"
+quick-xml = "0.38"
+serde = "1"
+
+[dev-dependencies]
+serde_json.workspace = true
+sha2 = "0.10"

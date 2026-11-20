@@ -15,6 +15,7 @@ members = [
     "crates/mcds",
     "crates/openocd-tcl",
     "crates/orti",
+    "crates/svd",
     "crates/symbols",
     "crates/tas",
     "crates/tcf",
@@ -33,6 +34,7 @@ openocd-tcl = { path = "crates/openocd-tcl" }
 aurix-core = { path = "crates/core" }
 tcf = { path = "crates/tcf" }
 symbols = { path = "crates/symbols" }
+svd = { path = "crates/svd" }
 orti = { path = "crates/orti" }
 isa = { path = "crates/isa" }
 mcds = { path = "crates/mcds" }
@@ -52,4 +54,8 @@ memmap2 = "0.9"
 opt-level = 2
 
 [profile.dev.package.symbols]
+opt-level = 2
+
+# Reading a 154 MB SVD file (TC4Dx) is far too slow unoptimized.
+[profile.dev.package.svd]
 opt-level = 2

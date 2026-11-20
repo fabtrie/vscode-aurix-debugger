@@ -1,0 +1,128 @@
+[
+ {
+  "accessType": 2,
+  "baseAddress": 4026535936,
+  "description": "The base",
+  "name": "BASE",
+  "registers": [
+   {
+    "addressOffset": 0,
+    "description": "",
+    "fields": [
+     {
+      "description": "",
+      "enumeration": {
+       "0": {
+        "description": "",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON",
+        "value": 1
+       }
+      },
+      "name": "EN",
+      "offset": 0,
+      "width": 1
+     }
+    ],
+    "name": "CTRL"
+   }
+  ],
+  "resetValue": 0,
+  "size": 16,
+  "totalLength": 64
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026540032,
+  "description": "Derived, with its own registers element replacing the base's",
+  "name": "COPY",
+  "registers": [
+   {
+    "addressOffset": 4,
+    "description": "",
+    "fields": [
+     {
+      "description": "",
+      "enumeration": {
+       "0": {
+        "description": "",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON",
+        "value": 1
+       }
+      },
+      "name": "EN",
+      "offset": 0,
+      "width": 1
+     }
+    ],
+    "name": "CTRL2"
+   }
+  ],
+  "resetValue": 0,
+  "size": 16,
+  "totalLength": 64
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026531840,
+  "description": "The base",
+  "name": "COPY_FIRST",
+  "registers": [
+   {
+    "addressOffset": 0,
+    "description": "",
+    "fields": [
+     {
+      "description": "",
+      "enumeration": {
+       "0": {
+        "description": "",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON",
+        "value": 1
+       }
+      },
+      "name": "EN",
+      "offset": 0,
+      "width": 1
+     }
+    ],
+    "name": "CTRL"
+   }
+  ],
+  "resetValue": 0,
+  "size": 16,
+  "totalLength": 64
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026548224,
+  "description": "",
+  "name": "OTHER",
+  "resetValue": 0,
+  "size": 16,
+  "totalLength": 0
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026552320,
+  "description": "The later one wins, at the place of the first",
+  "name": "TWICE",
+  "resetValue": 0,
+  "size": 16,
+  "totalLength": 0
+ }
+]

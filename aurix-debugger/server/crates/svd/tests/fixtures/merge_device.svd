@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device>
+  <name>MERGE</name>
+  <peripherals>
+    <peripheral>
+      <name>HSM</name>
+      <description>Replaced by the extra file's</description>
+      <baseAddress>0xF0040000</baseAddress>
+    </peripheral>
+    <peripheral>
+      <name>STM0</name>
+      <baseAddress>0xF0001000</baseAddress>
+      <registers>
+        <register><name>TIM0</name><addressOffset>0x10</addressOffset></register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

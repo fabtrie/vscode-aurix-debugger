@@ -1,0 +1,529 @@
+[
+ {
+  "accessType": 2,
+  "baseAddress": 4026548224,
+  "description": "",
+  "name": "EMPTY",
+  "resetValue": 0,
+  "size": 32,
+  "totalLength": 0
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026544128,
+  "description": "",
+  "name": "LATE",
+  "registers": [
+   {
+    "addressOffset": 0,
+    "description": "",
+    "fields": [
+     {
+      "description": "",
+      "enumeration": {
+       "0": {
+        "description": "First choice",
+        "name": "S0",
+        "value": 0
+       },
+       "7": {
+        "description": "",
+        "name": "S7",
+        "value": 7
+       }
+      },
+      "name": "SEL",
+      "offset": 0,
+      "width": 3
+     }
+    ],
+    "name": "M"
+   }
+  ],
+  "resetValue": 0,
+  "size": 32,
+  "totalLength": 0
+ },
+ {
+  "accessType": 2,
+  "baseAddress": 4026540032,
+  "clusters": [
+   {
+    "addressOffset": 8,
+    "description": "",
+    "name": "ONLY",
+    "registers": [
+     {
+      "addressOffset": 0,
+      "description": "",
+      "fields": [],
+      "name": "Q"
+     }
+    ]
+   }
+  ],
+  "description": "",
+  "groupName": "G",
+  "name": "ALPHA",
+  "resetValue": 0,
+  "size": 32,
+  "totalLength": 0
+ },
+ {
+  "accessType": 1,
+  "baseAddress": 4026535936,
+  "clusters": [
+   {
+    "accessType": 2,
+    "addressOffset": 256,
+    "clusters": [
+     {
+      "addressOffset": 16,
+      "description": "",
+      "name": "SUB",
+      "registers": [
+       {
+        "addressOffset": 4,
+        "description": "",
+        "fields": [],
+        "name": "Y"
+       }
+      ]
+     }
+    ],
+    "description": "Cluster 0",
+    "name": "CL0",
+    "registers": [
+     {
+      "addressOffset": 0,
+      "description": "",
+      "fields": [
+       {
+        "description": "",
+        "enumeration": {
+         "0": {
+          "description": "",
+          "name": "K0",
+          "value": 0
+         },
+         "2": {
+          "description": "",
+          "name": "K2",
+          "value": 2
+         },
+         "10": {
+          "description": "",
+          "name": "K10",
+          "value": 10
+         }
+        },
+        "name": "K",
+        "offset": 0,
+        "width": 2
+       }
+      ],
+      "name": "X"
+     }
+    ],
+    "size": 8
+   },
+   {
+    "accessType": 2,
+    "addressOffset": 288,
+    "clusters": [
+     {
+      "addressOffset": 16,
+      "description": "",
+      "name": "SUB",
+      "registers": [
+       {
+        "addressOffset": 4,
+        "description": "",
+        "fields": [],
+        "name": "Y"
+       }
+      ]
+     }
+    ],
+    "description": "Cluster 1",
+    "name": "CL1",
+    "registers": [
+     {
+      "addressOffset": 0,
+      "description": "",
+      "fields": [
+       {
+        "description": "",
+        "enumeration": {
+         "0": {
+          "description": "",
+          "name": "K0",
+          "value": 0
+         },
+         "2": {
+          "description": "",
+          "name": "K2",
+          "value": 2
+         },
+         "10": {
+          "description": "",
+          "name": "K10",
+          "value": 10
+         }
+        },
+        "name": "K",
+        "offset": 0,
+        "width": 2
+       }
+      ],
+      "name": "X"
+     }
+    ],
+    "size": 8
+   }
+  ],
+  "description": "Sorted after the grouped ones: <tx> & A B &unknown;",
+  "groupName": "G",
+  "name": "ZETA",
+  "registers": [
+   {
+    "accessType": 2,
+    "addressOffset": 0,
+    "description": "Control over two lines",
+    "fields": [
+     {
+      "accessType": 2,
+      "description": "Enable",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "EN",
+      "offset": 0,
+      "width": 1
+     },
+     {
+      "description": "Named further on in the file",
+      "enumeration": {
+       "0": {
+        "description": "First choice",
+        "name": "S0",
+        "value": 0
+       },
+       "7": {
+        "description": "",
+        "name": "S7",
+        "value": 7
+       }
+      },
+      "name": "MODE",
+      "offset": 1,
+      "width": 3
+     },
+     {
+      "accessType": 1,
+      "description": "",
+      "name": "FLAG",
+      "offset": 4,
+      "readAction": 1,
+      "width": 1
+     },
+     {
+      "description": "Channel %s",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "CHA",
+      "offset": 8,
+      "width": 1
+     },
+     {
+      "description": "Channel %s",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "CHB",
+      "offset": 9,
+      "width": 1
+     },
+     {
+      "description": "",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "PATH",
+      "offset": 9,
+      "width": 1
+     }
+    ],
+    "name": "CTRL",
+    "resetValue": 5,
+    "size": 32
+   },
+   {
+    "addressOffset": 16,
+    "description": "Data word 0",
+    "fields": [
+     {
+      "accessType": 3,
+      "description": "",
+      "name": "VALUE",
+      "offset": 0,
+      "width": 32
+     }
+    ],
+    "name": "DATA[0]",
+    "readAction": 3
+   },
+   {
+    "addressOffset": 20,
+    "description": "Data word 1",
+    "fields": [
+     {
+      "accessType": 3,
+      "description": "",
+      "name": "VALUE",
+      "offset": 0,
+      "width": 32
+     }
+    ],
+    "name": "DATA[1]",
+    "readAction": 3
+   },
+   {
+    "addressOffset": 24,
+    "description": "Data word 2",
+    "fields": [
+     {
+      "accessType": 3,
+      "description": "",
+      "name": "VALUE",
+      "offset": 0,
+      "width": 32
+     }
+    ],
+    "name": "DATA[2]",
+    "readAction": 3
+   },
+   {
+    "addressOffset": 28,
+    "description": "Data word 3",
+    "fields": [
+     {
+      "accessType": 3,
+      "description": "",
+      "name": "VALUE",
+      "offset": 0,
+      "width": 32
+     }
+    ],
+    "name": "DATA[3]",
+    "readAction": 3
+   },
+   {
+    "addressOffset": 32,
+    "description": "",
+    "fields": [],
+    "name": "R3"
+   },
+   {
+    "addressOffset": 36,
+    "description": "",
+    "fields": [],
+    "name": "R4"
+   },
+   {
+    "addressOffset": 40,
+    "description": "",
+    "fields": [],
+    "name": "R5"
+   },
+   {
+    "addressOffset": 48,
+    "description": "",
+    "fields": [],
+    "name": "La"
+   },
+   {
+    "addressOffset": 52,
+    "description": "",
+    "fields": [],
+    "name": "Lb"
+   },
+   {
+    "addressOffset": 56,
+    "description": "",
+    "fields": [],
+    "name": "Uundefined"
+   },
+   {
+    "addressOffset": 60,
+    "description": "",
+    "fields": [],
+    "name": "Uundefined"
+   },
+   {
+    "accessType": 2,
+    "addressOffset": 64,
+    "description": "Like CTRL, at <0x40>",
+    "fields": [
+     {
+      "accessType": 2,
+      "description": "Enable",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "EN",
+      "offset": 0,
+      "width": 1
+     },
+     {
+      "description": "Named further on in the file",
+      "enumeration": {
+       "0": {
+        "description": "First choice",
+        "name": "S0",
+        "value": 0
+       },
+       "7": {
+        "description": "",
+        "name": "S7",
+        "value": 7
+       }
+      },
+      "name": "MODE",
+      "offset": 1,
+      "width": 3
+     },
+     {
+      "accessType": 1,
+      "description": "",
+      "name": "FLAG",
+      "offset": 4,
+      "readAction": 1,
+      "width": 1
+     },
+     {
+      "description": "Channel %s",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "CHA",
+      "offset": 8,
+      "width": 1
+     },
+     {
+      "description": "Channel %s",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "CHB",
+      "offset": 9,
+      "width": 1
+     },
+     {
+      "description": "",
+      "enumeration": {
+       "0": {
+        "description": "Off",
+        "name": "OFF",
+        "value": 0
+       },
+       "1": {
+        "description": "",
+        "name": "ON_AGAIN",
+        "value": 1
+       }
+      },
+      "name": "PATH",
+      "offset": 9,
+      "width": 1
+     }
+    ],
+    "name": "ALIAS",
+    "resetValue": 5,
+    "size": 32
+   },
+   {
+    "addressOffset": 68,
+    "description": "",
+    "fields": [],
+    "name": "TWO_FIELDS"
+   },
+   {
+    "accessType": 3,
+    "addressOffset": 72,
+    "description": "",
+    "fields": [],
+    "name": "ODD",
+    "resetValue": 12,
+    "size": 16
+   }
+  ],
+  "resetValue": 0,
+  "size": 16,
+  "totalLength": 576
+ }
+]

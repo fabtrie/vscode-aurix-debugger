@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What needs every peripheral at once: derived peripherals, a register derived from another
+     peripheral's, two peripherals of one name, device defaults after the peripherals. -->
+<device>
+  <name>DERIVED</name>
+  <peripherals>
+    <peripheral derivedFrom="BASE">
+      <name>COPY_FIRST</name>
+      <baseAddress>0xF0000000</baseAddress>
+    </peripheral>
+    <peripheral>
+      <name>BASE</name>
+      <description>The base</description>
+      <baseAddress>0xF0001000</baseAddress>
+      <addressBlock><offset>0</offset><size>0x40</size><usage>registers</usage></addressBlock>
+      <registers>
+        <register>
+          <name>CTRL</name>
+          <addressOffset>0x0</addressOffset>
+          <fields>
+            <field>
+              <name>EN</name>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+              <enumeratedValues>
+                <name>en</name>
+                <enumeratedValue><name>OFF</name><value>0</value></enumeratedValue>
+                <enumeratedValue><name>ON</name><value>1</value></enumeratedValue>
+              </enumeratedValues>
+            </field>
+          </fields>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral derivedFrom="BASE">
+      <name>COPY</name>
+      <description>Derived, with its own registers element replacing the base's</description>
+      <baseAddress>0xF0002000</baseAddress>
+      <registers>
+        <register derivedFrom="BASE.CTRL">
+          <name>CTRL2</name>
+          <addressOffset>0x4</addressOffset>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral>
+      <name>TWICE</name>
+      <baseAddress>0xF0003000</baseAddress>
+    </peripheral>
+    <peripheral>
+      <name>OTHER</name>
+      <baseAddress>0xF0004000</baseAddress>
+    </peripheral>
+    <peripheral>
+      <name>TWICE</name>
+      <description>The later one wins, at the place of the first</description>
+      <baseAddress>0xF0005000</baseAddress>
+    </peripheral>
+  </peripherals>
+  <size>16</size>
+</device>

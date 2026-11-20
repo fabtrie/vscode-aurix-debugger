@@ -210,9 +210,10 @@ pub fn plan(acc: &[Access]) -> Vec<std::ops::Range<usize>> {
 }
 
 /// Splits reads and writes (each at most [`MAX_CHUNK`]) into messages for
-/// [`crate::Probe::access_packed`]: unlike [`plan`], a write does not end its message, so a whole
-/// run-control sequence (trigger setup, release, status read) is one message. Each message keeps
-/// room for the [`CHECK`] read that follows a write at its end; within the same limits as [`plan`].
+/// [`crate::Probe::access_packed`] and [`crate::Probe::write_bulk`]: unlike [`plan`], a write does
+/// not end its message, so a whole run-control sequence (trigger setup, release, status read) or
+/// several bulk writes are one message. Each message keeps room for the [`CHECK`] read that follows
+/// a write at its end; within the same limits as [`plan`].
 pub fn plan_packed(acc: &[Access]) -> Vec<std::ops::Range<usize>> {
     let empty = (1, REQUEST_HEAD + REQUEST_TAIL + CHECK.request_size(), REPLY_HEAD + CHECK.reply_size());
     let mut out = Vec::new();
@@ -454,6 +455,24 @@ fn u32le(b: &[u8], o: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flash loader slot (32 KB in 8 KB pieces) and its header go in one message, more in
+    /// several, each within the request limit with room for the check read.
+    #[test]
+    fn bulk_writes_share_messages() {
+        let piece = vec![0u8; MAX_CHUNK];
+        let header = [0u8; 32];
+        let mut acc: Vec<Access> = (0..4).map(|i| Access::Write { addr: 0x7000_0040 + (i * MAX_CHUNK) as u32, data: &piece }).collect();
+        acc.push(Access::Write { addr: 0x7000_0020, data: &header });
+        assert_eq!(plan_packed(&acc), vec![0..5]);
+        let many: Vec<Access> = (0..12).map(|i| Access::Write { addr: (i * MAX_CHUNK) as u32, data: &piece }).collect();
+        let plan = plan_packed(&many);
+        assert_eq!(plan.len(), 3);
+        for r in plan {
+            let rq: usize = REQUEST_HEAD + REQUEST_TAIL + CHECK.request_size() + many[r].iter().map(|a| a.request_size()).sum::<usize>();
+            assert!(rq <= MAX_BATCH_REQUEST, "{rq}");
+        }
+    }
 
     /// A step's writes and reads share one message; more than a message holds go in several.
     #[test]

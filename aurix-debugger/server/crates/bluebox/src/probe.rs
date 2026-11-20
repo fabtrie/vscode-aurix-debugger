@@ -202,6 +202,26 @@ impl<L: Link> Probe<L> {
         Ok(out)
     }
 
+    /// Writes `blocks` in order, in as few messages as [`memory::plan_packed`] allows: unlike
+    /// [`Probe::access`], writes share a message and only its end carries the check read, so a
+    /// failed write is known per message, not per write. For bulk data whose writes need no
+    /// exact failure position (the flash loader's slots). Returns whether every byte was written.
+    pub fn write_bulk(&mut self, blocks: &[(u32, &[u8])]) -> Result<bool> {
+        let mut pieces = Vec::new();
+        for &(addr, data) in blocks {
+            for (i, c) in data.chunks(MAX_CHUNK).enumerate() {
+                pieces.push(Access::Write { addr: addr.wrapping_add((i * MAX_CHUNK) as u32), data: c });
+            }
+        }
+        let mut ok = true;
+        for range in memory::plan_packed(&pieces) {
+            let mut msg = pieces[range].to_vec();
+            msg.push(memory::CHECK);
+            ok &= self.batch(&msg)?.iter().all(|m| m.all_ok());
+        }
+        Ok(ok)
+    }
+
     /// Runs `ops` in order, in as few messages as [`memory::plan`] allows,
     /// splitting longer ones at [`MAX_CHUNK`]: reads share messages, every
     /// write has one of its own, followed by the check read. Stops at the first op with a failed byte, like a TAS packet:

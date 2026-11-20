@@ -1169,6 +1169,33 @@ impl Adapter for BlueBoxAdapter {
         self.execute_as(batch, true)
     }
 
+    /// Several writes per message, with one check read at its end (`bluebox::Probe::write_bulk`):
+    /// a write per message, as [`Adapter::execute`] does, costs a USB round trip each.
+    fn write_bulk(&mut self, blocks: &[(u32, &[u8])]) -> Result<bool> {
+        #[cfg(not(windows))]
+        {
+            let _ = blocks;
+            Err(Error::Usage(NOT_CONNECTED.into()))
+        }
+        #[cfg(windows)]
+        {
+            if !self.inited {
+                return Err(Error::Usage(NOT_CONNECTED.into()));
+            }
+            self.ensure_connected()?;
+            let blocks: Vec<(u32, &[u8])> = blocks.iter().map(|&(a, d)| (crate::tricore::bus_address(a), d)).collect();
+            match self.probe()?.write_bulk(&blocks) {
+                Ok(ok) => Ok(ok),
+                Err(e) => {
+                    self.probe_gone = probe_gone(&e);
+                    let msg = format!("bluebox: {e}");
+                    self.lose(Lost::Probe, &format!("probe error: {e}"));
+                    Err(other(msg))
+                }
+            }
+        }
+    }
+
     /// A message takes 64 accesses, but each costs about 0.45 ms in the probe
     /// however they are packed: `max_num_rw` is what bounds a DAQ tick's time
     /// (2 x 32 reads, about 30 ms), not the message's capacity.

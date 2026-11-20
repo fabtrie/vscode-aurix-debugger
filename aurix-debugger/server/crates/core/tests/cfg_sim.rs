@@ -1553,3 +1553,136 @@ fn scr_target_set_after_the_cfg_files() {
     assert_eq!(i.eval("tc37x.scr was_examined").unwrap(), "1");
     assert_eq!(i.eval("tc37x.scr curstate").unwrap(), "halted");
 }
+
+/// An Intel HEX file in the temp folder, as a quoted Tcl path.
+fn hex_file(name: &str, img: &aurix_core::image::Image) -> String {
+    let p = std::env::temp_dir().join(format!("aurix-{name}-{}.hex", std::process::id()));
+    std::fs::write(&p, img.to_ihex()).unwrap();
+    jim::quote(&tcl_path(p))
+}
+
+fn pattern(words: u32, seed: u32) -> Vec<u8> {
+    (0..words).flat_map(|i| (seed.wrapping_mul(0x0100_0193) ^ i.wrapping_mul(0x9E37_79B9)).to_le_bytes()).collect()
+}
+
+const CBS_TL1ST: u32 = 0xF000_0494;
+const CPU0_D0: u32 = 0xF881_FF00;
+const CPU0_A4: u32 = 0xF881_FF90;
+
+/// cpu0's d0, a4, PC (the simulator's) and CBS_TL1ST, which the loader borrows and gives back.
+fn loader_state(s: &Server) -> (u32, u32, u32, u32) {
+    let tl1st = mem(s, CBS_TL1ST);
+    with_sim(s, |sim| (sim.mem_word(CPU0_D0), sim.mem_word(CPU0_A4), sim.pc[0], tl1st))
+}
+
+#[test]
+fn flash_loader_programs_through_cpu0() {
+    use aurix_core::image::{Image, Section};
+    let s = server();
+    s.interp.eval("init").unwrap();
+    assert_eq!(s.interp.eval("flash loader").unwrap(), "on");
+    s.interp.eval("halt").unwrap();
+    with_sim(&s, |sim| {
+        sim.set_mem(CPU0_D0, 0x1111_1111);
+        sim.set_mem(CPU0_A4, 0x2222_2222);
+    });
+    let before = loader_state(&s);
+    assert_eq!(before.3 & 1, 1, "the cfg puts cpu0 on trigger line 1");
+    // Off a burst boundary, across 8 KB slots and three sectors, and a second bank.
+    let image = |seed: u32| {
+        Image::from_sections(vec![
+            Section { addr: 0x8000_4040, data: pattern(10_000, seed) },
+            Section { addr: 0x8030_0000, data: pattern(64, seed + 1) },
+        ])
+    };
+    let file = hex_file("loader-a", &image(1));
+    let out = s.interp.eval(&format!("flash write_images erase verify {file}")).unwrap();
+    assert!(out.contains("4 sectors: 0 unchanged, 4 programmed (0 erased first)") && out.contains("(RAM loader)"), "{out}");
+    assert!(out.contains("verified 40256 bytes"), "{out}");
+    assert_eq!(with_sim(&s, |sim| sim.cpu0_fault.clone()), None);
+    assert_eq!(loader_state(&s), before, "cpu0's registers and its TL1 routing are back");
+    assert_eq!(mem(&s, 0xF003_62A8) & 3, 3, "Safety ENDINIT is set again");
+    assert!(with_sim(&s, |sim| sim.halted[0] && sim.cpu0.is_none()));
+
+    // The same image again: unchanged; another one: the sectors are erased and programmed.
+    let out = s.interp.eval(&format!("flash write_images erase incremental {file}")).unwrap();
+    assert!(out.contains("4 sectors: 4 unchanged"), "{out}");
+    // An all-zero page where the flash is still erased reads as zeros: the loader's checksum must
+    // not take it for unchanged data (Verify Erased Page).
+    let mut grown = image(1);
+    grown.sections.push(Section { addr: 0x8000_4000, data: vec![0; 32] });
+    let out = s.interp.eval(&format!("flash write_images erase incremental {}", hex_file("loader-zero", &grown))).unwrap();
+    assert!(out.contains("4 sectors: 3 unchanged, 1 programmed (1 erased first)"), "{out}");
+    assert!(with_sim(&s, |sim| sim.dmu.pflash_pages.contains_key(&0xA000_4000)), "the zero page is programmed");
+    // Changed data: every sector is programmed again.
+    let out = s.interp.eval(&format!("flash write_images erase incremental {}", hex_file("loader-changed", &image(9)))).unwrap();
+    assert!(out.contains("4 sectors: 0 unchanged, 4 programmed (4 erased first)"), "{out}");
+    let execs = |s: &Server| with_sim(s, |sim| sim.execs);
+    let e0 = execs(&s);
+    let out = s.interp.eval(&format!("flash write_images erase verify {}", hex_file("loader-b", &image(2)))).unwrap();
+    assert!(out.contains("4 programmed (4 erased first)") && out.contains("verified 40256 bytes"), "{out}");
+    let with_loader = execs(&s) - e0;
+
+    // The DMU over the debug interface takes many more round trips for the same work.
+    assert_eq!(s.interp.eval("flash loader off").unwrap(), "off");
+    let e0 = execs(&s);
+    let out = s.interp.eval(&format!("flash write_images erase verify {}", hex_file("loader-c", &image(3)))).unwrap();
+    assert!(out.contains("4 programmed (4 erased first)") && !out.contains("RAM loader"), "{out}");
+    let without = execs(&s) - e0;
+    assert!(with_loader * 3 < without, "round trips with the loader {with_loader}, without {without}");
+    assert!(s.interp.eval("catch {flash loader maybe} e; set e").unwrap().starts_with("usage"));
+    no_violations(&s);
+}
+
+#[test]
+fn flash_loader_falls_back_when_the_watchdogs_stay_on() {
+    use aurix_core::image::{Image, Section};
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("halt").unwrap();
+    with_sim(&s, |sim| sim.wdt_stuck = true);
+    let before = loader_state(&s);
+    let file = hex_file("loader-wdt", &Image::from_sections(vec![Section { addr: 0x8000_0000, data: pattern(64, 5) }]));
+    let out = s.interp.eval(&format!("flash write_images erase verify {file}")).unwrap();
+    assert!(out.contains("1 programmed") && !out.contains("RAM loader") && out.contains("verified 256 bytes"), "{out}");
+    assert_eq!(loader_state(&s), before);
+    assert!(with_sim(&s, |sim| sim.halted[0] && sim.cpu0.is_none()));
+}
+
+#[test]
+fn flash_loader_reports_a_failed_program_command() {
+    use aurix_core::image::{Image, Section};
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("halt").unwrap();
+    let before = loader_state(&s);
+    // A page with data in a sector the erase check finds erased: programming it fails.
+    with_sim(&s, |sim| {
+        sim.dmu.pflash_pages.insert(0xA000_8000, vec![0; 32]);
+    });
+    let file = hex_file("loader-fail", &Image::from_sections(vec![Section { addr: 0x8000_8000, data: pattern(64, 6) }]));
+    let e = s.interp.eval(&format!("catch {{flash write_image erase {file}}} e; set e")).unwrap();
+    assert!(e.contains("flash program at 0x80008000 failed: program verify error"), "{e}");
+    assert_eq!(loader_state(&s), before);
+    assert!(with_sim(&s, |sim| sim.halted[0] && sim.cpu0.is_none() && sim.cpu0_fault.is_none()));
+}
+
+/// An application that protects cpu0's DSPR against the debugger (its writes are dropped without an
+/// error, seen on a TC375 Lite Kit): the loader's slots go to cpu0's PSPR behind the code.
+#[test]
+fn flash_loader_uses_the_pspr_when_the_dspr_is_protected() {
+    use aurix_core::image::{Image, Section};
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("halt").unwrap();
+    with_sim(&s, |sim| sim.debugger_dropped.push(0x7000_0000..0x7010_0000));
+    let before = loader_state(&s);
+    let img = Image::from_sections(vec![Section { addr: 0x8000_4040, data: pattern(10_000, 11) }]);
+    let file = hex_file("loader-pspr", &img);
+    let out = s.interp.eval(&format!("flash write_images erase verify {file}")).unwrap();
+    assert!(out.contains("3 programmed") && out.contains("(RAM loader)") && out.contains("verified 40000 bytes"), "{out}");
+    let out = s.interp.eval(&format!("flash write_images erase incremental {file}")).unwrap();
+    assert!(out.contains("3 sectors: 3 unchanged"), "{out}");
+    assert_eq!(loader_state(&s), before);
+    assert_eq!(with_sim(&s, |sim| sim.cpu0_fault.clone()), None);
+}

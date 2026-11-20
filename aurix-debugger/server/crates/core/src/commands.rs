@@ -863,6 +863,15 @@ fn cmd_flash(cx: &Cx, a: &[&str]) -> CmdResult {
                 .join("\n")
         })),
         Some("init") => ok(),
+        Some("loader") => {
+            match a.get(2).copied() {
+                Some("on") => cx.with(|c| c.flash_loader = true),
+                Some("off") => cx.with(|c| c.flash_loader = false),
+                None => {}
+                Some(_) => return Err("usage: flash loader [on|off]".into()),
+            }
+            Ok(if cx.with(|c| c.flash_loader) { "on" } else { "off" }.into())
+        }
         Some("probe") | Some("info") => {
             require_controller_flash(cx, "probe")?;
             require_init(cx, "flash")?;

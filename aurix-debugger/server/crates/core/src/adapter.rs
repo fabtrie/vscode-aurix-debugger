@@ -293,6 +293,16 @@ pub trait Adapter {
     fn execute_packed(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         self.execute(batch)
     }
+    /// Writes `blocks` (host addresses, see [`bus_address`]) in order, for bulk data whose
+    /// failure needs no exact position (the flash loader's slots): `Ok(false)` if any byte
+    /// failed. The default is one batch; an adapter that pays per write message packs them.
+    fn write_bulk(&mut self, blocks: &[(u32, &[u8])]) -> Result<bool> {
+        let mut b = Batch::new();
+        for &(addr, data) in blocks {
+            b.write(bus_address(addr) as u64, data);
+        }
+        Ok(self.execute(&b)?.iter().all(|r| r.ok()))
+    }
     /// Packet limits of the connection; the default is a conservative guess.
     fn limits(&self) -> BatchLimits {
         BatchLimits::default()

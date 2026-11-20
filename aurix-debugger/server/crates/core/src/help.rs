@@ -271,6 +271,11 @@ pub static ENTRIES: &[Entry] = &[
     e!(Flash, "flash banks", "", "List the flash banks (also `flash list`)."),
     e!(Flash, "flash info", "<bank>", "Probe a bank and show its geometry (also `flash probe`)."),
     e!(Flash, "flash erase_check", "<bank>", "Show which sectors of a bank are erased."),
+    e!(Flash, "flash loader", "[on|off]", "Program PFLASH through the RAM flash loader on cpu0 (default on).",
+        "`flash write_image(s)` copies a small loader to the start of cpu0's PSPR and its buffers to the start of \
+         its DSPR, and cpu0 runs the flash commands while the debugger only moves data in 8 KB blocks. The loader \
+         turns off the CPU0 and safety watchdogs until the next reset; cpu0 gets its registers back, the RAM keeps \
+         the loader. If it cannot start, the debugger drives the flash controller itself (`off`: always)."),
     e!(Flash, "flash erase_sector", "<bank> <first> <last>|last", "Erase sectors of a bank."),
     e!(Flash, "flash write_image", "[erase] [incremental] [unlock] <file> [<offset> [<type>]]", "Program an image (ELF, HEX, S-record, binary).",
         "`incremental` only programs the sectors that differ. Non-cached PFLASH data, UCB data and data outside the flash \

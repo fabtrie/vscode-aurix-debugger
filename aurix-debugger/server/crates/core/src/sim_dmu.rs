@@ -40,6 +40,9 @@ pub struct SimDmu {
     pub cut_after: Option<usize>,
     /// Logical PFLASH sectors (non-cached address) that hold data, for "verify erased".
     pub programmed_sectors: std::collections::BTreeSet<u32>,
+    /// A CPU issues the command cycle and Safety ENDINIT is set: PFLASH erase and program fail
+    /// with PROER (the debugger's commands are exempt).
+    pub cpu_safety_endinit: bool,
     /// Data of the PFLASH pages programmed since (non-cached page address, 32 bytes each); it
     /// reads back at both the cached and the non-cached address, other PFLASH reads as zero.
     pub pflash_pages: std::collections::BTreeMap<u32, Vec<u8>>,
@@ -98,6 +101,7 @@ impl SimDmu {
             commands: 0,
             cut_after: None,
             programmed_sectors: [0xA000_0000].into(),
+            cpu_safety_endinit: false,
             pflash_pages: Default::default(),
         };
         s.install();
@@ -355,10 +359,18 @@ impl SimDmu {
         let a = self.seq_addr;
         let in_ucb = (ucb::BASE as u64..ucb::END).contains(&(a as u64));
         match cmd {
+            // Verify Erased Page (PFLASH): EVER if programmed.
+            0x56 => {
+                if !a.is_multiple_of(32) {
+                    self.errsr |= SQER;
+                } else if self.pflash_pages.contains_key(&((a & 0x0FFF_FFFF) | 0xA000_0000)) {
+                    self.errsr |= EVER;
+                }
+            }
             // Verify Erased Logical Sector Range (PFLASH): EVER if programmed.
             0x5F => {
                 let sector = (a & 0x0FFF_FFFF & !0x3FFF) | 0xA000_0000;
-                if self.programmed_sectors.contains(&sector) {
+                if (0..self.seq_count.max(1)).any(|k| self.programmed_sectors.contains(&(sector + k * 0x4000))) {
                     self.errsr |= EVER;
                 }
             }
@@ -395,6 +407,12 @@ impl SimDmu {
                     self.commands += 1;
                 }
             }
+            // PFLASH erase and program from a CPU with Safety ENDINIT set.
+            0x50 | 0xAA | 0xA6 if (a >> 28) == 0xA && a < 0xAF00_0000 && self.cpu_safety_endinit => {
+                self.page.clear();
+                self.page_mode = false;
+                self.errsr |= PROER;
+            }
             // PFLASH erase and program: only which sectors hold data is modelled.
             0x50 if (a >> 28) == 0xA && a < 0xAF00_0000 => {
                 for k in 0..self.seq_count.max(1) {
@@ -406,8 +424,13 @@ impl SimDmu {
             0xAA | 0xA6 if (a >> 28) == 0xA && a < 0xAF00_0000 => {
                 let page = std::mem::take(&mut self.page);
                 self.page_mode = false;
-                if page.len() != if cmd == 0xA6 { 256 } else { 32 } {
+                let n = if cmd == 0xA6 { 256 } else { 32 };
+                let pa = (a & !31) | 0xA000_0000;
+                if page.len() != n || !a.is_multiple_of(n as u32) {
                     self.errsr |= SQER;
+                } else if (0..n as u32 / 32).any(|k| self.pflash_pages.contains_key(&(pa + 32 * k))) {
+                    // Programming over programmed data: the chip reports a program verify error.
+                    self.errsr |= PVER;
                 } else {
                     self.programmed_sectors.insert((a & !0x3FFF) | 0xA000_0000);
                     for (k, p) in page.chunks(32).enumerate() {

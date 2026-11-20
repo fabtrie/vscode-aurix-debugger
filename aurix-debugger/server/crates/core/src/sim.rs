@@ -33,6 +33,7 @@ use crate::error::Result;
 use crate::sim_dmu::SimDmu;
 use crate::sim_mcs::SimGtm;
 use crate::sim_scr::SimScr;
+use crate::sim_tricore::{Bus, SimCpu, Stop};
 
 const NUM_CORES: usize = 3;
 
@@ -317,7 +318,26 @@ pub struct SimAdapter {
     pub sampler: Option<SimSampler>,
     /// The DMU with the UCBs ([`SimDmu`]).
     pub dmu: SimDmu,
+    /// Code cpu0 executes: started when it is resumed in its PSPR (the RAM flash loader), run at
+    /// every batch until it waits, halted by the debugger.
+    pub cpu0: Option<SimCpu>,
+    /// Why cpu0's code stopped with a fault, if it did.
+    pub cpu0_fault: Option<String>,
+    /// The watchdogs ignore their disable request (`WDTxCON1.DR`): DS stays clear.
+    pub wdt_stuck: bool,
+    /// RAM the application protects against the debugger: its writes there are dropped without an
+    /// error (the bus error of a posted write does not reach the probe); the cores' writes land.
+    pub debugger_dropped: Vec<std::ops::Range<u32>>,
 }
+
+/// CPU0's PSPR (global address): a resume there runs the code in [`SimAdapter::cpu0`].
+const SIM_PSPR0: std::ops::Range<u32> = 0x7010_0000..0x7020_0000;
+/// CPU0's CSFR base in the simulator (D0 at +0xFF00, A0 at +0xFF80).
+const SIM_CPU0_CSFR: u32 = 0xF881_0000;
+/// WDTCPU0CON1 and WDTSCON1 (CON0 before, SR after each).
+const SIM_WDT_CON1: [u32; 2] = [0xF003_6250, 0xF003_62AC];
+/// WDTSCON0: its ENDINIT is Safety ENDINIT.
+pub const SIM_WDTS_CON0: u32 = 0xF003_62A8;
 
 /// A probe sampler as the BlueBox's behaves: after a configure every readable item sends one
 /// value, then a value whenever it changed (checked at each drain); an unreadable item (in
@@ -380,6 +400,10 @@ impl SimAdapter {
             health: None,
             sampler: None,
             dmu: SimDmu::new(),
+            cpu0: None,
+            cpu0_fault: None,
+            wdt_stuck: false,
+            debugger_dropped: Vec::new(),
             app: Some(SimApp::new()),
             fs26: None,
             violations: Vec::new(),
@@ -397,6 +421,12 @@ impl SimAdapter {
     /// Peripheral registers after a power-on class reset: OCS cleared, ACCEN0 open, only the
     /// modules that are on by default enabled.
     fn reset_periphs(&mut self) {
+        // WDTCPU0CON0 and WDTSCON0 locked with ENDINIT set (as the startup leaves them), password
+        // 0x3C (PW reads 0x03), the watchdogs enabled.
+        for con0 in [0xF003_624C, SIM_WDTS_CON0] {
+            self.mem.insert(con0, 0xFFFC_000F);
+            self.mem.insert(con0 + 8, self.mem.get(&(con0 + 8)).copied().unwrap_or(0) & !8);
+        }
         for &(ocs, clc, accen, on) in SIM_PERIPHS {
             self.mem.remove(&ocs);
             self.mem.insert(clc, if on { 0 } else { 3 });
@@ -455,6 +485,7 @@ impl SimAdapter {
     /// peripherals and the application from the beginning. `halt`: the debugger halts cpu0 at the
     /// reset vector (the application starts when it is resumed).
     fn power_on_reset(&mut self, halt: bool) {
+        self.cpu0 = None;
         self.ostate = 0;
         self.mcds.reset();
         self.dmu.install();
@@ -555,6 +586,7 @@ impl SimAdapter {
 
     /// Simulates an external (watchdog) reset: OCDS disabled, cores running, STM0 restarting.
     pub fn external_reset(&mut self) {
+        self.cpu0 = None;
         self.ostate = 0;
         self.halted = [false; NUM_CORES];
         self.stm_epoch = Instant::now();
@@ -564,6 +596,7 @@ impl SimAdapter {
     /// Simulates an application reset (software reset): cores running, STM0 restarting, OCDS kept
     /// (only a power-on class reset clears it).
     pub fn application_reset(&mut self) {
+        self.cpu0 = None;
         self.halted = [false; NUM_CORES];
         self.stm_epoch = Instant::now();
         self.pending_resets += 1;
@@ -599,6 +632,9 @@ impl SimAdapter {
                         | if self.halted[i] { (self.evtsrc[i] & 0x1F) << 8 } else { 0 }
                 }
                 0xFE08 => {
+                    if let (0, Some(cpu)) = (i, self.cpu0.as_ref()) {
+                        return cpu.pc;
+                    }
                     if !self.halted[i] {
                         self.pc[i] = self.pc[i].wrapping_add(2);
                     }
@@ -635,6 +671,14 @@ impl SimAdapter {
                 }
             }
         }
+        // A watchdog takes CON1.DR into SR.DS when ENDINIT is set again (modify access, LCK 1).
+        if let Some(&con1) = SIM_WDT_CON1.iter().find(|&&c| c == addr + 4) {
+            if v & 3 == 3 {
+                let sr = self.mem.get(&(con1 + 4)).copied().unwrap_or(0) & !8;
+                let dr = self.mem.get(&con1).copied().unwrap_or(0) & 8;
+                self.mem.insert(con1 + 4, sr | if self.wdt_stuck { 0 } else { dr });
+            }
+        }
         if let Some((i, off)) = Self::core_of(addr) {
             match off {
                 0xFD00 => {
@@ -643,6 +687,9 @@ impl SimAdapter {
                         3 => {
                             self.halted[i] = true;
                             self.evtsrc[i] = 0;
+                            if i == 0 {
+                                self.stop_cpu0();
+                            }
                         }
                         2 => self.resume_core(i),
                         _ => {}
@@ -831,8 +878,54 @@ impl SimAdapter {
         false
     }
 
+    /// Runs cpu0's code until it waits for the debugger (or faults: it then stops there).
+    fn run_cpu0(&mut self) {
+        let Some(mut cpu) = self.cpu0.take() else { return };
+        if !self.halted[0] {
+            match cpu.run(self, 2_000_000) {
+                Stop::Idle => {
+                    // Waiting with an ENDINIT cleared: the watchdog is in time-out mode and resets the
+                    // chip on the board.
+                    for con0 in [0xF003_624C, SIM_WDTS_CON0] {
+                        if self.mem_word(con0) & 1 == 0 {
+                            self.violations.push(con0);
+                        }
+                    }
+                }
+                Stop::Budget => self.cpu0_fault = Some(format!("no wait for the debugger within the budget (pc 0x{:08x})", cpu.pc)),
+                Stop::Fault(f) => self.cpu0_fault = Some(f),
+            }
+        }
+        self.cpu0 = Some(cpu);
+    }
+
+    /// cpu0 halted: its registers go back to the CSFRs.
+    fn stop_cpu0(&mut self) {
+        let Some(cpu) = self.cpu0.take() else { return };
+        for n in 0..16u32 {
+            self.mem.insert(SIM_CPU0_CSFR + 0xFF00 + 4 * n, cpu.d[n as usize]);
+            self.mem.insert(SIM_CPU0_CSFR + 0xFF80 + 4 * n, cpu.a[n as usize]);
+        }
+        let icr = self.mem.get(&(SIM_CPU0_CSFR + 0xFE2C)).copied().unwrap_or(0) & !(1 << 15);
+        self.mem.insert(SIM_CPU0_CSFR + 0xFE2C, icr | (cpu.ie as u32) << 15);
+        self.pc[0] = cpu.pc;
+    }
+
     fn resume_core(&mut self, i: usize) {
         self.halted[i] = false;
+        if i == 0 && SIM_PSPR0.contains(&self.pc[0]) {
+            let reg = |s: &Self, off: u32| s.mem.get(&(SIM_CPU0_CSFR + off)).copied().unwrap_or(0);
+            let mut cpu = SimCpu::default();
+            cpu.pc = self.pc[0];
+            cpu.ie = reg(self, 0xFE2C) & (1 << 15) != 0;
+            for n in 0..16u32 {
+                cpu.d[n as usize] = reg(self, 0xFF00 + 4 * n);
+                cpu.a[n as usize] = reg(self, 0xFF80 + 4 * n);
+            }
+            self.cpu0 = Some(cpu);
+            self.cpu0_fault = None;
+            return;
+        }
         if i == 0 {
             if let Some(app) = self.app.as_mut() {
                 if app.pending {
@@ -852,6 +945,26 @@ impl SimAdapter {
                 break;
             }
         }
+    }
+}
+
+/// cpu0's accesses: the DMU, then the rest of the chip as the debugger sees it.
+impl Bus for SimAdapter {
+    fn read32(&mut self, addr: u32) -> u32 {
+        if SimDmu::claims(addr) {
+            return self.dmu.read32(addr).unwrap_or(0);
+        }
+        SimAdapter::read32(self, addr)
+    }
+
+    fn write32(&mut self, addr: u32, v: u32) {
+        if SimDmu::claims(addr) {
+            self.dmu.cpu_safety_endinit = self.mem_word(SIM_WDTS_CON0) & 1 != 0;
+            self.dmu.write32(addr, v);
+            self.dmu.cpu_safety_endinit = false;
+            return;
+        }
+        SimAdapter::write32(self, addr, v);
     }
 }
 
@@ -876,6 +989,7 @@ impl Adapter for SimAdapter {
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
         self.tick();
         self.execs += 1;
+        self.run_cpu0();
         self.mcds.observe(self.halted[0]);
         let mut out = Vec::with_capacity(batch.len());
         // As on the chip, a failing bridge access fails the bridge accesses after it in the batch.
@@ -944,6 +1058,9 @@ impl Adapter for SimAdapter {
                             let mut w = [0u8; 4];
                             w[..chunk.len()].copy_from_slice(chunk);
                             let (a, v) = (addr as u32 + 4 * k as u32, u32::from_le_bytes(w));
+                            if self.debugger_dropped.iter().any(|r| r.contains(&a)) {
+                                continue;
+                            }
                             self.write32(a, v);
                             self.mcds.on_store(a, v);
                         }

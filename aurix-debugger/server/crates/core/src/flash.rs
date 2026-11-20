@@ -1,8 +1,9 @@
 //! Flash banks (`flash bank`) and the AURIX TC3xx PFLASH/DFLASH driver (`tc3x_eflash`,
 //! also accepted as `aurix_eflash`). DFLASH banks support erase and erase check only.
 //!
-//! Programming runs the DMU command sequences over the debug interface (no RAM
-//! loader). `write_image` is incremental per 16 KB sector:
+//! `write_image` programs through the RAM flash loader on CPU0 ([`crate::flash_loader`]) when
+//! it starts, otherwise it runs the DMU command sequences over the debug interface
+//! ([`Driver`]). Either way it is incremental per 16 KB sector:
 //! - an erased sector is programmed directly; erased state is checked with the DMU
 //!   "verify erased" command, because reading erased PFLASH causes ECC bus errors,
 //! - a sector whose image pages already hold the image data is skipped,
@@ -17,6 +18,7 @@ use tas::Batch;
 
 use crate::adapter::{check, Io};
 use crate::error::{other, usage, Error, Result};
+use crate::flash_loader::Loader;
 use crate::image::{Image, Section};
 use crate::target::TargetState;
 use crate::{log_info, log_warn, ops, Cx};
@@ -220,6 +222,14 @@ pub fn probe(io: &mut Io, bank: &FlashBank) -> Result<Pflash> {
     Ok(layout)
 }
 
+/// Logical sectors from `addr` that one erase (or erase check) command of `bank` may cover: at most
+/// `max_erase_sectors`, not across a physical sector.
+pub(crate) fn erase_chunk(bank: &Pflash, addr: u32, remaining: u32) -> u32 {
+    let off = (addr & 0x0FFF_FFFF) - (bank.base & 0x0FFF_FFFF);
+    let to_phys = (bank.phys_sector - off % bank.phys_sector) / bank.sector_size;
+    remaining.min(bank.max_erase_sectors).min(to_phys.max(1))
+}
+
 /// DMU command sequences on one PFLASH bank.
 pub struct Driver<'a, 'b> {
     io: &'a mut Io<'b>,
@@ -275,9 +285,7 @@ impl<'a, 'b> Driver<'a, 'b> {
 
     /// Sectors from `addr` that one command may cover.
     fn chunk(&self, addr: u32, remaining: u32) -> u32 {
-        let off = (addr & 0x0FFF_FFFF) - (self.bank.base & 0x0FFF_FFFF);
-        let to_phys = (self.bank.phys_sector - off % self.bank.phys_sector) / self.bank.sector_size;
-        remaining.min(self.bank.max_erase_sectors).min(to_phys.max(1))
+        erase_chunk(&self.bank, addr, remaining)
     }
 
     /// Erases `sectors` logical sectors from `addr`.
@@ -453,6 +461,9 @@ pub struct WriteStats {
     pub elapsed: Duration,
     /// Addresses of the sectors that were programmed.
     pub programmed: Vec<u32>,
+    /// Programmed by the RAM flash loader ([`crate::flash_loader`]) rather than over the debug
+    /// interface.
+    pub loader: bool,
 }
 
 impl std::fmt::Display for WriteStats {
@@ -467,6 +478,9 @@ impl std::fmt::Display for WriteStats {
             self.bytes,
             self.elapsed.as_secs_f64()
         )?;
+        if self.loader {
+            write!(f, " (RAM loader)")?;
+        }
         if self.ucb_skipped > 0 {
             write!(f, ", {} bytes of UCB data skipped", self.ucb_skipped)?;
         }
@@ -603,7 +617,35 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, un
     halt_all(cx)?;
     let t0 = Instant::now();
     let mut stats = WriteStats { ucb_skipped, unbanked_skipped, ..Default::default() };
-    for bank in &banks {
+    let mut loader = None;
+    let r = write_banks(cx, img, &banks, Mode { erase, incremental }, &mut loader, &mut stats);
+    // The loader is stopped in every case: CPU0 runs it.
+    let stopped = loader.map(|l| l.stop(cx));
+    match (r, stopped) {
+        (Err(e), Some(Err(s))) => {
+            log_warn!("flash loader: stopping it failed: {s}");
+            return Err(e);
+        }
+        (Err(e), _) => return Err(e),
+        (Ok(()), Some(Err(s))) => return Err(s),
+        _ => {}
+    }
+    stats.elapsed = t0.elapsed();
+    Ok(stats)
+}
+
+#[derive(Clone, Copy)]
+struct Mode {
+    erase: bool,
+    incremental: bool,
+}
+
+/// The banks' part of `img`: through the RAM flash loader if `flash loader` is on and it starts
+/// (once, at the first bank written; left in `loader` for the caller to stop), else through the
+/// DMU directly.
+fn write_banks(cx: &Cx, img: &Image, banks: &[FlashBank], mode: Mode, loader: &mut Option<Loader>, stats: &mut WriteStats) -> Result<()> {
+    let mut tried = !cx.with(|c| c.flash_loader);
+    for bank in banks {
         let hi = bank.base as u64 + bank.size as u64;
         if !img.touches(bank.base, hi) {
             continue;
@@ -615,46 +657,192 @@ pub fn write_image_with(cx: &Cx, img: &Image, erase: bool, incremental: bool, un
         let pages = image_pages(img, bank.base, hi);
         let sectors: BTreeSet<u32> = pages.keys().map(|p| p - (p - bank.base) % SECTOR_SIZE).collect();
         log_info!("{}: checking {} sectors for {} bytes of image data", bank.name, sectors.len(), pages.len() * PAGE_SIZE as usize);
-        for (i, &sector) in sectors.iter().enumerate() {
-            let runs = sector_runs(&pages, sector);
-            let (unchanged, erased, bytes) = cx.with(|c| -> Result<(bool, bool, usize)> {
-                let mut io = c.io()?;
-                let mut f = Driver::new(&mut io, layout);
-                let blank = f.is_erased(sector, 1)?;
-                if !blank {
-                    if incremental {
-                        // Assumes the image pages are programmed (see write_image_with).
-                        let same = runs.iter().all(|(a, d)| f.io.read(seg_a(*a), d.len()).is_ok_and(|r| r == *d));
-                        if same {
-                            return Ok((true, false, 0));
-                        }
-                    }
-                    if !erase {
-                        return Err(other(format!("sector 0x{sector:08x} is not erased (use 'flash write_image erase')")));
-                    }
-                    f.erase(sector, 1)?;
-                }
-                let mut bytes = 0;
-                for (a, d) in &runs {
-                    f.program(*a, d)?;
-                    bytes += d.len();
-                }
-                Ok((false, !blank, bytes))
-            })?;
-            stats.sectors += 1;
-            stats.unchanged += unchanged as usize;
-            stats.erased += erased as usize;
-            stats.bytes += bytes;
-            if !unchanged {
-                stats.programmed.push(sector);
+        if !tried {
+            tried = true;
+            *loader = Loader::start(cx)?;
+        }
+        match loader.as_mut() {
+            Some(l) => {
+                stats.loader = true;
+                write_bank_loader(cx, l, bank, &layout, &pages, &sectors, mode, stats)?;
             }
-            if (i + 1) % 16 == 0 || i + 1 == sectors.len() {
-                log_info!("{}: {}/{} sectors done", bank.name, i + 1, sectors.len());
+            None => write_bank_dmu(cx, bank, layout, &pages, &sectors, mode, stats)?,
+        }
+    }
+    Ok(())
+}
+
+fn progress(bank: &FlashBank, i: usize, n: usize) {
+    if (i + 1).is_multiple_of(16) || i + 1 == n {
+        log_info!("{}: {}/{} sectors done", bank.name, i + 1, n);
+    }
+}
+
+/// Whether the image pages of `sector` already hold the image data. Only for programmed sectors:
+/// reading erased PFLASH raises ECC errors (see [`write_image_with`]).
+fn sector_unchanged(io: &mut Io, pages: &BTreeMap<u32, [u8; PAGE_SIZE as usize]>, sector: u32) -> bool {
+    sector_runs(pages, sector).iter().all(|(a, d)| io.read(seg_a(*a), d.len()).is_ok_and(|r| r == *d))
+}
+
+/// One sector at a time over the debug interface: erase check, erase if needed, program.
+fn write_bank_dmu(
+    cx: &Cx,
+    bank: &FlashBank,
+    layout: Pflash,
+    pages: &BTreeMap<u32, [u8; PAGE_SIZE as usize]>,
+    sectors: &BTreeSet<u32>,
+    mode: Mode,
+    stats: &mut WriteStats,
+) -> Result<()> {
+    for (i, &sector) in sectors.iter().enumerate() {
+        let runs = sector_runs(pages, sector);
+        let (unchanged, erased, bytes) = cx.with(|c| -> Result<(bool, bool, usize)> {
+            let mut io = c.io()?;
+            let mut f = Driver::new(&mut io, layout);
+            let blank = f.is_erased(sector, 1)?;
+            if !blank {
+                if mode.incremental && sector_unchanged(f.io, pages, sector) {
+                    return Ok((true, false, 0));
+                }
+                if !mode.erase {
+                    return Err(other(format!("sector 0x{sector:08x} is not erased (use 'flash write_image erase')")));
+                }
+                f.erase(sector, 1)?;
+            }
+            let mut bytes = 0;
+            for (a, d) in &runs {
+                f.program(*a, d)?;
+                bytes += d.len();
+            }
+            Ok((false, !blank, bytes))
+        })?;
+        stats.sectors += 1;
+        stats.unchanged += unchanged as usize;
+        stats.erased += erased as usize;
+        stats.bytes += bytes;
+        if !unchanged {
+            stats.programmed.push(sector);
+        }
+        progress(bank, i, sectors.len());
+    }
+    Ok(())
+}
+
+/// Runs of consecutive sectors in `sectors` as (first, count).
+fn sector_ranges(sectors: &BTreeSet<u32>, size: u32) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for &s in sectors {
+        match out.last_mut() {
+            Some((first, n)) if *first + *n * size == s => *n += 1,
+            _ => out.push((s, 1)),
+        }
+    }
+    out
+}
+
+/// The programmed `sectors` whose image pages already hold the image data, compared by the
+/// loader's checksums ([`Loader::checksum_runs`]) instead of reading the flash back.
+fn checksums_unchanged(
+    cx: &Cx,
+    l: &mut Loader,
+    layout: &Pflash,
+    pages: &BTreeMap<u32, [u8; PAGE_SIZE as usize]>,
+    sectors: &[u32],
+) -> Result<BTreeSet<u32>> {
+    // (sector, run address, run bytes, the image's sums) for every image run of the sectors.
+    let mut runs = Vec::new();
+    for &sector in sectors {
+        for (a, d) in sector_runs(pages, sector) {
+            runs.push((sector, a, d.len() as u32, crate::flash_loader::checksum(&d)));
+        }
+    }
+    let mut changed = BTreeSet::new();
+    for group in runs.chunks(l.max_runs()) {
+        let list: Vec<(u32, u32)> = group.iter().map(|r| (r.1, r.2)).collect();
+        for (r, got) in group.iter().zip(l.checksum_runs(cx, layout, &list)?) {
+            if got != r.3 {
+                changed.insert(r.0);
             }
         }
     }
-    stats.elapsed = t0.elapsed();
-    Ok(stats)
+    Ok(sectors.iter().copied().filter(|s| !changed.contains(s)).collect())
+}
+
+/// Through the RAM flash loader: one blank check per run of sectors, erases of up to 512 KB per
+/// command, then the data in slots of 8 KB, while the loader works on the previous one.
+#[allow(clippy::too_many_arguments)]
+fn write_bank_loader(
+    cx: &Cx,
+    l: &mut Loader,
+    bank: &FlashBank,
+    layout: &Pflash,
+    pages: &BTreeMap<u32, [u8; PAGE_SIZE as usize]>,
+    sectors: &BTreeSet<u32>,
+    mode: Mode,
+    stats: &mut WriteStats,
+) -> Result<()> {
+    let size = layout.sector_size;
+    let mut blank = BTreeSet::new();
+    for (first, n) in sector_ranges(sectors, size) {
+        for (i, b) in l.blank_check(cx, layout, first, n)?.into_iter().enumerate() {
+            if b {
+                blank.insert(first + i as u32 * size);
+            }
+        }
+    }
+    let programmed: Vec<u32> = sectors.difference(&blank).copied().collect();
+    let unchanged = match (mode.incremental, l.checksums()) {
+        (false, _) => BTreeSet::new(),
+        (true, true) => checksums_unchanged(cx, l, layout, pages, &programmed)?,
+        (true, false) => {
+            let mut same = BTreeSet::new();
+            for &sector in &programmed {
+                if cx.with(|c| c.io().map(|mut io| sector_unchanged(&mut io, pages, sector)))? {
+                    same.insert(sector);
+                }
+            }
+            same
+        }
+    };
+    let mut to_erase = BTreeSet::new();
+    for &sector in programmed.iter().filter(|s| !unchanged.contains(s)) {
+        if !mode.erase {
+            return Err(other(format!("sector 0x{sector:08x} is not erased (use 'flash write_image erase')")));
+        }
+        to_erase.insert(sector);
+    }
+    for (first, n) in sector_ranges(&to_erase, size) {
+        let (mut addr, mut left) = (first, n);
+        while left > 0 {
+            let k = erase_chunk(layout, addr, left);
+            l.erase(cx, layout, addr, k)?;
+            addr += k * size;
+            left -= k;
+        }
+    }
+    for (i, &sector) in sectors.iter().enumerate() {
+        stats.sectors += 1;
+        if unchanged.contains(&sector) {
+            stats.unchanged += 1;
+        } else {
+            for (a, d) in sector_runs(pages, sector) {
+                // Split at slot-size boundaries of the flash (multiples of 256 bytes), so the bursts stay aligned.
+                let mut off = 0;
+                while off < d.len() {
+                    let addr = a + off as u32;
+                    let slot = l.slot_data();
+                    let n = (slot - addr as usize % slot).min(d.len() - off);
+                    l.program(cx, layout, addr, &d[off..off + n])?;
+                    off += n;
+                }
+                stats.bytes += d.len();
+            }
+            stats.erased += to_erase.contains(&sector) as usize;
+            stats.programmed.push(sector);
+        }
+        progress(bank, i, sectors.len());
+    }
+    l.drain(cx)
 }
 
 /// Compares the image with target memory (`verify_image`). Returns the number

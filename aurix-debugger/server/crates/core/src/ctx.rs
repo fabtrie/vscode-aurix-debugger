@@ -69,6 +69,8 @@ pub struct Ctx {
     /// Targets whose `halted` handler was deferred by a source step.
     pub halted_deferred: std::collections::BTreeSet<usize>,
     pub flash_banks: Vec<FlashBank>,
+    /// `flash loader on|off`: program PFLASH through the RAM flash loader on CPU0.
+    pub flash_loader: bool,
     pub search_dirs: Vec<PathBuf>,
     pub poll_enabled: bool,
     pub poll_period_ms: u64,
@@ -149,6 +151,7 @@ impl Ctx {
             source_steps: 0,
             halted_deferred: Default::default(),
             flash_banks: Vec::new(),
+            flash_loader: true,
             search_dirs: Vec::new(),
             poll_enabled: true,
             poll_period_ms: DEFAULT_POLL_PERIOD_MS,

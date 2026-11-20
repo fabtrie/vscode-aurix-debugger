@@ -20,6 +20,7 @@ pub mod ctx;
 pub mod error;
 pub mod events;
 pub mod flash;
+pub mod flash_loader;
 pub mod image;
 pub mod mcds_cmd;
 pub mod mcds_trace;
@@ -33,6 +34,7 @@ pub mod sim_dmu;
 pub mod sim_mcds;
 pub mod sim_mcs;
 pub mod sim_scr;
+pub mod sim_tricore;
 pub mod target;
 pub mod tas_adapter;
 #[cfg(feature = "bluebox")]

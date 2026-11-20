@@ -118,6 +118,12 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
         }
         Ok(cx.with(|c| c.reset_hook.clone().unwrap_or_default()))
     });
+    // ocds_found_off: 1 if OCDS was found off (and switched on again) since the last call, which
+    // clears it. A power-on class reset clears OCDS; an application that checks for a debugger at
+    // start-up (an SBC watchdog policy) may have started without seeing it.
+    reg(interp, sh, "ocds_found_off", |cx, _| {
+        Ok(if cx.with(|c| std::mem::take(&mut c.ocds_found_off)) { "1" } else { "0" }.to_string())
+    });
     // probe_lost_timeout ?ms?: how long the probe (BlueBox USB, miniWiggler, TasServer) may be
     // gone before the frontends end their debug sessions; 0 keeps reconnecting for ever.
     reg(interp, sh, "probe_lost_timeout", |cx, a| {

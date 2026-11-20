@@ -37,10 +37,17 @@ fn server_with_mcs(mcs: bool) -> Server {
         .unwrap();
     // The simulated HSM never reports ready: don't wait for it after halting resets.
     s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
-    // No FS26 unless a test adds one: the debugger's reset is not wired to it (the FS26 tests set
-    // this themselves).
-    s.interp.eval_global("set sbc_rstb_wired 0").unwrap();
+    // No FS26 unless a test adds one: the debugger's reset is not wired to it and there is no
+    // watchdog to disarm (the FS26 tests set these themselves, see `add_fs26`).
+    s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
     s
+}
+
+/// Puts an FS26 on the simulated board; its watchdog state is not known to the scripts, as after a
+/// connection.
+fn add_fs26(s: &Server, f: SimFs26) {
+    with_sim(s, |sim| sim.fs26 = Some(f));
+    s.interp.eval("set sbc_disarmed 0").unwrap();
 }
 
 fn no_violations(s: &Server) {
@@ -453,11 +460,9 @@ fn wired_reset_halt_goes_through_deep_fail_safe_and_holds() {
     let s = server();
     s.interp.eval("set sbc_rstb_wired auto").unwrap();
     s.interp.eval("set sbc_hold_ms 350").unwrap();
-    with_sim(&s, |sim| {
-        let mut f = SimFs26::new(true, false);
-        f.dfs_limit = 3;
-        sim.fs26 = Some(f);
-    });
+    let mut f = SimFs26::new(true, false);
+    f.dfs_limit = 3;
+    add_fs26(&s, f);
     s.interp.eval("init").unwrap();
     s.interp.eval("reset halt").unwrap();
     assert_eq!(s.interp.eval("set sbc_wired_found").unwrap(), "1");
@@ -477,19 +482,26 @@ fn wired_reset_halt_goes_through_deep_fail_safe_and_holds() {
     assert_eq!(with_sim(&s, |sim| sim.mem_word(APP_DRIVER_STATE)), 3);
     assert!(with_sim(&s, |sim| { let f = sim.fs26.as_ref().unwrap(); !f.armed && !f.debug_mode }));
     assert_eq!(s.interp.eval("set sbc_assume").unwrap(), "");
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1", "resumed from the halting reset: disarmed");
     no_violations(&s);
 }
 
-/// Explicit sbc_rstb_wired 0 on a board whose debugger reset does reach the FS26: the lost halt is
-/// reported, never repeated - no deep fail-safe on a board said to be unwired.
+/// Explicit sbc_rstb_wired 0: the halt after the reset is not watched (no ~400 ms hold check). On a
+/// board whose debugger reset does reach the FS26 after all, the FS26's reset comes later and is one
+/// the poll detects; it is never repeated - no deep fail-safe on a board said to be unwired.
 #[test]
-fn halt_lost_with_rstb_unwired_setting_is_not_repeated() {
+fn halt_with_rstb_unwired_setting_is_not_watched_or_repeated() {
     let s = server();
-    s.interp.eval("set sbc_hold_ms 350").unwrap();
-    with_sim(&s, |sim| sim.fs26 = Some(SimFs26::new(true, false)));
+    add_fs26(&s, SimFs26::new(true, false));
     s.interp.eval("init").unwrap();
-    let err = s.interp.eval("reset halt").unwrap_err();
-    assert!(err.contains("not repeated"), "{err}");
+    s.interp.eval("set sbc_disarmed 1").unwrap();
+    let t0 = std::time::Instant::now();
+    s.interp.eval("reset halt").unwrap();
+    assert!(t0.elapsed() < std::time::Duration::from_millis(250), "halt watched: {:?}", t0.elapsed());
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    ops::poll_all(&s.cx());
+    ops::poll_all(&s.cx());
     assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().resets), 1);
     assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().dfs_entries), 0);
     no_violations(&s);
@@ -501,7 +513,7 @@ fn halt_lost_with_rstb_unwired_setting_is_not_repeated() {
 fn wired_reset_halt_app_halts_in_the_application() {
     let s = server();
     s.interp.eval("set sbc_rstb_wired auto; set sbc_wired_reset_halt app; set sbc_hold_ms 350").unwrap();
-    with_sim(&s, |sim| sim.fs26 = Some(SimFs26::new(true, false)));
+    add_fs26(&s, SimFs26::new(true, false));
     s.interp.eval("init").unwrap();
     s.interp.eval("reset halt").unwrap();
     assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
@@ -514,14 +526,26 @@ fn wired_reset_halt_app_halts_in_the_application() {
     no_violations(&s);
 }
 
-/// Unwired board, wiring not configured: the halting reset holds (the FS26 does not see it), so it is
-/// done once, with the STM suspend written before the application runs.
+/// Unwired board, wiring not configured: the first reset after the connection is preceded by a
+/// running reset that lets the application disarm the watchdog (its state is not read from the
+/// application); later halting resets are done once. The halting reset holds (the FS26 does not see
+/// it), with the STM suspend written before the application runs.
 #[test]
-fn unwired_reset_halt_is_done_once_and_holds() {
+fn unwired_reset_halt_disarms_once_then_is_done_once_and_holds() {
     let s = server();
     s.interp.eval("set sbc_rstb_wired auto").unwrap();
-    with_sim(&s, |sim| sim.fs26 = Some(SimFs26::new(false, false)));
+    add_fs26(&s, SimFs26::new(false, false));
     s.interp.eval("init").unwrap();
+    take_writes(&s);
+    s.interp.eval("reset halt").unwrap();
+    let w = take_writes(&s);
+    let setups = w.iter().filter(|x| **x == (0xF000_0494, 0xB000_003F)).count();
+    assert_eq!(setups, 2, "first reset: a running reset, then the halting one: {w:08x?}");
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1");
+
+    s.interp.eval("resume").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    ops::poll_all(&s.cx());
     take_writes(&s);
     s.interp.eval("reset halt").unwrap();
     assert_eq!(s.interp.eval("set sbc_wired_found").unwrap(), "0");
@@ -542,10 +566,8 @@ fn unwired_reset_halt_is_done_once_and_holds() {
 #[test]
 fn unwired_reset_halt_disarms_an_armed_watchdog_first() {
     let s = server();
-    with_sim(&s, |sim| {
-        sim.fs26 = Some(SimFs26::new(false, true));
-        sim.app_started_without_debugger();
-    });
+    add_fs26(&s, SimFs26::new(false, true));
+    with_sim(&s, |sim| sim.app_started_without_debugger());
     s.interp.eval("init").unwrap();
     s.interp.eval("reset halt").unwrap();
     assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
@@ -587,10 +609,8 @@ fn reset_run_suspends_stm_before_the_application_locks_it() {
 #[test]
 fn hot_attach_then_halt_while_armed_recovers() {
     let s = server();
-    with_sim(&s, |sim| {
-        sim.fs26 = Some(SimFs26::new(false, true));
-        sim.app_started_without_debugger();
-    });
+    add_fs26(&s, SimFs26::new(false, true));
+    with_sim(&s, |sim| sim.app_started_without_debugger());
     s.interp.eval("init").unwrap();
     assert_eq!(curstate(&s, "tc37x.cpu0"), "running");
     assert_eq!(ocs_sus(&s, STM0_OCS), 0, "STM0 is locked by the application");
@@ -604,6 +624,52 @@ fn hot_attach_then_halt_while_armed_recovers() {
     assert!(with_sim(&s, |sim| !sim.fs26.as_ref().unwrap().armed));
     assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
     assert_eq!(ocs_sus(&s, STM0_OCS), 2, "STM0 suspend not written after the FS26 reset");
+    no_violations(&s);
+}
+
+/// Hot attach to an application that saw the debugger: the first halt is watched, holds, and so
+/// proves the watchdog disarmed - no reset.
+#[test]
+fn hot_attach_then_halt_that_holds_proves_disarmed() {
+    let s = server();
+    add_fs26(&s, SimFs26::new(false, false));
+    s.interp.eval("init").unwrap();
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "0");
+    s.interp.eval("halt 200").unwrap();
+    ops::poll_all(&s.cx());
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1");
+    assert_eq!(with_sim(&s, |sim| sim.fs26.as_ref().unwrap().resets), 0);
+    no_violations(&s);
+}
+
+/// Once disarmed, a reset outside the scripts that clears OCDS (FS26 reset, power cycle, a reset
+/// while the connection was lost) makes the state unknown again: the next reset disarms again. An
+/// application reset keeps OCDS: still disarmed, the next reset is done once.
+#[test]
+fn only_a_reset_that_cleared_ocds_needs_another_disarm() {
+    let s = server();
+    s.interp.eval("set sbc_rstb_wired auto").unwrap();
+    add_fs26(&s, SimFs26::new(false, false));
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset run").unwrap();
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1");
+
+    with_sim(&s, |sim| sim.application_reset());
+    ops::poll_all(&s.cx());
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1", "an application reset keeps OCDS");
+
+    with_sim(&s, |sim| sim.external_reset());
+    ops::poll_all(&s.cx());
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "0", "OCDS was off after the reset");
+    take_writes(&s);
+    s.interp.eval("reset halt").unwrap();
+    let w = take_writes(&s);
+    let setups = w.iter().filter(|x| **x == (0xF000_0494, 0xB000_003F)).count();
+    assert_eq!(setups, 2, "a running reset first, then the halting one: {w:08x?}");
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1");
     no_violations(&s);
 }
 
@@ -1360,7 +1426,7 @@ fn scr_server() -> Server {
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
     s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
-    s.interp.eval_global("set sbc_rstb_wired 0").unwrap();
+    s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
     s
 }
 

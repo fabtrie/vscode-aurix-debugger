@@ -95,6 +95,9 @@ pub struct Ctx {
     pub reset_hook: Option<String>,
     /// Set while the hook runs: a `reset` inside it is the built-in one.
     pub in_reset_hook: bool,
+    /// OCDS was found off (a power-on class reset nobody had answered yet) since `ocds_found_off`
+    /// last read it: the application may have started without seeing the debugger.
+    pub ocds_found_off: bool,
     /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
     pub health: Option<crate::adapter::LinkHealth>,
     /// Since when the adapter reports the probe lost.
@@ -162,6 +165,7 @@ impl Ctx {
             srst_asserted: false,
             reset_hook: None,
             in_reset_hook: false,
+            ocds_found_off: false,
             health: None,
             probe_lost_since: None,
             probe_lost_reported: false,

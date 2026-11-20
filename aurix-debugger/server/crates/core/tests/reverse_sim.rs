@@ -35,7 +35,7 @@ fn server_running() -> Server {
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
     s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
-    s.interp.eval_global("set sbc_rstb_wired 0").unwrap();
+    s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
     s.interp.eval_global("init").unwrap();
     s.interp.eval_global("targets tc37x.cpu0").unwrap();
     s
@@ -140,6 +140,7 @@ fn protected_ram_is_never_written() {
     tcl(&s, "mww 0x70000410 0x11");
     let e = s.interp.eval_global("reverse back").unwrap_err();
     assert!(e.contains("RAM protection") && e.contains("nothing was changed"), "{e}");
+    assert!(e.contains("reset the target from the debugger"), "the stacks closed: hint at a reset with the debugger, {e}");
     assert_eq!(word(&s, 0x7000_0410), 0x11, "nothing written");
     assert_eq!(json(&s, "reverse status -json")["checkpoints"], 1, "history kept");
     // Open memory is restored as usual.

@@ -460,6 +460,16 @@ Send every reset request to `<proc> <mode>`; without an argument, show the hook.
 
 Requests from Tcl, the debugger frontends, the API and `program` all go to the proc. A `reset` inside the proc runs the built-in sequence. An empty name removes the hook. `fs26_sbc.cfg` uses this to reset through the FS26.
 
+### `ocds_found_off`
+
+```
+ocds_found_off
+```
+
+1 if OCDS was found off since the last call (which clears it), else 0.
+
+A power-on class reset (debugger reset, an SBC reset, a power cycle) clears OCDS; the examination after it switches it on again. Set also when a probe that owns OCDS (BlueBox) had to bring the target back into debug mode. An application that checks for a debugger at start-up may then have started without seeing it: `fs26_sbc.cfg` disarms the FS26 watchdog again with the next reset.
+
 ### `ocd_process_reset`
 
 ```

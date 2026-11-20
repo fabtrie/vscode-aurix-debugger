@@ -78,12 +78,16 @@ pub fn examine_one(cx: &Cx, t: usize, quiet: bool) -> Result<()> {
         // A probe that does its own run control has already enabled debug, and
         // the OEC key write below is one it would refuse: OCDS is its to steer.
         // The SCR's debug access does not go through the host OCDS at all.
+        let mut found_off = false;
         if io.adapter.run_control().is_none() && !matches!(e.core, Core::Xc800(_)) {
-            enable_ocds(&mut io)?;
+            found_off = enable_ocds(&mut io)?;
         }
         e.core.examine(&mut io)?;
         let tr = e.core.poll(&mut io)?;
         e.core.restore_triggers(&mut io)?;
+        if found_off {
+            c.ocds_found_off = true;
+        }
         Ok(tr)
     });
     match res {
@@ -333,6 +337,12 @@ pub fn poll_all(cx: &Cx) {
                 // DAQ points keep their addresses, but their change-detection baselines are now
                 // pre-reset values: drop them and back off until the device answers again.
                 cx.with(|c| {
+                    // A probe that owns OCDS (BlueBox) reports a reset when the target stopped
+                    // answering and it had to bring it back into debug mode: OCDS was lost, and
+                    // it switched it on again itself, so the examination cannot find it off.
+                    if c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_some()) {
+                        c.ocds_found_off = true;
+                    }
                     crate::mcds_trace::on_reset(c);
                     crate::daq::on_reset(c, Instant::now());
                 });

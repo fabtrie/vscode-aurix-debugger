@@ -60,8 +60,7 @@ pub const APP_MARKER_DEBUGGER: u32 = 0xDEB0_0001;
 
 /// The simulated board's settings for the example board cfg (`tc37x_ocds_init.cfg`), as a board's
 /// own cfg would set them before loading it: the peripheral suspend list ([`SIM_PERIPHS`] without
-/// the STMs, which `tc3xx_setup` adds) and the disarm check on [`APP_DRIVER_STATE`] and
-/// [`APP_MARKER`].
+/// the STMs, which `tc3xx_setup` adds).
 pub const SIM_BOARD_SETTINGS: &str = "
 set tc3xx_periph {
     {SMU      0xF0036FE8 0xF0036800 0xF0036FFC 2 reset}
@@ -73,10 +72,6 @@ set tc3xx_periph {
     {GTM      0xF019FD38 0xF019FD00 0xF019FD10 0 app}
     {CAN0     0xF02080E8 0xF0208000 0xF02080FC 2 app}
     {CAN1     0xF02180E8 0xF0218000 0xF02180FC 2 app}
-}
-set sbc_disarm_check {
-    {0x6000F000 0x000000FF != 0}
-    {0x7000F000 0xFFFFFFFF == 0xDEB00001}
 }
 ";
 
@@ -561,6 +556,14 @@ impl SimAdapter {
     /// Simulates an external (watchdog) reset: OCDS disabled, cores running, STM0 restarting.
     pub fn external_reset(&mut self) {
         self.ostate = 0;
+        self.halted = [false; NUM_CORES];
+        self.stm_epoch = Instant::now();
+        self.pending_resets += 1;
+    }
+
+    /// Simulates an application reset (software reset): cores running, STM0 restarting, OCDS kept
+    /// (only a power-on class reset clears it).
+    pub fn application_reset(&mut self) {
         self.halted = [false; NUM_CORES];
         self.stm_epoch = Instant::now();
         self.pending_resets += 1;

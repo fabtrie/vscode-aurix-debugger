@@ -32,7 +32,7 @@ fn server_running() -> Server {
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
     s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
     s.interp
-        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
+        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_fs26_example.cfg")))))
         .unwrap();
     s.interp.eval_global("hsm ready_ms 0").unwrap();
     s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();

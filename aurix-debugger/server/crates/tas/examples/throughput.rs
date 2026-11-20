@@ -19,7 +19,7 @@ use tas::{Batch, ConnectMode, TasClient, DEFAULT_PORT};
 
 /// TAS address map 15 is the access hardware itself, not the target.
 const AM15: u8 = 15;
-/// Access-hardware clock, in Hz. `tc37x_ocds_init.cfg` sets 30 MHz, so the raw numbers below are
+/// Access-hardware clock, in Hz. `tc37x_fs26_example.cfg` sets 30 MHz, so the raw numbers below are
 /// comparable with what the debugger gets.
 const AM15_ACC_HW_FREQUENCY: u64 = 0x000C_0100;
 const SPEED_KHZ: u32 = 30_000;
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     c.device_connect(ConnectMode::HotAttach)?;
     set_speed(&mut c, SPEED_KHZ)?;
-    println!("access hardware clock: {SPEED_KHZ} kHz (same as tc37x_ocds_init.cfg)");
+    println!("access hardware clock: {SPEED_KHZ} kHz (same as tc37x_fs26_example.cfg)");
 
     // Same as the debugger's init: enable OCDS if it is off, so the reads get through. Nothing
     // is reset and nothing is halted.

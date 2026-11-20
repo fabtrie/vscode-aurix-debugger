@@ -1,4 +1,4 @@
-//! Loads the real OpenOCD board cfg and tc37x_ocds_init.cfg (with tc3xx_ocds.cfg and fs26_sbc.cfg)
+//! Loads the real OpenOCD board cfg and tc37x_fs26_example.cfg (with tc3xx_ocds.cfg and fs26_sbc.cfg)
 //! against the simulated TC37x and checks the event-driven register sequences and the FS26 attach and
 //! reset flows.
 
@@ -33,7 +33,7 @@ fn server_with_mcs(mcs: bool) -> Server {
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
     s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
     s.interp
-        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
+        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_fs26_example.cfg")))))
         .unwrap();
     // The simulated HSM never reports ready: don't wait for it after halting resets.
     s.interp.eval_global("hsm ready_ms 0").unwrap();
@@ -92,10 +92,11 @@ fn loads_real_cfg_and_inits() {
     assert!(names.starts_with("tc37x.cpu0 tc37x.cpu1 tc37x.cpu2 tc37x.hsm tc37x.mcs0.ch0 tc37x.mcs0.ch1"), "{names}");
     assert!(names.ends_with("tc37x.mcs1.ch7"), "{names}");
     assert_eq!(i.eval("target current").unwrap(), "tc37x.cpu0");
-    // pfls0/1 from the target cfg, dfls0/1 from tc37x_ocds_init.cfg.
+    // pfls0/1 from the target cfg, dfls0/1 from tc37x_fs26_example.cfg.
     assert_eq!(i.eval("flash banks").unwrap().lines().count(), 4);
     assert_eq!(i.eval("tc37x.cpu1 cget -dbgbase").unwrap(), "0xf8820000");
-    assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap().trim(), "tc3xx_on_examine");
+    // The FS26 policy watches cpu0; the chip mechanics are the server's.
+    assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap().trim(), "sbc_on_examine");
     i.eval("init").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "CBS_TL1ST not written: {w:08x?}");
@@ -1412,20 +1413,23 @@ fn generic_setup_follows_the_target_cfg() {
     s.cx().with(|c| c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR)));
     let i = &s.interp;
     i.eval_global("adapter driver sim; script target/infineon/tc39x.cfg").unwrap();
-    i.eval_global("set tc3xx_mcs_modules {0 9}; set tc3xx_mcs_ramsize 0x1800").unwrap();
+    i.eval_global("set tc3xx_mcs_modules {0 9}; set tc3xx_mcs_ramsize 0x1800; set tc3xx_hsm_target 1").unwrap();
+    // The chip is found by the target names.
     i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc3xx_ocds.cfg"))))).unwrap();
-    i.eval_global("tc3xx_setup tc39x").unwrap();
+    assert_eq!(i.eval("set tc3xx_chip").unwrap(), "tc39x");
     assert_eq!(i.eval("set tc3xx_cores").unwrap(), "tc39x.cpu0 tc39x.cpu1 tc39x.cpu2 tc39x.cpu3 tc39x.cpu4 tc39x.cpu5");
     assert_eq!(i.eval("set tc3xx_dbgsr(tc39x.cpu5)").unwrap(), "0xF88DFD00");
     assert_eq!(i.eval("set tc3xx_coreid(tc39x.cpu5)").unwrap(), "5");
     assert_eq!(i.eval("format 0x%08X [tc3xx_cbs_trc 5]").unwrap(), "0xF0000434");
-    assert_eq!(i.eval("tc39x.cpu5 cget -event halted").unwrap(), "tc3xx_on_halted tc39x.cpu5");
+    assert_eq!(i.eval("tc39x.cpu5 cget -event halted").unwrap(), "", "the generic cfg installs no handlers");
     assert_eq!(i.eval("ocds sync").unwrap(), "tl1");
     assert_eq!(i.eval("tc39x.hsm cget -type").unwrap(), "cortex_m");
     assert_eq!(i.eval("tc39x.mcs9.ch7 cget -ramsize").unwrap(), "0x1800");
     assert_eq!(i.eval("target current").unwrap(), "tc39x.cpu0");
     assert!(i.eval("catch {target create x gtm_mcs -module 10}").unwrap() == "1");
-    assert!(i.eval("catch {tc3xx_setup tc27x}").unwrap() == "1");
+    // Set up once; no DFLASH0 size known for the TC39x here: dfls1 only.
+    assert_eq!(i.eval("tc3xx_setup tc27x; set tc3xx_chip").unwrap(), "tc39x");
+    assert!(i.eval("flash banks").unwrap().contains("dfls1") && !i.eval("flash banks").unwrap().contains("dfls0"));
 }
 
 /// The cfg drives OCDS itself on the TAS and simulator backends, and steps
@@ -1443,7 +1447,7 @@ mod backend_guard {
         s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
         s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
         s.interp
-            .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
+            .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_fs26_example.cfg")))))
             .unwrap();
         s
     }
@@ -1454,9 +1458,10 @@ mod backend_guard {
         let i = &s.interp;
         assert_eq!(i.eval("adapter name").unwrap(), "sim");
         assert_eq!(i.eval("tc3xx_ocds_available").unwrap(), "1");
-        assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap(), "tc3xx_on_examine");
-        assert_eq!(i.eval("tc37x.cpu0 cget -event reset-end").unwrap(), "tc3xx_on_reset_end");
-        assert_eq!(i.eval("tc37x.cpu1 cget -event halted").unwrap(), "tc3xx_on_halted tc37x.cpu1");
+        assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap(), "sbc_on_examine");
+        assert_eq!(i.eval("tc37x.cpu0 cget -event halted").unwrap(), "sbc_on_halted");
+        assert_eq!(i.eval("reset_hook").unwrap(), "sbc_reset_hook");
+        assert_eq!(i.eval("halt_check_hook").unwrap(), "sbc_halt_check");
         assert_eq!(i.eval("ocds sync").unwrap(), "tl1");
     }
 
@@ -1514,7 +1519,7 @@ fn scr_server() -> Server {
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
     s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
     s.interp
-        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
+        .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_fs26_example.cfg")))))
         .unwrap();
     s.interp.eval_global("hsm ready_ms 0").unwrap();
     s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
@@ -1776,4 +1781,31 @@ fn flash_loader_uses_the_pspr_when_the_dspr_is_protected() {
     assert!(out.contains("3 sectors: 3 unchanged"), "{out}");
     assert_eq!(loader_state(&s), before);
     assert_eq!(with_sim(&s, |sim| sim.cpu0_fault.clone()), None);
+}
+
+/// A board without an SBC (tc375_lite_example.cfg): no SBC file is loaded, resets and halts are the
+/// server's, and the attach modes work as on any board.
+#[test]
+fn board_without_an_sbc_loads_no_sbc_policy() {
+    aurix_core::log::set_debug_level(1);
+    let s = Server::new();
+    s.cx().with(|c| {
+        c.adapter_override = Some("sim".into());
+        c.search_dirs.push(PathBuf::from(openocd_tcl::TCL_DIR));
+    });
+    let i = &s.interp;
+    i.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+    i.eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc375_lite_example.cfg"))))).unwrap();
+    assert_eq!(i.eval("info procs sbc_*").unwrap(), "", "an SBC file was loaded");
+    assert_eq!(i.eval("reset_hook").unwrap(), "");
+    assert_eq!(i.eval("halt_check_hook").unwrap(), "");
+    assert!(!i.eval("target names").unwrap().contains("hsm"), "HSM target without tc3xx_hsm_target");
+    assert!(i.eval("suspend list").unwrap().contains("STM2"));
+    i.eval("attach_mode halt").unwrap();
+    i.eval("init").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.halted), [true; 3]);
+    assert_eq!(ocs_sus(&s, STM0_OCS), 2, "the halt attach did not reset for the locked STM0");
+    i.eval("reset halt").unwrap();
+    assert_eq!(i.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+    no_violations(&s);
 }

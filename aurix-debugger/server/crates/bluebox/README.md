@@ -132,7 +132,7 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
 ## What works on the iC5000 with winIDEA 9.21.356 (TC377TP, through `aurix-dbg`)
 
 - Connect after a power cycle and with the kernel running: kernel load, FPGA upload, attach, about 3.5 s in all. The target keeps running (STM0 uptime kept counting).
-- `reset halt` (cpu0 halted at `0x800a8000`) and `reset run`, with the board cfg plus `tc37x_ocds_init.cfg`: cpu0, cpu1 and the HSM run, as after winIDEA's `resetAndRun()`. `reset halt` then `resume` does the same.
+- `reset halt` (cpu0 halted at `0x800a8000`) and `reset run`, with the board cfg plus `tc37x_fs26_example.cfg`: cpu0, cpu1 and the HSM run, as after winIDEA's `resetAndRun()`. `reset halt` then `resume` does the same.
 - Recovery after `bluebox drop_target`: reconnected in 1.3 s.
 - `adapter speed` from 2 to 30 MHz, at `init` and later (7,000 kHz runs at 6 MHz), kept across resets.
 - The target became unreachable three times (the attach ran, `SCU_CHIPID` failed): after the first, broken attempts, after it had sat halted at boot for minutes, and once after a `reset run` at 6 MHz that did not repeat. `reset halt` brought it back each time.
@@ -140,7 +140,7 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
 
 ## What works (tested on hardware, TC377TP, iC5700 A)
 
-- Recovery, through `aurix-dbg` with `tc37x_ocds_init.cfg`:
+- Recovery, through `aurix-dbg` with `tc37x_fs26_example.cfg`:
   - after `bluebox drop_target`: reconnected in 357 ms, "Device reset detected", all four cores re-examined, the application ran on;
   - after a BlueBox power cycle during a session: reconnected in 4.6 s once the probe was back, cores re-examined, the application kept running throughout (STM0 uptime unbroken).
 
@@ -149,12 +149,12 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
   - Reads from 1 byte to 64 KiB, split into 8 KiB requests.
   - About 1.2 ms per small access; 0.3 MB/s on long reads.
   - A refused write (read-only register) is reported failed. A write of RAM reads back.
-- Reset, through `aurix-dbg` with the board cfg plus `tc37x_ocds_init.cfg` (MCS targets off):
+- Reset, through `aurix-dbg` with the board cfg plus `tc37x_fs26_example.cfg` (MCS targets off):
   - `reset halt`: the chip restarts (STM0 uptime about 0.4 s), cpu0 halts at `0x800a8000`, the cfg's hooks run (HSM found at its boot-ROM breakpoint, STM suspend set). About 0.8 s.
   - `resume` after it starts the application: cpu0 and cpu1 run.
   - `reset run`: the chip restarts, cpu0 and cpu1 run. About 0.8 s.
   - With the board cfg alone, cpu1 stays in boot halt after any reset: the boot ROM halts the HSM on a halting reset, and only the cfg starts it again.
-- Run control through OCDS register accesses, with the board cfg plus `tc37x_ocds_init.cfg` (MCS and HSM targets off). Tested with the earlier replay-based attach:
+- Run control through OCDS register accesses, with the board cfg plus `tc37x_fs26_example.cfg` (MCS and HSM targets off). Tested with the earlier replay-based attach:
   - `init` examines all three cores.
   - `halt` takes 17 ms and stops cpu0 and cpu1 together over trigger line 1.
   - `step` advances the PC, about 35 ms each.
@@ -176,7 +176,7 @@ One `//2///16/` message carries several accesses: a u32 count, the single reques
 - **DAP clocks above 25 MHz** gave wrong data (see "DAP clock"); the driver caps at 25 MHz.
 - **The probe's `I` state.** Seen: `00` (no kernel), `2f` (kernel ready), `55` (booting, right after power-on), `01` and `40`. The driver waits up to 20 s for `00` or `2f`, then restarts the kernel. Attaching in another state hung the probe until a full power-off: unplug power and USB, as a soft power-cycle kept the stuck kernel.
 - **Trigger setup.** The attach enables capture-and-hold on trigger line 1, so any halt holds all cores until `CBS_TLCHS` is written. Load `tc3xx_ocds.cfg`, whose resume and step hooks do that. Without it, the cores stay held.
-- **Resets after resume (fixed in the cfg: the application's ADC safety reset, peripherals now suspended with the cores).** Twice, the target dropped off the debug port right after `resume` released trigger line 1, and the chip restarted; the driver now reconnects. With `tc37x_ocds_init.cfg` a 3 s halt and resume did not restart the chip. Without it (DBGSR written directly) it did every time: the application restarts the chip, and about 0.2 s later the connection breaks.
+- **Resets after resume (fixed in the cfg: the application's ADC safety reset, peripherals now suspended with the cores).** Twice, the target dropped off the debug port right after `resume` released trigger line 1, and the chip restarted; the driver now reconnects. With `tc37x_fs26_example.cfg` a 3 s halt and resume did not restart the chip. Without it (DBGSR written directly) it did every time: the application restarts the chip, and about 0.2 s later the connection breaks.
   - With 9.21.417 (iC5700 B without active probe, 2026-11-05) it happened on most resumes after halting cpu1 or cpu2: with the cfg, and with the plain target cfg when the cores were halted one by one. Halting cpu0 alone never did it. STM0 kept counting through the halts, and the cfg reported `STM0_OCS write refused (STM0_ACCEN0=0x00000004)`: the application locks the STMs, so they are not suspended, and the application sees the time jump.
   - The traces show nothing wrong with the 9.21.417 migration (request and reply layout, channels, reset, attach writes all checked against every capture).
   - Measured on 2026-11-06 (`memory.rs`, "Access flags"): winIDEA's own access flags (`00 01 00`) do not get past the application's `STMx_ACCEN0` either; the probe only stops reporting the refused write. The driver keeps the SDK's `01 01 01`.

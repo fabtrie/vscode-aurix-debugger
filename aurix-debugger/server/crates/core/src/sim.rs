@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use tas::{Batch, BatchOp, OpResult, PL0_ERR_DATA, PL0_ERR_NO_ERROR};
 
 use crate::adapter::{Adapter, AdapterSettings, BatchLimits, DeviceInfo, LinkHealth, ProbeDaq, ProbeDaqLimits, ProbeDrain, ProbeItem, ProbeSample};
-use crate::arch::{OEC, OSTATE};
+use crate::arch::{CBS_TLC, CBS_TLCHS, CBS_TLS, OEC, OSTATE};
+use crate::tl1::CBS_TLCHE;
 use crate::cortex_m::*;
 use crate::error::Result;
 use crate::sim_dmu::SimDmu;
@@ -289,6 +290,11 @@ pub struct SimAdapter {
     pub limits: BatchLimits,
     pub halted: [bool; NUM_CORES],
     pub susp: [bool; NUM_CORES],
+    /// TL1 latched by capture-and-hold (CBS_TLCHE): routed cores stay suspended until CBS_TLCHS
+    /// clears it, also once their debug halt is released.
+    pub tl1_held: bool,
+    /// Cores whose debug halt was released while TL1 held them: they run when the hold drops.
+    pub tl1_parked: [bool; NUM_CORES],
     /// SYSCON.BHALT: core not started yet.
     pub bhalt: [bool; NUM_CORES],
     pub evtsrc: [u32; NUM_CORES],
@@ -390,6 +396,8 @@ impl SimAdapter {
             limits: BatchLimits::default(),
             halted: [false; NUM_CORES],
             susp: [false; NUM_CORES],
+            tl1_held: false,
+            tl1_parked: [false; NUM_CORES],
             bhalt: [false; NUM_CORES],
             evtsrc: [0; NUM_CORES],
             pc: [0x8000_1000, 0x8010_0000, 0x8020_0000],
@@ -496,6 +504,15 @@ impl SimAdapter {
     fn power_on_reset(&mut self, halt: bool) {
         self.cpu0 = None;
         self.ostate = 0;
+        // The trigger routing is cleared with OCDS.
+        self.tl1_held = false;
+        self.tl1_parked = [false; NUM_CORES];
+        for a in [crate::tl1::CBS_TL1ST, CBS_TLCHE, crate::tl1::CBS_TRHSM, CBS_TLC, CBS_TLCHS] {
+            self.mem.remove(&a);
+        }
+        for i in 0..6u32 {
+            self.mem.remove(&crate::tl1::cbs_trc(i));
+        }
         self.mcds.reset();
         self.dmu.install();
         self.halted = [halt, false, false];
@@ -653,6 +670,9 @@ impl SimAdapter {
         if addr == OSTATE {
             return self.ostate;
         }
+        if addr == CBS_TLS {
+            return (self.tl1_held as u32) << 1;
+        }
         // STM0 at 100 MHz; reading TIM0 latches bits 63:32 into CAP.
         if addr == STM0_TIM0 {
             let ticks = (self.stm_epoch.elapsed().as_nanos() / 10) as u64;
@@ -699,14 +719,19 @@ impl SimAdapter {
         }
         // CBS_TLC: forcing trigger line 1 (TLSP1 = 3) halts the cores it is routed to (CBS_TRCx), as on
         // the chip; a core in boot halt stays there.
-        if addr == 0xF000_0490 && v & 0x30 == 0x30 {
+        if addr == CBS_TLC && v & 0x30 == 0x30 {
+            self.tl1_pulse();
+        }
+        // CBS_TLCHS: the TL1 hold dropped; the cores released under it start.
+        if addr == CBS_TLCHS && v & 2 != 0 {
+            self.mem.insert(addr, v);
+            self.tl1_held = false;
             for i in 0..NUM_CORES {
-                let routed = self.mem.get(&(0xF000_0420 + 4 * i as u32)).is_some_and(|t| t & 0x100 != 0);
-                if routed && !self.bhalt[i] && !self.halted[i] {
-                    self.halted[i] = true;
-                    self.evtsrc[i] = 0;
+                if std::mem::take(&mut self.tl1_parked[i]) {
+                    self.resume_core(i);
                 }
             }
+            return;
         }
         // A watchdog takes CON1.DR into SR.DS when ENDINIT is set again (modify access, LCK 1).
         if let Some(&con1) = SIM_WDT_CON1.iter().find(|&&c| c == addr + 4) {
@@ -728,6 +753,8 @@ impl SimAdapter {
                                 self.stop_cpu0();
                             }
                         }
+                        // Released while the held TL1 suspends it: it starts when the hold drops.
+                        2 if self.tl1_held && self.tl1_suspends(i) => self.tl1_parked[i] = true,
                         2 => self.resume_core(i),
                         _ => {}
                     }
@@ -907,6 +934,7 @@ impl SimAdapter {
                     self.halted[i] = true;
                     self.evtsrc[i] = 16 + n;
                     self.pc[i] = self.pc[i].wrapping_add(4);
+                    self.brkout(i);
                     return true;
                 }
             }
@@ -948,6 +976,41 @@ impl SimAdapter {
         self.pc[0] = cpu.pc;
     }
 
+    /// CBS_TRCx: core `i`'s BRKOUT drives TL1.
+    fn tl1_routed(&self, i: usize) -> bool {
+        self.mem.get(&(0xF000_0420 + 4 * i as u32)).is_some_and(|t| t & 0x100 != 0)
+    }
+
+    /// CBS_TL1ST: TL1 suspends core `i`.
+    fn tl1_suspends(&self, i: usize) -> bool {
+        self.mem.get(&crate::tl1::CBS_TL1ST).is_some_and(|t| t & (1 << i) != 0)
+    }
+
+    /// A pulse on TL1 (forced, or a routed core's BRKOUT): the routed cores halt, and with
+    /// capture-and-hold on (CBS_TLCHE) TL1 stays active.
+    fn tl1_pulse(&mut self) {
+        if self.mem.get(&CBS_TLCHE).is_some_and(|v| v & 2 != 0) {
+            self.tl1_held = true;
+        }
+        for i in 0..NUM_CORES {
+            if self.tl1_suspends(i) && !self.bhalt[i] && !self.halted[i] {
+                self.halted[i] = true;
+                self.evtsrc[i] = 0;
+                if i == 0 {
+                    self.stop_cpu0();
+                }
+            }
+            self.tl1_parked[i] = false;
+        }
+    }
+
+    /// Core `i` halted on a debug event: its BRKOUT pulses TL1 if it is routed there.
+    fn brkout(&mut self, i: usize) {
+        if self.tl1_routed(i) {
+            self.tl1_pulse();
+        }
+    }
+
     fn resume_core(&mut self, i: usize) {
         self.halted[i] = false;
         if i == 0 && SIM_PSPR0.contains(&self.pc[0]) {
@@ -979,6 +1042,7 @@ impl SimAdapter {
                 self.halted[i] = true;
                 self.evtsrc[i] = 16 + n;
                 self.pc[i] = if evt & 8 != 0 { adr } else { adr.wrapping_add(2) };
+                self.brkout(i);
                 break;
             }
         }

@@ -17,7 +17,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::arch::{CBS_TLC, DBGSR, DBGSR_HALTED, DBGSR_HALT_REQ, DBGSR_RESUME, DBGSR_SUSP, ICR, PC, PSW, REGS, SYSCON};
+use crate::arch::{DBGSR, DBGSR_HALTED, DBGSR_HALT_REQ, DBGSR_RESUME, DBGSR_SUSP, ICR, PC, PSW, REGS, SYSCON};
 use crate::error::{other, Error, Result};
 use crate::flash::{err_text, seg_a, Pflash, ERR_EVER, ERR_MASK};
 use crate::target::Core;
@@ -110,7 +110,7 @@ const STATE_DONE: u32 = 2;
 const STATE_FAILED: u32 = 3;
 
 /// TL1 suspend targets: CPU0 is bit 0.
-const CBS_TL1ST: u32 = CBS_TLC + 4;
+use crate::tl1::CBS_TL1ST;
 /// Supervisor mode, call depth counting as after a reset.
 const LOADER_PSW: u32 = 0x0000_0B80;
 const ICR_IE: u32 = 1 << 15;

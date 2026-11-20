@@ -493,6 +493,20 @@ impl CortexM {
         Ok(())
     }
 
+    /// Resumes the HSM if its DHCSR says it is halted, whatever the server's state of it: TL1
+    /// halts it behind the server's back, and a halted HSM keeps BRKOUT active (TL1 would latch
+    /// again right after the cores resume). Returns whether it was halted. The state is left to
+    /// the poll, as for the cores TL1 releases: it reports the run.
+    pub fn release_if_halted(&mut self, io: &mut Io) -> Result<bool> {
+        if self.read32(io, DHCSR)? & S_HALT == 0 {
+            return Ok(false);
+        }
+        self.write32_seq(io, &[(DFSR, DFSR_ALL), (DHCSR, self.dhcsr_value(false, false, false))])?;
+        self.maskints = false;
+        self.invalidate();
+        Ok(true)
+    }
+
     /// Executes one instruction (C_STEP). Returns whether the core halted again.
     pub fn step(&mut self, io: &mut Io, addr: Option<u32>, mode: RunMode) -> Result<bool> {
         if self.state != TargetState::Halted {

@@ -84,6 +84,11 @@ pub struct Tricore {
     cache: Vec<Option<u32>>,
     /// `tricore tl1_halt`, `tl1_step`, `irq_mask` settings.
     pub run: RunCfg,
+    /// TL1 sync (`ocds sync tl1`, see [`crate::tl1`]): the other cores' DBGSR, released (or, for a
+    /// single-core step, kept halted) by a step of this one.
+    pub tl1_peers: Vec<u32>,
+    /// `ocds step_timers frozen`: suspend-out stays set through a step.
+    pub tl1_freeze: bool,
     /// The application's ICR.IE while the debugger holds it cleared.
     irq_saved_ie: Option<bool>,
     /// PCXI and application IE when the first masked run started.
@@ -113,6 +118,8 @@ impl Tricore {
             cache: vec![None; REGS.len()],
             run: RunCfg::default(),
             irq_saved_ie: None,
+            tl1_peers: Vec::new(),
+            tl1_freeze: false,
             irq_run: None,
             examined: false,
             reset_halt_missed: false,
@@ -350,9 +357,26 @@ impl Tricore {
         for &i in &masked {
             w.push((self.csfr(trxevt(i)), 0));
         }
+        let tl1_step = self.run.tl1_step && !self.is_v18();
+        // TL1 sync: with `tl1_step` the other cores' debug halt is released while the held TL1
+        // still suspends them (they run for the instruction with this one); otherwise they are
+        // kept debug halted and the hold is dropped, so that only this core runs. Suspend-out as
+        // `ocds step_timers` says (this core's too).
+        let mut own_susp = dbgsr & DBGSR_SUSP;
+        if !self.tl1_peers.is_empty() {
+            let susp = if self.tl1_freeze { DBGSR_SUSP } else { 0 };
+            if tl1_step {
+                w.extend(self.tl1_peers.iter().map(|&d| (d, DBGSR_RESUME | susp)));
+                own_susp = susp;
+            } else {
+                w.extend(self.tl1_peers.iter().map(|&d| (d, DBGSR_HALT_REQ | DBGSR_SUSP)));
+                w.push((CBS_TLCHS, 0x2));
+                own_susp = DBGSR_SUSP;
+            }
+        }
         let step_trigger = Trigger { enable: true, bbm: false, pc: true, range: false, access: 0, addr: pc };
         // Releases the halt without changing the suspend-out signal (see `resume_value`).
-        let resume = DBGSR_RESUME | (dbgsr & DBGSR_SUSP);
+        let resume = DBGSR_RESUME | own_susp;
         // The trigger event loads DBGSR.SUSP from TRxEVT.SUSP: arm it with the
         // current state, or the halt would clear suspend-out and let this
         // core's STM run until the halted handler sets it again.
@@ -362,7 +386,7 @@ impl Tricore {
             (self.csfr(trxevt(slot)), self.trigger_value(&step_trigger) | susp),
             (self.csfr(DBGSR), resume),
         ]);
-        if self.run.tl1_step && !self.is_v18() {
+        if tl1_step {
             // This core is released but still suspended by the held TL1:
             // clearing the hold starts all TL1 suspend targets in the same cycle.
             w.push((CBS_TLCHS, 0x2));
@@ -452,15 +476,6 @@ impl Tricore {
             }
         }
         Ok(halted)
-    }
-
-    /// `tl1_step`: makes sure TL1 is latched before the step-start handler
-    /// releases the other cores, so they stay suspended until the step starts.
-    pub fn ensure_tl1_hold(&self, io: &mut Io) -> Result<()> {
-        if io.read32(CBS_TLS)? & CBS_TLS_TL1 == 0 {
-            io.write32_seq(&[(CBS_TLC, 0x30), (CBS_TLC, 0x0)])?;
-        }
-        Ok(())
     }
 
     /// DBGSR value that releases the halt without changing the suspend-out

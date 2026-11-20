@@ -16,6 +16,7 @@ use crate::suspend::{self, Select, SuspendSet, Why};
 #[derive(Debug, Default)]
 pub struct RestoreSet {
     pub suspend: RefCell<SuspendSet>,
+    pub tl1: RefCell<crate::tl1::Plan>,
 }
 
 pub type SharedRestore = Rc<RestoreSet>;
@@ -28,6 +29,8 @@ pub fn mark_reset(rs: &RestoreSet) {
 /// After a reset, once OCDS is on again: the set-up it cleared.
 pub fn after_reset(io: &mut Io, rs: &RestoreSet) {
     mark_reset(rs);
+    let plan = rs.tl1.borrow().clone();
+    crate::tl1::write_config(io, &plan);
     suspend::attempt(io, &rs.suspend, Why::Reset, Select::All);
 }
 
@@ -51,6 +54,7 @@ pub fn on_attach(cx: &Cx) {
     if !examined {
         return;
     }
+    crate::tl1::on_attach(cx);
     cx.with(|c| {
         if let Ok(mut io) = c.io() {
             suspend::attempt(&mut io, &rs.suspend, Why::Attach, Select::All);

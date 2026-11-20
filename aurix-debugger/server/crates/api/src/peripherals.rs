@@ -45,11 +45,6 @@ const MAX_LIMIT: u32 = 2000;
 /// Longest run of adjacent registers read in one access.
 const MAX_RUN: usize = 4096;
 
-/// The bundled SVD files (see [`svd::catalog::default_dir`]).
-pub fn svd_dir() -> Option<PathBuf> {
-    svd::catalog::default_dir()
-}
-
 fn catalog() -> svd::Catalog {
     svd::Catalog::bundled()
 }

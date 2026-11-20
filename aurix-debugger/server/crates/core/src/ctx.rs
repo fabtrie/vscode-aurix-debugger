@@ -106,6 +106,8 @@ pub struct Ctx {
     /// What a reset clears and the server sets up again (peripheral suspend), shared with the
     /// device watch ([`crate::restore`]).
     pub restore: crate::restore::SharedRestore,
+    /// TL1 multi-core run control (`ocds ...`), see [`crate::tl1`].
+    pub tl1: crate::tl1::Settings,
     /// The chip's bundled SVD description, once a module name had to be looked up in it.
     pub svd_device: Option<std::sync::Arc<svd::Device>>,
     /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
@@ -179,6 +181,7 @@ impl Ctx {
             ocds_found_off: false,
             reset_watch: Default::default(),
             restore: Default::default(),
+            tl1: Default::default(),
             svd_device: None,
             health: None,
             probe_lost_since: None,

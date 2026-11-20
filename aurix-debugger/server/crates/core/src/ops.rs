@@ -172,6 +172,7 @@ pub fn handle_transition(cx: &Cx, t: usize, tr: Transition) {
             }
             emit(Event::Halted { target: t, name, reason, pc, trigger });
             if !boot {
+                crate::tl1::on_halted(cx, t);
                 // Inside a source step the handler of an instruction step's halt runs once at its
                 // end (`end_source_step`). The halt of a run in it (`run_to` over a call) is
                 // handled at once: the resume-end handler switched suspend-out off, and the
@@ -565,10 +566,12 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
     }
     unmask_irq_except(cx, t);
     fire(cx, t, "resume-start");
+    crate::tl1::before_resume(cx, t);
     cx.with(|c| {
         let (mut io, e) = c.target_io(t)?;
         e.core.resume(&mut io, addr, mode)
     })?;
+    crate::tl1::after_resume(cx, t);
     emit(Event::Resumed { target: t, name: target_name(cx, t) });
     fire(cx, t, "resumed");
     fire(cx, t, "resume-end");
@@ -611,15 +614,6 @@ fn unmask_irq_except(cx: &Cx, t: usize) {
     }
 }
 
-/// `tl1_step`: makes sure TL1 is latched before the step-start handler
-/// releases the other cores, so they stay suspended until the step starts.
-fn ensure_tl1_hold(io: &mut Io) -> Result<()> {
-    if io.read32(CBS_TLS)? & CBS_TLS_TL1 == 0 {
-        io.write32_seq(&[(CBS_TLC, 0x30), (CBS_TLC, 0x0)])?;
-    }
-    Ok(())
-}
-
 pub fn step(cx: &Cx, t: usize, addr: Option<u32>) -> Result<()> {
     step_as(cx, t, addr, RunMode::Step)
 }
@@ -651,7 +645,7 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
         unmask_irq_except(cx, t);
         cx.with(|c| {
             let mut io = c.io()?;
-            ensure_tl1_hold(&mut io)
+            crate::tl1::ensure_hold(&mut io)
         })?;
     }
     fire(cx, t, "step-start");
@@ -1037,6 +1031,7 @@ pub fn init(cx: &Cx) -> Result<()> {
         let settings = c.reset_watch;
         let rs = c.restore.clone();
         rs.suspend.borrow_mut().active = own_ocds && tricore;
+        crate::tl1::apply(c);
         if let Some(w) = c.watch() {
             w.set_settings(settings);
             w.set_active(own_ocds && tricore);

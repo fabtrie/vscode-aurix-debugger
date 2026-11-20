@@ -127,6 +127,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "reset_info", cmd_reset_info);
     reg(interp, sh, "reset_watch", cmd_reset_watch);
     reg(interp, sh, "suspend", crate::suspend::cmd_suspend);
+    reg(interp, sh, "ocds", crate::tl1::cmd_ocds);
     // probe_lost_timeout ?ms?: how long the probe (BlueBox USB, miniWiggler, TasServer) may be
     // gone before the frontends end their debug sessions; 0 keeps reconnecting for ever.
     reg(interp, sh, "probe_lost_timeout", |cx, a| {

@@ -744,6 +744,54 @@ Remove a watchpoint, or all of them.
 
 ## Core-specific (`tricore`, `cortex_m`, `gtm_mcs`, `xc800`)
 
+### `ocds sync`
+
+```
+ocds sync [tl1|none]
+```
+
+Halt, resume and step all cores of the chip together through trigger line TL1, or each alone (default).
+
+With `tl1` every BRKOUT (CPUs, the HSM) drives TL1 and capture-and-hold keeps it active: a halt of one core stops all          TL1 members and every suspended peripheral in the same cycle. A pause pulses TL1 (`tricore tl1_halt` is set on every          core), a resume releases the other cores while the held TL1 still suspends them, resumes this one and drops the hold,          so all start in the same cycle; a step runs all cores for the instruction (`ocds step`). The routing is cleared by every          power-on class reset and written again right after it (with the peripheral suspend), and at the attach; an attach          that finds cpu0 halted halts all cores together again. May be set before or after `init`. Not with a probe that owns          OCDS (winIDEA).
+
+### `ocds tl1_members`
+
+```
+ocds tl1_members [<list>]
+```
+
+What TL1 suspends: any of `cpus hsm dma hssl` (default all four).
+
+Written to CBS_TL1ST (CPU0-5, the HSM, DMA, HSSL0). `hsm` only counts with an HSM target, which also routes its BRKOUT          to TL1 (CBS_TRHSM).
+
+### `ocds step`
+
+```
+ocds step [all|single]
+```
+
+With TL1 sync: a step runs all cores for the instruction (default), or only the stepping one.
+
+`single` keeps the other cores debug halted and drops the TL1 hold, so that only the stepping core runs; it sets          `tricore tl1_step` off on every core.
+
+### `ocds step_timers`
+
+```
+ocds step_timers [run|frozen]
+```
+
+With TL1 sync: the STMs run during a step (default) or stay stopped.
+
+`frozen` keeps the cores' suspend-out (DBGSR.SUSP) set from the halt until the next resume, so a step does not advance          the timers.
+
+### `ocds tl1_force`
+
+```
+ocds tl1_force
+```
+
+Pulse TL1 once: all TL1 members halt in the same cycle (latched by capture-and-hold).
+
 ### `tricore tl1_halt`
 
 ```

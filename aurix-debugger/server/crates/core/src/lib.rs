@@ -49,6 +49,7 @@ pub mod winidea_regs;
 #[cfg(feature = "winidea")]
 pub mod winidea_session;
 pub mod telnet;
+pub mod tl1;
 pub mod tricore;
 pub mod ucb;
 pub mod ucb_cmd;

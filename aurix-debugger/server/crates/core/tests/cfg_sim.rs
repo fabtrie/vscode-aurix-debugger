@@ -142,7 +142,7 @@ fn halt_and_resume_follow_cfg_event_order() {
 fn frozen_step_timers_keep_suspend_out_while_halted_and_stepping() {
     let s = server();
     s.interp.eval("init").unwrap();
-    assert_eq!(s.interp.eval("tc3xx_step_timers frozen").unwrap(), "frozen");
+    assert_eq!(s.interp.eval("ocds step_timers frozen").unwrap(), "frozen");
     s.interp.eval("halt 1000").unwrap();
     let w = take_writes(&s);
     for d in DBGSR {
@@ -150,18 +150,19 @@ fn frozen_step_timers_keep_suspend_out_while_halted_and_stepping() {
     }
     s.interp.eval("step").unwrap();
     let w = take_writes(&s);
+    // The other cores released under the TL1 hold with SUSP kept, the step trigger keeping SUSP=1,
+    // then this core released with SUSP.
     let others = pos(&w, (DBGSR[1], 0x14));
-    let own = pos(&w, (DBGSR[0], 0x10));
-    let evt = pos(&w, (0xF881_F038, 0x1022)); // step trigger keeps SUSP=1
+    let evt = pos(&w, (0xF881_F038, 0x1022));
     let release = pos(&w, (DBGSR[0], 0x14));
-    assert!(others < own && own < evt && evt < release, "{w:08x?}");
+    assert!(others < evt && evt < release, "{w:08x?}");
 
     s.interp.eval("resume").unwrap();
     let w = take_writes(&s);
     let p_clear = pos(&w, (DBGSR[0], 0));
     let pend = pos(&w, (CBS_TLCHS, 2));
     assert!(p_clear < pend, "suspend-out cleared after the TL1 hold was dropped: {w:08x?}");
-    assert!(s.interp.eval("catch {tc3xx_step_timers slow}").unwrap() == "1");
+    assert!(s.interp.eval("catch {ocds step_timers slow}").unwrap() == "1");
 }
 
 #[test]
@@ -173,17 +174,16 @@ fn step_uses_non_bbm_pc_trigger() {
     take_writes(&s);
     s.interp.eval("step").unwrap();
     let w = take_writes(&s);
-    // tl1_step: TL1 latched first (the sim reports it inactive), step-start releases the other
-    // cores under the hold and sets every SUSP for "run" mode (clear), the core releases cpu0 and
-    // then clears the hold.
-    let latch = pos(&w, (CBS_TLC, 0x30));
+    // tl1_step: TL1 still held from the halt (no new pulse); the step releases the other cores
+    // under the hold (SUSP clear for "run" mode), arms the trigger, releases cpu0 and then clears
+    // the hold.
+    assert!(!w.contains(&(CBS_TLC, 0x30)), "TL1 pulsed although it is held: {w:08x?}");
     let others = pos(&w, (DBGSR[1], 0x4));
-    let own = pos(&w, (DBGSR[0], 0));
     // TR7EVT: PC trigger, no BBM, EVTA=halt, SUSP=0 (TL1 stops the STMs with the cores)
     let evt = pos(&w, (0xF881_F038, 0x1002));
     let release = pos(&w, (DBGSR[0], 0x4));
     let start = pos(&w, (CBS_TLCHS, 2));
-    assert!(latch < others && others < own && own < evt && evt < release && release < start, "wrong order: {w:08x?}");
+    assert!(others < evt && evt < release && release < start, "wrong order: {w:08x?}");
     assert!(!w.contains(&(DBGSR[1], 0x16)), "other core put into debug halt: {w:08x?}");
     assert!(w.contains(&(0xF881_F03C, pc)));
     let (state, reason) = ops::state(&s.cx(), 0);
@@ -296,7 +296,7 @@ fn boot_halted_core_does_not_fire_halted_handler() {
     let (_, reason) = ops::state(&s.cx(), 2);
     assert_eq!(reason.name(), "boot-halt");
     // A real debug halt of cpu0 still runs the handler (visible through its SUSP writes in "frozen").
-    s.interp.eval("tc3xx_step_timers frozen").unwrap();
+    s.interp.eval("ocds step_timers frozen").unwrap();
     s.interp.eval("halt 1000").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(DBGSR[2], 0x10)));
@@ -1420,7 +1420,8 @@ fn generic_setup_follows_the_target_cfg() {
     assert_eq!(i.eval("set tc3xx_dbgsr(tc39x.cpu5)").unwrap(), "0xF88DFD00");
     assert_eq!(i.eval("set tc3xx_coreid(tc39x.cpu5)").unwrap(), "5");
     assert_eq!(i.eval("format 0x%08X [tc3xx_cbs_trc 5]").unwrap(), "0xF0000434");
-    assert_eq!(i.eval("tc39x.cpu5 cget -event step-start").unwrap(), "tc3xx_on_step_start tc39x.cpu5");
+    assert_eq!(i.eval("tc39x.cpu5 cget -event halted").unwrap(), "tc3xx_on_halted tc39x.cpu5");
+    assert_eq!(i.eval("ocds sync").unwrap(), "tl1");
     assert_eq!(i.eval("tc39x.hsm cget -type").unwrap(), "cortex_m");
     assert_eq!(i.eval("tc39x.mcs9.ch7 cget -ramsize").unwrap(), "0x1800");
     assert_eq!(i.eval("target current").unwrap(), "tc39x.cpu0");
@@ -1457,7 +1458,7 @@ mod backend_guard {
         assert_eq!(i.eval("tc37x.cpu0 cget -event examine-end").unwrap(), "tc3xx_on_examine");
         assert_eq!(i.eval("tc37x.cpu0 cget -event reset-end").unwrap(), "tc3xx_on_reset_end");
         assert_eq!(i.eval("tc37x.cpu1 cget -event halted").unwrap(), "tc3xx_on_halted tc37x.cpu1");
-        assert_eq!(i.eval("tc37x.cpu0 cget -event step-start").unwrap(), "tc3xx_on_step_start tc37x.cpu0");
+        assert_eq!(i.eval("ocds sync").unwrap(), "tl1");
     }
 
     /// The winIDEA backend skips the OCDS handlers and leaves the HSM to

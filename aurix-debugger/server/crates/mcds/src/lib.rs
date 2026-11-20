@@ -71,28 +71,58 @@ pub fn decode_program_between(
     start_pc: Option<u32>,
     halt_pc: Option<u32>,
 ) -> (Vec<Step>, flow::FlowStats, decode::Stats, bool) {
-    let mut d = Decoder::new();
+    decode_program_segments(&[Segment { paragraphs: paragraphs.to_vec(), halt_pc }], code, start_pc)
+}
+
+/// One recording of a program trace made of several (oldest first, see
+/// [`decode_program_segments`]): its paragraphs in order and the PC its core halted at.
+#[derive(Debug, Clone)]
+pub struct Segment<'a> {
+    pub paragraphs: Vec<(usize, &'a [u8])>,
+    pub halt_pc: Option<u32>,
+}
+
+/// Decodes recordings that follow each other: each one after the first was armed while the core
+/// stood at the previous one's halt PC, and the core ran on from there (an automatic trace armed
+/// on every run). The flow goes on through the halts; every recording starts with fresh
+/// compression bases. Returns whether the flow reaches the last recording's halt PC.
+pub fn decode_program_segments(segments: &[Segment<'_>], code: &mut dyn Code, start_pc: Option<u32>) -> (Vec<Step>, flow::FlowStats, decode::Stats, bool) {
     let mut f = Flow::new();
     if let Some(pc) = start_pc {
         f.start_at(pc);
     }
     let mut out = Vec::new();
-    for (_, p) in paragraphs {
-        for (_, m) in frame::messages(p) {
-            match d.feed(m) {
-                Some(Event::Ptu { time, ev }) => f.feed(ev, time, code, &mut out),
-                Some(Event::Lost { time, .. }) | Some(Event::Undecodable { time }) => f.gap(&mut out, time),
-                _ => {}
+    let mut ds = decode::Stats::default();
+    let mut reached = false;
+    for (k, s) in segments.iter().enumerate() {
+        if k > 0 && !reached {
+            // The flow did not get to the halt: what ran before it is missing. The next
+            // recording starts at the halt again.
+            f.gap(&mut out, None);
+            if let Some(pc) = segments[k - 1].halt_pc {
+                f.start_at(pc);
             }
         }
+        let mut d = Decoder::new();
+        for (_, p) in &s.paragraphs {
+            for (_, m) in frame::messages(p) {
+                match d.feed(m) {
+                    Some(Event::Ptu { time, ev }) => f.feed(ev, time, code, &mut out),
+                    Some(Event::Lost { time, .. }) | Some(Event::Undecodable { time }) => f.gap(&mut out, time),
+                    _ => {}
+                }
+            }
+        }
+        reached = match s.halt_pc {
+            Some(pc) => f.run_to(pc, d.now(), code, &mut out),
+            None => false,
+        };
+        ds.messages += d.stats.messages;
+        ds.undecodable += d.stats.undecodable;
+        ds.lost += d.stats.lost;
+        ds.gaps += d.stats.gaps;
     }
-    let reached = match halt_pc {
-        Some(pc) => f.run_to(pc, d.now(), code, &mut out),
-        None => false,
-    };
-    let fs = f.stats;
-    let ds = d.stats.clone();
-    (out, fs, ds, reached)
+    (out, f.stats, ds, reached)
 }
 
 #[cfg(test)]
@@ -120,6 +150,44 @@ mod tests {
         assert_eq!(writes[0].time, Some(1003));
         assert_eq!(stats.undecodable, 0);
         assert_eq!(units_to_ns(150), 1000);
+    }
+
+    /// Recordings of an automatic trace, each armed at the previous halt: the flow runs on
+    /// through the halt, and a recording that does not reach its halt leaves a gap only.
+    #[test]
+    fn segments_continue_through_the_halts() {
+        use crate::flow::{Insn, InsnKind};
+        use crate::frame::CORE_PTU;
+        struct Map(Vec<(u32, u8, Option<u32>)>);
+        impl Code for Map {
+            fn insn(&mut self, a: u32) -> Option<Insn> {
+                self.0.iter().find(|i| i.0 == a).map(|&(_, size, direct)| Insn { size, direct, kind: InsnKind::Other })
+            }
+        }
+        // 0x100 mov, 0x102 j 0x104 | halt at 0x104 | 0x104 j 0x110 | halt at 0x110.
+        let mut code = Map(vec![(0x100, 2, None), (0x102, 2, Some(0x104)), (0x104, 2, Some(0x110)), (0x110, 2, None)]);
+        let rec = |addr: u32, count: u32| {
+            let r = [Rec::Unit { core: CORE_PTU, tt: 0, data: addr as u128, bits: 32 }, Rec::Unit { core: CORE_PTU, tt: 2, data: count as u128, bits: 4 }];
+            paragraphs(&r, 0x400, 1)
+        };
+        let (a, b) = (rec(0x100, 4), rec(0x104, 2));
+        fn seg(raw: &[u8], halt: u32) -> Segment<'_> {
+            Segment { paragraphs: vec![(0, raw)], halt_pc: Some(halt) }
+        }
+        let addrs = |steps: &[Step]| steps.iter().map(|s| if let Step::Insn { addr, .. } = s { Some(*addr) } else { None }).collect::<Vec<_>>();
+
+        let (steps, _, ds, reached) = decode_program_segments(&[seg(&a, 0x104), seg(&b, 0x110)], &mut code, None);
+        assert!(reached);
+        assert_eq!(addrs(&steps), vec![Some(0x100), Some(0x102), Some(0x104)]);
+        assert_eq!((ds.undecodable, ds.lost), (0, 0));
+        // The later recording alone: what ran before its start is not there.
+        let (steps, _, _, reached) = decode_program_segments(&[seg(&b, 0x110)], &mut code, None);
+        assert!(reached);
+        assert_eq!(addrs(&steps), vec![Some(0x104)]);
+        // The first one does not reach its halt (say 0x10C): a gap, then the next one from its start.
+        let (steps, _, _, reached) = decode_program_segments(&[seg(&a, 0x10C), seg(&b, 0x110)], &mut code, None);
+        assert!(reached);
+        assert_eq!(addrs(&steps), vec![Some(0x100), Some(0x102), None, Some(0x104)]);
     }
 
     /// Local recordings (not in the repository): set MCDS_CAPTURES to their folder.

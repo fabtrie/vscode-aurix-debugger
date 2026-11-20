@@ -123,6 +123,8 @@ pub fn recording_json(r: &Recording) -> Value {
         "done": r.done,
         "ring": r.ring,
         "paragraphs": r.paragraphs().len(),
+        // Paragraphs of earlier recordings this one continues (automatic trace).
+        "earlier_paragraphs": r.earlier.iter().map(|e| e.paragraphs.len()).sum::<usize>(),
         "bytes": r.raw.len(),
         "stopped_ms": r.stopped_at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
         "ran_since": r.ran_since,
@@ -229,10 +231,7 @@ pub fn cmd_mcds(cx: &Cx, args: &[&str]) -> CmdResult {
                 Some(_) => {
                     let cfg = parse_config(&rest)?;
                     cfg.plan()?;
-                    if cx.with(|c| c.reverse.enabled()) {
-                        return Err(mt::REVERSE_OWNS.into());
-                    }
-                    cx.with(|c| c.mcds.auto = Some(cfg));
+                    cx.with(|c| mt::set_auto(c, Some(cfg))).map_err(|e| e.to_string())?;
                 }
             }
             let v = json!({"auto": cx.with(|c| c.mcds.auto.as_ref().map(config_json))});

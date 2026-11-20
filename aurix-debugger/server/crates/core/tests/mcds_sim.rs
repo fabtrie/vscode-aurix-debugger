@@ -144,3 +144,47 @@ fn daq_traced_points() {
     daq::tick_at(&s.cx(), t0 + Duration::from_millis(200), Some(t0));
     assert!(s.cx().with(|c| c.mcds.armed.is_none()));
 }
+
+/// The Lite Kit board cfg on the simulator, initialised, CPU0 selected and running.
+fn board_running() -> Server {
+    aurix_core::log::set_debug_level(0);
+    let s = Server::new();
+    s.cx().with(|c| {
+        c.adapter_override = Some("sim".into());
+        c.search_dirs.push(std::path::PathBuf::from(openocd_tcl::TCL_DIR));
+    });
+    s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
+    s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
+    s.interp.eval_global("hsm ready_ms 0").unwrap();
+    s.interp.eval_global("init").unwrap();
+    s.interp.eval_global("targets tc37x.cpu0").unwrap();
+    s
+}
+
+/// `mcds auto` set while the core runs (a launch sets it after the reset started the
+/// application) arms at once: the run to the first halt is recorded, not only the runs after it.
+#[test]
+fn auto_set_while_running_arms_at_once() {
+    let s = board_running();
+    assert_eq!(tcl(&s, "tc37x.cpu0 curstate").unwrap(), "running");
+    json(&s, "mcds auto -program -stop halt -json");
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(true), "{st}");
+    assert_eq!(st["owner"], "snapshot");
+    // The halt reads it.
+    tcl(&s, "halt").unwrap();
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(false), "{st}");
+    assert_eq!(st["last"]["ran_since"], Value::Null, "{st}");
+    assert!(st["last"]["paragraphs"].as_u64().unwrap() >= 7, "{st}");
+    // Set again while halted: armed on the next run only.
+    json(&s, "mcds auto -program -stop halt -json");
+    assert_eq!(json(&s, "mcds status -json")["armed"], Value::Bool(false));
+    tcl(&s, "resume").unwrap();
+    assert_eq!(json(&s, "mcds status -json")["armed"], Value::Bool(true));
+    // A full ring keeps no earlier recording (one trace RAM in all).
+    tcl(&s, "halt").unwrap();
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["last"]["earlier_paragraphs"], 0, "{st}");
+    json(&s, "mcds auto off -json");
+}

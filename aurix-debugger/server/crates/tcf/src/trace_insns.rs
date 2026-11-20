@@ -57,9 +57,10 @@ pub enum MemAt {
     Saved(Vec<(u32, Vec<u8>)>),
 }
 
-/// Whether a ring recording went round its trace RAM (its start is lost).
+/// Whether a ring recording went round its trace RAM (its start is lost), or continues earlier
+/// recordings (it does not start where it was armed).
 pub fn lapped(r: &Recording) -> bool {
-    r.ring && r.paragraphs().first().is_some_and(|p| p.0 != 0)
+    !r.earlier.is_empty() || (r.ring && r.paragraphs().first().is_some_and(|p| p.0 != 0))
 }
 
 fn is_call(m: &str) -> bool {
@@ -104,13 +105,12 @@ pub fn build_with(sh: &Shared, r: &Recording, entry: Option<&[u32]>, mem: MemAt)
         return Err("no code to decode the program trace with (load the ELF of the application)".into());
     }
     let mut code = mcds::flow::CapstoneCode::new(|a: u32, n: usize| img.read(a, n))?;
-    let pars = r.paragraphs();
     // A ring recording ends where the core halted (stop on halt, or a manual stop of a halted core:
     // nothing is recorded while it is halted); a linear one may have filled long before.
     let halt_pc = r.halt_pc.filter(|_| r.ring);
     let entry = entry.filter(|e| e.len() > 36 && !lapped(r));
     let start_pc = entry.map(|e| e[36]);
-    let (steps, flow, decode, reached) = mcds::decode_program_between(&pars, &mut code, start_pc, halt_pc);
+    let (steps, flow, decode, reached) = mcds::decode_program_segments(&r.segments(halt_pc), &mut code, start_pc);
     let t_start = steps.iter().find_map(|s| match s {
         Step::Insn { time, .. } | Step::Gap { time, .. } => *time,
     });

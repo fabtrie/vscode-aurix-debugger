@@ -445,8 +445,10 @@ pub static ENTRIES: &[Entry] = &[
     e!(Trace, "mcds plan", "[-json] <options of mcds arm>", "Show the register writes `mcds arm` would make, without touching the target."),
     e!(Trace, "mcds auto", "[off | <mcds arm options>] [-json]", "Arm the trace on every run of the traced core and read it at the halt.",
         "Each `resume` (not a step) arms it, each halt reads it, so every halt comes with the trace up to it, e.g. \
-         `mcds auto -program -stop halt`. `off` ends it; without arguments, show the setting. A trace another owner \
-         uses or that is still recording is left alone."),
+         `mcds auto -program -stop halt`. Set while the core runs, it arms at once. A run that starts where the last \
+         recording halted continues it: the program trace is decoded with the earlier recordings in front, one 8 KB \
+         trace RAM's worth in all. `off` ends it; without arguments, show the setting. A trace another owner uses or \
+         that is still recording is left alone."),
     e!(Trace, "mcds status", "[-json]", "Whether a trace is armed, its owner, the write pointer, how full the 8 KB are (a ring stays full after its first lap) and whether it finished."),
     e!(Trace, "mcds stop", "[-json]", "Stop the trace (if it still runs) and read the trace RAM."),
     e!(Trace, "mcds decode", "[-json] [<max>]", "List the events of the last recording: data trace writes with address, value and time; program trace messages raw.",

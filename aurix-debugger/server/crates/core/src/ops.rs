@@ -551,12 +551,13 @@ pub fn resume_as(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode) -> Result<
     // Reverse debugging: the state before the run (inside a source step: the step's own).
     cx.with(|c| {
         crate::reverse::begin_action(c, t, action_name(mode, true), mode);
+        if mode == RunMode::Continue {
+            // `mcds auto`: a trace that ends at the next halt. Before `on_run`: whether the last
+            // recording still ends where the core stands decides if the new one continues it.
+            crate::mcds_trace::auto_arm(c, t);
+        }
         crate::mcds_trace::on_run(c, t, "run");
     });
-    if mode == RunMode::Continue {
-        // `mcds auto`: a trace that ends at the next halt.
-        cx.with(|c| crate::mcds_trace::auto_arm(c, t));
-    }
     // A breakpoint on the PC would stop the resume before the first instruction: step past it
     // first (not reported: to the frontends this is one run).
     if addr.is_none() && cx.with(|c| c.target_io(t).and_then(|(mut io, e)| e.core.breakpoint_at_pc(&mut io))).unwrap_or(false) {

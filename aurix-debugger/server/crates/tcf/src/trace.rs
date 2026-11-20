@@ -133,17 +133,7 @@ pub fn auto_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
         Some(cfg) => {
             let cfg = parse_config(sh, cfg)?;
             cfg.plan()?;
-            sh.handle
-                .call(move |cx| {
-                    cx.with(|c| {
-                        if c.reverse.enabled() {
-                            return Err(mt::REVERSE_OWNS.to_string());
-                        }
-                        c.mcds.auto = Some(cfg);
-                        Ok(())
-                    })
-                })
-                .ok_or("the debug server stopped")??;
+            sh.handle.call(move |cx| cx.with(|c| mt::set_auto(c, Some(cfg)))).ok_or("the debug server stopped")?.map_err(|e| e.to_string())?;
         }
     }
     let auto = sh.handle.call(|cx| cx.with(|c| c.mcds.auto.as_ref().map(mcds_cmd::config_json))).ok_or("the debug server stopped")?;

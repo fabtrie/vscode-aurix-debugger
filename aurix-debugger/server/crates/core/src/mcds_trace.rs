@@ -44,6 +44,8 @@ pub struct Armed {
     pub finished: bool,
     /// A ring recording that went round the trace RAM at least once (see [`fill`]).
     pub lapped: bool,
+    /// The recording this one continues ([`auto_arm`]: armed at its halt, nothing ran between).
+    pub continues: Option<Box<Recording>>,
 }
 
 /// A stopped recording: the whole trace RAM and where the writer stood.
@@ -69,12 +71,60 @@ pub struct Recording {
     /// an instruction step ("step") or the device was reset ("reset") after the stop. None while
     /// the core still stands where the recording stopped.
     pub ran_since: Option<&'static str>,
+    /// The automatic trace's recordings before this one, oldest first, that the core ran through
+    /// to its start without a gap (each armed at the previous halt): a run from a breakpoint
+    /// that only reaches the next one records a few instructions, the history before it is
+    /// here. Their newest paragraphs only, one trace RAM's worth with this recording's own.
+    pub earlier: Vec<Earlier>,
+}
+
+/// An earlier recording joined to a later one ([`Recording::earlier`]).
+#[derive(Debug, Clone)]
+pub struct Earlier {
+    /// Paragraphs with data, oldest first.
+    pub paragraphs: Vec<(usize, Vec<u8>)>,
+    /// Where the core halted at its end: where the next recording starts.
+    pub halt_pc: Option<u32>,
 }
 
 impl Recording {
     /// The paragraphs that hold data, oldest first.
     pub fn paragraphs(&self) -> Vec<(usize, &[u8])> {
         buffer::ordered(&self.raw, self.write_ptr, self.ring)
+    }
+
+    /// The program trace to decode: the earlier recordings, then this one ending at `halt_pc`.
+    pub fn segments(&self, halt_pc: Option<u32>) -> Vec<mcds::Segment<'_>> {
+        let mut v: Vec<mcds::Segment<'_>> = self
+            .earlier
+            .iter()
+            .map(|e| mcds::Segment { paragraphs: e.paragraphs.iter().map(|(i, p)| (*i, p.as_slice())).collect(), halt_pc: e.halt_pc })
+            .collect();
+        v.push(mcds::Segment { paragraphs: self.paragraphs(), halt_pc });
+        v
+    }
+
+    /// Joins `prev`, which this recording continues, in front of it: as many of the newest
+    /// paragraphs as fit beside this recording's own in one trace RAM.
+    fn join(&mut self, prev: Recording) {
+        let mut budget = regs::PARAGRAPHS.saturating_sub(self.paragraphs().len());
+        let own = Earlier { paragraphs: prev.paragraphs().into_iter().map(|(i, p)| (i, p.to_vec())).collect(), halt_pc: prev.halt_pc };
+        let mut pieces = prev.earlier;
+        pieces.push(own);
+        let mut kept = Vec::new();
+        for mut e in pieces.into_iter().rev() {
+            if budget == 0 {
+                break;
+            }
+            let n = e.paragraphs.len().min(budget);
+            e.paragraphs.drain(..e.paragraphs.len() - n);
+            budget -= n;
+            if n > 0 {
+                kept.push(e);
+            }
+        }
+        kept.reverse();
+        self.earlier = kept;
     }
 
     /// The trace RAM with winIDEA's 60-byte RawData header, so the analysis scripts read it.
@@ -152,7 +202,7 @@ pub fn arm(c: &mut Ctx, cfg: TraceConfig, owner: Owner) -> Result<Plan> {
     // Cleared completely, so paragraphs the recording never reaches read as unwritten.
     io.write(regs::TRAM, &vec![0u8; regs::TRAM_SIZE as usize])?;
     io.write32(regs::CTRL, plan.start)?;
-    c.mcds.armed = Some(Armed { cfg, plan: plan.clone(), owner, since: SystemTime::now(), finished: false, lapped: false });
+    c.mcds.armed = Some(Armed { cfg, plan: plan.clone(), owner, since: SystemTime::now(), finished: false, lapped: false, continues: None });
     c.mcds.lost_by_reset = false;
     Ok(plan)
 }
@@ -200,7 +250,10 @@ pub fn stop(c: &mut Ctx, owner: Owner) -> Result<Recording> {
     let raw = io.read(regs::TRAM, regs::TRAM_SIZE as usize)?;
     let halt_pc = halted_pc(c, a.cfg.core as u32);
     let halt_regs = halt_pc.and_then(|_| halted_regs(c, a.cfg.core as u32));
-    let rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc, halt_regs, ran_since: None };
+    let mut rec = Recording { raw, write_ptr: wp, ring: a.plan.ring, done: st.done, cfg: a.cfg, armed_at: a.since, stopped_at: SystemTime::now(), halt_pc, halt_regs, ran_since: None, earlier: Vec::new() };
+    if let Some(prev) = a.continues {
+        rec.join(*prev);
+    }
     c.mcds.armed = None;
     c.mcds.last = Some(rec.clone());
     Ok(rec)
@@ -252,8 +305,34 @@ pub fn on_halted(c: &mut Ctx, t: usize) {
     }
 }
 
+/// Sets (or with `None` ends) the automatic trace. Set while the traced core runs, it is armed
+/// right away, so the run to the next halt is recorded too (a launch sets it after the reset
+/// started the application).
+pub fn set_auto(c: &mut Ctx, cfg: Option<TraceConfig>) -> Result<()> {
+    let Some(cfg) = cfg else {
+        c.mcds.auto = None;
+        return Ok(());
+    };
+    if c.reverse.enabled() {
+        return Err(Error::Resource(REVERSE_OWNS.into()));
+    }
+    let core = cfg.core as u32;
+    c.mcds.auto = Some(cfg);
+    let running = c.targets.iter().position(|e| {
+        matches!(&e.core, crate::target::Core::Tricore(tc) if tc.coreid == core) && e.core.examined() && e.core.state() == crate::target::TargetState::Running
+    });
+    if let Some(t) = running.filter(|_| !c.in_reset && !c.in_reset_hook) {
+        auto_arm(c, t);
+    }
+    Ok(())
+}
+
 /// Arms the automatic trace before core `t` runs (a plain run, not a step). Leaves a trace
 /// alone that another owner uses or that is still recording; a finished one is read first.
+///
+/// When the core still stands where the last recording of this configuration halted (it has
+/// not run, stepped or been reset since), the new recording continues it: decoded together
+/// ([`Recording::earlier`]).
 pub fn auto_arm(c: &mut Ctx, t: usize) {
     if c.reverse.enabled() {
         return;
@@ -276,8 +355,21 @@ pub fn auto_arm(c: &mut Ctx, t: usize) {
         }
         None => {}
     }
-    if let Err(e) = arm(c, cfg, Owner::Snapshot) {
-        crate::log_warn!("trace: arming on run failed: {e}");
+    let core = cfg.core as u32;
+    let continues = match c.mcds.last.as_ref() {
+        Some(r) if r.ran_since.is_none() && r.ring && r.cfg == cfg && matches!(cfg.kind, mcds::Kind::Program { .. }) && r.halt_pc.is_some() => {
+            let r = r.clone();
+            (halted_pc(c, core) == r.halt_pc).then(|| Box::new(r))
+        }
+        _ => None,
+    };
+    match arm(c, cfg, Owner::Snapshot) {
+        Ok(_) => {
+            if let Some(a) = c.mcds.armed.as_mut() {
+                a.continues = continues;
+            }
+        }
+        Err(e) => crate::log_warn!("trace: arming on run failed: {e}"),
     }
 }
 
@@ -340,4 +432,38 @@ fn halted_pc(c: &mut Ctx, coreid: u32) -> Option<u32> {
         _ => None,
     })?;
     c.io().ok()?.read32(addr).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcds::{Kind, Stop, Timestamps};
+
+    /// A stopped ring that has not lapped: `n` paragraphs with data (byte `tag`), halted at `pc`.
+    fn rec(n: usize, tag: u8, pc: u32) -> Recording {
+        let mut raw = vec![0u8; regs::TRAM_SIZE as usize];
+        raw[..n * regs::PARAGRAPH as usize].fill(tag);
+        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None }, stop: Stop::Halt, timestamps: Timestamps::Messages };
+        let t = SystemTime::now();
+        Recording { raw, write_ptr: n as u32 * regs::PARAGRAPH - 0x20, ring: true, done: true, cfg, armed_at: t, stopped_at: t, halt_pc: Some(pc), halt_regs: None, ran_since: None, earlier: Vec::new() }
+    }
+
+    #[test]
+    fn joined_recordings_keep_one_trace_ram() {
+        // Three recordings joined in turn: 3, 2 and 4 paragraphs, then a short one of 2.
+        let mut b = rec(2, 2, 0x200);
+        b.join(rec(3, 1, 0x100));
+        assert_eq!(b.earlier.iter().map(|e| e.paragraphs.len()).collect::<Vec<_>>(), vec![3]);
+        let mut c = rec(4, 3, 0x300);
+        c.join(b);
+        // 8 - 4 = 4 paragraphs of history: b's own 2, then the newest 2 of the first one.
+        assert_eq!(c.earlier.iter().map(|e| (e.paragraphs.len(), e.halt_pc)).collect::<Vec<_>>(), vec![(2, Some(0x100)), (2, Some(0x200))]);
+        assert!(c.earlier[0].paragraphs.iter().all(|(_, p)| p[0] == 1));
+        let segs = c.segments(c.halt_pc);
+        assert_eq!(segs.iter().map(|s| (s.paragraphs.len(), s.halt_pc)).collect::<Vec<_>>(), vec![(2, Some(0x100)), (2, Some(0x200)), (4, Some(0x300))]);
+        // A recording that fills the trace RAM by itself keeps none.
+        let mut full = rec(8, 4, 0x400);
+        full.join(c);
+        assert!(full.earlier.is_empty());
+    }
 }

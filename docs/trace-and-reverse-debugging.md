@@ -47,7 +47,9 @@ Without reverse debugging, **Step Back** and **Reverse Continue** replay the las
 "trace": { "Kind": "program", "Ranges": [{ "Function": "Motor_Update" }], "Stop": "halt" }
 ```
 
-`"trace": { "Auto": true }` turns on **Arm on every run, stop on halt**.
+`"trace": { "Auto": true }` turns on **Arm on every run, stop on halt**. If the application is already running when it is set (after the launch reset), the trace is armed at once, so the first breakpoint has a trace too.
+
+When a run starts where the last one halted, its trace is shown after the one before, up to 8 KB in total. A Continue that only gets to the next breakpoint still shows the history before it.
 
 ## Reverse debugging
 

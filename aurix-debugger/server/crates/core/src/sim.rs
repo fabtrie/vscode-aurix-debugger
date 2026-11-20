@@ -328,6 +328,9 @@ pub struct SimAdapter {
     /// RAM the application protects against the debugger: its writes there are dropped without an
     /// error (the bus error of a posted write does not reach the probe); the cores' writes land.
     pub debugger_dropped: Vec<std::ops::Range<u32>>,
+    /// The next reset deasserts that fail, as a TasServer refusing its reset `DEVICE_CONNECT`:
+    /// the pending reset is dropped and the chip is not reset.
+    pub deassert_fails: u32,
 }
 
 /// CPU0's PSPR (global address): a resume there runs the code in [`SimAdapter::cpu0`].
@@ -404,6 +407,7 @@ impl SimAdapter {
             cpu0_fault: None,
             wdt_stuck: false,
             debugger_dropped: Vec::new(),
+            deassert_fails: 0,
             app: Some(SimApp::new()),
             fs26: None,
             violations: Vec::new(),
@@ -1080,6 +1084,10 @@ impl Adapter for SimAdapter {
     fn deassert_srst(&mut self, halt_after_reset: bool) -> Result<()> {
         if self.srst {
             self.srst = false;
+            if self.deassert_fails > 0 {
+                self.deassert_fails -= 1;
+                return Err(crate::error::Error::Adapter("sim: reset refused (as TAS command 0xA8: command failed)".into()));
+            }
             // A power-on class reset: clears OCS (STM suspend included), as on the chip.
             self.power_on_reset(halt_after_reset);
             // Wired to RSTB: the FS26 restarts INIT_FS (a reset is due if the core is still halted

@@ -722,9 +722,11 @@ pub fn arp_reset_assert(cx: &Cx, t: usize, halt: bool) -> Result<()> {
 /// `arp_reset deassert <halt>`
 pub fn arp_reset_deassert(cx: &Cx, t: usize, halt: bool) -> Result<()> {
     let tr = cx.with(|c| -> Result<Transition> {
-        if c.srst_asserted {
+        // Cleared whatever the deassert gives: the adapter forgets its reset before it tries,
+        // and a flag left set here would make the next reset skip `assert_srst` - and with it
+        // the reset itself.
+        if std::mem::take(&mut c.srst_asserted) {
             c.adapter.as_deref_mut().ok_or_else(|| usage("no adapter"))?.deassert_srst(halt)?;
-            c.srst_asserted = false;
         }
         let (mut io, e) = c.target_io(t)?;
         let name = e.name.clone();

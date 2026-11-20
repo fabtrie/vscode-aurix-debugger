@@ -249,7 +249,7 @@ impl TasClient {
             e => Err(Error::Command {
                 cmd: PL1_DEVICE_CONNECT,
                 err: e,
-                msg: if device_type == 0 { "no device connected".into() } else { format!("option {mode:?} not supported") },
+                msg: format!("device connect {mode:?}"),
             }),
         }
     }

@@ -673,6 +673,25 @@ fn only_a_reset_that_cleared_ocds_needs_another_disarm() {
     no_violations(&s);
 }
 
+/// The running reset before the first halting one fails (TasServer refused its reset connect): the
+/// halting reset still resets the chip and halts at the reset vector, rather than halting the
+/// application where it runs.
+#[test]
+fn halting_reset_after_a_failed_reset_still_resets() {
+    let s = server();
+    add_fs26(&s, SimFs26::new(false, false));
+    s.interp.eval("init").unwrap();
+    with_sim(&s, |sim| {
+        sim.pc[0] = 0x8000_1234;
+        sim.deassert_fails = 1;
+    });
+    s.interp.eval("reset halt").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.deassert_fails), 0, "the running reset was not tried");
+    assert_eq!(curstate(&s, "tc37x.cpu0"), "halted");
+    assert_eq!(s.interp.eval("reg pc").unwrap(), "pc (/32): 0x800a8000");
+    no_violations(&s);
+}
+
 /// sbc_attach halt on a disarmed application whose STM0/1 have no suspend (locked): a halt would make
 /// the OS panic on resume, so it resets first, then halts in the application.
 #[test]

@@ -5,6 +5,10 @@
 - With `"enableFlashing": true`, the images in `flashFiles` are programmed when the debug session starts.
 - **Flash Target** (debug toolbar) programs them again, e.g. after a rebuild.
 - Afterwards the target is reset with `resetType` and runs, or halts at the reset vector with `"resetSuspend": true`.
+- Only sectors whose content differs are erased and programmed; the others are left alone.
+- PFLASH is programmed by a small loader that runs on cpu0: a full 6 MB image takes well under half a minute, a small change about a second.
+  - The loader uses the start of cpu0's PSPR and DSPR, and turns off the CPU0 and safety watchdogs until the next reset. Flashing from VS Code ends with a reset, so the application starts as usual.
+  - If the loader cannot run, the debugger programs the flash itself, which is much slower (minutes on a BlueBox). `monitor flash loader off` forces that.
 
 ### Flash files
 

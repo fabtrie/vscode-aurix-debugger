@@ -14,8 +14,9 @@ VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore
 - **Watching data:** Call Stack, Variables, Watch, and a **Live Watch** that updates while the target runs (sidebar or editor tabs); C++ names supported
 - **Peripherals and memory:** SVD registers in the Peripheral view (HSM and SCR included), Memory Inspector, Disassembly view with Go to Address or Symbol
 - **AUTOSAR OS (ORTI):** running task per core, task names in the Call Stack, tasks, stacks, alarms, task profiling
-- **On-chip trace (TC37x):** program flow and every write to a variable, recorded by the miniMCDS over the miniWiggler
-- **Flash and UCBs:** program ELF, HEX, S-record and binary images; read, compare, edit, export and write the TC3xx UCBs
+- **On-chip trace (TC37x):** program flow, every instruction with its registers, and every write to a variable, recorded by the miniMCDS over the miniWiggler; Step Back replays it
+- **Reverse debugging:** Step Back and Reverse Continue restore the core's registers and RAM, and the code runs again from there
+- **Flash and UCBs:** program ELF, HEX, S-record and binary images (only changed sectors); read, compare, edit, export and write the TC3xx UCBs
 - **Target health** in the status bar: no power, reset, no debug access, probe lost
 - **Automation:** custom toolbar actions, `monitor` Tcl commands, a debugger hub for VS Code, Claude (MCP), REST and Python
 
@@ -174,45 +175,30 @@ Set `ortiFile` or run **Load ORTI File…**. Then:
 
 ### On-chip trace
 
-TC37x only, over the miniWiggler. Uses the chip's miniMCDS (8 KB buffer: about 80 µs of unfiltered program flow, more with a filter). Only CPU0 is traced; the data trace sees only CPU0's writes.
+TC37x only, over the miniWiggler; no trace probe needed. **Show Trace** opens the Trace panel. It records CPU0's program flow (all code or one function) or every write into a variable range, and stops on halt, when full, manually or at a function.
 
-**Show Trace** opens the Trace panel:
+- **Arm on every run, stop on halt:** every breakpoint comes with the trace up to it.
+- Results: executed code by function with source lines and target times, and every instruction with the registers rebuilt from the halt.
+- **Step Back** and **Reverse Continue** replay the trace: editor, Variables, Registers and Call Stack show the state at that point; the target is not changed.
+- `"trace": { "Auto": true }` in the launch configuration arms it at start.
 
-- **Record:** all CPU0 code, only one function or address range, or every write into a variable range.
-- **Stop:** on halt (the trace ends exactly at the breakpoint or halt), when full, manually, or at a function.
-- The panel checks the configuration as you type and shows the resources it uses. Configurations can be saved by name.
-- **Arm on every run, stop on halt:** arms on every Continue and reads on halt, so every breakpoint comes with the trace up to it and Step Back works right away.
-- Results: executed code grouped by function, with source lines and target times; click to open the source. **Export CSV** saves it.
-- **Instructions:** every executed instruction with source lines, what it wrote, and the registers at any instruction (rebuilt from the halt). Each value is marked exact, from memory at the halt, or unknown; click a register to see where its value came from.
-- **Step Back** and **Reverse Continue** replay the trace: editor, Variables, Watch, Registers, Call Stack and Disassembly show the state at that point. Step, Step Into and Continue move forward again up to the halt.
+![Trace panel: all code, then only one function](vscode-aurix-tcf-debugger/media/readme/trace-panel.gif)
 
-Launch configuration: `"trace": { ... }` arms a trace when the session starts (same keys as the panel); `"trace": { "Auto": true }` is **Arm on every run, stop on halt**.
+![Step Back replays the trace](vscode-aurix-tcf-debugger/media/readme/trace-step-back.gif)
+
+More: [On-chip trace and reverse debugging](docs/trace-and-reverse-debugging.md).
 
 ### Reverse debugging
 
-Enable with `"reverse": true` in the launch configuration or **Enable Reverse Debugging**. **Step Back** and **Reverse Continue** then put the real core back into an earlier state, and it runs from there.
+`"reverse": true` in the launch configuration (or **Enable Reverse Debugging**) makes **Step Back** and **Reverse Continue** put the real core back into an earlier state: its registers and RAM are restored and it runs on from there.
 
-- Before every step, run and register or memory write, the core's registers and RAM (the ELF's writable sections, stacks, context save area) are saved.
-- **Step Back:** to the start of the previous line (stepping back over calls), or one instruction in instruction stepping mode. Inside a Continue it reruns from the run's start to that line; if the rerun takes another path it stops there and says so.
-- **Reverse Continue:** back to the last breakpoint or data breakpoint hit, or to the start of the history.
-- Not rewound: peripherals (their writes are listed in the Debug Console), timers, other cores, DMA. Use a reset to go back across initialisation.
-- RAM protected against other bus masters (TC3xx DSPR safety protection, `CPUx_SPR_SPROT`) also blocks the debugger. A Step Back that would write such RAM is refused and nothing changes. At start the Debug Console lists the blocked areas. Fix in a test build: one more protection region per core that opens them to the debugger (master tags 28 and 30).
-- Uses the on-chip trace: the Trace panel's own setup is off, and `reverse` and `trace` cannot both be in a launch configuration.
-- The Trace panel's **History** tab lists the checkpoints and goes back to any of them. **Go here** in the Instructions tab goes back to an instruction of the last action.
-- The Debug Console shows at start how much RAM is saved and how long a checkpoint takes.
-- Without reverse debugging, Step Back is the view-only trace replay: the status bar shows **Trace replay · view only**, the current line marks where the core really is, nothing on the target changes.
+- Step Back goes to the previous line, or one instruction in instruction stepping mode. Reverse Continue goes back to the last breakpoint hit.
+- Not rewound: peripherals, timers, other cores, DMA.
+- RAM protected against the debugger (TC3xx DSPR safety protection) cannot be restored; the Debug Console lists it at start.
 
-Options (`"reverse": { ... }`):
+![Step Back restores the core: the mode change is undone and runs again](vscode-aurix-tcf-debugger/media/readme/reverse-debugging.gif)
 
-| Option | Default | Description |
-|---|---|---|
-| `history` | `50` | Checkpoints kept (`0`: all since the last reset) |
-| `trace` | `true` | Record every action with the trace; `false`: whole actions only |
-| `regions` | | RAM saved in addition: `{ "start", "size", "private", "name" }` |
-| `exclude` | | RAM left out, e.g. large buffers: `{ "symbol" }` or `{ "start", "size" }` |
-| `stackSymbols`, `csaSymbols` | iLLD/HighTec and TASKING symbols | Linker symbol pairs bounding the stacks and the context save area |
-| `maxHits` | `200` | Most breakpoint hits a Step Back inside a run may count |
-| `strict` | `false` | Refuse a Step Back that cannot restore everything (peripheral or unknown writes) |
+More: [On-chip trace and reverse debugging](docs/trace-and-reverse-debugging.md#reverse-debugging).
 
 ### Peripheral view
 
@@ -238,6 +224,7 @@ Registers that change when read (e.g. `TRNG_DATA32`) are not read automatically.
 ### Flashing and reset
 
 - With `enableFlashing`, `flashFiles` are programmed when the session starts.
+- Only sectors that differ are erased and programmed, through a loader in cpu0's RAM: a full 6 MB image takes well under half a minute.
 - **Flash Target** (toolbar) programs them again, e.g. after a rebuild.
 - After flashing and with **Reset**, the target is reset with `resetType` and runs, or halts at the reset vector with `resetSuspend: true`.
 
@@ -319,7 +306,7 @@ The debug server runs behind `aurix-hub`, a background process (port 3001) with 
 
 ![A breakpoint set by Claude over MCP halts the target in VS Code](vscode-aurix-tcf-debugger/media/readme/claude-session.gif)
 
-- **Add Debugger MCP Server to Claude Config:** lets Claude Code open sessions, flash, set breakpoints and read variables.
+- **Add Debugger MCP Server to Claude Config:** lets Claude Code open sessions, flash, set breakpoints, and read variables, the call stack with locals, and peripheral registers by name.
 - **Attach to Hub Session:** attaches VS Code to a session Claude or a script opened (also offered when one opens).
 - **Start Debugger Hub at Logon** keeps the hub running; **Show Debugger Hub Status** lists its sessions.
 - **Another PC:** to use a lab PC's probes, run `aurix-hub install --autostart --remote` there and set `aurix-debugger.hub.url` and `aurix-debugger.hub.token` here.

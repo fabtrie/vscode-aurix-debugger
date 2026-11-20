@@ -72,6 +72,7 @@ import { SerialQueue } from './serialQueue';
 import { BreakpointsManager, sourceKey } from './breakpointsManager';
 import { deriveMapping, isAbsolutePath, SourceFileResolver, SourceMappingStore } from './sourceFileMap';
 import { cppVariableName } from './cppNames';
+import { StoppedDetailsMirror } from './stoppedDetailsMirror';
 
 type ElfSymbol = { name: string; address: number; size: number; file?: string };
 type FlashFile = { path: string; offset?: number | string; type?: string };
@@ -420,6 +421,8 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 	private stopStormPauseDelayMs: number = 30;
 	private stopStormStackSuppressMs: number = 500;
 	private pendingPauseStoppedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	/** The stops VS Code remembers (see invalidateStacks). */
+	private vscodeStops = new StoppedDetailsMirror();
 	private pendingBreakpointStoppedTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private breakpointStopDelayMs: number = 60;
 	private suppressPauseStoppedUntilMs: number = 0;
@@ -689,7 +692,27 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (opts?.description) {
 			(ev.body as DebugProtocol.StoppedEvent['body']).description = opts.description;
 		}
+		this.vscodeStops.stopped(threadId, Boolean(opts?.allThreadsStopped));
 		this.sendEvent(ev);
+	}
+
+	/**
+	 * Has VS Code fetch its threads and call stacks again. VS Code rebuilds its threads from the
+	 * stops it remembers, and a TL1 core that was stopped only by another core's allThreadsStopped
+	 * is no longer among them once that core continued (a step, a Step Back): it would show as
+	 * running although it is halted, and stay so, since its next suspend events are repeats. Such
+	 * cores get a stop of their own first (focus preserving, the trace replay untouched).
+	 */
+	private invalidateStacks(areas: DebugProtocol.InvalidatedAreas[]): void {
+		const halted = Array.from(this.suspendedContextIds, ctx => this.getOrAssignThreadId(ctx));
+		for (const threadId of this.vscodeStops.uncovered(halted)) {
+			this.focusLog(`stop of its own for threadId=${threadId} before the threads are fetched again`);
+			const ev = new StoppedEvent(StoppedEventReason.pause, threadId);
+			(ev.body as DebugProtocol.StoppedEvent['body']).preserveFocusHint = true;
+			this.vscodeStops.stopped(threadId, false);
+			this.sendEvent(ev);
+		}
+		this.sendEvent(new InvalidatedEvent(areas));
 	}
 
 	private cancelPendingPauseStoppedTimers(tag: string) {
@@ -3333,6 +3356,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			const body = ev.body as DebugProtocol.StoppedEvent['body'];
 			body.description = r?.Replay ? `Trace replay ${Number(r.At) + 1}/${r.Total}` : 'At the halt';
 			body.preserveFocusHint = false;
+			this.vscodeStops.stopped(threadId, false);
 			this.sendEvent(ev);
 		}
 	}
@@ -4835,7 +4859,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		}
 		this.targetDataChangedTimer = setTimeout(() => {
 			this.targetDataChangedTimer = undefined;
-			this.sendEvent(new InvalidatedEvent(['variables', 'stacks']));
+			this.invalidateStacks(['variables', 'stacks']);
 		}, 100);
 	}
 
@@ -4845,6 +4869,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		this.onThreadResumed(threadId);
 		this.disassemblyJumpTarget = undefined;
 		// Important for multi-core: do NOT let VS Code assume all threads continued.
+		this.vscodeStops.continued(threadId);
 		this.sendEvent(new ContinuedEvent(threadId, false));
 		if (this.startupDiagnosticsEnabled) {
 			this.tcfLogger.log(`[dap] ContinuedEvent threadId=${threadId} ctx=${contextId} allThreadsContinued=false`);
@@ -5272,7 +5297,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			this.tcfLogger.log(`Source mapping added: ${mapping.from} -> ${mapping.to}`);
 			response.body = mapping;
 			this.sendResponse(response);
-			this.sendEvent(new InvalidatedEvent(['stacks']));
+			this.invalidateStacks(['stacks']);
 			return;
 		}
 
@@ -5325,7 +5350,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 				const target = await this.resolveDisassemblyTarget(ctx, String(args?.target ?? ''));
 				this.disassemblyJumpTarget = { ...target, ctx };
-				this.sendEvent(new InvalidatedEvent(['stacks']));
+				this.invalidateStacks(['stacks']);
 				response.body = { address: `0x${target.address.toString(16)}`, label: target.label };
 				this.sendResponse(response);
 			} catch (e) {

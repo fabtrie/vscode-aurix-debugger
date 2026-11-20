@@ -244,6 +244,7 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "mww", |cx, a| cmd_mw(cx, a, 4));
     reg(interp, sh, "mwh", |cx, a| cmd_mw(cx, a, 2));
     reg(interp, sh, "mwb", |cx, a| cmd_mw(cx, a, 1));
+    reg(interp, sh, "mww_seq", cmd_mww_seq);
     reg(interp, sh, "mdw", |cx, a| cmd_md(cx, a, 4));
     reg(interp, sh, "mdh", |cx, a| cmd_md(cx, a, 2));
     reg(interp, sh, "mdb", |cx, a| cmd_md(cx, a, 1));
@@ -1228,6 +1229,24 @@ fn cmd_mw(cx: &Cx, a: &[&str], size: usize) -> CmdResult {
     let word = &value.to_le_bytes()[..size];
     let data: Vec<u8> = word.iter().copied().cycle().take(size * count).collect();
     ops::write_memory(cx, addr, &data).map(|_| String::new()).map_err(e2s)
+}
+
+/// `mww_seq <address> <value> ...`: one run-control sequence (see [`crate::adapter::Io::write32_seq_packed`]).
+fn cmd_mww_seq(cx: &Cx, a: &[&str]) -> CmdResult {
+    require_init(cx, a[0])?;
+    let args = &a[1..];
+    if args.is_empty() || args.len() % 2 != 0 {
+        return Err(format!("usage: {} <address> <value> [<address> <value> ...]", a[0]));
+    }
+    let writes = args.chunks(2).map(|p| Ok((num32(p[0])?, num(p[1])? as u32))).collect::<Result<Vec<_>, String>>()?;
+    cx.with(|c| {
+        for &(addr, _) in &writes {
+            crate::reverse::on_write_memory(c, addr, 4);
+        }
+        c.io()?.write32_seq_packed(&writes)
+    })
+    .map(|_| String::new())
+    .map_err(e2s)
 }
 
 fn cmd_md(cx: &Cx, a: &[&str], size: usize) -> CmdResult {

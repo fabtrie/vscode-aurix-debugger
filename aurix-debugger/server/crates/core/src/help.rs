@@ -224,6 +224,10 @@ pub static ENTRIES: &[Entry] = &[
     e!(Memory, "mww", "['phys'] <address> <value> [<count>]", "Write a 32-bit word (`<count>` times)."),
     e!(Memory, "mwh", "['phys'] <address> <value> [<count>]", "Write a 16-bit halfword (`<count>` times)."),
     e!(Memory, "mwb", "['phys'] <address> <value> [<count>]", "Write a byte (`<count>` times)."),
+    e!(Memory, "mww_seq", "<address> <value> [<address> <value> ...]", "Write 32-bit words to several addresses in one transaction, in order.",
+        "For run-control sequences on debug registers (the cfg's step-start handler). On a probe that pays per message \
+         (the BlueBox) they share one message, and the writes after a failed one may have run too; the error names the \
+         first failed write. On TAS nothing runs after a failed write."),
     e!(Memory, "read_memory", "<address> 8|16|32|64 <count> ['phys']", "Read `<count>` values and return them as a Tcl list (at most 65536)."),
     e!(Memory, "write_memory", "<address> 8|16|32|64 <list> ['phys']", "Write the values of a Tcl list."),
     e!(Memory, "reg", "[<register> [<value>]]", "Show all registers of the current target, or read or write one by name or number."),

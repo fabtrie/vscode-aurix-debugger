@@ -574,6 +574,16 @@ mwb ['phys'] <address> <value> [<count>]
 
 Write a byte (`<count>` times).
 
+### `mww_seq`
+
+```
+mww_seq <address> <value> [<address> <value> ...]
+```
+
+Write 32-bit words to several addresses in one transaction, in order.
+
+For run-control sequences on debug registers (the cfg's step-start handler). On a probe that pays per message (the BlueBox) they share one message, and the writes after a failed one may have run too; the error names the first failed write. On TAS nothing runs after a failed write.
+
 ### `read_memory`
 
 ```

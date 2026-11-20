@@ -209,23 +209,7 @@ impl<L: Link> Probe<L> {
     /// after the failure are flagged (and zero for a read). The probe may have
     /// run reads after it in the same message; their results are dropped.
     pub fn access(&mut self, ops: &[Access]) -> Result<Vec<MemReply>> {
-        // Pieces of at most MAX_CHUNK, by op.
-        let mut pieces: Vec<(usize, Access)> = Vec::new();
-        for (i, op) in ops.iter().enumerate() {
-            let mut off = 0;
-            while off < op.len() {
-                let n = (op.len() - off).min(MAX_CHUNK);
-                let addr = op.addr().wrapping_add(off as u32);
-                pieces.push((
-                    i,
-                    match *op {
-                        Access::Read { .. } => Access::Read { addr, len: n },
-                        Access::Write { data, .. } => Access::Write { addr, data: &data[off..off + n] },
-                    },
-                ));
-                off += n;
-            }
-        }
+        let pieces = pieces(ops);
         let mut out: Vec<MemReply> = ops.iter().map(|_| MemReply { data: Vec::new(), failed: Vec::new() }).collect();
         let mut failed_op = None;
         'messages: for range in memory::plan(&pieces.iter().map(|p| p.1).collect::<Vec<_>>()) {
@@ -257,15 +241,86 @@ impl<L: Link> Probe<L> {
             }
         }
         if let Some(i) = failed_op {
-            out.truncate(i + 1);
-            let (m, op) = (&mut out[i], &ops[i]);
-            if !op.is_write() {
-                m.data.resize(op.len(), 0);
-            }
-            m.failed.resize(op.len(), true);
+            truncate_at(&mut out, ops, i);
         }
         Ok(out)
     }
+
+    /// Runs `ops` like [`Probe::access`], but in as few messages as [`memory::plan_packed`]
+    /// allows: writes share a message with what follows them, and only a write at a message's end
+    /// gets the check read. A write's bus error shows on the access after it, so the write is the
+    /// op that failed there. The result again ends at the first failed op, but **the probe has
+    /// run the rest of its message**: for sequences whose later writes do no harm after an
+    /// earlier one failed (run control on a halted core's debug registers), where one message
+    /// instead of one per write is what makes stepping bearable.
+    pub fn access_packed(&mut self, ops: &[Access]) -> Result<Vec<MemReply>> {
+        let pieces = pieces(ops);
+        let mut out: Vec<MemReply> = ops.iter().map(|_| MemReply { data: Vec::new(), failed: Vec::new() }).collect();
+        let mut failed_op = None;
+        'messages: for range in memory::plan_packed(&pieces.iter().map(|p| p.1).collect::<Vec<_>>()) {
+            let part = &pieces[range];
+            let mut msg: Vec<Access> = part.iter().map(|p| p.1).collect();
+            if msg.last().is_some_and(|a| a.is_write()) {
+                msg.push(memory::CHECK);
+            }
+            let rep = self.batch(&msg)?;
+            for (k, (op, a)) in part.iter().enumerate() {
+                let m = &rep[k];
+                let n = a.len();
+                // A write fails when the access after it (the next piece or the check read) does.
+                let late = a.is_write() && !rep[k + 1].all_ok();
+                let failed = if late {
+                    vec![true; n]
+                } else if m.failed.is_empty() {
+                    vec![false; n]
+                } else {
+                    m.failed.clone()
+                };
+                let bad = failed.iter().any(|f| *f);
+                out[*op].data.extend_from_slice(&m.data);
+                out[*op].failed.extend(failed);
+                if bad {
+                    failed_op = Some(*op);
+                    break 'messages;
+                }
+            }
+        }
+        if let Some(i) = failed_op {
+            truncate_at(&mut out, ops, i);
+        }
+        Ok(out)
+    }
+}
+
+/// `ops` in pieces of at most [`MAX_CHUNK`], each with the index of its op.
+fn pieces<'a>(ops: &[Access<'a>]) -> Vec<(usize, Access<'a>)> {
+    let mut pieces = Vec::new();
+    for (i, op) in ops.iter().enumerate() {
+        let mut off = 0;
+        while off < op.len() {
+            let n = (op.len() - off).min(MAX_CHUNK);
+            let addr = op.addr().wrapping_add(off as u32);
+            pieces.push((
+                i,
+                match *op {
+                    Access::Read { .. } => Access::Read { addr, len: n },
+                    Access::Write { data, .. } => Access::Write { addr, data: &data[off..off + n] },
+                },
+            ));
+            off += n;
+        }
+    }
+    pieces
+}
+
+/// Ends the results at failed op `i`, whose bytes after the failure are flagged (zero for a read).
+fn truncate_at(out: &mut Vec<MemReply>, ops: &[Access], i: usize) {
+    out.truncate(i + 1);
+    let (m, op) = (&mut out[i], &ops[i]);
+    if !op.is_write() {
+        m.data.resize(op.len(), 0);
+    }
+    m.failed.resize(op.len(), true);
 }
 
 #[cfg(test)]
@@ -433,6 +488,43 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].failed, vec![true; 4]);
         assert_eq!(p.link_mut().written.len(), 3, "the read after the write was not sent");
+    }
+
+    #[test]
+    fn packed_writes_and_reads_share_one_message_with_one_check_read() {
+        let mut link = ScriptedLink::default();
+        link.replies.push_back(memory::batch_reply(&[ok(&[]), ok(&[]), ok(&[6; 4]), ok(&[]), ok(&[0; 4])]));
+        let mut p = Probe::new(link, false);
+        let d = [9u8; 4];
+        let ops = [
+            Access::Write { addr: 0xF881_F03C, data: &d },
+            Access::Write { addr: 0xF881_FD00, data: &d },
+            Access::Read { addr: 0xF881_FD00, len: 4 },
+            Access::Write { addr: 0xF881_F038, data: &d },
+        ];
+        let m = p.access_packed(&ops).unwrap();
+        assert_eq!(m.len(), 4);
+        assert!(m.iter().all(|m| m.all_ok()));
+        assert_eq!(m[2].data, [6; 4]);
+        assert_eq!(p.link_mut().written.len(), 3, "one message");
+        assert_eq!(addresses(&mut p, 1), [0xF881_F03C, 0xF881_FD00, 0xF881_FD00, 0xF881_F038, WRITE_CHECK_ADDR]);
+    }
+
+    #[test]
+    fn a_packed_write_fails_when_the_access_after_it_does() {
+        let mut link = ScriptedLink::default();
+        link.replies.push_back(memory::batch_reply(&[ok(&[]), ok(&[]), (vec![0x0f], vec![0; 4])]));
+        let mut p = Probe::new(link, false);
+        let d = [1u8; 4];
+        let ops = [
+            Access::Write { addr: 0xF881_F03C, data: &d },
+            Access::Write { addr: 0xF000_10E8, data: &d },
+            Access::Read { addr: 0xF881_FD00, len: 4 },
+        ];
+        let m = p.access_packed(&ops).unwrap();
+        assert_eq!(m.len(), 2, "the results end at the write");
+        assert!(m[0].all_ok());
+        assert_eq!(m[1].failed, vec![true; 4]);
     }
 
     #[test]

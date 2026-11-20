@@ -285,6 +285,14 @@ pub trait Adapter {
     fn init(&mut self, settings: &AdapterSettings) -> Result<DeviceInfo>;
     fn initialized(&self) -> bool;
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>>;
+    /// Runs a run-control sequence (writes and reads on a halted core's debug registers) like
+    /// [`Self::execute`], with the same results: they end at the first failed op. But an adapter
+    /// that pays per write message may run the ops after a failed write too, and packs them (the
+    /// BlueBox: one message for the whole sequence instead of one per write). The default is
+    /// [`Self::execute`], where nothing runs after a failure (a TAS packet).
+    fn execute_packed(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        self.execute(batch)
+    }
     /// Packet limits of the connection; the default is a conservative guess.
     fn limits(&self) -> BatchLimits {
         BatchLimits::default()
@@ -416,6 +424,28 @@ impl<'a> Io<'a> {
             b.write32(bus_address(a) as u64, v);
         }
         let r = self.batch(&b)?;
+        for (res, &(a, _)) in r.iter().zip(writes) {
+            check(res, a as u64, true)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::batch`] for a run-control sequence (see [`Adapter::execute_packed`]).
+    pub fn batch_packed(&mut self, b: &Batch) -> Result<Vec<OpResult>> {
+        self.adapter.execute_packed(b)
+    }
+
+    /// [`Self::write32_seq`] as a run-control sequence (see [`Adapter::execute_packed`]): on a
+    /// probe that runs a whole message, the writes after a failed one may have run too.
+    pub fn write32_seq_packed(&mut self, writes: &[(u32, u32)]) -> Result<()> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let mut b = Batch::new();
+        for &(a, v) in writes {
+            b.write32(bus_address(a) as u64, v);
+        }
+        let r = self.batch_packed(&b)?;
         for (res, &(a, _)) in r.iter().zip(writes) {
             check(res, a as u64, true)?;
         }

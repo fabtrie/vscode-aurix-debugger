@@ -615,9 +615,10 @@ impl BlueBoxAdapter {
         false
     }
 
-    /// Runs a batch: one probe request per op. A probe-level error ends it.
+    /// Runs a batch: one probe request per op. A probe-level error ends it. `packed`: as one
+    /// run-control sequence (`bluebox::Probe::access_packed`).
     #[cfg(windows)]
-    fn run_batch(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+    fn run_batch(&mut self, batch: &Batch, packed: bool) -> Result<Vec<OpResult>> {
         let ops: Vec<bluebox::Access> = batch
             .iter()
             .map(|op| match op {
@@ -628,7 +629,8 @@ impl BlueBoxAdapter {
         // Batched (see `bluebox::Probe::access`): reads share a message, a write
         // has its own with the check read, and the results stop at the
         // first failed op, so the rest is consequential as on a TAS packet.
-        let replies = match self.probe()?.access(&ops) {
+        let probe = self.probe()?;
+        let replies = match if packed { probe.access_packed(&ops) } else { probe.access(&ops) } {
             Ok(r) => r,
             Err(e) => {
                 // Classified here, while the error still has its kind (see `execute`).
@@ -655,6 +657,37 @@ impl BlueBoxAdapter {
             out.push(OpResult { err: tas::PL0_ERR_CONSEQUENTIAL, bytes_ok: 0, data: Vec::new() });
         }
         Ok(out)
+    }
+
+    /// [`Adapter::execute`] (`packed`: [`Adapter::execute_packed`]). Notices a lost connection
+    /// and reconnects (see the module docs).
+    fn execute_as(&mut self, batch: &Batch, packed: bool) -> Result<Vec<OpResult>> {
+        #[cfg(not(windows))]
+        {
+            let _ = (batch, packed);
+            Err(Error::Usage(NOT_CONNECTED.into()))
+        }
+        #[cfg(windows)]
+        {
+            if !self.inited {
+                return Err(Error::Usage(NOT_CONNECTED.into()));
+            }
+            self.ensure_connected()?;
+            match self.run_batch(batch, packed) {
+                Ok(out) => {
+                    let failed = out.iter().any(|r| r.err != tas::PL0_ERR_NO_ERROR && r.err != tas::PL0_ERR_CONSEQUENTIAL);
+                    if failed && !self.target_answers() {
+                        self.lose(Lost::Target, "the target stopped answering");
+                    }
+                    Ok(out)
+                }
+                Err(e) => {
+                    // `run_batch` noted whether the probe itself is gone.
+                    self.lose(Lost::Probe, &format!("probe error: {e}"));
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Makes winIDEA 9.21.417's kernel run on `probe`, given whose ran
@@ -1127,32 +1160,13 @@ impl Adapter for BlueBoxAdapter {
     /// packet reports a fault part-way.
     /// Notices a lost connection and reconnects (see the module docs).
     fn execute(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
-        #[cfg(not(windows))]
-        {
-            let _ = batch;
-            Err(Error::Usage(NOT_CONNECTED.into()))
-        }
-        #[cfg(windows)]
-        {
-            if !self.inited {
-                return Err(Error::Usage(NOT_CONNECTED.into()));
-            }
-            self.ensure_connected()?;
-            match self.run_batch(batch) {
-                Ok(out) => {
-                    let failed = out.iter().any(|r| r.err != tas::PL0_ERR_NO_ERROR && r.err != tas::PL0_ERR_CONSEQUENTIAL);
-                    if failed && !self.target_answers() {
-                        self.lose(Lost::Target, "the target stopped answering");
-                    }
-                    Ok(out)
-                }
-                Err(e) => {
-                    // `run_batch` noted whether the probe itself is gone.
-                    self.lose(Lost::Probe, &format!("probe error: {e}"));
-                    Err(e)
-                }
-            }
-        }
+        self.execute_as(batch, false)
+    }
+
+    /// One message for the whole sequence, where [`Adapter::execute`] sends one per write and
+    /// its check read (about 1.6 ms each): a step's trigger setup, release and status read.
+    fn execute_packed(&mut self, batch: &Batch) -> Result<Vec<OpResult>> {
+        self.execute_as(batch, true)
     }
 
     /// A message takes 64 accesses, but each costs about 0.45 ms in the probe

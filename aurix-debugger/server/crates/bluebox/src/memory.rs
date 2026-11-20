@@ -209,6 +209,32 @@ pub fn plan(acc: &[Access]) -> Vec<std::ops::Range<usize>> {
     out
 }
 
+/// Splits reads and writes (each at most [`MAX_CHUNK`]) into messages for
+/// [`crate::Probe::access_packed`]: unlike [`plan`], a write does not end its message, so a whole
+/// run-control sequence (trigger setup, release, status read) is one message. Each message keeps
+/// room for the [`CHECK`] read that follows a write at its end; within the same limits as [`plan`].
+pub fn plan_packed(acc: &[Access]) -> Vec<std::ops::Range<usize>> {
+    let empty = (1, REQUEST_HEAD + REQUEST_TAIL + CHECK.request_size(), REPLY_HEAD + CHECK.reply_size());
+    let mut out = Vec::new();
+    let mut start = 0;
+    let (mut n, mut rq, mut rsp) = empty;
+    for (i, a) in acc.iter().enumerate() {
+        let full = n + 1 > MAX_BATCH || rq + a.request_size() > MAX_BATCH_REQUEST || rsp + a.reply_size() > MAX_BATCH_REPLY;
+        if i > start && full {
+            out.push(start..i);
+            start = i;
+            (n, rq, rsp) = empty;
+        }
+        n += 1;
+        rq += a.request_size();
+        rsp += a.reply_size();
+    }
+    if start < acc.len() {
+        out.push(start..acc.len());
+    }
+    out
+}
+
 /// The service message for several accesses, run in order.
 pub fn batch_request(acc: &[Access]) -> Vec<u8> {
     let mut b = (acc.len() as u32).to_le_bytes().to_vec();
@@ -428,6 +454,24 @@ fn u32le(b: &[u8], o: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A step's writes and reads share one message; more than a message holds go in several.
+    #[test]
+    fn packed_writes_and_reads_share_messages() {
+        let w = [0u8; 4];
+        let acc = [
+            Access::Write { addr: 0xF881_F03C, data: &w },
+            Access::Write { addr: 0xF881_F038, data: &w },
+            Access::Write { addr: 0xF881_FD00, data: &w },
+            Access::Read { addr: 0xF881_FD00, len: 4 },
+            Access::Write { addr: 0xF881_F038, data: &w },
+        ];
+        assert_eq!(plan_packed(&acc), vec![0..5]);
+        let many: Vec<Access> = (0..100).map(|i| Access::Write { addr: 4 * i, data: &w }).collect();
+        let plan = plan_packed(&many);
+        // Room for the check read in each.
+        assert_eq!(plan, vec![0..MAX_BATCH - 1, MAX_BATCH - 1..100]);
+    }
 
     #[test]
     fn scr_read_is_what_winidea_sends() {

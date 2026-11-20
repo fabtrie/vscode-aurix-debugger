@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use tas::Batch;
 
-use crate::adapter::Io;
+use crate::adapter::{check, Io};
 use crate::arch::*;
 use crate::error::{other, Error, Result};
 use crate::log_info;
@@ -290,6 +290,13 @@ impl Tricore {
     /// Executes one instruction. Uses a non-BBM PC trigger on the current PC,
     /// which halts after the instruction has executed. Returns whether the
     /// core halted again.
+    ///
+    /// Three transactions where a probe that pays per message (the BlueBox, ~1.2 ms per
+    /// message, a write ~1.6 ms with its check read) used to need about a dozen: the state the
+    /// step needs (one read batch), the trigger setup and release with the status read right
+    /// after it ([`Io::batch_packed`]: the instruction is long done by then), the trigger clear.
+    /// The writes keep their order. Only if that status read does not see the halt, the core is
+    /// polled for it as before.
     pub fn step(&mut self, io: &mut Io, addr: Option<u32>, mode: RunMode) -> Result<bool> {
         if self.state != TargetState::Halted {
             return Err(Error::NotHalted(String::new()));
@@ -301,13 +308,34 @@ impl Tricore {
             }
             None => self.read_reg(io, REG_PC)?,
         };
-        self.prepare_irq(io, mode)?;
-        // Instruction and PCXI before a masked step: its effect on the
-        // interrupt state is carried over to the application's IE afterwards.
-        let irq_before = match self.irq_saved_ie {
-            Some(_) => Some((io.read32(pc).ok(), io.read32(self.csfr(PCXI))?)),
+        let masking = self.run.irq_mask.applies(mode);
+        if !masking {
+            self.unmask_irq(io)?;
+        }
+
+        // What the step needs to know: DBGSR (SUSP for the release), and for a masked step ICR,
+        // PCXI and the instruction (its effect on the interrupt state is carried over to the
+        // application's IE afterwards). The instruction last: unreadable, it fails alone.
+        let mut b = Batch::new();
+        let h_dbgsr = b.read32(self.csfr(DBGSR) as u64);
+        let h_irq = masking.then(|| (b.read32(self.csfr(ICR) as u64), b.read32(self.csfr(PCXI) as u64), b.read32(bus_address(pc) as u64)));
+        let r = io.batch(&b)?;
+        check(&r[h_dbgsr.0], self.csfr(DBGSR) as u64, false)?;
+        let dbgsr = r[h_dbgsr.0].u32();
+        let mut w = Vec::new();
+        let irq_before = match h_irq {
+            Some((h_icr, h_pcxi, h_word)) => {
+                check(&r[h_icr.0], self.csfr(ICR) as u64, false)?;
+                check(&r[h_pcxi.0], self.csfr(PCXI) as u64, false)?;
+                if let Some(wr) = self.mask_irq(r[h_icr.0].u32()) {
+                    w.push(wr);
+                }
+                let word = r.get(h_word.0).filter(|res| res.ok()).map(|res| res.u32());
+                Some((word, r[h_pcxi.0].u32()))
+            }
             None => None,
         };
+
         // A breakpoint on the current PC would halt again before executing it.
         let masked: Vec<usize> = (0..NUM_TRIGGERS)
             .filter(|&i| {
@@ -315,55 +343,111 @@ impl Tricore {
                 t.enable && t.pc && t.bbm && !t.range && t.addr == pc
             })
             .collect();
-        for &i in &masked {
-            io.write32(self.csfr(trxevt(i)), 0)?;
-        }
         let slot = (0..NUM_TRIGGERS)
             .rev()
             .find(|&i| !self.triggers[i].enable)
             .ok_or_else(|| Error::Resource("No hardware event available for single step".into()))?;
+        for &i in &masked {
+            w.push((self.csfr(trxevt(i)), 0));
+        }
         let step_trigger = Trigger { enable: true, bbm: false, pc: true, range: false, access: 0, addr: pc };
-        let resume = self.resume_value(io)?;
+        // Releases the halt without changing the suspend-out signal (see `resume_value`).
+        let resume = DBGSR_RESUME | (dbgsr & DBGSR_SUSP);
         // The trigger event loads DBGSR.SUSP from TRxEVT.SUSP: arm it with the
         // current state, or the halt would clear suspend-out and let this
         // core's STM run until the halted handler sets it again.
         let susp = if resume & DBGSR_SUSP != 0 { TREVT_SUSP } else { 0 };
-        let mut w = vec![
+        w.extend([
             (self.csfr(trxadr(slot)), pc),
             (self.csfr(trxevt(slot)), self.trigger_value(&step_trigger) | susp),
             (self.csfr(DBGSR), resume),
-        ];
+        ]);
         if self.run.tl1_step && !self.is_v18() {
             // This core is released but still suspended by the held TL1:
             // clearing the hold starts all TL1 suspend targets in the same cycle.
             w.push((CBS_TLCHS, 0x2));
         }
-        io.write32_seq(&w)?;
+        // The release and, right after it, DBGSR and the registers the halt is handled with:
+        // CSFRs only, which a running core answers too (the poll reads DBGSR and SYSCON).
+        let mut b = Batch::new();
+        for &(a, v) in &w {
+            b.write32(bus_address(a) as u64, v);
+        }
+        let h_after = b.read32(self.csfr(DBGSR) as u64);
+        let h_pc = b.read32(self.csfr(PC) as u64);
+        let h_pcxi = b.read32(self.csfr(PCXI) as u64);
+        let h_irq_after = masking.then(|| (b.read32(self.csfr(ICR) as u64), b.read32(self.csfr(BTV) as u64)));
+        let res = io.batch_packed(&b).and_then(|r| {
+            for (res, &(a, _)) in r.iter().zip(&w) {
+                check(res, a as u64, true)?;
+            }
+            Ok(r)
+        });
         self.invalidate();
+        let r = match res {
+            Ok(r) => r,
+            Err(e) => {
+                // A probe that runs a whole message ran the writes after the failed one too: do
+                // not leave the step trigger armed (the poll sees whether the core runs).
+                let mut undo = vec![(self.csfr(trxevt(slot)), 0), (self.csfr(trxadr(slot)), 0)];
+                for &i in &masked {
+                    undo.push((self.csfr(trxevt(i)), self.trigger_value(&self.triggers[i])));
+                }
+                let _ = io.write32_seq(&undo);
+                return Err(e);
+            }
+        };
         self.state = TargetState::Running;
         self.reason = DebugReason::NotHalted;
 
-        let t0 = Instant::now();
-        let mut halted = false;
-        while t0.elapsed() < Duration::from_millis(500) {
-            let d = io.read32(self.csfr(DBGSR))?;
-            if d & DBGSR_HALTED != 0 {
-                self.dbgsr = d;
-                halted = true;
-                break;
+        let ok = |h: tas::OpHandle| r.get(h.0).is_some_and(|res| res.ok());
+        let mut after = None;
+        if ok(h_after) && r[h_after.0].u32() & DBGSR_HALTED != 0 {
+            let irq_ok = h_irq_after.is_none_or(|(i, b)| ok(i) && ok(b));
+            if ok(h_pc) && ok(h_pcxi) && irq_ok {
+                self.dbgsr = r[h_after.0].u32();
+                after = Some((r[h_pc.0].u32(), r[h_pcxi.0].u32(), h_irq_after.map(|(i, b)| (r[i.0].u32(), r[b.0].u32()))));
             }
-            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut halted = after.is_some();
+        if !halted {
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(500) {
+                let d = io.read32(self.csfr(DBGSR))?;
+                if d & DBGSR_HALTED != 0 {
+                    self.dbgsr = d;
+                    halted = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
 
-        io.write32_seq(&[(self.csfr(trxevt(slot)), 0), (self.csfr(trxadr(slot)), 0)])?;
+        let mut clear = vec![(self.csfr(trxevt(slot)), 0), (self.csfr(trxadr(slot)), 0)];
         for &i in &masked {
-            let v = self.trigger_value(&self.triggers[i]);
-            io.write32(self.csfr(trxevt(i)), v)?;
+            clear.push((self.csfr(trxevt(i)), self.trigger_value(&self.triggers[i])));
         }
+        // With the registers read along with the halt, the interrupt fix-up joins the clear.
+        let mut pcxi_written = false;
+        let mut fixed = false;
+        if let (Some((pc_after, pcxi, Some((icr, btv)))), Some((word, pcxi_before))) = (after, irq_before) {
+            let iw = self.irq_step_writes(word, pcxi_before, icr, pcxi, pc_after, btv);
+            pcxi_written = iw.iter().any(|&(a, _)| a == self.csfr(PCXI));
+            clear.extend(iw);
+            fixed = true;
+        }
+        io.write32_seq_packed(&clear)?;
         if halted {
             self.state = TargetState::Halted;
             self.reason = DebugReason::SingleStep;
-            if let Some((word, pcxi)) = irq_before {
+            if let Some((pc_after, pcxi, _)) = after {
+                // Read with the halt: the reported PC and the stepping loop need no read.
+                self.cache[REG_PC] = Some(pc_after);
+                if !pcxi_written {
+                    self.cache[REG_PCXI] = Some(pcxi);
+                }
+            }
+            if let (false, Some((word, pcxi))) = (fixed, irq_before) {
                 self.irq_after_step(io, word, pcxi)?;
             }
         }
@@ -399,14 +483,20 @@ impl Tricore {
             return self.unmask_irq(io);
         }
         let icr = io.read32(self.csfr(ICR))?;
+        if let Some((a, v)) = self.mask_irq(icr) {
+            io.write32(a, v)?;
+        }
+        Ok(())
+    }
+
+    /// Notes the application's IE from `icr` for a masked run; the ICR write that clears it on
+    /// the chip, if it is set.
+    fn mask_irq(&mut self, icr: u32) -> Option<(u32, u32)> {
         // A masked run may have enabled interrupts itself (enable, rfe, ...).
         let hw_ie = icr & ICR_IE != 0;
         self.irq_saved_ie = Some(hw_ie || self.irq_saved_ie == Some(true));
-        if hw_ie {
-            io.write32(self.csfr(ICR), icr & !ICR_IE)?;
-            self.cache[REG_ICR] = None;
-        }
-        Ok(())
+        self.cache[REG_ICR] = None;
+        hw_ie.then(|| (self.csfr(ICR), icr & !ICR_IE))
     }
 
     /// Restores the application's ICR.IE if the debugger masked it.
@@ -439,11 +529,25 @@ impl Tricore {
 
     /// Applies the effect of a masked instruction step on the interrupt state.
     fn irq_after_step(&mut self, io: &mut Io, word: Option<u32>, pcxi_before: u32) -> Result<()> {
-        let Some(ie) = self.irq_saved_ie else {
+        if self.irq_saved_ie.is_none() {
             return Ok(());
-        };
+        }
         let v = io.read32_many(&[self.csfr(ICR), self.csfr(PCXI), self.csfr(PC), self.csfr(BTV)])?;
-        let (icr, pcxi, pc, btv) = (v[0], v[1], v[2], v[3]);
+        let w = self.irq_step_writes(word, pcxi_before, v[0], v[1], v[2], v[3]);
+        if !w.is_empty() {
+            io.write32_seq(&w)?;
+        }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// The writes that carry a masked step's effect on the interrupt state over to the
+    /// application (see [`Self::irq_after_step`]), from the registers after the step; notes the
+    /// application's IE.
+    fn irq_step_writes(&mut self, word: Option<u32>, pcxi_before: u32, icr: u32, pcxi: u32, pc: u32, btv: u32) -> Vec<(u32, u32)> {
+        let Some(ie) = self.irq_saved_ie else {
+            return Vec::new();
+        };
         let in_trap_table = pc.wrapping_sub(btv) < TRAP_TABLE_SIZE;
         let fx = irq_step_effect(word, ie, icr & ICR_IE != 0, pcxi != pcxi_before, in_trap_table);
         let mut w = Vec::new();
@@ -457,12 +561,8 @@ impl Tricore {
         if icr & ICR_IE != 0 {
             w.push((self.csfr(ICR), icr & !ICR_IE));
         }
-        if !w.is_empty() {
-            io.write32_seq(&w)?;
-        }
         self.irq_saved_ie = Some(fx.ie);
-        self.invalidate();
-        Ok(())
+        w
     }
 
     /// Register value as the application sees it: ICR with its own IE while

@@ -660,7 +660,10 @@ fn only_a_reset_that_cleared_ocds_needs_another_disarm() {
     ops::poll_all(&s.cx());
     assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1", "an application reset keeps OCDS");
 
+    // Nothing accessed the board for longer than the device watch's threshold: the reset is answered
+    // late (the application may have checked for the debugger meanwhile).
     with_sim(&s, |sim| sim.external_reset());
+    std::thread::sleep(std::time::Duration::from_millis(40));
     ops::poll_all(&s.cx());
     ops::poll_all(&s.cx());
     assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "0", "OCDS was off after the reset");
@@ -671,6 +674,57 @@ fn only_a_reset_that_cleared_ocds_needs_another_disarm() {
     assert_eq!(setups, 2, "a running reset first, then the halting one: {w:08x?}");
     assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1");
     no_violations(&s);
+}
+
+fn reset_info(s: &Server, key: &str) -> String {
+    s.interp.eval(&format!("dict get [reset_info] {key}")).unwrap()
+}
+
+/// A board reset while a Tcl command only waits (no background poll in between): the device watch
+/// accesses the board every slice of the wait and switches OCDS on again before the application
+/// checks for the debugger (25 ms after it starts). The FS26 policy then has no reason to disarm
+/// again.
+#[test]
+fn reset_during_a_script_wait_is_answered_at_once() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset run").unwrap();
+    assert_eq!(reset_info(&s, "count"), "0", "the server's own reset is not a detected one");
+    assert_eq!(reset_info(&s, "watching"), "1");
+
+    with_sim(&s, |sim| sim.schedule_board_reset(std::time::Duration::from_millis(20)));
+    s.interp.eval("sleep 150").unwrap();
+    assert_eq!(with_sim(&s, |sim| sim.ostate & 1), 1, "OCDS not switched on during the wait");
+    assert!(with_sim(&s, |sim| sim.app.as_ref().unwrap().saw_debugger), "the application missed the debugger");
+    assert_eq!(reset_info(&s, "count"), "1");
+    assert_eq!(reset_info(&s, "restored"), "1");
+    assert_eq!(reset_info(&s, "late"), "0", "latency {} ms", reset_info(&s, "latency_ms"));
+
+    // The poll still re-examines after the reset, but finds nothing that would re-arm the FS26.
+    ops::poll_all(&s.cx());
+    ops::poll_all(&s.cx());
+    assert_eq!(s.interp.eval("tc37x.cpu0 was_examined").unwrap(), "1");
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "1", "{}", s.interp.eval("set sbc_disarmed_why").unwrap());
+    no_violations(&s);
+}
+
+/// The same reset with the device watch off: nothing answers it until the command has ended, the
+/// application starts without the debugger, and the FS26 policy takes the watchdog as armed.
+#[test]
+fn reset_during_a_script_wait_without_the_watch_is_answered_by_the_poll() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset_watch off").unwrap();
+    s.interp.eval("reset run").unwrap();
+
+    with_sim(&s, |sim| sim.schedule_board_reset(std::time::Duration::from_millis(20)));
+    s.interp.eval("sleep 150").unwrap();
+    assert_eq!(reset_info(&s, "count"), "0");
+    ops::poll_all(&s.cx());
+    ops::poll_all(&s.cx());
+    assert!(!with_sim(&s, |sim| sim.app.as_ref().unwrap().saw_debugger));
+    assert_eq!(with_sim(&s, |sim| sim.ostate & 1), 1, "the examination switches OCDS on");
+    assert_eq!(s.interp.eval("set sbc_disarmed").unwrap(), "0");
 }
 
 /// The running reset before the first halting one fails (TasServer refused its reset connect): the

@@ -98,8 +98,11 @@ pub struct Ctx {
     /// Set while the hook runs: a `reset` inside it is the built-in one.
     pub in_reset_hook: bool,
     /// OCDS was found off (a power-on class reset nobody had answered yet) since `ocds_found_off`
-    /// last read it: the application may have started without seeing the debugger.
+    /// last read it: the application may have started without seeing the debugger. Also set for a
+    /// reset the device watch answered later than its threshold.
     pub ocds_found_off: bool,
+    /// Settings of the device watch (`reset_watch`), see [`crate::reset_watch`].
+    pub reset_watch: crate::reset_watch::WatchSettings,
     /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
     pub health: Option<crate::adapter::LinkHealth>,
     /// Since when the adapter reports the probe lost.
@@ -169,6 +172,7 @@ impl Ctx {
             reset_hook: None,
             in_reset_hook: false,
             ocds_found_off: false,
+            reset_watch: Default::default(),
             health: None,
             probe_lost_since: None,
             probe_lost_reported: false,
@@ -205,6 +209,11 @@ impl Ctx {
     }
 
     /// Adapter access together with a mutable target entry.
+    /// The device watch around the adapter, once there is one ([`crate::reset_watch`]).
+    pub fn watch(&mut self) -> Option<&mut crate::reset_watch::Watched> {
+        self.adapter.as_deref_mut().and_then(|a| a.watched())
+    }
+
     pub fn target_io(&mut self, t: usize) -> Result<(Io<'_>, &mut TargetEntry)> {
         let Ctx { adapter, targets, .. } = self;
         let a = match adapter.as_deref_mut() {

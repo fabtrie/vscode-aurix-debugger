@@ -323,6 +323,14 @@ pub fn poll_all(cx: &Cx) {
     });
 
     report_health(cx);
+    // A reset the device watch answered later than its threshold (or could not answer): the
+    // application may have started without seeing the debugger, as when the examination finds OCDS
+    // off. Checked every period, since the restore may end after the poll took the reset.
+    cx.with(|c| {
+        if c.watch().is_some_and(|w| w.take_late()) {
+            c.ocds_found_off = true;
+        }
+    });
     let mut failed_all = false;
     match res {
         Ok((transitions, resets, failed)) => {
@@ -759,8 +767,14 @@ pub fn reset(cx: &Cx, mode: &str) -> Result<()> {
     if cx.with(|c| std::mem::replace(&mut c.in_reset, true)) {
         return Err(usage("'reset' can not be invoked recursively"));
     }
+    // The resets of this sequence are its own: the device watch neither answers nor counts them
+    // until the sequence has collected them (after `reset-deassert-post`, see `reset_inner`).
+    cx.with(|c| c.watch().map(|w| w.set_own_reset(true)));
     let r = reset_inner(cx, mode, halt);
     cx.with(|c| {
+        if let Some(w) = c.watch() {
+            w.set_own_reset(false);
+        }
         c.in_reset = false;
         // The DMU installs the UCBs at startup: what was written is now active (or not).
         if r.is_ok() {
@@ -828,8 +842,14 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
     for &t in &all {
         fire(cx, t, "reset-deassert-post");
     }
-    // Resets we triggered ourselves are not "detected" resets.
-    cx.with(|c| c.adapter.as_deref_mut().map(|a| a.take_resets()));
+    // Resets we triggered ourselves are not "detected" resets. From here on (handlers, the halt
+    // wait, the cores running for `reset run`) a reset is a new one, which the device watch answers.
+    cx.with(|c| {
+        c.adapter.as_deref_mut().map(|a| a.take_resets());
+        if let Some(w) = c.watch() {
+            w.set_own_reset(false);
+        }
+    });
 
     if halt {
         for &t in &all {
@@ -988,8 +1008,19 @@ pub fn init(cx: &Cx) -> Result<()> {
             }
         }
     }
-    // A reset that happened before we attached is not a "detected" reset.
-    cx.with(|c| c.adapter.as_deref_mut().map(|a| a.take_resets()));
+    // A reset that happened before we attached is not a "detected" reset. From now on the device
+    // watch answers resets at the access that reports them, for TriCore cores whose OCDS this server
+    // switches on itself (not where the probe does run control and owns OCDS).
+    cx.with(|c| {
+        c.adapter.as_deref_mut().map(|a| a.take_resets());
+        let own_ocds = c.adapter.as_deref_mut().is_some_and(|a| a.run_control().is_none());
+        let tricore = c.targets.iter().any(|e| matches!(e.core, Core::Tricore(_)));
+        let settings = c.reset_watch;
+        if let Some(w) = c.watch() {
+            w.set_settings(settings);
+            w.set_active(own_ocds && tricore);
+        }
+    });
     if cx.interp.command_exists("init_board") {
         cx.interp.eval_global("init_board").map_err(other)?;
     }

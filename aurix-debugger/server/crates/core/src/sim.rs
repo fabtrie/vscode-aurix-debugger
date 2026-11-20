@@ -294,6 +294,8 @@ pub struct SimAdapter {
     pub pc: [u32; NUM_CORES],
     pub ostate: u32,
     pub pending_resets: u64,
+    /// A power-on class reset of the board due at this time (see [`Self::schedule_board_reset`]).
+    pub board_reset_at: Option<Instant>,
     pub device_id: u32,
     /// The application on the chip (start-up model), if any.
     pub app: Option<SimApp>,
@@ -392,6 +394,7 @@ impl SimAdapter {
             pc: [0x8000_1000, 0x8010_0000, 0x8020_0000],
             ostate: 0,
             pending_resets: 0,
+            board_reset_at: None,
             // Plain TC37x, as expected by OpenOCD's tc37x.cfg.
             device_id: 0x1020_7083,
             hsm: SimHsm::new(),
@@ -525,9 +528,27 @@ impl SimAdapter {
         }
     }
 
+    /// Makes the board do a power-on class reset `after` from now (a supply reset, an SBC reset):
+    /// OCDS off, the application starts again, and the probe reports it with the next access after
+    /// it. For tests of a reset that happens while a command runs.
+    pub fn schedule_board_reset(&mut self, after: std::time::Duration) {
+        self.board_reset_at = Some(Instant::now() + after);
+    }
+
     /// Advances the application and the FS26 to now.
     fn tick(&mut self) {
         let now = Instant::now();
+        if let Some(t) = self.board_reset_at.filter(|t| now >= *t) {
+            // Applied at the first access after it, but as of when it was due: the application has
+            // been running since then (without OCDS, if nothing switched it on).
+            self.board_reset_at = None;
+            self.power_on_reset(false);
+            self.stm_epoch = t;
+            if let Some(app) = self.app.as_mut() {
+                app.started = Some(t);
+            }
+            self.pending_resets += 1;
+        }
         if let Some(app) = self.app.as_ref() {
             if let (Some(t0), false) = (app.started, self.halted[0]) {
                 let ms = now.duration_since(t0).as_millis() as u64;

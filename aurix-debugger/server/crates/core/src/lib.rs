@@ -27,6 +27,7 @@ pub mod mcds_trace;
 pub mod ops;
 pub mod reverse;
 pub mod reverse_cmd;
+pub mod reset_watch;
 pub mod scr_monitor;
 pub mod server;
 pub mod sim;

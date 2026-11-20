@@ -124,6 +124,8 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "ocds_found_off", |cx, _| {
         Ok(if cx.with(|c| std::mem::take(&mut c.ocds_found_off)) { "1" } else { "0" }.to_string())
     });
+    reg(interp, sh, "reset_info", cmd_reset_info);
+    reg(interp, sh, "reset_watch", cmd_reset_watch);
     // probe_lost_timeout ?ms?: how long the probe (BlueBox USB, miniWiggler, TasServer) may be
     // gone before the frontends end their debug sessions; 0 keeps reconnecting for ever.
     reg(interp, sh, "probe_lost_timeout", |cx, a| {
@@ -1164,10 +1166,63 @@ fn cmd_echo(_cx: &Cx, a: &[&str]) -> CmdResult {
     ok()
 }
 
-fn cmd_sleep(_cx: &Cx, a: &[&str]) -> CmdResult {
+fn cmd_sleep(cx: &Cx, a: &[&str]) -> CmdResult {
     let ms = num(a.get(1).ok_or("usage: sleep <ms> [busy]")?)?;
-    std::thread::sleep(Duration::from_millis(ms));
+    wait_watching(cx, Duration::from_millis(ms));
     ok()
+}
+
+/// Waits like `thread::sleep`, but while the device watch acts in slices with an idle access
+/// between them, so that a reset during a script's wait is reported and answered within a slice
+/// ([`crate::reset_watch::Watched::idle_tick`]).
+fn wait_watching(cx: &Cx, d: Duration) {
+    let end = std::time::Instant::now() + d;
+    loop {
+        let now = std::time::Instant::now();
+        if now >= end {
+            return;
+        }
+        let Some(slice) = cx.with(|c| c.watch().and_then(|w| w.wait_slice())) else {
+            std::thread::sleep(end - now);
+            return;
+        };
+        std::thread::sleep((end - now).min(slice));
+        cx.with(|c| c.watch().map(|w| w.idle_tick()));
+    }
+}
+
+/// `reset_info`: what the device watch saw of the resets it answered, as a dict.
+fn cmd_reset_info(cx: &Cx, _a: &[&str]) -> CmdResult {
+    let (watching, i) = cx.with(|c| c.watch().map_or((false, Default::default()), |w| (w.is_watching(), w.info())));
+    Ok(format!(
+        "count {} last_ms {} latency_ms {} restored {} late {} watching {}",
+        i.count,
+        i.last_ms,
+        i.latency_ms.map_or_else(|| "{}".to_string(), |l| l.to_string()),
+        i.restored as u8,
+        i.late as u8,
+        watching as u8
+    ))
+}
+
+/// `reset_watch ?on|off? | threshold ?ms? | slice ?ms?`: the device watch's settings.
+fn cmd_reset_watch(cx: &Cx, a: &[&str]) -> CmdResult {
+    let mut s = cx.with(|c| c.reset_watch);
+    match (a.get(1).copied(), a.get(2)) {
+        (None, _) => {}
+        (Some("threshold"), Some(v)) => s.threshold_ms = num(v)?,
+        (Some("slice"), Some(v)) => s.slice_ms = num(v)?,
+        (Some("threshold" | "slice"), None) => {}
+        (Some(v), None) => s.on = parse_bool(v)?,
+        _ => return Err("usage: reset_watch ?on|off? | threshold ?ms? | slice ?ms?".into()),
+    }
+    cx.with(|c| {
+        c.reset_watch = s;
+        if let Some(w) = c.watch() {
+            w.set_settings(s);
+        }
+    });
+    Ok(format!("reset_watch {} threshold {} slice {}", if s.on { "on" } else { "off" }, s.threshold_ms, s.slice_ms))
 }
 
 /// `after <ms>` waits like `sleep`; every other form goes to Jim's `after` (renamed `_jim_after`).
@@ -1187,7 +1242,7 @@ fn cmd_after(cx: &Cx, a: &[&str]) -> CmdResult {
         if let Some(ms) = ms {
             if ms > 0.0 {
                 let d = Duration::try_from_secs_f64(ms / 1000.0).map_err(|_| format!("after: {t} ms is too long to wait"))?;
-                std::thread::sleep(d);
+                wait_watching(cx, d);
             }
             return ok();
         }

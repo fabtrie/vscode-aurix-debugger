@@ -373,6 +373,11 @@ pub trait Adapter {
     fn background(&mut self) {}
     fn quit(&mut self) {}
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    /// The device watch around the session's adapter ([`crate::reset_watch`]); `None` for a bare
+    /// adapter.
+    fn watched(&mut self) -> Option<&mut crate::reset_watch::Watched> {
+        None
+    }
 }
 
 pub const DRIVERS: &[&str] = &[
@@ -384,7 +389,13 @@ pub const DRIVERS: &[&str] = &[
     "bluebox",
 ];
 
+/// The adapter for a driver name, wrapped in the device watch ([`crate::reset_watch::Watched`]),
+/// which stays inactive until `init` has seen the targets.
 pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
+    create_bare(name).map(|a| Box::new(crate::reset_watch::Watched::new(a)) as Box<dyn Adapter>)
+}
+
+fn create_bare(name: &str) -> Option<Box<dyn Adapter>> {
     match name {
         "tas_client" => Some(Box::new(crate::tas_adapter::TasAdapter::default())),
         "sim" => Some(Box::new(crate::sim::SimAdapter::new())),

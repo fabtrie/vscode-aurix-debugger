@@ -468,7 +468,27 @@ ocds_found_off
 
 1 if OCDS was found off since the last call (which clears it), else 0.
 
-A power-on class reset (debugger reset, an SBC reset, a power cycle) clears OCDS; the examination after it switches it on again. Set also when a probe that owns OCDS (BlueBox) had to bring the target back into debug mode. An application that checks for a debugger at start-up may then have started without seeing it: `fs26_sbc.cfg` disarms the FS26 watchdog again with the next reset.
+A power-on class reset (debugger reset, an SBC reset, a power cycle) clears OCDS; the examination after it switches it on again. Set also when a probe that owns OCDS (BlueBox) had to bring the target back into debug mode. An application that checks for a debugger at start-up may then have started without seeing it: `fs26_sbc.cfg` disarms the FS26 watchdog again with the next reset. A reset the device watch (`reset_watch`) switched OCDS on again for within its threshold does not set it; a later one does.
+
+### `reset_info`
+
+```
+reset_info
+```
+
+What the device watch saw of resets, as a dict.
+
+Keys: `count` (resets seen while watching, not the server's own, since the connection), `last_ms` (when the last one was seen, as `clock milliseconds`), `latency_ms` (upper bound of how long the device answered without OCDS before it was switched on again; empty while unknown), `restored` (OCDS is on again), `late` (later than the threshold, or not restored), `watching` (the watch acts in this session). Scripts that detect resets by finding OCDS off compare `count` instead: the watch may have switched it on already.
+
+### `reset_watch`
+
+```
+reset_watch [on|off] | threshold [<ms>] | slice [<ms>]
+```
+
+Show or set the device watch, which answers a reset at the access that reports it.
+
+Every access (from a command, a handler, flashing or the poll) collects the resets the probe reported; for a reset the server did not do itself, the watch switches OCDS on again right away, and while the boot ROM keeps the device locked, at each following access (for up to 3 s). Waits in Tcl (`sleep`, `after`) access the device every `slice` ms (default 5) when nothing else did, so that a reset is also answered while a script waits. A restore later than `threshold` ms (default 15) after the device could answer again counts as late and sets `ocds_found_off`. Active for TriCore cores whose OCDS the server drives (not with a probe that does run control itself, the BlueBox, winIDEA). The re-examination after a reset (triggers, the cfg's `examine-end` handlers) still follows in the background poll after the command.
 
 ### `ocd_process_reset`
 

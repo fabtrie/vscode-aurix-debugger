@@ -151,12 +151,14 @@ pub fn wait_ready(cx: &Cx, ms: u64) -> bool {
 }
 
 /// The server's reset sequence, after the deassert (and for a halting reset, once cpu0 halted):
-/// the HSM released; before a resume that follows (`run_after`) it reports ready first. A halting
-/// reset that stays halted latches TL1, so that the cores and the suspended modules stay stopped
-/// until continue (the edge halts the released HSM with them; continue releases it again).
+/// the HSM released, and given the time to report ready (~32 ms) before anything else: before a
+/// resume that follows (`run_after`), and before the TL1 latch of a halting reset that stays
+/// halted, which keeps the cores and the suspended modules stopped until continue. The latch halts
+/// the HSM too: latched before it was ready, it reported ready only after continue, too late for a
+/// bootloader that checks once, which then looped (TC375, measured).
 pub fn after_own_reset(cx: &Cx, halt: bool, run_after: bool) {
     let released = release(cx) == Release::Released;
-    if released && run_after {
+    if released {
         let ms = cx.with(|c| c.hsm.ready_ms);
         wait_ready(cx, ms);
     }

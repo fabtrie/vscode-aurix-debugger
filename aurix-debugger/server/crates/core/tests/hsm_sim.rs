@@ -37,15 +37,34 @@ fn hsm_writes(s: &Server) -> Vec<(u32, u32)> {
 
 #[test]
 fn halting_reset_releases_the_hsm_then_latches_tl1() {
-    let s = server(true, "ocds sync tl1");
+    let s = server(true, "ocds sync tl1; hsm ready_ms 300");
     s.interp.eval("init").unwrap();
     hsm_writes(&s);
+    // The HSM reports ready right away: the latch comes after that, without waiting the 300 ms.
+    with_sim(&s, |sim| sim.set_mem(HSM2HTS, 3));
+    let t0 = Instant::now();
     s.interp.eval("reset halt").unwrap();
+    assert!(t0.elapsed().as_millis() < 250, "waited although the HSM was ready");
     let w = hsm_writes(&s);
     assert!(w.contains(&(fp_comp(0), 0)), "boot ROM breakpoint not deleted: {w:08x?}");
     assert!(w.contains(&(DHCSR, 0xA05F_0001)), "HSM not run: {w:08x?}");
     assert!(with_sim(&s, |sim| sim.tl1_held), "TL1 not latched after the halting reset");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
+}
+
+/// The latch waits for the HSM to report ready: latched before, the HSM (halted by TL1) reports
+/// ready only after continue, and a bootloader that checks once loops.
+#[test]
+fn halting_reset_waits_for_the_released_hsm_before_the_latch() {
+    let s = server(true, "ocds sync tl1; hsm ready_ms 100");
+    s.interp.eval("init").unwrap();
+    let t0 = Instant::now();
+    s.interp.eval("reset halt").unwrap();
+    assert!(t0.elapsed().as_millis() >= 100, "latched without waiting for the HSM");
+    let w = with_sim(&s, |sim| sim.writes.clone());
+    let release = w.iter().rposition(|&(a, v)| a == 0xF005_EDF0 && v == 0xA05F_0001).expect("no release");
+    let latch = w.iter().rposition(|&x| x == (0xF000_0490, 0x30)).expect("no latch");
+    assert!(release < latch, "{w:08x?}");
 }
 
 #[test]

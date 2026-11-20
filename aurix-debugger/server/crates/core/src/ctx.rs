@@ -108,6 +108,8 @@ pub struct Ctx {
     pub restore: crate::restore::SharedRestore,
     /// TL1 multi-core run control (`ocds ...`), see [`crate::tl1`].
     pub tl1: crate::tl1::Settings,
+    /// The HSM after a reset (`hsm ...`), see [`crate::hsm`].
+    pub hsm: crate::hsm::Settings,
     /// The chip's bundled SVD description, once a module name had to be looked up in it.
     pub svd_device: Option<std::sync::Arc<svd::Device>>,
     /// The adapter's [`crate::adapter::LinkHealth`] last reported to the frontends.
@@ -182,6 +184,7 @@ impl Ctx {
             reset_watch: Default::default(),
             restore: Default::default(),
             tl1: Default::default(),
+            hsm: Default::default(),
             svd_device: None,
             health: None,
             probe_lost_since: None,

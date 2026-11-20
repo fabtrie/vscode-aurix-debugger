@@ -599,7 +599,7 @@ fn board_server() -> Server {
     s.interp.eval_global("script board/infineon/kit_a2g_tc375_lite.cfg").unwrap();
     s.interp.eval_global(aurix_core::sim::SIM_BOARD_SETTINGS).unwrap();
     s.interp.eval_global(&format!("script {}", jim::quote(&path(repo.join("tc37x_ocds_init.cfg"))))).unwrap();
-    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("hsm ready_ms 0").unwrap();
     s.interp.eval_global("init").unwrap();
     s
 }

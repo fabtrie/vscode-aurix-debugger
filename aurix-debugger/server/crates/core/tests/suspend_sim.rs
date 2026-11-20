@@ -188,3 +188,19 @@ fn a_write_that_does_not_take_is_given_up() {
     assert_eq!(writes_to(&s, 0xF000_1010), 2);
     assert_eq!(state(&s, "ODD"), "refused");
 }
+
+/// `reset_settle`: a board reset during the wait is counted, the suspend is restored on the way, and
+/// the wait ends once no reset came for the quiet time.
+#[test]
+fn reset_settle_counts_resets_and_restores_on_the_way() {
+    let s = server("suspend add cores");
+    s.interp.eval("init").unwrap();
+    s.interp.eval("reset run").unwrap();
+    with_sim(&s, |sim| sim.schedule_board_reset(Duration::from_millis(30)));
+    let r = s.interp.eval("reset_settle 2000 200").unwrap();
+    assert!(r.starts_with("settled 1 resets 1 "), "{r}");
+    assert_eq!(sus(&s, STM0_OCS), 2, "STM0 not suspended again after the board reset");
+    let r = s.interp.eval("reset_settle 2000 50").unwrap();
+    assert!(r.starts_with("settled 1 resets 0 "), "{r}");
+    no_violations(&s);
+}

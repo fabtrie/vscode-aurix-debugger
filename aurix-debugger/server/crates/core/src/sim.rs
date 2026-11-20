@@ -293,6 +293,11 @@ pub struct SimAdapter {
     /// TL1 latched by capture-and-hold (CBS_TLCHE): routed cores stay suspended until CBS_TLCHS
     /// clears it, also once their debug halt is released.
     pub tl1_held: bool,
+    /// The HSM boots after a reset (firmware present, HSM boot on): with a debugger connected the
+    /// boot ROM then holds it at its first instruction.
+    pub hsm_boots: bool,
+    /// Cores running from the reset vector since a reset without halt (not halted since).
+    from_reset: [bool; NUM_CORES],
     /// Cores whose debug halt was released while TL1 held them: they run when the hold drops.
     pub tl1_parked: [bool; NUM_CORES],
     /// SYSCON.BHALT: core not started yet.
@@ -397,6 +402,8 @@ impl SimAdapter {
             halted: [false; NUM_CORES],
             susp: [false; NUM_CORES],
             tl1_held: false,
+            hsm_boots: true,
+            from_reset: [false; NUM_CORES],
             tl1_parked: [false; NUM_CORES],
             bhalt: [false; NUM_CORES],
             evtsrc: [0; NUM_CORES],
@@ -516,6 +523,7 @@ impl SimAdapter {
         self.mcds.reset();
         self.dmu.install();
         self.halted = [halt, false, false];
+        self.from_reset = [!halt, false, false];
         self.pc = [0x800A_8000, 0x8010_0000, 0x8020_0000];
         self.stm_epoch = Instant::now();
         self.reset_periphs();
@@ -683,6 +691,11 @@ impl SimAdapter {
             match off {
                 0xFE18 => return 0x00C0_C021,
                 0xFD00 => {
+                    // A core running from the reset vector after a reset without halt reaches an
+                    // armed PC trigger (the simulator executes linearly), as a resumed core does.
+                    if self.from_reset[i] && !self.halted[i] && !self.bhalt[i] {
+                        self.hit_armed_trigger(i);
+                    }
                     return (self.halted[i] as u32) << 1
                         | 1
                         | (self.susp[i] as u32) << 4
@@ -1034,6 +1047,12 @@ impl SimAdapter {
                 }
             }
         }
+        self.hit_armed_trigger(i);
+    }
+
+    /// Core `i` (running) halts at its first armed PC trigger, if any.
+    fn hit_armed_trigger(&mut self, i: usize) {
+        self.from_reset[i] = false;
         let base = 0xF881_0000 + 0x2_0000 * i as u32;
         for n in 0..8u32 {
             let evt = *self.mem.get(&(base + 0xF000 + 8 * n)).unwrap_or(&0);
@@ -1207,7 +1226,7 @@ impl Adapter for SimAdapter {
             let scr_enabled = self.scr.enabled;
             self.scr = SimScr::new();
             self.scr.enabled = scr_enabled;
-            if halt_after_reset {
+            if halt_after_reset && self.hsm_boots {
                 self.hsm.mem.insert(FP_CTRL, 1);
                 self.hsm.mem.insert(fp_comp(0), 0x0002_85d0 | 1 << 30 | 1);
                 self.hsm.mem.insert(fp_comph(0), 4);

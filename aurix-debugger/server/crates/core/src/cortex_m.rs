@@ -175,6 +175,11 @@ impl CortexM {
         self.dbgbase.unwrap_or(BRIDGE_BASE)
     }
 
+    /// The HSM bridge base (`-dbgbase`, default [`BRIDGE_BASE`]).
+    pub fn bridge_base(&self) -> u32 {
+        self.bridge()
+    }
+
     fn dbgbase_reg(&self) -> u32 {
         self.bridge() + DBGBASE_OFF
     }

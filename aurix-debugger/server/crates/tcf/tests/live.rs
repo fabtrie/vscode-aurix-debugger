@@ -40,7 +40,7 @@ fn server(sampler: bool) -> ServerHandle {
         s.interp
             .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
             .unwrap();
-        s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+        s.interp.eval_global("hsm ready_ms 0").unwrap();
         s.interp.eval_global("init").unwrap();
         if sampler {
             s.cx().with(|c| c.adapter.as_mut().unwrap().as_any_mut().downcast_mut::<SimAdapter>().unwrap().sampler = Some(SimSampler::default()));

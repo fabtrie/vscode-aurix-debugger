@@ -128,6 +128,8 @@ pub fn register_all(interp: &Interp, sh: &Shared) {
     reg(interp, sh, "reset_watch", cmd_reset_watch);
     reg(interp, sh, "suspend", crate::suspend::cmd_suspend);
     reg(interp, sh, "ocds", crate::tl1::cmd_ocds);
+    reg(interp, sh, "hsm", crate::hsm::cmd_hsm);
+    reg(interp, sh, "reset_settle", crate::settle::cmd_reset_settle);
     // probe_lost_timeout ?ms?: how long the probe (BlueBox USB, miniWiggler, TasServer) may be
     // gone before the frontends end their debug sessions; 0 keeps reconnecting for ever.
     reg(interp, sh, "probe_lost_timeout", |cx, a| {
@@ -1177,7 +1179,7 @@ fn cmd_sleep(cx: &Cx, a: &[&str]) -> CmdResult {
 /// Waits like `thread::sleep`, but while the device watch acts in slices with an idle access
 /// between them, so that a reset during a script's wait is reported and answered within a slice
 /// ([`crate::reset_watch::Watched::idle_tick`]).
-fn wait_watching(cx: &Cx, d: Duration) {
+pub(crate) fn wait_watching(cx: &Cx, d: Duration) {
     let end = std::time::Instant::now() + d;
     loop {
         let now = std::time::Instant::now();

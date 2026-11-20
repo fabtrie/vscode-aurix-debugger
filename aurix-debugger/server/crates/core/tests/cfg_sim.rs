@@ -36,7 +36,7 @@ fn server_with_mcs(mcs: bool) -> Server {
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
     // The simulated HSM never reports ready: don't wait for it after halting resets.
-    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("hsm ready_ms 0").unwrap();
     // No FS26 unless a test adds one: the debugger's reset is not wired to it and there is no
     // watchdog to disarm (the FS26 tests set these themselves, see `add_fs26`).
     s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
@@ -802,13 +802,12 @@ fn debugger_reset_reapplies_setup_and_latches_tl1_when_halted() {
     assert!(run < latch, "TL1 latched once the halt holds: {w:08x?}");
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "halted");
 
-    // A reset without halt is halted for the init (STM0/1 before the application locks them), then
-    // all cores run: the TL1 hold is dropped after the latch.
+    // A reset without halt: the set-up is redone right after it, nothing holds the cores.
     s.interp.eval("reset run").unwrap();
     let w = take_writes(&s);
     assert!(w.contains(&(0xF000_0494, 0xB000_003F)), "setup not redone after reset run: {w:08x?}");
-    let latch = w.iter().rposition(|x| *x == (CBS_TLC, 0x30)).expect("TL1 not latched for the init");
-    assert!(w[latch..].contains(&(CBS_TLCHS, 2)), "TL1 hold not dropped after reset run: {w:08x?}");
+    assert!(w.contains(&(0xF000_10E8, 0x1200_0000)), "STM0 not suspended after reset run: {w:08x?}");
+    assert!(!with_sim(&s, |sim| sim.tl1_held), "TL1 still held after reset run: {w:08x?}");
     ops::poll_all(&s.cx());
     assert_eq!(s.interp.eval("tc37x.cpu0 curstate").unwrap(), "running");
 }
@@ -1517,7 +1516,7 @@ fn scr_server() -> Server {
     s.interp
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
-    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("hsm ready_ms 0").unwrap();
     s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
     s
 }

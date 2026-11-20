@@ -891,6 +891,9 @@ fn reset_inner(cx: &Cx, mode: &str, halt: bool) -> Result<()> {
             }
         }
     }
+    // The HSM out of its boot ROM breakpoint (the bootloader waits for it); a halt that stays
+    // latches TL1.
+    crate::hsm::after_own_reset(cx, halt, run_after);
     if mode == "init" {
         for &t in &all {
             if cx.with(|c| c.targets[t].core.state()) == TargetState::Halted {
@@ -1031,6 +1034,7 @@ pub fn init(cx: &Cx) -> Result<()> {
         let settings = c.reset_watch;
         let rs = c.restore.clone();
         rs.suspend.borrow_mut().active = own_ocds && tricore;
+        rs.hsm.set(if own_ocds { crate::hsm::bridge(c) } else { Default::default() });
         crate::tl1::apply(c);
         if let Some(w) = c.watch() {
             w.set_settings(settings);

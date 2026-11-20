@@ -180,7 +180,7 @@ fn hub_sessions_end_to_end() {
         "script board/infineon/kit_a2g_tc375_lite.cfg".to_string(),
         aurix_core::sim::SIM_BOARD_SETTINGS.to_string(),
         format!("script {}", tcl_path(repo().join("tc37x_ocds_init.cfg"))),
-        "set tc3xx_hsm_ready_ms 0".to_string(),
+        "hsm ready_ms 0".to_string(),
     ];
     let profile = json!({ "connect": { "commands": commands.clone(), "adapter": "sim" }, "launch": { "reset": { "halt": true }, "stop_on_entry": true } });
     let toml_text = format!(

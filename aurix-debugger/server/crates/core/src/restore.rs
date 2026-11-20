@@ -17,6 +17,7 @@ use crate::suspend::{self, Select, SuspendSet, Why};
 pub struct RestoreSet {
     pub suspend: RefCell<SuspendSet>,
     pub tl1: RefCell<crate::tl1::Plan>,
+    pub hsm: std::cell::Cell<crate::hsm::Bridge>,
 }
 
 pub type SharedRestore = Rc<RestoreSet>;
@@ -32,6 +33,7 @@ pub fn after_reset(io: &mut Io, rs: &RestoreSet) {
     let plan = rs.tl1.borrow().clone();
     crate::tl1::write_config(io, &plan);
     suspend::attempt(io, &rs.suspend, Why::Reset, Select::All);
+    rs.hsm.get().debug_enable(io);
 }
 
 /// After the server's own reset sequence (cores halted at the reset vector, or running for `reset

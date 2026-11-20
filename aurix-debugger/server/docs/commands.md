@@ -498,6 +498,50 @@ ocd_process_reset <mode>
 
 Same as `reset <mode>` (OpenOCD's name for it).
 
+### `reset_settle`
+
+```
+reset_settle <max_ms> <quiet_ms>
+```
+
+Let the device run until no reset came for `quiet_ms`, for up to `max_ms`; returns a dict.
+
+Keys: `settled` (1 if quiet in time), `resets` (seen during the wait), `elapsed` (ms), `down` (ms the device has not          answered at the end). STM0 is read every 2 ms through the device watch, which answers each reset on the way at once          (OCDS, TL1 routing, peripheral suspend), in time for an application that checks for the debugger at start-up: e.g.          until an application has disarmed an external watchdog. A reset is one the watch counted, STM0 counting from a          lower value, or reads that failed for a while and then find OCDS off.
+
+### `hsm autostart`
+
+```
+hsm autostart [on|off]
+```
+
+Release the HSM from its boot ROM breakpoint after a reset (default on).
+
+With a debugger connected the boot ROM holds the HSM at its first instruction after a reset, and a bootloader that          waits for the HSM (HSM2HTS) hangs. After every reset the server deletes the breakpoint and runs the HSM if DHCSR          shows it halted; an HSM that does not boot or whose firmware closed debugging is left alone. Before the server          resumes the cores after a halting reset (`reset run` on a probe that only resets with a halt) it waits for the          HSM to report ready (`hsm ready_ms`). An HSM that stays halted is unrouted from TL1. Only with an HSM target.
+
+### `hsm ready_ms`
+
+```
+hsm ready_ms [<ms>]
+```
+
+How long to wait for HSM2HTS READY|ACTIVE after the release (default 2000).
+
+### `hsm release`
+
+```
+hsm release
+```
+
+Release the HSM from its boot ROM breakpoint now, if it is held there; 1 if released.
+
+### `hsm wait_ready`
+
+```
+hsm wait_ready [<ms>]
+```
+
+Wait for HSM2HTS READY|ACTIVE; 1 when ready (also without an HSM target), 0 after the time.
+
 ### `suspend add`
 
 ```

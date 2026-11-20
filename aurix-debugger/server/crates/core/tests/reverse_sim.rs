@@ -34,7 +34,7 @@ fn server_running() -> Server {
     s.interp
         .eval_global(&format!("script {}", jim::quote(&tcl_path(repo().join("tc37x_ocds_init.cfg")))))
         .unwrap();
-    s.interp.eval_global("set tc3xx_hsm_ready_ms 0").unwrap();
+    s.interp.eval_global("hsm ready_ms 0").unwrap();
     s.interp.eval_global("set sbc_rstb_wired 0; set sbc_disarmed 1").unwrap();
     s.interp.eval_global("init").unwrap();
     s.interp.eval_global("targets tc37x.cpu0").unwrap();

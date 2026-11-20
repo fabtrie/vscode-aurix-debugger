@@ -56,8 +56,9 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// `trace_find` (instruction trace with rebuilt registers), `trace_auto`. 9: `reverse_enable`,
 /// `reverse_disable`, `reverse_status`, `reverse_history`, `reverse_back`, `reverse_continue`,
 /// `reverse_goto` (reverse debugging on the hardware). 10: `stack_trace`, `lookup_address`,
-/// `location` in the target state.
-pub const API_VERSION: u32 = 10;
+/// `location` in the target state. 11: `list_locals`, `frame` in `evaluate`, `write_variable` and
+/// `symbol_children`.
+pub const API_VERSION: u32 = 11;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

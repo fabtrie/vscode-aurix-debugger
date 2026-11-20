@@ -479,6 +479,97 @@ class LaunchStep:
 
 
 @dataclass
+class LocalList:
+    """The locals and parameters of a stack frame."""
+
+    frame: int
+    items: list[LocalVariable]
+    """Outermost declaration first, as the VS Code Variables view lists them; a local an inner
+    declaration of the same name shadows is left out."""
+    target: str
+    function: str | None = None
+    """The frame's function, where the symbols name it."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LocalList:
+        return cls(
+            frame=d.get("frame"),
+            items=_list(LocalVariable, d.get("items")),
+            target=d.get("target"),
+            function=d.get("function"),
+        )
+
+
+@dataclass
+class LocalVariable:
+    """A local variable or parameter of a stack frame."""
+
+    argument: bool
+    """A parameter of the frame's function."""
+    class_: VariableClass
+    expression: str
+    """C expression naming exactly this object, for `evaluate`, `write_variable`,
+    `symbol_children` and the `expression` of a DAQ point. It is the plain name unless another
+    global of the same name would be found first; then it is a symbol reference
+    (`${E0/GV:12}`). A copy in one core's core-local RAM ends in its core, `CRASH_state@2`."""
+    has_children: bool
+    """`symbol_children` lists members or elements: a struct or union, or an array of known
+    length; or, for a `per_core` group, the copies."""
+    name: str
+    """Name to show: the variable, the member, or the index (`[3]`)."""
+    sampleable: bool
+    """A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at
+    most 8 bytes."""
+    size: int
+    """Size in bytes; for a bit field, of its storage unit."""
+    type_name: str
+    """C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`."""
+    address: int | None = None
+    """Address, when it is fixed (always for a global, except a `per_core` group). Always the
+    system-bus address: a variable linked to the core-local alias (`0xD000_0000` DSPR,
+    `0xC000_0000` PSPR) is reported in the DSPR/PSPR of its core, e.g. `0x60000100` for
+    `0xD0000100` on core 1."""
+    bit_offset: int | None = None
+    """Bit field: position of its least significant bit in the storage unit at `address`."""
+    bit_size: int | None = None
+    """Bit field: width in bits."""
+    error: str | None = None
+    """Why there is no value: e.g. its location is not available at the frame's PC (optimized
+    out), or its memory cannot be read."""
+    per_core: bool | None = None
+    """A group rather than one variable: it is in core-local RAM, which every TriCore core has
+    its own of, and its symbol file is not assigned to exactly one core (`load_symbols`
+    `path@N`, or `symbolFiles` in VS Code). Its `symbol_children` are the copies, one per core
+    (`CRASH_state@0`, `CRASH_state@1`, ...), each with its own address. A group has no
+    `address`, is not `sampleable`, and `evaluate` refuses its bare name. Left out when false."""
+    unit: str | None = None
+    """The compilation unit (source file) that defines a global; `list_globals` only."""
+    value: float | bool | str | None = None
+    """The value, decoded as `evaluate` decodes it, when `values` was asked for and it could be
+    read."""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LocalVariable:
+        return cls(
+            argument=d.get("argument"),
+            class_=d.get("class"),
+            expression=d.get("expression"),
+            has_children=d.get("has_children"),
+            name=d.get("name"),
+            sampleable=d.get("sampleable"),
+            size=d.get("size"),
+            type_name=d.get("type_name"),
+            address=d.get("address"),
+            bit_offset=d.get("bit_offset"),
+            bit_size=d.get("bit_size"),
+            error=d.get("error"),
+            per_core=d.get("per_core"),
+            unit=d.get("unit"),
+            value=d.get("value"),
+        )
+
+
+@dataclass
 class MemoryData:
     """Memory contents."""
 
@@ -2031,7 +2122,7 @@ class GeneratedClient:
         """
         return GlobalList.from_dict(self._call("GET", self._session_path() + "/globals", _args({"limit": limit, "offset": offset, "query": query, "target": target}), None))
 
-    def symbol_children(self, *, expression: str, limit: int | None = None, offset: int | None = None, target: str | None = None) -> SymbolChildren:
+    def symbol_children(self, *, expression: str, frame: int | None = None, limit: int | None = None, offset: int | None = None, target: str | None = None) -> SymbolChildren:
         """List the members of a struct or union, or the elements of an array, that an expression
         stands for, each with the expression that names it.
 
@@ -2041,43 +2132,67 @@ class GeneratedClient:
 
         Args:
             expression: C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or `symbol_children` returned. It may end in `@N` as for `evaluate`; the children's expressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are its copies, one per core.
+            frame: Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace` numbers them): its locals and parameters first, then the globals, as the VS Code Watch view does with the frame selected. Needs `target`, and no `@N`.
             limit: Return at most this many (default 100, at most 10000); a large array is paged like `list_globals`.
             offset: Skip this many children (default 0).
             target: Symbols of this target (name or index); default: the first core that has symbols, or the core of an `@N`.
         """
-        return SymbolChildren.from_dict(self._call("GET", self._session_path() + "/expressions/children", _args({"expression": expression, "limit": limit, "offset": offset, "target": target}), None))
+        return SymbolChildren.from_dict(self._call("GET", self._session_path() + "/expressions/children", _args({"expression": expression, "frame": frame, "limit": limit, "offset": offset, "target": target}), None))
 
-    def evaluate(self, *, expression: str, target: str | None = None) -> VariableValue:
+    def evaluate(self, *, expression: str, frame: int | None = None, target: str | None = None) -> VariableValue:
         """Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
 
-        Works while the cores run: there is no stack frame, so names are globals and statics, as in
-        a VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one
-        core the symbol file is assigned to; `address` is the system-bus address of that copy.
+        Without `frame` it works while the cores run: there is no stack frame, so names are
+        globals and statics, as in a VS Code live watch. Core-local RAM is the copy of the core an
+        `@N` names, or of the one core the symbol file is assigned to; `address` is the system-bus
+        address of that copy. With `frame` (a halted `target`) names are the frame's locals and
+        parameters first, as in the VS Code Watch view; a value in a register has no `address`.
 
-        Fails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no
-        symbols are loaded; with `bad_request` for a variable in core-local RAM that needs an
-        `@N` (the message lists the choices) or an `@N` that contradicts `target`; and with
-        `memory` when the target memory cannot be read.
+        Fails with `not_found` for an unknown name, an `@N` that names no TriCore core, a frame
+        the call stack does not have, or when no symbols are loaded; with `bad_request` for a
+        variable in core-local RAM that needs an `@N` (the message lists the choices) or an `@N`
+        that contradicts `target`; with `not_halted` / `busy` for a `frame` of a running or
+        stepping target; and with `memory` when the target memory cannot be read.
 
         Args:
-            expression: C expression: a global or static variable, a member or element of one (`g_motor.speed`, `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.  A trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression means, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for the HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned to exactly one core, and allowed (selecting that core's symbols) anywhere else.
+            expression: C expression: a global or static variable, a member or element of one (`g_motor.speed`, `g_buf[3]`, `p->x`), a cast or arithmetic. Locals and parameters with `frame` only.  A trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression means, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for the HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned to exactly one core, and allowed (selecting that core's symbols) anywhere else.
+            frame: Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace` numbers them): its locals and parameters first, then the globals, as the VS Code Watch view does with the frame selected. Needs `target`, and no `@N`.
             target: Use this target's symbols and read memory as it sees it (HSM-private memory, MCS program RAM); default: the first core that has symbols, or the core of an `@N`. It does not choose the core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.
         """
-        return VariableValue.from_dict(self._call("GET", self._session_path() + "/expressions", _args({"expression": expression, "target": target}), None))
+        return VariableValue.from_dict(self._call("GET", self._session_path() + "/expressions", _args({"expression": expression, "frame": frame, "target": target}), None))
 
-    def write_variable(self, *, expression: str, value: float | bool | str, target: str | None = None) -> VariableValue:
+    def write_variable(self, *, expression: str, value: float | bool | str, frame: int | None = None, target: str | None = None) -> VariableValue:
         """Write a variable by its expression and read it back.
 
         Works while the cores run, like `write_memory`; a bit field is merged into its storage
-        unit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM
-        and the errors are as for `evaluate`.
+        unit. With `frame` it writes a local or parameter; one in a register only in the top frame
+        (a caller's registers are saved copies). Connected debugger clients (VS Code) are told to
+        refresh their views. Core-local RAM and the errors are as for `evaluate`.
 
         Args:
             expression: C expression of the variable, as for `evaluate` (including `@N`); it must name something stored on the target.
             value: The new value: a number; `true` / `false`; for an enum, an enumerator name; for an integer, enum or pointer also a decimal or `0x` hex string, which keeps 64-bit values exact where a JSON number does not; for a float also `nan`, `inf` or `-inf`. A struct or array takes its bytes as a hex string of exactly its size.
+            frame: Write a local or parameter of this stack frame (see `evaluate`). One that lives in a register can only be written in the top frame (0).
             target: Use this target's symbols and write memory as it sees it; default: the first core that has symbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.
         """
-        return VariableValue.from_dict(self._call("PUT", self._session_path() + "/expressions", None, _args({"expression": expression, "value": value, "target": target})))
+        return VariableValue.from_dict(self._call("PUT", self._session_path() + "/expressions", None, _args({"expression": expression, "value": value, "frame": frame, "target": target})))
+
+    def list_locals(self, target: str, *, frame: int | None = None, values: bool | None = None) -> LocalList:
+        """The locals and parameters of a stack frame of a halted target, with their values.
+
+        The variables the VS Code Variables view shows for the frame. Each item's `expression`
+        goes to `evaluate`, `write_variable` and `symbol_children` with the same `frame`. A local
+        whose location the debug information does not give at the frame's PC (optimized out) is
+        listed with an `error` instead of a value. Fails with `not_halted` / `busy` as
+        `stack_trace` does and with `not_found` for a frame the call stack does not have; without
+        symbols for the frame's code the list is empty.
+
+        Args:
+            target: Target name or index.
+            frame: Stack frame (default 0, the top frame), as `stack_trace` numbers them.
+            values: Read each local's value too (default true). Aggregates over 256 bytes are left to `evaluate`.
+        """
+        return LocalList.from_dict(self._call("GET", self._session_path() + f"/targets/{quote(str(target), safe='')}/locals", _args({"frame": frame, "values": values}), None))
 
     def load_orti(self, *, file: str, target: str | None = None) -> OsInfo:
         """Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.

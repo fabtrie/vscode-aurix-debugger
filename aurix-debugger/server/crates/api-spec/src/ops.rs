@@ -288,22 +288,36 @@ api! {
 
     /// Evaluate a C expression and read its value, decoded as a DAQ point decodes it.
     ///
-    /// Works while the cores run: there is no stack frame, so names are globals and statics, as in
-    /// a VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one
-    /// core the symbol file is assigned to; `address` is the system-bus address of that copy.
+    /// Without `frame` it works while the cores run: there is no stack frame, so names are
+    /// globals and statics, as in a VS Code live watch. Core-local RAM is the copy of the core an
+    /// `@N` names, or of the one core the symbol file is assigned to; `address` is the system-bus
+    /// address of that copy. With `frame` (a halted `target`) names are the frame's locals and
+    /// parameters first, as in the VS Code Watch view; a value in a register has no `address`.
     ///
-    /// Fails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no
-    /// symbols are loaded; with `bad_request` for a variable in core-local RAM that needs an
-    /// `@N` (the message lists the choices) or an `@N` that contradicts `target`; and with
-    /// `memory` when the target memory cannot be read.
+    /// Fails with `not_found` for an unknown name, an `@N` that names no TriCore core, a frame
+    /// the call stack does not have, or when no symbols are loaded; with `bad_request` for a
+    /// variable in core-local RAM that needs an `@N` (the message lists the choices) or an `@N`
+    /// that contradicts `target`; with `not_halted` / `busy` for a `frame` of a running or
+    /// stepping target; and with `memory` when the target memory cannot be read.
     op evaluate [variables]: GET "/api/v1/expressions" (EvaluateRequest) -> VariableValue;
 
     /// Write a variable by its expression and read it back.
     ///
     /// Works while the cores run, like `write_memory`; a bit field is merged into its storage
-    /// unit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM
-    /// and the errors are as for `evaluate`.
+    /// unit. With `frame` it writes a local or parameter; one in a register only in the top frame
+    /// (a caller's registers are saved copies). Connected debugger clients (VS Code) are told to
+    /// refresh their views. Core-local RAM and the errors are as for `evaluate`.
     op write_variable [variables]: PUT "/api/v1/expressions" (WriteVariableRequest) -> VariableValue;
+
+    /// The locals and parameters of a stack frame of a halted target, with their values.
+    ///
+    /// The variables the VS Code Variables view shows for the frame. Each item's `expression`
+    /// goes to `evaluate`, `write_variable` and `symbol_children` with the same `frame`. A local
+    /// whose location the debug information does not give at the frame's PC (optimized out) is
+    /// listed with an `error` instead of a value. Fails with `not_halted` / `busy` as
+    /// `stack_trace` does and with `not_found` for a frame the call stack does not have; without
+    /// symbols for the frame's code the list is empty.
+    op list_locals [variables]: GET "/api/v1/targets/{target}/locals" (ListLocalsRequest) -> LocalList;
 
     /// Load an ORTI file: the AUTOSAR/OSEK OS awareness description the OS generator emits.
     ///

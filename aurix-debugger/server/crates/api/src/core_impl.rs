@@ -1255,6 +1255,10 @@ impl DebuggerApi for CoreApi {
         variables::write_variable(self, req)
     }
 
+    fn list_locals(&self, req: ListLocalsRequest) -> Result<LocalList, ApiError> {
+        variables::list_locals(self, req)
+    }
+
     fn load_orti(&self, req: LoadOrtiRequest) -> Result<OsInfo, ApiError> {
         let path = PathBuf::from(&req.file);
         if !path.is_file() {

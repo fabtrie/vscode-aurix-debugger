@@ -569,25 +569,33 @@ fn create(sh: &Shared, parent: String, text: String) -> Res<Json> {
     Ok(expression_context(sh, &id, &parent, &text, &None))
 }
 
+/// The locals and parameters visible in the frame of `scope` (context `ctx`), outermost
+/// declaration first, without those an inner declaration of the same name shadows; and the ELF
+/// that describes them.
+fn visible_locals(sh: &Shared, ctx: &str, scope: &Scope) -> Option<(Elf, Vec<symbols::scope::Local>)> {
+    let pc = scope.pc.filter(|_| scope.frame_id.is_some())?;
+    let (n, syms) = sh.symbols_for(ctx).and_then(|s| s.for_addr(pc).cloned())?;
+    let all = syms.locals_at(pc);
+    let visible = all.iter().enumerate().filter(|(i, l)| !all[i + 1..].iter().any(|x| x.name == l.name)).map(|(_, l)| l.clone()).collect();
+    Some(((n, syms), visible))
+}
+
 /// Local variables of a frame (or of a suspended core's top frame).
 fn children(sh: &Shared, parent: &str) -> Res<Vec<String>> {
     let scope = scope_for(sh, parent)?;
-    let (Some(pc), Some(frame)) = (scope.pc, scope.frame_id.clone()) else { return Ok(Vec::new()) };
-    let Some((n, syms)) = sh.symbols_for(parent).and_then(|s| s.for_addr(pc).cloned()) else { return Ok(Vec::new()) };
-    let locals = syms.locals_at(pc);
+    let Some(frame) = scope.frame_id.clone() else { return Ok(Vec::new()) };
+    let Some(((n, _), locals)) = visible_locals(sh, parent, &scope) else { return Ok(Vec::new()) };
     let mut table = sh.exprs.lock().unwrap();
-    let mut ids = Vec::new();
-    for (i, l) in locals.iter().enumerate() {
-        // Shadowed by a later (inner) declaration.
-        if locals[i + 1..].iter().any(|x| x.name == l.name) {
-            continue;
-        }
-        ids.push(table.add(ExprEntry {
-            parent: parent.to_string(),
-            text: l.name.clone(),
-            symbol: Some(elf_id(n, &format!("LV:{}@{frame}", var_id(l.var)))),
-        }));
-    }
+    let ids = locals
+        .iter()
+        .map(|l| {
+            table.add(ExprEntry {
+                parent: parent.to_string(),
+                text: l.name.clone(),
+                symbol: Some(elf_id(n, &format!("LV:{}@{frame}", var_id(l.var)))),
+            })
+        })
+        .collect();
     Ok(ids)
 }
 
@@ -627,23 +635,29 @@ fn assign(sh: &Shared, id: &str, data: &[u8]) -> Res<()> {
             write_checked(sh, &scope, n, addr, bytes).map_err(|e| (ERR_OTHER, e))?;
         }
         Write::Register(r, value) => {
-            if scope.frame_index != Some(0) {
-                return fail(ERR_OTHER, "Register variables can only be modified in the top stack frame");
-            }
-            let arch = scope.core.arch;
-            let reg = if r == PC_REGISTER {
-                arch.pc
-            } else {
-                arch.regs.iter().position(|x| x.dwarf.map(|d| d as u16) == Some(r)).ok_or_else(|| (ERR_OTHER, format!("No register for DWARF number {r}")))?
-            };
-            sh.handle
-                .call(move |cx| ops::write_reg(cx, idx, reg, value).map_err(|e| e.to_string()))
-                .unwrap_or_else(|| Err("server stopped".into()))
-                .map_err(|e| (ERR_OTHER, e))?;
+            write_register_var(sh, &scope, r, value).map_err(|e| (ERR_OTHER, e))?;
         }
     }
     sh.invalidate_stack(idx);
     Ok(())
+}
+
+/// Writes `value` into the register (DWARF number `r`) a variable of the scope's frame lives in.
+/// Only the top frame's registers are the core's; a caller frame's are saved copies. Returns the
+/// register's name.
+fn write_register_var(sh: &Shared, scope: &Scope, r: u16, value: u32) -> Result<&'static str, String> {
+    if scope.frame_index != Some(0) {
+        return Err("Register variables can only be modified in the top stack frame".into());
+    }
+    let arch = scope.core.arch;
+    let reg = if r == PC_REGISTER {
+        arch.pc
+    } else {
+        arch.regs.iter().position(|x| x.dwarf == Some(r)).ok_or_else(|| format!("No register for DWARF number {r}"))?
+    };
+    let idx = scope.core.idx;
+    sh.handle.call(move |cx| ops::write_reg(cx, idx, reg, value).map_err(|e| e.to_string())).unwrap_or_else(|| Err("server stopped".into()))?;
+    Ok(arch.regs[reg].name)
 }
 
 /// Writes `bytes` at `addr` through the memory view of ELF `n` in `scope`. Returns the target
@@ -856,7 +870,69 @@ pub fn evaluate_global(sh: &Shared, ctx: &str, text: &str) -> Result<GlobalValue
     }
 }
 
+/// A local variable or parameter of a stack frame (see [`frame_locals`]).
+pub struct FrameLocal {
+    pub name: String,
+    /// A parameter of the frame's function.
+    pub param: bool,
+    pub ty: TypeId,
+    /// The ELF that declares it.
+    pub elf: Elf,
+}
+
+/// The stack frame context of frame `frame` of target `idx`, and its scope.
+fn frame_scope(sh: &Shared, idx: usize, frame: usize) -> Result<(String, Scope), GlobalError> {
+    let core = cores(&sh.handle).into_iter().find(|c| c.idx == idx).ok_or_else(|| GlobalError::NoTarget(format!("no target {idx}")))?;
+    let ctx = format!("{}.F{frame}", core.id);
+    let scope = scope_for(sh, &ctx).map_err(|(_, e)| GlobalError::NoTarget(e))?;
+    Ok((ctx, scope))
+}
+
+/// Evaluates `text` in stack frame `frame` (0: the top frame) of the halted target `idx`: the
+/// frame's locals and parameters first, then the globals, as the VS Code Watch view does with
+/// that frame selected. Core-local RAM is the frame's core's.
+pub fn evaluate_in_frame(sh: &Shared, idx: usize, frame: usize, text: &str) -> Result<GlobalValue, GlobalError> {
+    let (ctx, scope) = frame_scope(sh, idx, frame)?;
+    let text = text.trim();
+    match evaluate_text(sh, &ctx, scope, text) {
+        Ok((scope, elf, value)) => Ok(GlobalValue { elf, value, scope, text: text.to_string(), sel: None }),
+        Err(((ERR_SYM_NOT_FOUND, _), _)) => Err(GlobalError::NoSymbols),
+        Err((_, Some(read))) => Err(GlobalError::Memory(read.message)),
+        Err(((_, e), None)) => Err(GlobalError::Expression(e)),
+    }
+}
+
+/// The locals and parameters visible in stack frame `frame` of the halted target `idx`, as the
+/// VS Code Variables view lists them: without those an inner declaration of the same name
+/// shadows. Empty without symbols for the frame's code.
+pub fn frame_locals(sh: &Shared, idx: usize, frame: usize) -> Result<Vec<FrameLocal>, GlobalError> {
+    let (ctx, scope) = frame_scope(sh, idx, frame)?;
+    let Some((elf, locals)) = visible_locals(sh, &ctx, &scope) else { return Ok(Vec::new()) };
+    Ok(locals.into_iter().map(|l| FrameLocal { name: l.name, param: l.param, ty: l.ty, elf: elf.clone() }).collect())
+}
+
+/// What [`GlobalValue::assign`] wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Assigned {
+    /// Memory, through the memory view of `target`.
+    Memory { target: usize, addr: u32, len: u32 },
+    /// A register of the top frame of `target`.
+    Register { target: usize, name: &'static str },
+}
+
 impl GlobalValue {
+    /// The stack frame the value was evaluated in, if any.
+    pub fn frame(&self) -> Option<usize> {
+        self.scope.frame_index
+    }
+
+    /// The value's bytes (the size of its type), wherever it lives: memory, a bit field's
+    /// storage unit, or a frame's registers.
+    pub fn load(&self, sh: &Shared) -> Result<Vec<u8>, String> {
+        let mut t = target(sh, self.elf.0, &self.scope);
+        Eval::new(&self.elf.1, &mut t).load(&self.value)
+    }
+
     /// Target index of the core the value was evaluated for.
     pub fn core(&self) -> usize {
         self.scope.core.idx
@@ -925,8 +1001,8 @@ impl GlobalValue {
     }
 
     /// Stores `data` (the size of the value's type) into the variable, merging a bit field into
-    /// its storage unit. Returns the target whose memory view was written and the range.
-    pub fn assign(&self, sh: &Shared, data: &[u8]) -> Result<(usize, u32, u32), GlobalError> {
+    /// its storage unit. A variable in a register can only be written in the top stack frame.
+    pub fn assign(&self, sh: &Shared, data: &[u8]) -> Result<Assigned, GlobalError> {
         let mut t = target(sh, self.elf.0, &self.scope);
         let write = Eval::new(&self.elf.1, &mut t).assign(&self.value, data);
         let write = match (write, t.read_error) {
@@ -937,11 +1013,15 @@ impl GlobalValue {
         match write {
             Write::Memory(addr, bytes) => {
                 let len = bytes.len() as u32;
-                let idx = write_checked(sh, &self.scope, self.elf.0, addr, bytes).map_err(GlobalError::Memory)?;
-                Ok((idx, addr, len))
+                let target = write_checked(sh, &self.scope, self.elf.0, addr, bytes).map_err(GlobalError::Memory)?;
+                Ok(Assigned::Memory { target, addr, len })
             }
-            // Without a stack frame nothing lives in a register.
-            Write::Register(..) => Err(GlobalError::Expression("a register variable needs a stack frame".into())),
+            Write::Register(..) if self.scope.frame_id.is_none() => Err(GlobalError::Expression("a register variable needs a stack frame".into())),
+            Write::Register(r, value) => {
+                let name = write_register_var(sh, &self.scope, r, value).map_err(GlobalError::Expression)?;
+                sh.invalidate_stack(self.scope.core.idx);
+                Ok(Assigned::Register { target: self.scope.core.idx, name })
+            }
         }
     }
 }

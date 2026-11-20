@@ -893,8 +893,18 @@
         "description": "An expression to evaluate.",
         "properties": {
           "expression": {
-            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
+            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. Locals and parameters with `frame` only.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
             "type": "string"
+          },
+          "frame": {
+            "default": null,
+            "description": "Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace`\nnumbers them): its locals and parameters first, then the globals, as the VS Code Watch\nview does with the frame selected. Needs `target`, and no `@N`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "target": {
             "default": null,
@@ -1659,6 +1669,38 @@
         },
         "type": "object"
       },
+      "ListLocalsRequest": {
+        "additionalProperties": false,
+        "description": "Which frame's locals to list.",
+        "properties": {
+          "frame": {
+            "default": null,
+            "description": "Stack frame (default 0, the top frame), as `stack_trace` numbers them.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "description": "Target name or index.",
+            "type": "string"
+          },
+          "values": {
+            "default": null,
+            "description": "Read each local's value too (default true). Aggregates over 256 bytes are left to\n`evaluate`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
       "LoadOrtiRequest": {
         "description": "Which ORTI file to load.",
         "properties": {
@@ -1705,6 +1747,150 @@
         },
         "required": [
           "files"
+        ],
+        "type": "object"
+      },
+      "LocalList": {
+        "description": "The locals and parameters of a stack frame.",
+        "properties": {
+          "frame": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "function": {
+            "description": "The frame's function, where the symbols name it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "description": "Outermost declaration first, as the VS Code Variables view lists them; a local an inner\ndeclaration of the same name shadows is left out.",
+            "items": {
+              "$ref": "#/components/schemas/LocalVariable"
+            },
+            "type": "array"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "frame",
+          "items"
+        ],
+        "type": "object"
+      },
+      "LocalVariable": {
+        "description": "A local variable or parameter of a stack frame.",
+        "properties": {
+          "address": {
+            "description": "Address, when it is fixed (always for a global, except a `per_core` group). Always the\nsystem-bus address: a variable linked to the core-local alias (`0xD000_0000` DSPR,\n`0xC000_0000` PSPR) is reported in the DSPR/PSPR of its core, e.g. `0x60000100` for\n`0xD0000100` on core 1.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "argument": {
+            "description": "A parameter of the frame's function.",
+            "type": "boolean"
+          },
+          "bit_offset": {
+            "description": "Bit field: position of its least significant bit in the storage unit at `address`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bit_size": {
+            "description": "Bit field: width in bits.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "class": {
+            "$ref": "#/components/schemas/VariableClass"
+          },
+          "error": {
+            "description": "Why there is no value: e.g. its location is not available at the frame's PC (optimized\nout), or its memory cannot be read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expression": {
+            "description": "C expression naming exactly this object, for `evaluate`, `write_variable`,\n`symbol_children` and the `expression` of a DAQ point. It is the plain name unless another\nglobal of the same name would be found first; then it is a symbol reference\n(`${E0/GV:12}`). A copy in one core's core-local RAM ends in its core, `CRASH_state@2`.",
+            "type": "string"
+          },
+          "has_children": {
+            "description": "`symbol_children` lists members or elements: a struct or union, or an array of known\nlength; or, for a `per_core` group, the copies.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name to show: the variable, the member, or the index (`[3]`).",
+            "type": "string"
+          },
+          "per_core": {
+            "description": "A group rather than one variable: it is in core-local RAM, which every TriCore core has\nits own of, and its symbol file is not assigned to exactly one core (`load_symbols`\n`path@N`, or `symbolFiles` in VS Code). Its `symbol_children` are the copies, one per core\n(`CRASH_state@0`, `CRASH_state@1`, ...), each with its own address. A group has no\n`address`, is not `sampleable`, and `evaluate` refuses its bare name. Left out when false.",
+            "type": "boolean"
+          },
+          "sampleable": {
+            "description": "A DAQ point decodes it to a typed value: an integer, float, bool, enum or pointer of at\nmost 8 bytes.",
+            "type": "boolean"
+          },
+          "size": {
+            "description": "Size in bytes; for a bit field, of its storage unit.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type_name": {
+            "description": "C type as declared, e.g. `uint32`, `struct motor_s`, `uint8[16]`.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "The compilation unit (source file) that defines a global; `list_globals` only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The value, decoded as `evaluate` decodes it, when `values` was asked for and it could be\nread."
+          }
+        },
+        "required": [
+          "name",
+          "expression",
+          "type_name",
+          "class",
+          "size",
+          "has_children",
+          "sampleable",
+          "argument"
         ],
         "type": "object"
       },
@@ -3301,6 +3487,16 @@
             "description": "C expression of the parent, e.g. `g_motor`, or an `expression` that `list_globals` or\n`symbol_children` returned. It may end in `@N` as for `evaluate`; the children's\nexpressions then end in it too (`g_s@2` -> `g_s.a@2`). A `per_core` group's children are\nits copies, one per core.",
             "type": "string"
           },
+          "frame": {
+            "default": null,
+            "description": "Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace`\nnumbers them): its locals and parameters first, then the globals, as the VS Code Watch\nview does with the frame selected. Needs `target`, and no `@N`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "limit": {
             "default": null,
             "description": "Return at most this many (default 100, at most 10000); a large array is paged like\n`list_globals`.",
@@ -4417,6 +4613,16 @@
             "description": "C expression of the variable, as for `evaluate` (including `@N`); it must name something\nstored on the target.",
             "type": "string"
           },
+          "frame": {
+            "default": null,
+            "description": "Write a local or parameter of this stack frame (see `evaluate`). One that lives in a\nregister can only be written in the top frame (0).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "target": {
             "default": null,
             "description": "Use this target's symbols and write memory as it sees it; default: the first core that has\nsymbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.",
@@ -5154,7 +5360,7 @@
     },
     "/api/v1/sessions/{session}/expressions": {
       "get": {
-        "description": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.\n\nWorks while the cores run: there is no stack frame, so names are globals and statics, as in\na VS Code live watch. Core-local RAM is the copy of the core an `@N` names, or of the one\ncore the symbol file is assigned to; `address` is the system-bus address of that copy.\n\nFails with `not_found` for an unknown name, an `@N` that names no TriCore core, or when no\nsymbols are loaded; with `bad_request` for a variable in core-local RAM that needs an\n`@N` (the message lists the choices) or an `@N` that contradicts `target`; and with\n`memory` when the target memory cannot be read.",
+        "description": "Evaluate a C expression and read its value, decoded as a DAQ point decodes it.\n\nWithout `frame` it works while the cores run: there is no stack frame, so names are\nglobals and statics, as in a VS Code live watch. Core-local RAM is the copy of the core an\n`@N` names, or of the one core the symbol file is assigned to; `address` is the system-bus\naddress of that copy. With `frame` (a halted `target`) names are the frame's locals and\nparameters first, as in the VS Code Watch view; a value in a register has no `address`.\n\nFails with `not_found` for an unknown name, an `@N` that names no TriCore core, a frame\nthe call stack does not have, or when no symbols are loaded; with `bad_request` for a\nvariable in core-local RAM that needs an `@N` (the message lists the choices) or an `@N`\nthat contradicts `target`; with `not_halted` / `busy` for a `frame` of a running or\nstepping target; and with `memory` when the target memory cannot be read.",
         "operationId": "evaluate",
         "parameters": [
           {
@@ -5167,12 +5373,27 @@
             }
           },
           {
-            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
+            "description": "C expression: a global or static variable, a member or element of one (`g_motor.speed`,\n`g_buf[3]`, `p->x`), a cast or arithmetic. Locals and parameters with `frame` only.\n\nA trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression\nmeans, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for\nthe HSM. It is needed for a variable in core-local RAM whose symbol file is not assigned\nto exactly one core, and allowed (selecting that core's symbols) anywhere else.",
             "in": "query",
             "name": "expression",
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace`\nnumbers them): its locals and parameters first, then the globals, as the VS Code Watch\nview does with the frame selected. Needs `target`, and no `@N`.",
+            "in": "query",
+            "name": "frame",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           {
@@ -5217,7 +5438,7 @@
         ]
       },
       "put": {
-        "description": "Write a variable by its expression and read it back.\n\nWorks while the cores run, like `write_memory`; a bit field is merged into its storage\nunit. Connected debugger clients (VS Code) are told to refresh their views. Core-local RAM\nand the errors are as for `evaluate`.",
+        "description": "Write a variable by its expression and read it back.\n\nWorks while the cores run, like `write_memory`; a bit field is merged into its storage\nunit. With `frame` it writes a local or parameter; one in a register only in the top frame\n(a caller's registers are saved copies). Connected debugger clients (VS Code) are told to\nrefresh their views. Core-local RAM and the errors are as for `evaluate`.",
         "operationId": "write_variable",
         "parameters": [
           {
@@ -5240,6 +5461,16 @@
                   "expression": {
                     "description": "C expression of the variable, as for `evaluate` (including `@N`); it must name something\nstored on the target.",
                     "type": "string"
+                  },
+                  "frame": {
+                    "default": null,
+                    "description": "Write a local or parameter of this stack frame (see `evaluate`). One that lives in a\nregister can only be written in the top frame (0).",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
                   },
                   "target": {
                     "default": null,
@@ -5323,6 +5554,21 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace`\nnumbers them): its locals and parameters first, then the globals, as the VS Code Watch\nview does with the frame selected. Needs `target`, and no `@N`.",
+            "in": "query",
+            "name": "frame",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           {
@@ -7325,6 +7571,86 @@
         "summary": "Halt a target.",
         "tags": [
           "run_control"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session}/targets/{target}/locals": {
+      "get": {
+        "description": "The locals and parameters of a stack frame of a halted target, with their values.\n\nThe variables the VS Code Variables view shows for the frame. Each item's `expression`\ngoes to `evaluate`, `write_variable` and `symbol_children` with the same `frame`. A local\nwhose location the debug information does not give at the frame's PC (optimized out) is\nlisted with an `error` instead of a value. Fails with `not_halted` / `busy` as\n`stack_trace` does and with `not_found` for a frame the call stack does not have; without\nsymbols for the frame's code the list is empty.",
+        "operationId": "list_locals",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stack frame (default 0, the top frame), as `stack_trace` numbers them.",
+            "in": "query",
+            "name": "frame",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Target name or index.",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read each local's value too (default true). Aggregates over 256 bytes are left to\n`evaluate`.",
+            "in": "query",
+            "name": "values",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalList"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The locals and parameters of a stack frame of a halted target, with their values.",
+        "tags": [
+          "variables"
         ]
       }
     },

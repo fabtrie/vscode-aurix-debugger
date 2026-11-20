@@ -1438,6 +1438,11 @@ pub struct SymbolChildrenRequest {
     /// core of an `@N`.
     #[serde(default)]
     pub target: Option<String>,
+    /// Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace`
+    /// numbers them): its locals and parameters first, then the globals, as the VS Code Watch
+    /// view does with the frame selected. Needs `target`, and no `@N`.
+    #[serde(default)]
+    pub frame: Option<u32>,
 }
 
 /// The members of a struct or union, or the elements of an array. Anything else has none.
@@ -1459,7 +1464,7 @@ pub struct SymbolChildren {
 #[serde(deny_unknown_fields)]
 pub struct EvaluateRequest {
     /// C expression: a global or static variable, a member or element of one (`g_motor.speed`,
-    /// `g_buf[3]`, `p->x`), a cast or arithmetic. There is no stack frame, so no locals.
+    /// `g_buf[3]`, `p->x`), a cast or arithmetic. Locals and parameters with `frame` only.
     ///
     /// A trailing `@N` names the TriCore core (core ID) whose core-local RAM the expression
     /// means, as in a VS Code live watch: `CRASH_state@2`, `${E0/GV:12}@1`; `@hsm` evaluates for
@@ -1471,6 +1476,11 @@ pub struct EvaluateRequest {
     /// the core-local RAM, `@N` does; naming another core than the `@N` is a `bad_request`.
     #[serde(default)]
     pub target: Option<String>,
+    /// Evaluate in this stack frame of the halted `target` (0: the top frame, as `stack_trace`
+    /// numbers them): its locals and parameters first, then the globals, as the VS Code Watch
+    /// view does with the frame selected. Needs `target`, and no `@N`.
+    #[serde(default)]
+    pub frame: Option<u32>,
 }
 
 /// A value: a number, a bool, or a string (an enumerator name, a number, or hex bytes).
@@ -1528,6 +1538,61 @@ pub struct WriteVariableRequest {
     /// symbols, or the core of an `@N`. As for `evaluate`, `@N` chooses the core-local RAM.
     #[serde(default)]
     pub target: Option<String>,
+    /// Write a local or parameter of this stack frame (see `evaluate`). One that lives in a
+    /// register can only be written in the top frame (0).
+    #[serde(default)]
+    pub frame: Option<u32>,
+}
+
+/// Which frame's locals to list.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListLocalsRequest {
+    /// Target name or index.
+    pub target: String,
+    /// Stack frame (default 0, the top frame), as `stack_trace` numbers them.
+    #[serde(default)]
+    pub frame: Option<u32>,
+    /// Read each local's value too (default true). Aggregates over 256 bytes are left to
+    /// `evaluate`.
+    #[serde(default)]
+    pub values: Option<bool>,
+}
+
+/// A local variable or parameter of a stack frame.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LocalVariable {
+    /// As for a global; `expression` is evaluated with the same `frame`.
+    #[serde(flatten)]
+    pub variable: VariableInfo,
+    /// A parameter of the frame's function.
+    pub argument: bool,
+    /// The value, decoded as `evaluate` decodes it, when `values` was asked for and it could be
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_scalar_schema")]
+    pub value: Option<serde_json::Value>,
+    /// Why there is no value: e.g. its location is not available at the frame's PC (optimized
+    /// out), or its memory cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn optional_scalar_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [{ "type": "number" }, { "type": "boolean" }, { "type": "string" }, { "type": "null" }] })
+}
+
+/// The locals and parameters of a stack frame.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LocalList {
+    pub target: String,
+    pub frame: u32,
+    /// The frame's function, where the symbols name it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// Outermost declaration first, as the VS Code Variables view lists them; a local an inner
+    /// declaration of the same name shadows is left out.
+    pub items: Vec<LocalVariable>,
 }
 
 // --- Clients and the control lease ----------------------------------------------------------

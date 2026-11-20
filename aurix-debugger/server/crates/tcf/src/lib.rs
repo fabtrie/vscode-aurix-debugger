@@ -37,7 +37,7 @@ use aurix_core::{log_info, log_warn, ServerHandle};
 use breakpoints::{BpTable, Resolver};
 use channel::Writer;
 use expressions::ExprTable;
-pub use expressions::{evaluate_global, home_core, split_core, symbol_ref, CoreSel, GlobalError, GlobalValue};
+pub use expressions::{evaluate_global, evaluate_in_frame, frame_locals, home_core, split_core, symbol_ref, Assigned, CoreSel, FrameLocal, GlobalError, GlobalValue};
 pub use stack::{frames as stack_frames, MAX_FRAMES};
 pub use symstore::{elf_id, CodeLocation, Elf, SymbolSet, SymbolStore};
 

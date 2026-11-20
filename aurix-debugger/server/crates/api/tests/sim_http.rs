@@ -662,17 +662,24 @@ fn dwarf_elf(vars: &[(&str, u32, bool)]) -> Vec<u8> {
     dwarf_elf_with(vars, &[])
 }
 
-/// [`dwarf_elf`] with `(name, start, end)` functions as well.
-fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32)]) -> Vec<u8> {
+/// Locals of a function of [`dwarf_elf_with`]: `(name, is_parameter, is_pair, DWARF location
+/// expression)`.
+type Locals<'a> = &'a [(&'a str, bool, bool, &'a [u8])];
+
+/// [`dwarf_elf`] with `(name, start, end, locals)` functions as well.
+fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32, Locals)]) -> Vec<u8> {
     // (code, tag, has children, [(attribute, form)]): compile_unit, base_type, structure_type,
-    // member, variable, subprogram.
-    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 6] = [
+    // member, variable, subprogram, subprogram with locals, formal_parameter, local variable.
+    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 9] = [
         (1, 0x11, true, &[(0x03, 0x08)]),
         (2, 0x24, false, &[(0x03, 0x08), (0x3e, 0x0b), (0x0b, 0x0b)]),
         (3, 0x13, true, &[(0x03, 0x08), (0x0b, 0x0b)]),
         (4, 0x0d, false, &[(0x03, 0x08), (0x49, 0x13), (0x38, 0x0b)]),
         (5, 0x34, false, &[(0x03, 0x08), (0x49, 0x13), (0x3f, 0x19), (0x02, 0x18)]),
         (6, 0x2e, false, &[(0x03, 0x08), (0x11, 0x01), (0x12, 0x06)]),
+        (7, 0x2e, true, &[(0x03, 0x08), (0x11, 0x01), (0x12, 0x06)]),
+        (8, 0x05, false, &[(0x03, 0x08), (0x49, 0x13), (0x02, 0x18)]),
+        (9, 0x34, false, &[(0x03, 0x08), (0x49, 0x13), (0x02, 0x18)]),
     ];
     let mut abbrev = Vec::new();
     for (code, tag, children, attrs) in abbrevs {
@@ -711,11 +718,22 @@ fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32)]) -> Vec
         info.extend([5, 0x03]); // a 5-byte location: DW_OP_addr
         info.extend(addr.to_le_bytes());
     }
-    for &(name, low, high) in funcs {
-        info.push(6);
+    for &(name, low, high, locals) in funcs {
+        info.push(if locals.is_empty() { 6 } else { 7 });
         cstr(&mut info, name);
         info.extend(low.to_le_bytes());
         info.extend((high - low).to_le_bytes()); // DW_AT_high_pc as a length
+        if locals.is_empty() {
+            continue;
+        }
+        for &(name, param, is_pair, loc) in locals {
+            info.push(if param { 8 } else { 9 });
+            cstr(&mut info, name);
+            info.extend(if is_pair { pair } else { uint }.to_le_bytes());
+            info.push(loc.len() as u8); // exprloc: a short length is its own ULEB128
+            info.extend(loc);
+        }
+        info.push(0);
     }
     info.push(0);
     let len = (info.len() - 4) as u32;
@@ -758,7 +776,7 @@ fn call_stack(http: &Http, vs: &mut Tcf, c0: &str) {
     let was_running = http.ok("GET", &format!("/api/v1/targets/{CPU0}"), None)["state"] == "running";
     http.ok("POST", &format!("/api/v1/targets/{CPU0}/halt"), None);
     let reg = |name: &str| http.ok("GET", &format!("/api/v1/targets/{CPU0}/registers/{name}"), None)["value"].clone();
-    let saved: Vec<(&str, Value)> = ["pc", "a10", "a11", "pcxi"].into_iter().map(|r| (r, reg(r))).collect();
+    let saved: Vec<(&str, Value)> = ["pc", "a10", "a11", "pcxi", "d4", "d8"].into_iter().map(|r| (r, reg(r))).collect();
     let set = |name: &str, v: u32| http.ok("PUT", &format!("/api/v1/targets/{CPU0}/registers/{name}"), Some(json!({ "value": v })));
 
     // inner (0x80001000..) runs at +0x10; its A11 returns into outer (0x80000200..) at +8. The
@@ -767,6 +785,7 @@ fn call_stack(http: &Http, vs: &mut Tcf, c0: &str) {
     csa[1] = 0x0000_0b80; // PSW
     csa[2] = 0x7000_1f00; // outer's A10
     csa[3] = 0x8000_0050; // outer's A11
+    csa[4] = 0x22; // outer's D8
     let hex: String = csa.iter().flat_map(|w| w.to_le_bytes()).map(|b| format!("{b:02x}")).collect();
     http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000800", "data": hex })));
     set("pc", 0x8000_1010);
@@ -797,7 +816,10 @@ fn call_stack(http: &Http, vs: &mut Tcf, c0: &str) {
     let dir = std::env::temp_dir().join(format!("aurix-stack-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let elf = dir.join("stack.elf");
-    let funcs = [("outer", 0x8000_0200, 0x8000_0208), ("inner", 0x8000_1000, 0x8000_1100)];
+    // DW_OP_reg4 / reg8 (D4, D8), DW_OP_breg26 (A10) + offset.
+    let inner_locals: Locals = &[("n", true, false, &[0x54]), ("buf", false, true, &[0x8a, 0x08])];
+    let outer_locals: Locals = &[("k", false, false, &[0x58]), ("total", false, false, &[0x8a, 0x10])];
+    let funcs = [("outer", 0x8000_0200, 0x8000_0208, outer_locals), ("inner", 0x8000_1000, 0x8000_1100, inner_locals)];
     std::fs::write(&elf, dwarf_elf_with(&[("g_pair", 0x7000_0400, true)], &funcs)).unwrap();
     let (status, e) = get("/api/v1/symbols/address?address=0x80001010");
     assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
@@ -808,6 +830,7 @@ fn call_stack(http: &Http, vs: &mut Tcf, c0: &str) {
     assert_eq!((loc(0), loc(1)), ((Some("inner"), Some(0x10)), (Some("outer"), Some(8))), "{st}");
     let state = http.ok("GET", &format!("/api/v1/targets/{CPU0}"), None);
     assert_eq!((state["location"]["function"].as_str(), state["location"]["function_offset"].as_u64()), (Some("inner"), Some(0x10)), "{state}");
+    frame_locals(http, vs, c0);
     let step = http.ok("POST", &format!("/api/v1/targets/{CPU0}/step"), None);
     assert_eq!(step["location"]["function"], "inner", "{step}");
 
@@ -827,11 +850,75 @@ fn call_stack(http: &Http, vs: &mut Tcf, c0: &str) {
     http.ok("POST", &format!("/api/v1/targets/{CPU0}/resume"), None);
     let (status, e) = get(&format!("/api/v1/targets/{CPU0}/stack"));
     assert_eq!((status, e["code"].as_str()), (409, Some("not_halted")), "{e}");
+    let (status, e) = get(&format!("/api/v1/targets/{CPU0}/locals"));
+    assert_eq!((status, e["code"].as_str()), (409, Some("not_halted")), "{e}");
     assert!(http.ok("GET", &format!("/api/v1/targets/{CPU0}"), None).get("location").is_none());
     if !was_running {
         http.ok("POST", &format!("/api/v1/targets/{CPU0}/halt"), None);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Locals of the frames `call_stack` built: listed, evaluated, browsed and written per frame, from
+/// the top frame's registers, the caller's registers restored from its CSA, and the stack.
+fn frame_locals(http: &Http, vs: &mut Tcf, c0: &str) {
+    const CPU0: &str = "tc37x.cpu0";
+    let get = |path: &str| http.request("GET", path, None, &[]);
+    let set = |name: &str, v: u32| http.ok("PUT", &format!("/api/v1/targets/{CPU0}/registers/{name}"), Some(json!({ "value": v })));
+    set("d4", 7);
+    set("d8", 0x11);
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70001e08", "data": "0100000002000000" })));
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70001f10", "data": "33000000" })));
+
+    let l = http.ok("GET", &format!("/api/v1/targets/{CPU0}/locals"), None);
+    assert_eq!((l["frame"].as_u64(), l["function"].as_str()), (Some(0), Some("inner")), "{l}");
+    let items = l["items"].as_array().unwrap();
+    let names: Vec<&str> = items.iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["n", "buf"], "{l}");
+    assert_eq!((items[0]["argument"].as_bool(), items[0]["value"].as_u64(), items[0].get("address")), (Some(true), Some(7), None), "{l}");
+    assert_eq!((items[1]["address"].as_u64(), items[1]["has_children"].as_bool(), items[1]["value"].as_str()), (Some(0x7000_1e08), Some(true), Some("0100000002000000")), "{l}");
+    let r = vs.command("Expressions", "getChildren", &[json!(format!("{c0}.F0"))]);
+    assert_eq!(serde_json::from_str::<Vec<String>>(&r[1]).unwrap().len(), 2, "the TCF Variables view: {r:?}");
+
+    let l = http.ok("GET", &format!("/api/v1/targets/{CPU0}/locals?frame=1&values=false"), None);
+    assert_eq!(l["function"], "outer", "{l}");
+    assert!(l["items"].as_array().unwrap().iter().all(|i| i.get("value").is_none()), "{l}");
+    let l = http.ok("GET", &format!("/api/v1/targets/{CPU0}/locals?frame=1"), None);
+    let vals: Vec<(&str, u64)> = l["items"].as_array().unwrap().iter().map(|i| (i["name"].as_str().unwrap(), i["value"].as_u64().unwrap())).collect();
+    // The caller's D8 is the one its CSA saved, not the core's.
+    assert_eq!(vals, [("k", 0x22), ("total", 0x33)], "{l}");
+
+    let eval = |e: &str, frame: &str| get(&format!("/api/v1/expressions?expression={}&target={CPU0}{frame}", enc(e)));
+    assert_eq!(eval("n", "&frame=0").1["value"], 7);
+    assert_eq!(eval("buf.b + n", "&frame=0").1["value"], 9);
+    assert_eq!(eval("k", "&frame=1").1["value"], 0x22);
+    let c = http.ok("GET", &format!("/api/v1/expressions/children?expression=buf&target={CPU0}&frame=0"), None);
+    let m: Vec<(&str, u64)> = c["items"].as_array().unwrap().iter().map(|i| (i["expression"].as_str().unwrap(), i["address"].as_u64().unwrap())).collect();
+    assert_eq!(m, [("buf.a", 0x7000_1e08), ("buf.b", 0x7000_1e0c)], "{c}");
+
+    // Errors: no frame (no global `n`), a frame the stack does not have, a frame without target,
+    // a frame with an `@N`.
+    let (status, e) = eval("n", "");
+    assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
+    let (status, e) = eval("n", "&frame=5");
+    assert_eq!((status, e["code"].as_str()), (404, Some("not_found")), "{e}");
+    assert!(e["message"].as_str().unwrap().contains("2 frame"), "{e}");
+    let (status, e) = get(&format!("/api/v1/expressions?expression=n&frame=0"));
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    let (status, e) = eval("n@1", "&frame=0");
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+
+    // Writes: a register local of the top frame (VS Code hears of the register), a caller's
+    // stack local; a caller's register local is a saved copy and refused.
+    let w = http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": "n", "target": CPU0, "frame": 0, "value": 9 })));
+    assert_eq!(w["value"], 9, "{w}");
+    assert_eq!(http.ok("GET", &format!("/api/v1/targets/{CPU0}/registers/d4"), None)["value"], 9);
+    vs.event("Registers", "registerChanged", &format!("{c0}.R.d4"));
+    let w = http.ok("PUT", "/api/v1/expressions", Some(json!({ "expression": "total", "target": CPU0, "frame": 1, "value": "0x44" })));
+    assert_eq!((w["value"].as_u64(), w["address"].as_u64()), (Some(0x44), Some(0x7000_1f10)), "{w}");
+    let (status, e) = http.request("PUT", "/api/v1/expressions", Some(json!({ "expression": "k", "target": CPU0, "frame": 1, "value": 1 })), &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    assert!(e["message"].as_str().unwrap().contains("top stack frame"), "{e}");
 }
 
 /// Variables in core-local RAM (`0xD000_0000`), which exists once per TriCore core: a name means

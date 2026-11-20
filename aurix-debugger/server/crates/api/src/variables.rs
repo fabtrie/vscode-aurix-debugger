@@ -65,6 +65,38 @@ fn evaluate_in(api: &CoreApi, target: Option<&str>, expression: &str) -> Result<
     tcf::evaluate_global(&api.session, &ctx, expression.trim()).map_err(eval_error)
 }
 
+/// The halted target a request's stack frame belongs to, checked: it exists, is halted and not in
+/// a source-level step, and its call stack has the frame. Returns the core and the frame count.
+fn frame_core(api: &CoreApi, target: Option<&str>, frame: u32) -> Result<(tcf::CoreInfo, usize), ApiError> {
+    let name = target.ok_or_else(|| ApiError::bad_request("a `frame` needs the `target` whose call stack it is in"))?;
+    let core = tcf::cores(&api.handle)
+        .into_iter()
+        .find(|c| c.name == name || c.idx.to_string() == name)
+        .ok_or_else(|| ApiError::not_found(format!("unknown target '{name}' (see `targets`)")))?;
+    if api.session.is_stepping(core.idx) {
+        return Err(ApiError::new(ErrorCode::Busy, format!("[{}] a source-level step of a debugger client is in progress", core.name)));
+    }
+    if !core.suspended() {
+        return Err(ApiError::new(ErrorCode::NotHalted, format!("[{}] target not halted (stack frames need a halted target)", core.name)));
+    }
+    let (frames, _) = tcf::stack_frames(&api.session, core.idx).map_err(|e| ApiError::failed(format!("[{}] cannot unwind the call stack: {e}", core.name)))?;
+    if frame as usize >= frames.len() {
+        return Err(ApiError::not_found(format!("[{}] the call stack has {} frame(s), there is no frame {frame}", core.name, frames.len())));
+    }
+    Ok((core, frames.len()))
+}
+
+/// Evaluates a request's expression: in its stack frame when it names one, else without a frame
+/// (globals, while the cores run).
+fn evaluate_req(api: &CoreApi, target: Option<&str>, frame: Option<u32>, expression: &str) -> Result<tcf::GlobalValue, ApiError> {
+    let Some(frame) = frame else { return evaluate_in(api, target, expression) };
+    if tcf::split_core(expression.trim()).1.is_some() {
+        return Err(ApiError::bad_request(format!("`{expression}`: a frame is its core's, so the expression takes no `@N`")));
+    }
+    let (core, _) = frame_core(api, target, frame)?;
+    tcf::evaluate_in_frame(&api.session, core.idx, frame as usize, expression).map_err(eval_error)
+}
+
 /// What the symbols of the request's target say about an address: code location and variable.
 pub fn lookup_address(api: &CoreApi, req: LookupAddressRequest) -> Result<AddressInfo, ApiError> {
     let (_, set) = symbol_set(api, req.target.as_deref())?;
@@ -341,7 +373,7 @@ fn per_core_children(gv: &tcf::GlobalValue, cores: &[u32], offset: usize, limit:
 
 pub fn symbol_children(api: &CoreApi, req: SymbolChildrenRequest) -> Result<SymbolChildren, ApiError> {
     let expression = req.expression.trim().to_string();
-    let gv = evaluate_in(api, req.target.as_deref(), &expression)?;
+    let gv = evaluate_req(api, req.target.as_deref(), req.frame, &expression)?;
     let syms = &gv.elf.1;
     let v = &gv.value;
     let info = syms.type_info(&v.ty);
@@ -423,6 +455,13 @@ fn read_value(api: &CoreApi, expression: String, gv: &tcf::GlobalValue) -> Resul
             let raw = gv.read(&api.session, *addr, *storage as usize).map_err(|e| ApiError::new(ErrorCode::Memory, e))?;
             (Some((*shift, *bits)), raw)
         }
+        // A variable in a frame's registers.
+        _ if gv.frame().is_some() => {
+            if size > MAX_TRANSFER {
+                return Err(ApiError::bad_request(format!("`{expression}` has {size} bytes, more than {MAX_TRANSFER}")));
+            }
+            (None, gv.load(&api.session).map_err(|e| ApiError::new(ErrorCode::Memory, e))?)
+        }
         _ => return Err(ApiError::bad_request(format!("`{expression}` has no value without a stack frame"))),
     };
     let shape = shape(syms, &v.ty, bits);
@@ -448,7 +487,7 @@ fn read_value(api: &CoreApi, expression: String, gv: &tcf::GlobalValue) -> Resul
 
 pub fn evaluate(api: &CoreApi, req: EvaluateRequest) -> Result<VariableValue, ApiError> {
     let expression = req.expression.trim().to_string();
-    let gv = evaluate_in(api, req.target.as_deref(), &expression)?;
+    let gv = evaluate_req(api, req.target.as_deref(), req.frame, &expression)?;
     read_value(api, expression, &gv)
 }
 
@@ -541,13 +580,14 @@ fn encode(syms: &Symbols, v: &symbols::expr::Value, bits: Option<(u32, u32)>, va
 
 pub fn write_variable(api: &CoreApi, req: WriteVariableRequest) -> Result<VariableValue, ApiError> {
     let expression = req.expression.trim().to_string();
-    let gv = evaluate_in(api, req.target.as_deref(), &expression)?;
+    let gv = evaluate_req(api, req.target.as_deref(), req.frame, &expression)?;
     if let Some(a) = gv.stored_at() {
         gv.global_address(&api.session, a).map_err(eval_error)?;
     }
     let bits = match (&gv.value.place, &gv.value.bytes) {
         (Place::Memory(_), None) => None,
         (Place::Bits { shift, bits, .. }, None) => Some((*shift, *bits)),
+        (Place::Register(_), None) if gv.frame().is_some() => None,
         _ => return Err(ApiError::bad_request(format!("`{expression}` is not stored on the target, so it cannot be written"))),
     };
     let info = gv.elf.1.type_info(&gv.value.ty);
@@ -555,11 +595,61 @@ pub fn write_variable(api: &CoreApi, req: WriteVariableRequest) -> Result<Variab
         return Err(ApiError::bad_request(format!("`{expression}` ({}) cannot be written", info.name.unwrap_or_default())));
     }
     let data = encode(&gv.elf.1, &gv.value, bits, &req.value).map_err(ApiError::bad_request)?;
-    let (t, addr, len) = gv.assign(&api.session, &data).map_err(eval_error)?;
-    // Core-local RAM was written through that core's view; anything else is the same for all.
-    let target = aurix_core::tricore::local_address(addr).then_some(t);
-    emit(Event::MemoryChanged { target, addr, len });
+    match gv.assign(&api.session, &data).map_err(eval_error)? {
+        tcf::Assigned::Memory { target: t, addr, len } => {
+            // Core-local RAM was written through that core's view; anything else is the same for all.
+            let target = aurix_core::tricore::local_address(addr).then_some(t);
+            emit(Event::MemoryChanged { target, addr, len });
+        }
+        tcf::Assigned::Register { target, name } => emit(Event::RegisterChanged { target, name: name.into() }),
+    }
+    // A frame's value holds the registers as they were before the write.
+    let gv = if req.frame.is_some() { evaluate_req(api, req.target.as_deref(), req.frame, &expression)? } else { gv };
     read_value(api, expression, &gv)
+}
+
+// --- list_locals -----------------------------------------------------------------------------
+
+/// Largest value `list_locals` reads; bigger ones are left to `evaluate`.
+const MAX_LOCAL_VALUE: u32 = 256;
+
+pub fn list_locals(api: &CoreApi, req: ListLocalsRequest) -> Result<LocalList, ApiError> {
+    let frame = req.frame.unwrap_or(0);
+    let (core, _) = frame_core(api, Some(&req.target), frame)?;
+    let (frames, _) = tcf::stack_frames(&api.session, core.idx).map_err(ApiError::failed)?;
+    let pc = frames.get(frame as usize).map(|f| f.pc).unwrap_or_default();
+    let function = api.session.symbols_for(&core.id).and_then(|s| s.code_location(pc, frame > 0).function);
+    let locals = tcf::frame_locals(&api.session, core.idx, frame as usize).map_err(eval_error)?;
+    let values = req.values.unwrap_or(true);
+    let items = locals
+        .into_iter()
+        .map(|l| {
+            let syms = &l.elf.1;
+            let size = syms.type_info(&l.ty).size;
+            let gv = tcf::evaluate_in_frame(&api.session, core.idx, frame as usize, &l.name);
+            let (address, bits) = match &gv {
+                Ok(gv) => {
+                    let bits = match gv.value.place {
+                        Place::Bits { shift, bits, .. } => Some((shift, bits)),
+                        _ => None,
+                    };
+                    (gv.stored_at().and_then(|a| gv.global_address(&api.session, a).ok()), bits)
+                }
+                Err(_) => (None, None),
+            };
+            let mut item = LocalVariable { variable: variable(l.name.clone(), l.name.clone(), syms, &l.ty, size, address, bits), argument: l.param, value: None, error: None };
+            match gv {
+                Err(e) => item.error = Some(eval_error(e).message),
+                Ok(_) if !values || size > MAX_LOCAL_VALUE => {}
+                Ok(gv) => match read_value(api, l.name.clone(), &gv) {
+                    Ok(v) => item.value = Some(v.value),
+                    Err(e) => item.error = Some(e.message),
+                },
+            }
+            item
+        })
+        .collect();
+    Ok(LocalList { target: core.name, frame, function, items })
 }
 
 #[cfg(test)]

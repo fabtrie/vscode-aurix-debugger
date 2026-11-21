@@ -507,11 +507,9 @@ pub fn on_write_memory(c: &mut Ctx, addr: u32, len: usize) {
 /// Reads the given trace RAM pieces (`(paragraph, length)`), for the incremental drain.
 pub fn read_pieces(c: &mut Ctx, reads: &[(usize, usize)]) -> Result<Vec<(usize, Vec<u8>)>> {
     let mut io = io(c)?;
-    let mut out = Vec::with_capacity(reads.len());
-    for &(i, n) in reads {
-        out.push((i, io.read(regs::TRAM + i as u32 * regs::PARAGRAPH, n)?));
-    }
-    Ok(out)
+    let ranges: Vec<(u32, usize)> = reads.iter().map(|&(i, n)| (regs::TRAM + i as u32 * regs::PARAGRAPH, n)).collect();
+    // One batch for all pieces.
+    Ok(reads.iter().map(|&(i, _)| i).zip(io.read_many(&ranges)?).collect())
 }
 
 /// Core `t` runs (a resume, a step, or released outside the debugger): the last recording of

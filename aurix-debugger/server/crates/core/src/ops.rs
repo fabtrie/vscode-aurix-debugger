@@ -1104,6 +1104,38 @@ pub fn read_reg(cx: &Cx, t: usize, idx: usize) -> Result<u32> {
     })
 }
 
+/// Several registers of target `t` in one transaction where the core allows it.
+pub fn read_regs(cx: &Cx, t: usize, idxs: &[usize]) -> Result<Vec<u32>> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        e.core.read_regs(&mut io, idxs)
+    })
+}
+
+/// [`read_reg`] for a frontend that shows the core registers one request at a time (the TCF
+/// Registers view): on a halted TriCore driven over its debug registers, or a halted HSM, a core
+/// register not read yet since the halt brings in all core registers not read yet, in one
+/// transaction; the view's next requests are answered from the register cache. Debug registers,
+/// running cores and probes that do their own run control (no cache) are read as by [`read_reg`].
+pub fn read_reg_of_set(cx: &Cx, t: usize, idx: usize) -> Result<u32> {
+    cx.with(|c| {
+        let (mut io, e) = c.target_io(t)?;
+        let arch = e.core.arch();
+        let cached = match &e.core {
+            Core::Tricore(_) => io.adapter.run_control().is_none(),
+            Core::CortexM(_) => true,
+            _ => false,
+        };
+        let core_reg = |i: usize| arch.regs[i].group != RegGroup::Debug;
+        if cached && e.core.state() == TargetState::Halted && arch.regs.get(idx).is_some_and(|_| core_reg(idx)) {
+            let idxs: Vec<usize> = (0..arch.regs.len()).filter(|&i| core_reg(i)).collect();
+            let k = idxs.iter().position(|&i| i == idx).unwrap_or(0);
+            return Ok(e.core.read_regs(&mut io, &idxs)?[k]);
+        }
+        e.core.read_reg(&mut io, idx)
+    })
+}
+
 pub fn write_reg(cx: &Cx, t: usize, idx: usize, value: u32) -> Result<()> {
     cx.with(|c| {
         crate::reverse::on_write_reg(c, t);

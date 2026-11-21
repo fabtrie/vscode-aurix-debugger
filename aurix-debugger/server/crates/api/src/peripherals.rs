@@ -367,11 +367,24 @@ fn reading(r: &RegisterInfo, result: Result<u64, String>, only: Option<&svd::Fie
     out
 }
 
-/// Reads registers (address, bytes), adjacent ones in one access; a failed access is retried
-/// register by register, so one unreadable register does not fail its neighbours.
+/// Host memory reads of several ranges in one batch, each with its own outcome
+/// ([`aurix_core::adapter::Io::read_ops`]).
+fn bus_reads(cx: &Cx, ranges: &[(u32, usize)]) -> Result<Vec<Result<Vec<u8>, String>>, String> {
+    let rs = cx.with(|c| c.io().map_err(|e| e.to_string())?.read_ops(ranges).map_err(|e| e.to_string()))?;
+    Ok(rs
+        .into_iter()
+        .zip(ranges)
+        .map(|(r, &(a, _))| aurix_core::adapter::check(&r, a as u64, false).map(|_| r.data).map_err(|e| e.to_string()))
+        .collect())
+}
+
+/// Reads registers (address, bytes), adjacent ones in one access; the accesses to host memory
+/// all in one batch. A failed access is retried register by register (those in host memory in
+/// one batch again), so one unreadable register does not fail its neighbours.
 fn read_registers(api: &CoreApi, regs: Vec<(u32, usize)>) -> Result<Vec<Result<Vec<u8>, String>>, ApiError> {
     api.call(move |cx| {
-        let mut out: Vec<Result<Vec<u8>, String>> = Vec::with_capacity(regs.len());
+        // Runs of adjacent registers, as index ranges into `regs`.
+        let mut runs: Vec<(usize, usize)> = Vec::new();
         let mut i = 0;
         while i < regs.len() {
             let (start, mut end) = (regs[i].0, regs[i].0 as usize + regs[i].1);
@@ -380,23 +393,77 @@ fn read_registers(api: &CoreApi, regs: Vec<(u32, usize)>) -> Result<Vec<Result<V
                 end += regs[j].1;
                 j += 1;
             }
-            match read_routed(cx, start, end - start as usize) {
-                Ok(bytes) => {
-                    for &(a, n) in &regs[i..j] {
-                        let at = (a - start) as usize;
-                        out.push(Ok(bytes[at..at + n].to_vec()));
+            runs.push((i, j));
+            i = j;
+        }
+        let span = |(i, j): (usize, usize)| (regs[i].0, (regs[j - 1].0 + regs[j - 1].1 as u32 - regs[i].0) as usize);
+        let mut out: Vec<Option<Result<Vec<u8>, String>>> = vec![None; regs.len()];
+        // Registers whose run failed, to read one by one.
+        let mut retry_bus: Vec<usize> = Vec::new();
+        let mut bus_runs: Vec<(usize, usize)> = Vec::new();
+        for &run in &runs {
+            let (start, len) = span(run);
+            match route(cx, start, len) {
+                Ok(None) => bus_runs.push(run),
+                // Served by a core of its own (HSM, SCR): read as before, run by run.
+                Ok(Some(_)) | Err(_) => match read_routed(cx, start, len) {
+                    Ok(bytes) => {
+                        for k in run.0..run.1 {
+                            let at = (regs[k].0 - start) as usize;
+                            out[k] = Some(Ok(bytes[at..at + regs[k].1].to_vec()));
+                        }
+                    }
+                    Err(e) if run.1 - run.0 == 1 => out[run.0] = Some(Err(e)),
+                    Err(_) => {
+                        for k in run.0..run.1 {
+                            out[k] = Some(read_routed(cx, regs[k].0, regs[k].1));
+                        }
+                    }
+                },
+            }
+        }
+        if !bus_runs.is_empty() {
+            let ranges: Vec<(u32, usize)> = bus_runs.iter().map(|&r| span(r)).collect();
+            match bus_reads(cx, &ranges) {
+                Ok(results) => {
+                    for ((&run, &(start, _)), res) in bus_runs.iter().zip(&ranges).zip(results) {
+                        match res {
+                            Ok(bytes) => {
+                                for k in run.0..run.1 {
+                                    let at = (regs[k].0 - start) as usize;
+                                    out[k] = Some(Ok(bytes[at..at + regs[k].1].to_vec()));
+                                }
+                            }
+                            Err(e) if run.1 - run.0 == 1 => out[run.0] = Some(Err(e)),
+                            Err(_) => retry_bus.extend(run.0..run.1),
+                        }
                     }
                 }
-                Err(e) if j - i == 1 => out.push(Err(e)),
-                Err(_) => {
-                    for &(a, n) in &regs[i..j] {
-                        out.push(read_routed(cx, a, n));
+                Err(e) => {
+                    for &run in &bus_runs {
+                        for k in run.0..run.1 {
+                            out[k] = Some(Err(e.clone()));
+                        }
                     }
                 }
             }
-            i = j;
         }
-        Ok(out)
+        if !retry_bus.is_empty() {
+            let ranges: Vec<(u32, usize)> = retry_bus.iter().map(|&k| regs[k]).collect();
+            match bus_reads(cx, &ranges) {
+                Ok(results) => {
+                    for (&k, res) in retry_bus.iter().zip(results) {
+                        out[k] = Some(res);
+                    }
+                }
+                Err(e) => {
+                    for &k in &retry_bus {
+                        out[k] = Some(Err(e.clone()));
+                    }
+                }
+            }
+        }
+        Ok(out.into_iter().map(|r| r.unwrap_or_else(|| Err("not read".into()))).collect())
     })
 }
 

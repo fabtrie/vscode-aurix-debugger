@@ -285,29 +285,49 @@ impl Tricore {
         if self.state == TargetState::Halted {
             return Ok(());
         }
+        let mut w = Vec::with_capacity(3);
         if self.run.tl1_halt && !self.is_v18() {
             // A DBGSR halt is not a debug event and pulses no BRKOUT: force TL1
             // directly so TL1 capture-and-hold stops all TL1 suspend targets.
-            io.write32_seq(&[(CBS_TLC, 0x30), (CBS_TLC, 0x0)])?;
+            w.extend([(CBS_TLC, 0x30), (CBS_TLC, 0x0)]);
         }
-        io.write32(self.csfr(DBGSR), DBGSR_HALT_REQ)?;
+        w.push((self.csfr(DBGSR), DBGSR_HALT_REQ));
+        // One message on the BlueBox: a failed TL1 pulse still halts this core.
+        io.write32_seq_packed(&w)?;
         self.reason = DebugReason::DbgRq;
         Ok(())
     }
 
+    /// Releases the halted core: the reads it needs (DBGSR for its SUSP, for a masked run ICR
+    /// and PCXI) in one batch, then the writes in order (PC, ICR, the DBGSR release), unpacked:
+    /// a failed PC or ICR write must not let the core run. The release keeps the suspend-out
+    /// signal (DBGSR.SUSP) as it is: the suspend handling sets and clears it, so a step keeps the
+    /// STMs frozen and a resume releases them together with the other cores.
     pub fn resume(&mut self, io: &mut Io, addr: Option<u32>, mode: RunMode) -> Result<()> {
         if self.state == TargetState::Running {
             return Ok(());
         }
+        let masking = self.run.irq_mask.applies(mode);
+        if !masking {
+            self.unmask_irq(io)?;
+        }
+        let mut reads = vec![self.csfr(DBGSR)];
+        if masking {
+            reads.extend([self.csfr(ICR), self.csfr(PCXI)]);
+        }
+        let v = io.read32_many(&reads)?;
+        let mut writes = Vec::with_capacity(3);
         if let Some(a) = addr {
-            io.write32(self.csfr(PC), a)?;
+            writes.push((self.csfr(PC), a));
         }
-        self.prepare_irq(io, mode)?;
-        if let (Some(ie), None) = (self.irq_saved_ie, self.irq_run) {
-            self.irq_run = Some((io.read32(self.csfr(PCXI))?, ie));
+        if masking {
+            writes.extend(self.mask_irq(v[1]));
+            if let (Some(ie), None) = (self.irq_saved_ie, self.irq_run) {
+                self.irq_run = Some((v[2], ie));
+            }
         }
-        let resume = self.resume_value(io)?;
-        io.write32(self.csfr(DBGSR), resume)?;
+        writes.push((self.csfr(DBGSR), DBGSR_RESUME | (v[0] & DBGSR_SUSP)));
+        io.write32_seq(&writes)?;
         self.invalidate();
         self.state = TargetState::Running;
         self.reason = DebugReason::NotHalted;
@@ -505,30 +525,9 @@ impl Tricore {
         Ok(halted)
     }
 
-    /// DBGSR value that releases the halt without changing the suspend-out
-    /// signal: SUSP is set and cleared only by the cfg's event handlers, so a
-    /// step keeps the STMs frozen and a resume releases them in resume-end
-    /// together with the other cores.
-    fn resume_value(&self, io: &mut Io) -> Result<u32> {
-        Ok(DBGSR_RESUME | (io.read32(self.csfr(DBGSR))? & DBGSR_SUSP))
-    }
-
     /// Whether the debugger currently holds this core's interrupts masked.
     pub fn irq_masked(&self) -> bool {
         self.irq_saved_ie.is_some()
-    }
-
-    /// Masks interrupts for a run in `mode` if `irq_mask` selects it, or
-    /// gives the application its interrupt enable back otherwise.
-    pub fn prepare_irq(&mut self, io: &mut Io, mode: RunMode) -> Result<()> {
-        if !self.run.irq_mask.applies(mode) {
-            return self.unmask_irq(io);
-        }
-        let icr = io.read32(self.csfr(ICR))?;
-        if let Some((a, v)) = self.mask_irq(icr) {
-            io.write32(a, v)?;
-        }
-        Ok(())
     }
 
     /// Notes the application's IE from `icr` for a masked run; the ICR write that clears it on
@@ -560,7 +559,8 @@ impl Tricore {
             }
         }
         if !w.is_empty() {
-            io.write32_seq(&w)?;
+            // Both writes give the application its state back: one message on the BlueBox.
+            io.write32_seq_packed(&w)?;
         }
         self.irq_saved_ie = None;
         self.irq_run = None;
@@ -768,7 +768,9 @@ impl Tricore {
         })
     }
 
-    fn program(&self, io: &mut Io, slot: usize) -> Result<()> {
+    /// The writes that put trigger `slot` into the hardware as it is in `self.triggers`: armed
+    /// (addresses first, the event last) or cleared (event first).
+    fn program_writes(&self, slot: usize) -> Vec<(u32, u32)> {
         let t = self.triggers[slot];
         if t.enable {
             let mut w = Vec::with_capacity(3);
@@ -777,15 +779,51 @@ impl Tricore {
             }
             w.push((self.csfr(trxadr(slot)), t.addr));
             w.push((self.csfr(trxevt(slot)), self.trigger_value(&t)));
+            w
+        } else {
+            self.clear_writes(slot, t.range)
+        }
+    }
+
+    /// The writes that clear trigger `slot` (and the upper one of a range): event first.
+    fn clear_writes(&self, slot: usize, range: bool) -> Vec<(u32, u32)> {
+        let mut w = vec![(self.csfr(trxevt(slot)), 0), (self.csfr(trxadr(slot)), 0)];
+        if range && slot + 1 < NUM_TRIGGERS {
+            w.push((self.csfr(trxevt(slot + 1)), 0));
+            w.push((self.csfr(trxadr(slot + 1)), 0));
+        }
+        w
+    }
+
+    /// Arming writes stop at a failure (a failed address write must leave the event unarmed);
+    /// clearing writes are packed into one BlueBox message.
+    fn program(&self, io: &mut Io, slot: usize) -> Result<()> {
+        let w = self.program_writes(slot);
+        if self.triggers[slot].enable {
             io.write32_seq(&w)
         } else {
-            let mut w = vec![(self.csfr(trxevt(slot)), 0), (self.csfr(trxadr(slot)), 0)];
-            if t.range && slot + 1 < NUM_TRIGGERS {
-                w.push((self.csfr(trxevt(slot + 1)), 0));
-                w.push((self.csfr(trxadr(slot + 1)), 0));
-            }
-            io.write32_seq(&w)
+            io.write32_seq_packed(&w)
         }
+    }
+
+    /// Writes the arming sequences of several triggers: as many per transaction as one TAS
+    /// packet takes, a trigger's writes never split over two (the packets of one batch all run,
+    /// even after a failure in an earlier one: an event armed after its failed address write
+    /// would halt at a stale address).
+    fn write_slots(io: &mut Io, slots: Vec<Vec<(u32, u32)>>) -> Result<()> {
+        let max = io.adapter.limits().max_num_rw.max(1);
+        let mut seq: Vec<(u32, u32)> = Vec::new();
+        for s in slots {
+            if !seq.is_empty() && seq.len() + s.len() > max {
+                io.write32_seq(&seq)?;
+                seq.clear();
+            }
+            seq.extend(s);
+        }
+        if !seq.is_empty() {
+            io.write32_seq(&seq)?;
+        }
+        Ok(())
     }
 
     /// Hardware breakpoint; `len > 4` uses a range over two triggers.
@@ -873,7 +911,7 @@ impl Tricore {
             }
             if halt {
                 // Clear the halt-after-reset trigger left in TR0.
-                io.write32_seq(&[(self.csfr(trxevt(0)), 0), (self.csfr(trxadr(0)), 0)])?;
+                io.write32_seq_packed(&self.clear_writes(0, false))?;
             }
         }
         if !self.examined {
@@ -898,39 +936,47 @@ impl Tricore {
     /// address); [`Tricore::resume_triggers`] puts them back as they were.
     pub fn suspend_triggers(&mut self, io: &mut Io) -> Result<Vec<Trigger>> {
         let saved = self.triggers.to_vec();
+        self.clear_enabled(io)?;
+        Ok(saved)
+    }
+
+    /// Clears every enabled trigger, in one packed sequence (event first per trigger).
+    fn clear_enabled(&mut self, io: &mut Io) -> Result<()> {
+        let mut w = Vec::new();
         for i in 0..NUM_TRIGGERS {
             if self.triggers[i].enable {
                 self.triggers[i].enable = false;
-                io.write32_seq(&[(self.csfr(trxevt(i)), 0), (self.csfr(trxadr(i)), 0)])?;
+                w.extend(self.clear_writes(i, false));
             }
         }
-        Ok(saved)
+        if w.is_empty() {
+            return Ok(());
+        }
+        io.write32_seq_packed(&w)
     }
 
     /// Ends [`Tricore::suspend_triggers`]: the triggers set meanwhile are removed, the saved
     /// ones programmed again into their slots.
     pub fn resume_triggers(&mut self, io: &mut Io, saved: &[Trigger]) -> Result<()> {
-        for i in 0..NUM_TRIGGERS {
-            if self.triggers[i].enable {
-                self.triggers[i].enable = false;
-                io.write32_seq(&[(self.csfr(trxevt(i)), 0), (self.csfr(trxadr(i)), 0)])?;
-            }
-        }
+        self.clear_enabled(io)?;
         for (i, t) in saved.iter().enumerate().take(NUM_TRIGGERS) {
             self.triggers[i] = *t;
         }
         self.restore_triggers(io)
     }
 
+    /// Re-programs all enabled triggers (after a reset cleared them), several per transaction
+    /// ([`Self::write_slots`]).
     pub fn restore_triggers(&self, io: &mut Io) -> Result<()> {
+        let mut slots = Vec::new();
         for i in 0..NUM_TRIGGERS {
             let t = self.triggers[i];
             let is_range_upper = i > 0 && self.triggers[i - 1].enable && self.triggers[i - 1].range;
             if t.enable && !is_range_upper {
-                self.program(io, i)?;
+                slots.push(self.program_writes(i));
             }
         }
-        Ok(())
+        Self::write_slots(io, slots)
     }
 
     pub fn assert_reset(&mut self) {

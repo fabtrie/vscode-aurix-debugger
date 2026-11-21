@@ -240,6 +240,21 @@ fn irq_mask_clears_ie_while_stepping_and_restores_it_on_resume() {
 }
 
 #[test]
+fn irq_mask_masks_a_step_over_run_and_a_continue_gives_ie_back() {
+    let s = server();
+    s.interp.eval("init").unwrap();
+    s.interp.eval("halt 1000").unwrap();
+    s.interp.eval(&format!("mww {ICR0:#x} 0x8000")).unwrap();
+    // The run of a step over (to a temporary breakpoint) is masked: one read batch, then the writes.
+    ops::resume_as(&s.cx(), 0, None, aurix_core::target::RunMode::StepOver).unwrap();
+    assert_eq!(icr_hw(&s), 0, "IE not masked for the step-over run");
+    s.interp.eval("halt 1000").unwrap();
+    assert_eq!(ops::read_reg(&s.cx(), 0, aurix_core::arch::REG_ICR).unwrap(), 0x8000, "the application's IE is shown");
+    s.interp.eval("resume").unwrap();
+    assert_eq!(icr_hw(&s), 0x8000, "IE not given back by a continue");
+}
+
+#[test]
 fn irq_mask_carries_a_stepped_disable_over_to_the_application() {
     let s = server();
     s.interp.eval("init").unwrap();

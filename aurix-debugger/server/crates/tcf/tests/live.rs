@@ -183,3 +183,43 @@ fn a_region_the_probe_cannot_read_becomes_a_plain_read_with_its_error() {
     });
     wait_for(|| source(&live::values(&sh, 1, "view").unwrap()[1]) == "daq");
 }
+
+#[test]
+fn memory_gets_read_together_give_what_each_gives_on_its_own() {
+    let h = server(false);
+    let sh = tcf::session(h.clone());
+    let core0 = tcf::cores(&h).into_iter().find(|c| c.idx == 0).unwrap().id;
+    let core1 = tcf::cores(&h).into_iter().find(|c| c.idx == 1).unwrap().id;
+    set_mem(&h, A, 0x1122_3344);
+    set_mem(&h, A + 8, 0x5566_7788);
+    // cpu1's scratchpad (0x6000_0000) behind the same local alias.
+    set_mem(&h, 0x6000_0100, 0x99AA_BBCC);
+    let regions = [
+        region(&core0, A, 4),
+        region(&core0, SIM_UNMAPPED.start, 4),
+        region(&core0, A + 8, 4),
+        region(&core0, HSM_PERI, 4),
+        region(&core0, A, 64),
+        // cpu0's local scratchpad alias of A, and the same through cpu1 (its own scratchpad).
+        region(&core0, 0xD000_0100, 8),
+        region(&core1, 0xD000_0100, 8),
+    ];
+    let many = live::memory_get_many(&sh, &regions.iter().map(|r| (r.ctx.clone(), r.addr, r.size)).collect::<Vec<_>>());
+    assert_eq!(many.len(), regions.len());
+    for (m, r) in many.into_iter().zip(&regions) {
+        let got = match m {
+            MemGet::Partial(Ok(p)) => (p.data, !p.unreadable.is_empty()),
+            MemGet::Op(Ok(o)) => {
+                let mut d = o.data.clone();
+                d.resize(r.size, 0);
+                (d, !o.ok())
+            }
+            MemGet::Partial(Err(_)) | MemGet::Op(Err(_)) => (Vec::new(), true),
+        };
+        let single = memory_get(&sh, r);
+        assert_eq!(got.1, single.1, "{r:?}");
+        if !got.1 {
+            assert_eq!(got.0, single.0, "{r:?}");
+        }
+    }
+}

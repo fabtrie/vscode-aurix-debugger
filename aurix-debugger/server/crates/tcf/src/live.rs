@@ -9,8 +9,8 @@
 //!   probe checks it and sends its changes, and a collector thread keeps the latest value.
 //! * **`read`**: everything else - every region on a TAS probe, winIDEA or the simulator, and on
 //!   the BlueBox core-relative regions, large ones and those its probe refused. Read when the
-//!   values are asked for, through [`memory_get`], the code `Memory.get` runs: the same accesses
-//!   at the same interval as the client's `Memory.get`s were.
+//!   values are asked for, all in one batch ([`memory_get_many`], the code a group of
+//!   `Memory.get`s runs): the same results as the client's `Memory.get`s, in one transaction.
 //!
 //! * **`trace`** (a set in trace mode): every bus region becomes a traced DAQ point: the miniMCDS
 //!   data trace records every write. The value is the one after the last write, with the count
@@ -81,6 +81,87 @@ fn route(sh: &Shared, ctx: &str, addr: u32, size: usize) -> Route {
 /// `Memory.get`'s read of `size` bytes at `addr` for context `ctx`.
 pub fn memory_get(sh: &Shared, ctx: &str, addr: u32, size: usize) -> MemGet {
     read_routed(sh, route(sh, ctx, addr, size), addr, size)
+}
+
+/// [`memory_get`] of several regions `(ctx, addr, size)`, one result each in order, in one call
+/// to the core thread: the bus reads share one batch ([`aurix_core::adapter::Io::read_ops`]: one
+/// exchange of packets on TAS, shared messages on the BlueBox) instead of a round trip each. The
+/// results are the ones the single reads would give.
+pub fn memory_get_many(sh: &Shared, regions: &[(String, u32, usize)]) -> Vec<MemGet> {
+    // The cores the contexts name, before the core thread call (`find_core` calls it itself).
+    let mut cores: HashMap<&str, Option<usize>> = HashMap::new();
+    let reqs: Vec<(Option<usize>, u32, usize)> = regions
+        .iter()
+        .map(|(ctx, addr, size)| (*cores.entry(ctx.as_str()).or_insert_with(|| find_core(&sh.handle, ctx).map(|c| c.idx)), *addr, *size))
+        .collect();
+    let n = reqs.len();
+    sh.handle
+        .call(move |cx| read_many_on_core(cx, &reqs))
+        .unwrap_or_else(|| (0..n).map(|_| MemGet::Op(Err("server stopped".to_string()))).collect())
+}
+
+fn read_many_on_core(cx: &aurix_core::Cx, reqs: &[(Option<usize>, u32, usize)]) -> Vec<MemGet> {
+    let routes: Vec<Route> = reqs
+        .iter()
+        .map(|&(idx, addr, size)| match ops::own_access_target(cx, idx, addr, size) {
+            Some(t) => Route::Own(t),
+            None if aurix_core::cortex_m::word_only(addr, size) => Route::Words,
+            None => Route::Bus,
+        })
+        .collect();
+    // The reads that go into the batch: (request, host address, as a core-relative read). A
+    // TriCore's local scratchpad alias (stack variables linked to 0xD000_0000) is its global
+    // address on the bus, read as `Core::read_memory` reads it.
+    let tricore = |t: usize| cx.with(|c| match &c.targets[t].core {
+        aurix_core::target::Core::Tricore(tc) => Some(tc.coreid),
+        _ => None,
+    });
+    let mut batched: Vec<(usize, u32, bool)> = Vec::new();
+    for (k, r) in routes.iter().enumerate() {
+        let (_, addr, size) = reqs[k];
+        match *r {
+            Route::Bus => batched.push((k, addr, false)),
+            Route::Own(t) if size > 0 => {
+                if let Some(coreid) = tricore(t) {
+                    batched.push((k, aurix_core::tricore::global_address(coreid, addr), true));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out: Vec<Option<MemGet>> = (0..reqs.len()).map(|_| None).collect();
+    if !batched.is_empty() {
+        let ranges: Vec<(u32, usize)> = batched.iter().map(|&(k, a, _)| (a, reqs[k].2)).collect();
+        match cx.with(|c| -> Result<Vec<tas::OpResult>, String> { c.io().map_err(|e| e.to_string())?.read_ops(&ranges).map_err(|e| e.to_string()) }) {
+            Ok(rs) => {
+                for (&(k, a, partial), r) in batched.iter().zip(rs) {
+                    out[k] = Some(if partial {
+                        // As `Io::read` of the global address: the whole range or its error.
+                        MemGet::Partial(aurix_core::adapter::check(&r, a as u64, false).map(|_| PartialRead { data: r.data, unreadable: Vec::new() }).map_err(|e| e.to_string()))
+                    } else {
+                        MemGet::Op(Ok(r))
+                    });
+                }
+            }
+            Err(e) => {
+                for &(k, _, partial) in &batched {
+                    out[k] = Some(if partial { MemGet::Partial(Err(e.clone())) } else { MemGet::Op(Err(e.clone())) });
+                }
+            }
+        }
+    }
+    for (k, r) in routes.into_iter().enumerate() {
+        if out[k].is_some() {
+            continue;
+        }
+        let (_, addr, size) = reqs[k];
+        match r {
+            Route::Own(t) => out[k] = Some(MemGet::Partial(ops::read_memory_partial_as(cx, t, addr, size).map_err(|e| e.to_string()))),
+            Route::Words => out[k] = Some(MemGet::Partial(ops::read_memory_partial(cx, addr, size).map_err(|e| e.to_string()))),
+            Route::Bus => {}
+        }
+    }
+    out.into_iter().map(|m| m.unwrap_or_else(|| MemGet::Op(Err("not read".to_string())))).collect()
 }
 
 fn read_routed(sh: &Shared, r: Route, addr: u32, size: usize) -> MemGet {
@@ -345,7 +426,9 @@ pub fn values(sh: &Shared, owner: u64, key: &str) -> Result<Value, String> {
             .unwrap_or_default()
     };
     let mut refused: Vec<PointId> = Vec::new();
-    let mut out = Vec::with_capacity(plan.len());
+    let mut out: Vec<Value> = Vec::with_capacity(plan.len());
+    // The regions read now (slot in `out`, region, why it is not traced), all in one batch.
+    let mut reads: Vec<(usize, Region, Option<String>)> = Vec::new();
     for (r, point) in plan {
         if let Some(p) = point {
             match sources.get(&p) {
@@ -366,18 +449,26 @@ pub fn values(sh: &Shared, owner: u64, key: &str) -> Result<Value, String> {
                 }
                 Some(Source::Polled) if reasons.contains_key(&p) => {
                     // Asked to be traced, read instead: the reason goes with the value.
-                    let mut v = read_value(memory_get(sh, &r.ctx, r.addr, r.size), r.size);
-                    if let Value::Object(m) = &mut v {
-                        m.insert("reason".into(), json!(reasons[&p]));
-                    }
-                    out.push(v);
+                    reads.push((out.len(), r, Some(reasons[&p].clone())));
+                    out.push(Value::Null);
                     continue;
                 }
                 Some(Source::Refused) | None => refused.push(p),
                 _ => {}
             }
         }
-        out.push(read_value(memory_get(sh, &r.ctx, r.addr, r.size), r.size));
+        reads.push((out.len(), r, None));
+        out.push(Value::Null);
+    }
+    if !reads.is_empty() {
+        let regions: Vec<(String, u32, usize)> = reads.iter().map(|(_, r, _)| (r.ctx.clone(), r.addr, r.size)).collect();
+        for ((slot, r, reason), m) in reads.into_iter().zip(memory_get_many(sh, &regions)) {
+            let mut v = read_value(m, r.size);
+            if let (Some(reason), Value::Object(m)) = (reason, &mut v) {
+                m.insert("reason".into(), json!(reason));
+            }
+            out[slot] = v;
+        }
     }
     if !refused.is_empty() {
         // The probe will not take these: from now on they are plain reads.

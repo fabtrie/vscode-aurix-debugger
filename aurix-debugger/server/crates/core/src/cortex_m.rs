@@ -602,29 +602,61 @@ impl CortexM {
         Ok(self.read_regs(io, &[idx])?[0])
     }
 
+    /// Several core registers (DCRSR selectors) in one batch: per register the selector write,
+    /// the DHCSR read and the DCRDR read. A transfer still running at its DHCSR read (S_REGRDY
+    /// clear: the probe outran the core) makes that register and the ones after it untrusted --
+    /// their selector was written while it ran -- so they are read again one by one.
+    fn read_core_regs(&self, io: &mut Io, sels: &[u16]) -> Result<Vec<u32>> {
+        if sels.len() < 2 {
+            return sels.iter().map(|&s| self.read_core_reg(io, s)).collect();
+        }
+        let ops: Vec<(u32, Option<u32>)> = sels.iter().flat_map(|&s| [(DCRSR, Some(s as u32)), (DHCSR, None), (DCRDR, None)]).collect();
+        let v = self.run_ops(io, &ops)?;
+        let mut out = Vec::with_capacity(sels.len());
+        for (k, &s) in sels.iter().enumerate() {
+            if v[3 * k + 1] & S_REGRDY == 0 {
+                crate::log_debug!("[hsm] register {s} not ready in a batched read: it and the {} after it are read one by one", sels.len() - k - 1);
+                for &s in &sels[k..] {
+                    out.push(self.read_core_reg(io, s)?);
+                }
+                break;
+            }
+            out.push(v[3 * k + 2]);
+        }
+        Ok(out)
+    }
+
     /// Reads registers: core registers need a halted core, debug registers are memory mapped.
+    /// The debug registers share one batch, the core registers not cached since the halt another
+    /// ([`Self::read_core_regs`]).
     pub fn read_regs(&mut self, io: &mut Io, idxs: &[usize]) -> Result<Vec<u32>> {
-        let mut out = Vec::with_capacity(idxs.len());
+        let defs: Vec<&RegDef> = idxs.iter().map(|&i| CM_REGS.get(i).ok_or_else(|| other(format!("invalid register {i}")))).collect::<Result<_>>()?;
+        let dbg: Vec<u32> = defs.iter().filter(|d| d.group == RegGroup::Debug).map(|d| 0xE000_0000 | d.offset as u32).collect();
         // Raw values per DCRSR selector: the byte fields of selector 20 share one read.
-        let mut raw_by_sel: Vec<(u16, u32)> = Vec::new();
-        for &i in idxs {
-            let def = CM_REGS.get(i).ok_or_else(|| other(format!("invalid register {i}")))?;
-            let v = if def.group == RegGroup::Debug {
-                self.read32(io, 0xE000_0000 | def.offset as u32)?
-            } else {
+        let mut sels: Vec<u16> = Vec::new();
+        for (k, &i) in idxs.iter().enumerate() {
+            if defs[k].group != RegGroup::Debug {
                 self.require_halted()?;
+                let sel = defs[k].offset & 0xFF;
+                if self.cache[i].is_none() && !sels.contains(&sel) {
+                    sels.push(sel);
+                }
+            }
+        }
+        let dbg_vals = if dbg.is_empty() { Vec::new() } else { self.read32_many(io, &dbg)? };
+        let raws = self.read_core_regs(io, &sels)?;
+        let mut dbg_vals = dbg_vals.into_iter();
+        let mut out = Vec::with_capacity(idxs.len());
+        for (k, &i) in idxs.iter().enumerate() {
+            let def = defs[k];
+            let v = if def.group == RegGroup::Debug {
+                dbg_vals.next().unwrap_or(0)
+            } else {
                 match self.cache[i] {
                     Some(v) => v,
                     None => {
                         let sel = def.offset & 0xFF;
-                        let raw = match raw_by_sel.iter().find(|(s, _)| *s == sel) {
-                            Some(&(_, r)) => r,
-                            None => {
-                                let r = self.read_core_reg(io, sel)?;
-                                raw_by_sel.push((sel, r));
-                                r
-                            }
-                        };
+                        let raw = sels.iter().position(|&s| s == sel).map_or(0, |p| raws[p]);
                         let v = Self::extract(def, raw);
                         self.cache[i] = Some(v);
                         v

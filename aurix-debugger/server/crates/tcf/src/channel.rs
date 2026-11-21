@@ -36,6 +36,9 @@ const ERR_INV_ADDRESS: i64 = 17;
 const ERR_SYM_NOT_FOUND: i64 = 22;
 const ERR_INV_COMMAND: i64 = 25;
 
+/// Most `Memory.get`s read in one batch (a Variables view or Live Watch refresh is a few dozen).
+const MAX_READ_GROUP: usize = 256;
+
 /// Shared, thread-safe socket writer.
 #[derive(Clone)]
 pub struct Writer(Arc<Mutex<TcpStream>>);
@@ -126,6 +129,17 @@ pub fn run(shared: Arc<Shared>, id: u64, stream: TcpStream) {
         })
     };
     while let Some(fields) = queue.pop() {
+        if queue::is_memory_get(&fields) {
+            // The reads queued right behind it (a frontend sends a view's reads together) run
+            // with it in one batch.
+            let more = queue.pop_memory_gets(MAX_READ_GROUP - 1);
+            if !more.is_empty() {
+                let mut group = vec![fields];
+                group.extend(more);
+                ch.memory_gets(&group);
+                continue;
+            }
+        }
         ch.message(&fields);
     }
     let _ = reading.join();
@@ -668,10 +682,38 @@ impl Channel {
 
     /// Routing and reads are [`live::memory_get`]'s, which live sets read with too.
     fn mem_get(&self, a: &Args) -> Reply {
-        let ctx = a.string(0)?;
-        let addr = a.u64(1)? as u32;
-        let size = a.u64(3)? as usize;
-        let res = match live::memory_get(&self.shared, &ctx, addr, size) {
+        let (ctx, addr, size) = Self::mem_get_args(a)?;
+        Self::mem_get_reply(addr, size, live::memory_get(&self.shared, &ctx, addr, size))
+    }
+
+    fn mem_get_args(a: &Args) -> Result<(String, u32, usize), TcfError> {
+        Ok((a.string(0)?, a.u64(1)? as u32, a.u64(3)? as usize))
+    }
+
+    /// `Memory.get` commands read together ([`live::memory_get_many`]), each answered as on its
+    /// own, in order.
+    fn memory_gets(&self, group: &[Vec<String>]) {
+        let parsed: Vec<Result<(String, u32, usize), TcfError>> = group
+            .iter()
+            .map(|f| {
+                log_debug!("TCF <- Memory.get {:?}", &f[4..]);
+                Self::mem_get_args(&Args(&f[4..]))
+            })
+            .collect();
+        let regions: Vec<(String, u32, usize)> = parsed.iter().filter_map(|p| p.as_ref().ok().cloned()).collect();
+        log_debug!("TCF: {} Memory.get read in one batch", regions.len());
+        let mut results = live::memory_get_many(&self.shared, &regions).into_iter();
+        for (f, p) in group.iter().zip(parsed) {
+            let reply = p.and_then(|(_, addr, size)| match results.next() {
+                Some(m) => Self::mem_get_reply(addr, size, m),
+                None => Err(err(ERR_OTHER, "not read")),
+            });
+            self.reply(&f[1], "Memory", "get", reply);
+        }
+    }
+
+    fn mem_get_reply(addr: u32, size: usize, m: live::MemGet) -> Reply {
+        let res = match m {
             live::MemGet::Partial(r) => return Ok(Self::partial_reply(addr, size, r)),
             live::MemGet::Op(r) => r.map_err(|e| err(ERR_INV_ADDRESS, e))?,
         };
@@ -812,7 +854,7 @@ impl Channel {
         }
         let v = self
             .h()
-            .call(move |cx| ops::read_reg(cx, ti, idx).map_err(|e| e.to_string()))
+            .call(move |cx| ops::read_reg_of_set(cx, ti, idx).map_err(|e| e.to_string()))
             .unwrap_or_else(|| Err("server stopped".into()))
             .map_err(|e| err(ERR_OTHER, e))?;
         Ok(vec![String::new(), j(&B64.encode(v.to_le_bytes()))])

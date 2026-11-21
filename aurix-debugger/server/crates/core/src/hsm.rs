@@ -72,9 +72,15 @@ impl Bridge {
     }
 
     /// One access to an HSM debug register through the window (DBGBASE first).
+    /// One transaction: the read is not done if the DBGBASE write failed.
     fn read(io: &mut Io, base: u32, addr: u32) -> crate::error::Result<u32> {
-        io.write32(base + DBGBASE_OFF, addr & 0xFFFF_0000)?;
-        io.read32(Self::window(base, addr))
+        let mut b = tas::Batch::new();
+        b.write32((base + DBGBASE_OFF) as u64, addr & 0xFFFF_0000);
+        b.read32(Self::window(base, addr) as u64);
+        let r = io.batch(&b)?;
+        crate::adapter::check(&r[0], (base + DBGBASE_OFF) as u64, true)?;
+        crate::adapter::check(&r[1], Self::window(base, addr) as u64, false)?;
+        Ok(r[1].u32())
     }
 
     fn write(io: &mut Io, base: u32, writes: &[(u32, u32)]) -> crate::error::Result<()> {

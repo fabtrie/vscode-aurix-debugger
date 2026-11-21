@@ -107,7 +107,8 @@ pub fn halt_all(cx: &Cx, timeout_ms: u64) -> bool {
     } else {
         writes.extend(dbgsrs.iter().map(|&d| (d, DBGSR_HALT_REQ)));
     }
-    let wrote = cx.with(|c| c.io().and_then(|mut io| io.write32_seq(&writes)));
+    // One BlueBox message: a failed TL1 pulse or halt request does not hold back the others.
+    let wrote = cx.with(|c| c.io().and_then(|mut io| io.write32_seq_packed(&writes)));
     let mut halted = false;
     if wrote.is_ok() {
         let t0 = Instant::now();

@@ -755,10 +755,17 @@ impl DebuggerApi for CoreApi {
             if group == RegisterGroup::Core && !halted(cx, t) {
                 return Err(ApiError::new(ErrorCode::NotHalted, format!("[{name}] target not halted (core registers need a halted target)")));
             }
-            let registers = (0..arch.regs.len())
-                .filter(|&i| reg_group(arch.regs[i].group) == group)
-                .map(|i| register_value(cx, t, i))
-                .collect::<Result<_, _>>()?;
+            // All of the group in one transaction where the core allows it.
+            let idxs: Vec<usize> = (0..arch.regs.len()).filter(|&i| reg_group(arch.regs[i].group) == group).collect();
+            let values = ops::read_regs(cx, t, &idxs).map_err(api_err)?;
+            let registers = idxs
+                .iter()
+                .zip(values)
+                .map(|(&i, value)| {
+                    let r = &arch.regs[i];
+                    RegisterValue { name: r.name.into(), value, group: reg_group(r.group), description: r.description.into() }
+                })
+                .collect();
             Ok(RegisterList { target: name, registers })
         })
     }

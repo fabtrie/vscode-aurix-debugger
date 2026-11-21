@@ -594,6 +594,47 @@ impl<'a> Io<'a> {
         })
     }
 
+    /// [`Self::read_op`] of several ranges, with the result each would have on its own, in as few
+    /// transactions as their failures allow: a failed read does not fail the reads after it (on
+    /// TAS they are consequential in its packet, the BlueBox stops there), they are read again.
+    /// Word-only memory is read range by range, as [`Self::read_op`] does.
+    pub fn read_ops(&mut self, ranges: &[(u32, usize)]) -> Result<Vec<OpResult>> {
+        let mut out: Vec<Option<OpResult>> = vec![None; ranges.len()];
+        let mut todo = Vec::new();
+        for (i, &(a, n)) in ranges.iter().enumerate() {
+            if word_only(bus_address(a), n) {
+                out[i] = Some(self.read_op(a, n)?);
+            } else {
+                todo.push(i);
+            }
+        }
+        while !todo.is_empty() {
+            let mut b = Batch::new();
+            for &i in &todo {
+                b.read(bus_address(ranges[i].0) as u64, ranges[i].1);
+            }
+            let r = self.batch(&b)?;
+            let mut again = Vec::new();
+            for (k, &i) in todo.iter().enumerate() {
+                match r.get(k) {
+                    Some(res) if res.err != tas::PL0_ERR_CONSEQUENTIAL => out[i] = Some(res.clone()),
+                    _ => again.push(i),
+                }
+            }
+            if again.len() == todo.len() {
+                // Nothing came back but consequential failures: they are the results.
+                for (k, &i) in todo.iter().enumerate() {
+                    let mut res = r.get(k).cloned().unwrap_or(OpResult { err: tas::PL0_ERR_CONSEQUENTIAL, ..Default::default() });
+                    res.data.resize(ranges[i].1, 0);
+                    out[i] = Some(res);
+                }
+                break;
+            }
+            todo = again;
+        }
+        Ok(out.into_iter().map(|r| r.unwrap_or_default()).collect())
+    }
+
     /// Writes host memory as one batch op; see [`Self::read_op`]. Memory that only allows word
     /// access takes whole aligned words only: merging a partial word by read-modify-write would
     /// set or clear the flags of the other bytes in the bridge's flag registers.
@@ -739,5 +780,81 @@ mod tests {
         assert_eq!(paged_sfr(0x8F, 1, 0x90), 0x4_8F10, "P00_IOCR0");
         assert_eq!(paged_sfr(0xC7, 2, 0xC1), 0x5_4741, "T2CCU_CC0L");
         assert_eq!(paged_sfr(0xB8, 3, 0xB0), 0x5_B830, "WCAN_DATA0_CTRL");
+    }
+
+    /// Reads fail at the `bad` addresses, and as in a TAS packet every op after a failure is
+    /// consequential. Counts the batches.
+    struct Packet {
+        bad: Vec<u32>,
+        batches: usize,
+    }
+
+    impl super::Adapter for Packet {
+        fn driver_name(&self) -> &'static str {
+            "packet"
+        }
+        fn init(&mut self, _: &super::AdapterSettings) -> super::Result<super::DeviceInfo> {
+            unreachable!()
+        }
+        fn initialized(&self) -> bool {
+            true
+        }
+        fn execute(&mut self, batch: &super::Batch) -> super::Result<Vec<super::OpResult>> {
+            self.batches += 1;
+            let mut failed = false;
+            Ok(batch
+                .iter()
+                .map(|op| {
+                    let tas::BatchOp::Read { addr, len, .. } = op else { unreachable!() };
+                    let err = if failed {
+                        tas::PL0_ERR_CONSEQUENTIAL
+                    } else if self.bad.contains(&(addr as u32)) {
+                        failed = true;
+                        tas::PL0_ERR_DATA
+                    } else {
+                        tas::PL0_ERR_NO_ERROR
+                    };
+                    let ok = err == tas::PL0_ERR_NO_ERROR;
+                    super::OpResult { err, bytes_ok: if ok { len } else { 0 }, data: vec![if ok { addr as u8 } else { 0 }; len] }
+                })
+                .collect())
+        }
+        fn assert_srst(&mut self) -> super::Result<()> {
+            Ok(())
+        }
+        fn deassert_srst(&mut self, _: bool) -> super::Result<()> {
+            Ok(())
+        }
+        fn take_resets(&mut self) -> u64 {
+            0
+        }
+        fn set_speed_khz(&mut self, _: u32) -> super::Result<()> {
+            Ok(())
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn read_ops_gives_every_range_its_own_result_despite_failures() {
+        let mut a = Packet { bad: vec![0x7000_0010, 0x7000_0030], batches: 0 };
+        let ranges = [(0x7000_0000, 4), (0x7000_0010, 4), (0x7000_0020, 2), (0x7000_0030, 4), (0x7000_0040, 8)];
+        let r = super::Io::new(&mut a).read_ops(&ranges).unwrap();
+        let errs: Vec<u8> = r.iter().map(|x| x.err).collect();
+        assert_eq!(errs, [tas::PL0_ERR_NO_ERROR, tas::PL0_ERR_DATA, tas::PL0_ERR_NO_ERROR, tas::PL0_ERR_DATA, tas::PL0_ERR_NO_ERROR]);
+        assert_eq!(r[2].data, [0x20, 0x20]);
+        assert_eq!(r[4].data, [0x40; 8]);
+        assert_eq!(r[1].data.len(), 4, "a failed read keeps its size");
+        assert_eq!(a.batches, 3, "one batch, then one per failure");
+    }
+
+    #[test]
+    fn read_ops_without_failures_is_one_batch() {
+        let mut a = Packet { bad: Vec::new(), batches: 0 };
+        let ranges: Vec<(u32, usize)> = (0..20).map(|i| (0x7000_0000 + 0x100 * i, 4)).collect();
+        let r = super::Io::new(&mut a).read_ops(&ranges).unwrap();
+        assert!(r.iter().all(|x| x.ok()));
+        assert_eq!(a.batches, 1);
     }
 }

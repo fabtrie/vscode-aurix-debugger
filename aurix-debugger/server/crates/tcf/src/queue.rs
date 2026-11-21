@@ -43,6 +43,11 @@ fn is(m: &[String], list: &[(&str, &str)]) -> bool {
     command(m).is_some_and(|c| list.contains(&c))
 }
 
+/// Whether the message is a `Memory.get` command.
+pub fn is_memory_get(m: &[String]) -> bool {
+    command(m) == Some(("Memory", "get"))
+}
+
 #[derive(Default)]
 pub struct Queue {
     inner: Mutex<Inner>,
@@ -85,6 +90,19 @@ impl Queue {
         }
     }
 
+    /// Takes the `Memory.get`s waiting at the front of the queue, at most `max`, without waiting
+    /// for more: the reads a frontend sent together (a Variables view, a Live Watch refresh), to
+    /// run as one batch with the one just popped. Stops at the first other command, so nothing
+    /// changes order.
+    pub fn pop_memory_gets(&self, max: usize) -> Vec<Vec<String>> {
+        let mut g = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        while out.len() < max && g.messages.front().is_some_and(|m| is_memory_get(m)) {
+            out.extend(g.messages.pop_front());
+        }
+        out
+    }
+
     /// No more messages come; [`pop`](Self::pop) returns the rest, then `None`.
     pub fn close(&self) {
         self.inner.lock().unwrap().closed = true;
@@ -117,6 +135,19 @@ mod tests {
         assert_eq!(dropped.iter().map(|m| m[1].as_str()).collect::<Vec<_>>(), ["1", "3", "5"]);
         q.push(c("7", "Memory", "get"));
         assert_eq!(tokens(&q), ["2", "4", "6", "7"], "a read after the resume stays");
+    }
+
+    #[test]
+    fn memory_gets_at_the_front_are_taken_up_to_the_first_other_command() {
+        let q = Queue::default();
+        q.push(c("1", "Memory", "get"));
+        q.push(c("2", "Memory", "get"));
+        q.push(c("3", "Memory", "set"));
+        q.push(c("4", "Memory", "get"));
+        assert_eq!(q.pop_memory_gets(1).iter().map(|m| m[1].as_str()).collect::<Vec<_>>(), ["1"]);
+        assert_eq!(q.pop_memory_gets(10).iter().map(|m| m[1].as_str()).collect::<Vec<_>>(), ["2"]);
+        assert!(q.pop_memory_gets(10).is_empty(), "a write first: nothing taken");
+        assert_eq!(tokens(&q), ["3", "4"]);
     }
 
     #[test]

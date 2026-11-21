@@ -2,7 +2,7 @@
 
 > **Disclaimer:** A personal project, built and maintained by one developer in my own time. Not an official Infineon product and not affiliated with Infineon Technologies AG. No warranty, no promise of support or updates. Use it at your own risk.
 
-VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3), the standby controller (SCR) and the GTM MCS channels. Probes: Infineon miniWiggler/DAP or iSYSTEM BlueBox. Claude and scripts can use the same debug session at the same time.
+VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore cores, the HSM (Cortex-M3), the standby controller (SCR) and the GTM MCS channels. Probes: Infineon miniWiggler/DAP or iSYSTEM BlueBox. AI assistants (MCP) and scripts can use the same debug session at the same time.
 
 ![A multi-core debug session](vscode-aurix-tcf-debugger/media/readme/hero.png)
 
@@ -18,7 +18,7 @@ VS Code extension for debugging Infineon AURIX&trade; TC3xx devices: the TriCore
 - **Reverse debugging:** Step Back and Reverse Continue restore the core's registers and RAM, and the code runs again from there
 - **Flash and UCBs:** program ELF, HEX, S-record and binary images (only changed sectors); read, compare, edit, export and write the TC3xx UCBs
 - **Target health** in the status bar: no power, reset, no debug access, probe lost
-- **Automation:** custom toolbar actions, `monitor` Tcl commands, a debugger hub for VS Code, Claude (MCP), REST and Python
+- **Automation:** custom toolbar actions, `monitor` Tcl commands, a debugger hub for VS Code, MCP clients, REST and Python
 
 ## Requirements
 
@@ -93,10 +93,10 @@ The extension installs its debug server to `%LOCALAPPDATA%\aurix-dbg` and keeps 
 | `stopOnEntry` | Pause after connecting |
 | `ucbWrite` | Allow writing UCBs in this session (default `false`; see [UCBs](#ucbs)) |
 | **Session** | |
-| `session` | Attach to an open session (e.g. one Claude opened) instead of opening one. No flashing, no reset. |
+| `session` | Attach to an open session (e.g. one an MCP client opened) instead of opening one. No flashing, no reset. |
 | `sessionName` | Session name (default: the configuration name) |
-| `sessionLifetime` | `close` (default): close the session when debugging ends. `keep`: leave it open, e.g. for Claude. |
-| `hub`, `hubToken` | Use a debugger hub on another PC (see [Debugger hub](#debugger-hub-claude-and-scripts)) |
+| `sessionLifetime` | `close` (default): close the session when debugging ends. `keep`: leave it open, e.g. for an MCP client. |
+| `hub`, `hubToken` | Use a debugger hub on another PC (see [Debugger hub](#debugger-hub-mcp-and-scripts)) |
 | **Views** | |
 | `actions` | Custom toolbar actions (see [Debugger Actions](#debugger-actions)) |
 | `trace` | Arm an on-chip trace when the session starts (see [On-chip trace](#on-chip-trace)) |
@@ -121,7 +121,7 @@ The extension installs its debug server to `%LOCALAPPDATA%\aurix-dbg` and keeps 
 | `aurix-debugger.hub.url` | `http://127.0.0.1:3001` | Debugger hub to use |
 | `aurix-debugger.hub.token` | | Token of a hub on another PC (default: the `AURIX_HUB_TOKEN` environment variable) |
 | `aurix-debugger.hub.install` | `auto` | Keep the installed hub up to date (`off`: manage it yourself) |
-| `aurix-debugger.hub.offerAttach` | `true` | Offer to attach when Claude or a script opens a session |
+| `aurix-debugger.hub.offerAttach` | `true` | Offer to attach when an MCP client or a script opens a session |
 
 ## Using the debugger
 
@@ -300,14 +300,14 @@ Both are off by default. Turn them on in the launch configuration:
 
 More: [SCR and MCS channels](docs/scr-and-mcs.md).
 
-## Debugger hub, Claude and scripts
+## Debugger hub, MCP and scripts
 
-The debug server runs behind `aurix-hub`, a background process (port 3001) with one session per board. VS Code, Claude and scripts share a session: a breakpoint set by Claude shows in VS Code, a halt in VS Code is seen by Claude.
+The debug server runs behind `aurix-hub`, a background process (port 3001) with one session per board. VS Code, MCP clients (AI assistants) and scripts share a session: a breakpoint set over MCP shows in VS Code, a halt in VS Code is seen by the MCP client.
 
-![A breakpoint set by Claude over MCP halts the target in VS Code](vscode-aurix-tcf-debugger/media/readme/claude-session.gif)
+![A breakpoint set over MCP halts the target in VS Code](vscode-aurix-tcf-debugger/media/readme/mcp-session.gif)
 
-- **Add Debugger MCP Server to Claude Config:** lets Claude Code open sessions, flash, set breakpoints, and read variables, the call stack with locals, and peripheral registers by name.
-- **Attach to Hub Session:** attaches VS Code to a session Claude or a script opened (also offered when one opens).
+- **Add Debugger MCP Server:** writes the workspace `.mcp.json`, so an MCP client can open sessions, flash, set breakpoints, and read variables, the call stack with locals, and peripheral registers by name.
+- **Attach to Hub Session:** attaches VS Code to a session an MCP client or a script opened (also offered when one opens).
 - **Start Debugger Hub at Logon** keeps the hub running; **Show Debugger Hub Status** lists its sessions.
 - **Another PC:** to use a lab PC's probes, run `aurix-hub install --autostart --remote` there and set `aurix-debugger.hub.url` and `aurix-debugger.hub.token` here.
 

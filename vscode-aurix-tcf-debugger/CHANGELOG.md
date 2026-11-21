@@ -2,6 +2,36 @@
 
 All notable changes to the "AURIX™ Debugger" extension will be documented in this file.
 
+## 0.6.0
+
+### Added
+
+- MCP and REST: call stack, locals and parameters of a frame, the source location of the PC, address lookup, and peripheral registers by name from the SVD description (read, write fields by value name)
+- MCP `reference`: the cfg guide and the Tcl command reference, without an open session
+- attach modes for every board (`"configCommands": ["attach_mode halt", "init"]`; also passive, hot, reset_halt, reset_run)
+- trace option "and on steps": Step Over/Into/Out and instruction steps are recorded too, joined to the earlier trace, so Step Back works after a step
+- reverse debugging: the instruction trace shows the whole history, action by action ("Whole history" in the Trace panel), and the History tab shows what each checkpoint cost
+
+### Changed
+
+- **Breaking:** one generic `tc3xx_ocds.cfg` for every TC3xx board, with two examples (`tc375_lite_example.cfg` without an SBC, `tc37x_fs26_example.cfg` with an FS26) in place of `tc37x_ocds_init.cfg`; the TL1 multi-core sync, peripheral suspend, HSM start and attach moved into the debug server (`ocds sync`, `suspend add`, `hsm autostart`, `attach_mode`). Copied board cfgs need to be redone
+- **Breaking:** the HSM is a core to debug only with `tc3xx_hsm_target 1`; an HSM that boots is released after a reset without it
+- flashing goes through a RAM flash loader on cpu0: much faster, above all over the BlueBox
+- faster halts and steps: the Variables, Live Watch and Registers views read in batches, an instruction step over the BlueBox takes three probe messages instead of about a dozen, and reverse debugging needs far fewer probe accesses per action
+- peripheral suspend is written as soon as a module can take it, also while the application runs, instead of at the next halt
+- the Peripheral view gets its definitions from the debug server; the extension no longer unpacks the SVD files into a 100+ MB cache folder
+
+### Fixed
+
+- a reset during a long Tcl command or wait was answered only after it, so the application started without seeing the debugger
+- a failed reset made the next one skip the reset and halt in the application
+- a halting reset over TAS that lost its halt now resets again (at most twice)
+- after a halting reset the bootloader could hang waiting for the HSM
+- halted TL1 cores were shown running in VS Code after a Step Back
+- the trace set to arm on every run by the launch configuration showed as off in the Trace panel, and missed the run to the first breakpoint
+- the FS26 watchdog disarm no longer depends on application variables of the running build
+- reading SCR or HSM peripherals without their target read unrelated system bus addresses; refused ENDINIT-protected writes now say why
+
 ## 0.5.0
 
 ### Added

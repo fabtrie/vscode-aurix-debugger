@@ -188,3 +188,47 @@ fn auto_set_while_running_arms_at_once() {
     assert_eq!(st["last"]["earlier_paragraphs"], 0, "{st}");
     json(&s, "mcds auto off -json");
 }
+
+#[test]
+fn auto_with_steps_records_steps_and_a_source_step_as_one() {
+    let s = board_running();
+    tcl(&s, "halt").unwrap();
+    // Without -steps: a step leaves the last recording behind (it no longer ends at the core).
+    let v = json(&s, "mcds auto -program -stop halt -json");
+    assert_eq!(v["steps"], Value::Bool(false), "{v}");
+    tcl(&s, "resume").unwrap();
+    tcl(&s, "halt").unwrap();
+    tcl(&s, "step").unwrap();
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(false), "{st}");
+    assert_eq!(st["last"]["ran_since"], "step", "{st}");
+
+    // With -steps: the step is recorded and read at its halt.
+    let v = json(&s, "mcds auto -program -stop halt -steps -json");
+    assert_eq!(v["steps"], Value::Bool(true), "{v}");
+    let before = json(&s, "mcds status -json")["last"]["stopped_ms"].clone();
+    tcl(&s, "step").unwrap();
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(false), "{st}");
+    assert_eq!(st["last"]["ran_since"], Value::Null, "{st}");
+    assert_ne!(st["last"]["stopped_ms"], before, "a new recording: {st}");
+
+    // A source step: one recording over all its instruction steps, read at its end.
+    s.cx().with(|c| {
+        c.source_steps += 1;
+        aurix_core::mcds_trace::begin_step(c, 0);
+    });
+    tcl(&s, "step").unwrap();
+    assert_eq!(json(&s, "mcds status -json")["armed"], Value::Bool(true), "still recording inside the source step");
+    tcl(&s, "step").unwrap();
+    s.cx().with(|c| {
+        c.source_steps -= 1;
+        aurix_core::mcds_trace::end_step(c, 0);
+    });
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(false), "{st}");
+    assert_eq!(st["last"]["ran_since"], Value::Null, "{st}");
+
+    let v = json(&s, "mcds auto off -json");
+    assert_eq!((v["auto"].clone(), v["steps"].clone()), (Value::Null, Value::Bool(false)), "{v}");
+}

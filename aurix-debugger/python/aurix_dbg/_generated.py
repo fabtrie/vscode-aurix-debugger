@@ -2203,15 +2203,16 @@ class GeneratedClient:
         """
         return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/arm", None, _args({"core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
 
-    def trace_auto(self, *, config: TraceConfigRequest | None = None) -> TraceData:
-        """Arm a trace automatically whenever the traced core runs (a run, not a step) and read the
-        recording when it halts, so every halt comes with the trace up to it (and its
-        instruction trace and replay). `config` null ends it; the answer is the current setting.
+    def trace_auto(self, *, config: TraceConfigRequest | None = None, steps: bool | None = None) -> TraceData:
+        """Arm a trace automatically whenever the traced core runs and read the recording when it
+        halts, so every halt comes with the trace up to it (and its instruction trace and replay).
+        Steps only with `steps`. `config` null ends it; the answer is the current setting.
 
         Args:
             config: The configuration to arm on every run (stop `halt` is the useful one); null: off.
+            steps: Record steps too: a source step (step over, into, out) as one recording, an instruction step on its own, each joined to the earlier recordings. Default: off.
         """
-        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/auto", None, _args({"config": config})))
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/auto", None, _args({"config": config, "steps": steps})))
 
     def trace_check(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
         """Check a trace configuration without arming: the resources it takes and the window to

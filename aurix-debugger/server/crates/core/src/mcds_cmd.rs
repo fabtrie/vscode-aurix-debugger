@@ -224,19 +224,26 @@ pub fn cmd_mcds(cx: &Cx, args: &[&str]) -> CmdResult {
             out(v, text)
         }
         "auto" => {
-            let rest: Vec<&str> = rest.iter().copied().filter(|x| *x != "-json").collect();
+            let steps = rest.contains(&"-steps");
+            let rest: Vec<&str> = rest.iter().copied().filter(|x| *x != "-json" && *x != "-steps").collect();
             match rest.first().copied() {
                 None => {}
-                Some("off") => cx.with(|c| c.mcds.auto = None),
+                Some("off") => cx.with(|c| {
+                    c.mcds.auto = None;
+                    c.mcds.auto_steps = false;
+                }),
                 Some(_) => {
                     let cfg = parse_config(&rest)?;
                     cfg.plan()?;
                     cx.with(|c| mt::set_auto(c, Some(cfg))).map_err(|e| e.to_string())?;
+                    cx.with(|c| c.mcds.auto_steps = steps);
                 }
             }
-            let v = json!({"auto": cx.with(|c| c.mcds.auto.as_ref().map(config_json))});
+            let (auto, steps) = cx.with(|c| (c.mcds.auto.as_ref().map(config_json), c.mcds.auto_steps));
+            let v = json!({"auto": auto, "steps": steps});
             let text = match &v["auto"] {
                 Value::Null => "off: the trace is armed by hand".to_string(),
+                cfg if steps => format!("on: armed whenever the core runs or steps ({})", cfg),
                 cfg => format!("on: armed whenever the core runs ({})", cfg),
             };
             out(v, text)

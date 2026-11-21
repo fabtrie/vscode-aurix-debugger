@@ -992,7 +992,7 @@ impl DebuggerApi for CoreApi {
     fn trace_auto(&self, req: TraceAutoRequest) -> Result<TraceData, ApiError> {
         self.check_control()?;
         let cfg = req.config.as_ref().map(trace_config).unwrap_or(serde_json::Value::Null);
-        let v = tcf::trace::auto_cmd(&self.session, &serde_json::json!({ "Config": cfg })).map_err(api_msg)?;
+        let v = tcf::trace::auto_cmd(&self.session, &serde_json::json!({ "Config": cfg, "Steps": req.steps.unwrap_or(false) })).map_err(api_msg)?;
         Ok(TraceData { data: v })
     }
 

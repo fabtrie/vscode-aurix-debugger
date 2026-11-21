@@ -76,7 +76,13 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
             5 => ("step out", RunMode::StepOut),
             _ => ("step into", RunMode::Step),
         };
-        let _ = shared.handle.call(move |cx| cx.with(|c| aurix_core::reverse::begin_scope(c, idx, kind, rm)));
+        let _ = shared.handle.call(move |cx| {
+            cx.with(|c| {
+                // Arming on run with steps: the whole step is one recording, read at its end.
+                aurix_core::mcds_trace::begin_step(c, idx);
+                aurix_core::reverse::begin_scope(c, idx, kind, rm)
+            })
+        });
         let arch = find_core(&shared.handle, &ctx).map(|c| c.arch.name);
         let result = match arch {
             Some("cortex_m") => run_arm(&shared, idx, &ctx, mode, &cancel),
@@ -93,7 +99,12 @@ pub fn start(shared: Arc<Shared>, idx: usize, ctx: String, mode: u64) {
             });
         }
         drop(scope);
-        let _ = h.call(move |cx| cx.with(|c| aurix_core::reverse::end_scope(c, idx)));
+        let _ = h.call(move |cx| {
+            cx.with(|c| {
+                aurix_core::reverse::end_scope(c, idx);
+                aurix_core::mcds_trace::end_step(c, idx);
+            })
+        });
         crate::reverse::note_last_action(&shared);
         // The forwarder still has the events of the instruction steps queued: let it drop them
         // while this core counts as stepping, before the one stop below.

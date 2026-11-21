@@ -360,7 +360,8 @@
 		vscode.postMessage({ type: 'arm' });
 	});
 	$('stopBtn').addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
-	$('auto').addEventListener('change', () => vscode.postMessage({ type: 'auto', on: $('auto').checked }));
+	$('auto').addEventListener('change', () => vscode.postMessage({ type: 'auto', on: $('auto').checked, steps: $('autoSteps').checked }));
+	$('autoSteps').addEventListener('change', () => vscode.postMessage({ type: 'auto', on: $('auto').checked, steps: $('autoSteps').checked }));
 	$('export').addEventListener('click', () => vscode.postMessage({ type: 'export' }));
 	$('save').addEventListener('click', () => vscode.postMessage({ type: 'save', name: $('saved').value }));
 	$('saved').addEventListener('change', () => {
@@ -417,6 +418,8 @@
 				break;
 			case 'auto':
 				$('auto').checked = !!m.on && !window.aurixReverse;
+				$('autoSteps').checked = !!m.on && !!m.steps && !window.aurixReverse;
+				$('autoSteps').disabled = !m.on || !!window.aurixReverse;
 				if (window.aurixReverse) break;
 				if (m.error) message(m.error, 'bad');
 				else if (m.on && !armed) message('Armed on every run: run the target; at the next halt the trace up to it is read here (Step Back replays it).', 'info');

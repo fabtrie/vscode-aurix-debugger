@@ -654,9 +654,16 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
     if cx.with(|c| c.targets[t].core.state()) != TargetState::Halted {
         return Err(Error::NotHalted(name));
     }
+    // An instruction step of its own (not inside a source step): recorded when arming on run
+    // includes steps. Before `on_run`: whether the last recording still ends here decides if the
+    // step's recording continues it.
+    let own_step = report && cx.with(|c| c.source_steps == 0);
     cx.with(|c| {
         if report {
             crate::reverse::begin_action(c, t, action_name(mode, false), mode);
+        }
+        if own_step {
+            crate::mcds_trace::begin_step(c, t);
         }
         crate::mcds_trace::on_run(c, t, "step");
         crate::reverse::note_run(c, t);
@@ -702,6 +709,9 @@ fn step_inner(cx: &Cx, t: usize, addr: Option<u32>, mode: RunMode, report: bool)
         Err(e) => Err(e),
     };
     fire(cx, t, "step-end");
+    if own_step {
+        cx.with(|c| crate::mcds_trace::end_step(c, t));
+    }
     r
 }
 

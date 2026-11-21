@@ -871,6 +871,10 @@ pub struct TraceAutoRequest {
     /// The configuration to arm on every run (stop `halt` is the useful one); null: off.
     #[serde(default)]
     pub config: Option<TraceConfigRequest>,
+    /// Record steps too: a source step (step over, into, out) as one recording, an instruction
+    /// step on its own, each joined to the earlier recordings. Default: off.
+    #[serde(default)]
+    pub steps: Option<bool>,
 }
 
 /// Reading a recording.

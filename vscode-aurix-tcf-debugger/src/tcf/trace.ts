@@ -18,6 +18,8 @@ export interface TraceConfig {
 	Timestamps?: 'tsu' | 'ticks';
 	/** Launch configuration only: arm this trace on every run instead of once. */
 	Auto?: boolean;
+	/** Launch configuration only, with `Auto`: record steps too (a source step as one recording). */
+	Steps?: boolean;
 }
 
 export class TraceCommand extends ValidatingCommand<any> {

@@ -4382,6 +4382,14 @@
             ],
             "default": null,
             "description": "The configuration to arm on every run (stop `halt` is the useful one); null: off."
+          },
+          "steps": {
+            "default": null,
+            "description": "Record steps too: a source step (step over, into, out) as one recording, an instruction\nstep on its own, each joined to the earlier recordings. Default: off.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -9599,7 +9607,7 @@
     },
     "/api/v1/sessions/{session}/trace/auto": {
       "post": {
-        "description": "Arm a trace automatically whenever the traced core runs (a run, not a step) and read the\nrecording when it halts, so every halt comes with the trace up to it (and its\ninstruction trace and replay). `config` null ends it; the answer is the current setting.",
+        "description": "Arm a trace automatically whenever the traced core runs and read the recording when it\nhalts, so every halt comes with the trace up to it (and its instruction trace and replay).\nSteps only with `steps`. `config` null ends it; the answer is the current setting.",
         "operationId": "trace_auto",
         "parameters": [
           {
@@ -9630,6 +9638,14 @@
                     ],
                     "default": null,
                     "description": "The configuration to arm on every run (stop `halt` is the useful one); null: off."
+                  },
+                  "steps": {
+                    "default": null,
+                    "description": "Record steps too: a source step (step over, into, out) as one recording, an instruction\nstep on its own, each joined to the earlier recordings. Default: off.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   }
                 },
                 "type": "object"
@@ -9660,7 +9676,7 @@
             "description": "Error"
           }
         },
-        "summary": "Arm a trace automatically whenever the traced core runs (a run, not a step) and read the recording when it halts, so every halt comes with the trace up to it (and its instruction trace and replay).",
+        "summary": "Arm a trace automatically whenever the traced core runs and read the recording when it halts, so every halt comes with the trace up to it (and its instruction trace and replay).",
         "tags": [
           "trace"
         ]

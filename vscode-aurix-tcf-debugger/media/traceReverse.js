@@ -19,7 +19,7 @@
 	function setControls() {
 		window.aurixReverse = on;
 		$('reverseBanner').hidden = !on;
-		document.querySelectorAll('#form input, #form select, #arm, #stopBtn, #auto, #save, #saved').forEach((el) => {
+		document.querySelectorAll('#form input, #form select, #arm, #stopBtn, #auto, #autoSteps, #save, #saved').forEach((el) => {
 			if (on) {
 				el.dataset.reverseOff = el.disabled ? '1' : '';
 				el.disabled = true;

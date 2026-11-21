@@ -105,22 +105,38 @@ impl Recording {
     }
 
     /// Joins `prev`, which this recording continues, in front of it: as many of the newest
-    /// paragraphs as fit beside this recording's own in one trace RAM.
+    /// paragraphs as fit beside this recording's own in one trace RAM's worth of bytes. A
+    /// paragraph counts with the bytes it holds (the last one of a recording only up to its
+    /// write pointer), so the short recordings of steps do not each use up a whole paragraph.
     fn join(&mut self, prev: Recording) {
-        let mut budget = regs::PARAGRAPHS.saturating_sub(self.paragraphs().len());
+        if self.ring && self.paragraphs().first().is_some_and(|p| p.0 != 0) {
+            // The ring went round: its start is lost, so it does not follow `prev` without a gap.
+            self.earlier = Vec::new();
+            return;
+        }
+        let mut budget = (regs::TRAM_SIZE as usize).saturating_sub(self.paragraphs().iter().map(|(_, p)| p.len()).sum());
         let own = Earlier { paragraphs: prev.paragraphs().into_iter().map(|(i, p)| (i, p.to_vec())).collect(), halt_pc: prev.halt_pc };
         let mut pieces = prev.earlier;
         pieces.push(own);
         let mut kept = Vec::new();
         for mut e in pieces.into_iter().rev() {
-            if budget == 0 {
-                break;
+            // The newest paragraphs of this piece that fit.
+            let mut n = 0;
+            for (_, p) in e.paragraphs.iter().rev() {
+                if p.len() > budget {
+                    break;
+                }
+                budget -= p.len();
+                n += 1;
             }
-            let n = e.paragraphs.len().min(budget);
+            let whole = n == e.paragraphs.len();
             e.paragraphs.drain(..e.paragraphs.len() - n);
-            budget -= n;
             if n > 0 {
                 kept.push(e);
+            }
+            // Older pieces only behind a whole one: the history stays without holes.
+            if !whole {
+                break;
             }
         }
         kept.reverse();
@@ -153,6 +169,12 @@ pub struct TraceState {
     /// The configuration last written to the MCDS: arming it again writes only the restart set
     /// ([`Plan::restart_writes`]) after checking that the MCDS still holds it ([`arm`]).
     pub configured: Option<TraceConfig>,
+    /// With [`Self::auto`]: steps are recorded too, a source step (step over, into, out) as one
+    /// recording and an instruction step on its own ([`begin_step`], [`end_step`]).
+    pub auto_steps: bool,
+    /// The core whose step is being recorded: its halts inside the step (each instruction step
+    /// of a source step) do not end the recording, [`end_step`] does.
+    pub step_scope: Option<usize>,
 }
 
 /// Why a manual trace is refused while reverse debugging is on.
@@ -333,6 +355,10 @@ pub fn release(c: &mut Ctx, owner: Owner) -> Result<()> {
 /// now, before anything can resume the core. Nothing is recorded while the core is halted (the
 /// time stamps and ticks are gated with `dcu_sus`), so the poll's delay costs nothing.
 pub fn on_halted(c: &mut Ctx, t: usize) {
+    if c.mcds.step_scope == Some(t) {
+        // A halt inside a recorded step: the step's end reads the recording.
+        return;
+    }
     let Some(a) = &c.mcds.armed else { return };
     if a.finished || !matches!(a.cfg.stop, mcds::Stop::Halt) {
         return;
@@ -430,6 +456,37 @@ pub fn auto_arm(c: &mut Ctx, t: usize) {
     }
 }
 
+/// A step of core `t` begins (a source step, or an instruction step outside one): with steps
+/// included in arming on run ([`TraceState::auto_steps`]) the trace is armed as for a run
+/// ([`auto_arm`]: joined to the last recording when the core still stands where it halted),
+/// and runs until [`end_step`].
+pub fn begin_step(c: &mut Ctx, t: usize) {
+    if !c.mcds.auto_steps || c.mcds.auto.is_none() || c.mcds.step_scope.is_some() {
+        return;
+    }
+    if c.targets.get(t).is_none_or(|e| e.core.state() != crate::target::TargetState::Halted) {
+        return;
+    }
+    auto_arm(c, t);
+    if c.mcds.armed.as_ref().is_some_and(|a| a.owner == Owner::Snapshot && !a.finished) {
+        c.mcds.step_scope = Some(t);
+    }
+}
+
+/// The step [`begin_step`] armed for has ended: its recording is read (the trace up to where the
+/// step stopped, after the earlier recordings it continues).
+pub fn end_step(c: &mut Ctx, t: usize) {
+    if c.mcds.step_scope != Some(t) {
+        return;
+    }
+    c.mcds.step_scope = None;
+    if c.mcds.armed.as_ref().is_some_and(|a| a.owner == Owner::Snapshot) {
+        if let Err(e) = stop(c, Owner::Snapshot) {
+            crate::log_warn!("trace: reading the step's recording failed: {e}");
+        }
+    }
+}
+
 /// Pushes the last trace RAM word out of a running recording (the DAQ drain, when no new data
 /// came for a while: else a rarely written variable's last write waits for the next one).
 pub fn flush(c: &mut Ctx) -> Result<()> {
@@ -478,6 +535,7 @@ pub fn on_device_reset(c: &mut Ctx) {
 pub fn on_reset(c: &mut Ctx) {
     crate::reverse::clear(c, "device reset");
     on_device_reset(c);
+    c.mcds.step_scope = None;
     if c.mcds.armed.take().is_some() {
         c.mcds.lost_by_reset = true;
     }
@@ -531,5 +589,31 @@ mod tests {
         let mut full = rec(8, 4, 0x400);
         full.join(c);
         assert!(full.earlier.is_empty());
+    }
+
+    /// A step's recording: `bytes` of messages at the start of the trace RAM.
+    fn short(bytes: usize, tag: u8, pc: u32) -> Recording {
+        let mut r = rec(1, tag, pc);
+        r.raw[bytes..].fill(0);
+        r.write_ptr = bytes as u32;
+        r
+    }
+
+    #[test]
+    fn short_recordings_count_with_their_bytes() {
+        // A run of 4 paragraphs, then 20 steps of 64 bytes each: all steps fit beside the run's
+        // newest paragraphs (20 x 64 = 1280 bytes), not one paragraph per step.
+        let mut last = rec(4, 1, 0x100);
+        for k in 0..20u32 {
+            let mut s = short(0x40, 2, 0x200 + k);
+            s.join(last);
+            last = s;
+        }
+        let steps = last.earlier.iter().filter(|e| e.paragraphs.iter().all(|(_, p)| p[0] == 2)).count();
+        assert_eq!(steps, 19, "the 19 earlier steps (the 20th is the recording itself)");
+        let run: usize = last.earlier.iter().filter(|e| e.paragraphs[0].1[0] == 1).map(|e| e.paragraphs.len()).sum();
+        assert_eq!(run, 4, "the run is kept whole: 4 x 1 KB + 20 x 64 bytes fit in 8 KB");
+        let bytes: usize = last.segments(last.halt_pc).iter().flat_map(|s| s.paragraphs.iter()).map(|(_, p)| p.len()).sum();
+        assert!(bytes <= regs::TRAM_SIZE as usize, "{bytes}");
     }
 }

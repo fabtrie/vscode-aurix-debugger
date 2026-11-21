@@ -102,6 +102,8 @@ export class TracePanel {
 	/** The recording last read (its stop time): a newer one, made by arming on run, is read too. */
 	private lastRead: number | undefined;
 	private auto = false;
+	/** Arming on every run includes steps (`mcds auto -steps`). */
+	private autoSteps = false;
 
 	private constructor(
 		private readonly panel: vscode.WebviewPanel,
@@ -261,7 +263,7 @@ export class TracePanel {
 				await this.check();
 				if (this.auto) {
 					// Arming on run follows the form.
-					await this.request('auto', { config: { ...this.config, Stop: 'halt' } }).catch(() => undefined);
+					await this.request('auto', { config: { ...this.config, Stop: 'halt' }, steps: this.autoSteps }).catch(() => undefined);
 				}
 				break;
 			case 'arm':
@@ -300,14 +302,16 @@ export class TracePanel {
 			case 'auto':
 				try {
 					// The form's configuration, stopping on the halt.
-					const r = await this.request('auto', { config: m.on ? { ...this.config, Stop: 'halt' } : null });
+					const steps = typeof m.steps === 'boolean' ? m.steps : this.autoSteps;
+					const r = await this.request('auto', { config: m.on ? { ...this.config, Stop: 'halt' } : null, steps: Boolean(m.on && steps) });
 					this.auto = Boolean(r?.Auto);
-					this.post({ type: 'auto', on: this.auto });
+					this.autoSteps = r?.Steps === true;
+					this.post({ type: 'auto', on: this.auto, steps: this.autoSteps });
 					if (this.auto && !this.poll) {
 						this.startPolling();
 					}
 				} catch (e) {
-					this.post({ type: 'auto', on: this.auto, error: e instanceof Error ? e.message : String(e) });
+					this.post({ type: 'auto', on: this.auto, steps: this.autoSteps, error: e instanceof Error ? e.message : String(e) });
 				}
 				break;
 			case 'insns':
@@ -429,9 +433,11 @@ export class TracePanel {
 			this.armed = st?.Armed === true && st?.Owner === 'snapshot';
 			// Reverse debugging records every action: its recordings are read as they come, too.
 			const auto = Boolean(st?.Auto) || st?.Reverse === true;
-			if (auto !== this.auto) {
+			const steps = st?.AutoSteps === true;
+			if (auto !== this.auto || steps !== this.autoSteps) {
 				this.auto = auto;
-				this.post({ type: 'auto', on: auto });
+				this.autoSteps = steps;
+				this.post({ type: 'auto', on: auto, steps });
 			}
 			this.post({ type: 'status', status: st });
 			const stopped = typeof st?.Last?.stopped_ms === 'number' ? st.Last.stopped_ms : undefined;
@@ -583,6 +589,7 @@ export class TracePanel {
   <button id="arm" type="button">Arm</button>
   <button id="stopBtn" type="button" class="secondary">Stop and read</button>
   <label class="inline" id="autoLabel" title="Arm this trace whenever the core runs (Continue, not a step) and stop it when the core halts: every halt comes with the trace up to it, and Step Back replays it"><input id="auto" type="checkbox"> Arm on every run, stop on halt</label>
+  <label class="inline" id="autoStepsLabel" title="With arming on every run: record steps too. A Step Over, Into or Out is one recording, an instruction step one of its own, each joined to the trace before it (up to 8 KB in all), so Step Back replays through them"><input id="autoSteps" type="checkbox" disabled> and on steps</label>
   <span class="spacer"></span>
   <button id="export" type="button" class="secondary" disabled>Export CSV</button>
 </div>

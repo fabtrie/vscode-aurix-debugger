@@ -125,10 +125,18 @@ pub fn check_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
 /// `auto {Config}` arms that configuration whenever the traced core runs (and reads the
 /// recording when it halts); `auto {Config: null}` ends it; without `Config` it only reports.
 pub fn auto_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
+    let steps = v.get("Steps").and_then(Value::as_bool);
     match v.get("Config") {
         None => {}
         Some(Value::Null) => {
-            sh.handle.call(|cx| cx.with(|c| c.mcds.auto = None)).ok_or("the debug server stopped")?;
+            sh.handle
+                .call(|cx| {
+                    cx.with(|c| {
+                        c.mcds.auto = None;
+                        c.mcds.auto_steps = false;
+                    })
+                })
+                .ok_or("the debug server stopped")?;
         }
         Some(cfg) => {
             let cfg = parse_config(sh, cfg)?;
@@ -136,8 +144,11 @@ pub fn auto_cmd(sh: &Shared, v: &Value) -> Result<Value, String> {
             sh.handle.call(move |cx| cx.with(|c| mt::set_auto(c, Some(cfg)))).ok_or("the debug server stopped")?.map_err(|e| e.to_string())?;
         }
     }
-    let auto = sh.handle.call(|cx| cx.with(|c| c.mcds.auto.as_ref().map(mcds_cmd::config_json))).ok_or("the debug server stopped")?;
-    Ok(json!({"Auto": auto}))
+    if let Some(s) = steps {
+        sh.handle.call(move |cx| cx.with(|c| c.mcds.auto_steps = s && c.mcds.auto.is_some())).ok_or("the debug server stopped")?;
+    }
+    let (auto, steps) = sh.handle.call(|cx| cx.with(|c| (c.mcds.auto.as_ref().map(mcds_cmd::config_json), c.mcds.auto_steps))).ok_or("the debug server stopped")?;
+    Ok(json!({"Auto": auto, "Steps": steps}))
 }
 
 pub fn status_cmd(sh: &Shared) -> Result<Value, String> {
@@ -148,7 +159,7 @@ pub fn status_cmd(sh: &Shared) -> Result<Value, String> {
                 let armed = c.mcds.armed.clone();
                 let last = c.mcds.last.as_ref().map(mcds_cmd::recording_json);
                 let auto = c.mcds.auto.as_ref().map(mcds_cmd::config_json);
-                let mut v = json!({"Armed": armed.is_some(), "LostByReset": c.mcds.lost_by_reset, "Last": last, "Auto": auto, "Reverse": c.reverse.enabled()});
+                let mut v = json!({"Armed": armed.is_some(), "LostByReset": c.mcds.lost_by_reset, "Last": last, "Auto": auto, "AutoSteps": c.mcds.auto_steps, "Reverse": c.reverse.enabled()});
                 if let Some(a) = armed {
                     v["Owner"] = json!(a.owner.as_str());
                     v["Config"] = mcds_cmd::config_json(&a.cfg);

@@ -16,6 +16,7 @@ TC37x only, over the miniWiggler. The trace uses the chip's miniMCDS: an 8 KB bu
 - The panel checks the configuration as you type and shows the trace resources it uses.
 - Configurations can be saved by name.
 - **Arm on every run, stop on halt** arms the trace on every Continue and reads it on halt. Every breakpoint then comes with the trace up to it, and Step Back works right away.
+- **and on steps** records steps too: a Step Over, Into or Out as one recording, an instruction step as one of its own, each joined to the trace before it (up to 8 KB in all). Step Back then replays through the steps as well. Each step costs one trace arm and read.
 
 ### Results
 
@@ -47,7 +48,7 @@ Without reverse debugging, **Step Back** and **Reverse Continue** replay the las
 "trace": { "Kind": "program", "Ranges": [{ "Function": "Motor_Update" }], "Stop": "halt" }
 ```
 
-`"trace": { "Auto": true }` turns on **Arm on every run, stop on halt**. If the application is already running when it is set (after the launch reset), the trace is armed at once, so the first breakpoint has a trace too.
+`"trace": { "Auto": true }` turns on **Arm on every run, stop on halt**; `"Steps": true` with it turns on **and on steps**. If the application is already running when it is set (after the launch reset), the trace is armed at once, so the first breakpoint has a trace too.
 
 When a run starts where the last one halted, its trace is shown after the one before, up to 8 KB in total. A Continue that only gets to the next breakpoint still shows the history before it.
 

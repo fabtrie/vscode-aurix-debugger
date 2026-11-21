@@ -167,9 +167,9 @@ api! {
     /// use it.
     op trace_arm [trace]: POST "/api/v1/trace/arm" (TraceConfigRequest) -> TraceData;
 
-    /// Arm a trace automatically whenever the traced core runs (a run, not a step) and read the
-    /// recording when it halts, so every halt comes with the trace up to it (and its
-    /// instruction trace and replay). `config` null ends it; the answer is the current setting.
+    /// Arm a trace automatically whenever the traced core runs and read the recording when it
+    /// halts, so every halt comes with the trace up to it (and its instruction trace and replay).
+    /// Steps only with `steps`. `config` null ends it; the answer is the current setting.
     op trace_auto [trace]: POST "/api/v1/trace/auto" (TraceAutoRequest) -> TraceData;
 
     /// Check a trace configuration without arming: the resources it takes and the window to

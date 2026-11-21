@@ -1294,12 +1294,12 @@ Show the register writes `mcds arm` would make, without touching the target.
 ### `mcds auto`
 
 ```
-mcds auto [off | <mcds arm options>] [-json]
+mcds auto [off | <mcds arm options> [-steps]] [-json]
 ```
 
 Arm the trace on every run of the traced core and read it at the halt.
 
-Each `resume` (not a step) arms it, each halt reads it, so every halt comes with the trace up to it, e.g. `mcds auto -program -stop halt`. Set while the core runs, it arms at once. A run that starts where the last recording halted continues it: the program trace is decoded with the earlier recordings in front, one 8 KB trace RAM's worth in all. `off` ends it; without arguments, show the setting. A trace another owner uses or that is still recording is left alone.
+Each `resume` (not a step) arms it, each halt reads it, so every halt comes with the trace up to it, e.g. `mcds auto -program -stop halt`. Set while the core runs, it arms at once. A run that starts where the last recording halted continues it: the program trace is decoded with the earlier recordings in front, one 8 KB trace RAM's worth in all. `-steps`: steps are recorded too, a source step (step over, into, out) as one recording and an instruction step on its own, each continuing the earlier ones. `off` ends it; without arguments, show the setting. A trace another owner uses or that is still recording is left alone.
 
 ### `mcds status`
 

@@ -506,6 +506,15 @@ fn trace(http: &Http, vs: &mut Tcf) {
     assert_eq!(serde_json::from_str::<Value>(&r[1]).unwrap()["Done"], true, "{r:?}");
     let r = vs.command("AurixTrace", "stop", &[]);
     assert_eq!(r[0], "", "{r:?}");
+    // Arming on every run, steps included, as the launch configuration sets it.
+    let r = vs.command("AurixTrace", "auto", &[json!({ "Config": { "Stop": "halt" }, "Steps": true })]);
+    let v: Value = serde_json::from_str(&r[1]).unwrap();
+    assert_eq!((v["Steps"].as_bool(), v["Auto"]["stop"].as_str()), (Some(true), Some("halt")), "{r:?}");
+    let st: Value = serde_json::from_str(&vs.command("AurixTrace", "status", &[])[1]).unwrap();
+    assert_eq!(st["AutoSteps"], true, "{st}");
+    let r = vs.command("AurixTrace", "auto", &[json!({ "Config": null })]);
+    let v: Value = serde_json::from_str(&r[1]).unwrap();
+    assert_eq!((v["Auto"].is_null(), v["Steps"].as_bool()), (true, Some(false)), "{r:?}");
 
     // A traced DAQ point: read until the trace is set up, then every write with its target time.
     let mut ws = Ws::connect(http.0, &[]).unwrap();

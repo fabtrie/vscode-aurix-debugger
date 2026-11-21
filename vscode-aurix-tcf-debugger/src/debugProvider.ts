@@ -2705,11 +2705,11 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 		if (!cfg || typeof cfg !== 'object') {
 			return;
 		}
-		const { Auto: auto, ...config } = cfg as TraceConfig;
+		const { Auto: auto, Steps: steps, ...config } = cfg as TraceConfig;
 		if (auto) {
 			try {
-				await this.tcfClient.sendCommand(new TraceCommand('auto', { Config: { Stop: 'halt', ...config } }));
-				this.sendEvent(new OutputEvent('Trace armed on every run (launch configuration).\n', 'console'));
+				await this.tcfClient.sendCommand(new TraceCommand('auto', { Config: { Stop: 'halt', ...config }, Steps: steps === true }));
+				this.sendEvent(new OutputEvent(`Trace armed on every run${steps === true ? ' and step' : ''} (launch configuration).\n`, 'console'));
 				// The Trace panel read the trace state when the session started, before this.
 				this.sendEvent(new Event('aurix/traceChanged'));
 			} catch (e) {
@@ -2718,7 +2718,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 		try {
-			await this.tcfClient.sendCommand(new TraceCommand('arm', cfg));
+			await this.tcfClient.sendCommand(new TraceCommand('arm', config));
 			this.sendEvent(new OutputEvent('Trace armed from the launch configuration.\n', 'console'));
 			this.sendEvent(new Event('aurix/traceChanged'));
 		} catch (e) {
@@ -5167,7 +5167,7 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 				}
 				const arg = op === 'arm' || op === 'check' ? args?.config ?? {}
 					: op === 'read' ? { Max: args?.max }
-					: op === 'auto' ? (args && 'config' in args ? { Config: args.config ?? null } : {})
+					: op === 'auto' ? (args && 'config' in args ? { Config: args.config ?? null, Steps: args.steps === true } : {})
 					: op === 'insns' ? { From: args?.from ?? 0, Count: args?.count ?? 500, Scope: args?.scope }
 					: op === 'regs' ? { At: args?.at, Scope: args?.scope }
 					: op === 'find' ? { Query: String(args?.query ?? ''), From: args?.from, Back: Boolean(args?.back), Scope: args?.scope }

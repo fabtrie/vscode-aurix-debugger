@@ -48,7 +48,11 @@ pub fn start(shared: Arc<Shared>) {
                     // Any core may have run (TL1-gated steps run all cores).
                     shared.stacks.lock().unwrap().clear();
                     crate::trace_insns::end_replay(&shared, None);
-                    if !shared.any_stepping() {
+                    // A halt the core already left is not reported: a TL1 group halt of the other
+                    // cores, when the core that stopped them had a breakpoint whose condition was
+                    // false and its resume released them all again (an earlier event here).
+                    let still = shared.handle.call(move |cx| ops::state(cx, target).0) == Some(aurix_core::target::TargetState::Halted);
+                    if !shared.any_stepping() && still {
                         halted(&shared, target, reason, pc, true);
                         crate::reverse::note_last_action(&shared);
                     }

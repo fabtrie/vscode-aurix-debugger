@@ -345,7 +345,9 @@ class FieldValueName:
 
 @dataclass
 class GlobalList:
-    """One page of the globals that match a query, sorted by name."""
+    """One page of the globals that match a query, sorted by name; then, for a path query, the
+    matching members or elements in declaration or index order. For a `search`, the best matches
+    first."""
 
     items: list[VariableInfo]
     offset: int
@@ -602,9 +604,20 @@ class LocalVariable:
     """Bit field: position of its least significant bit in the storage unit at `address`."""
     bit_size: int | None = None
     """Bit field: width in bits."""
+    context: bool | None = None
+    """Not a match itself: an ancestor of a match on the same `list_globals` `search` page,
+    there so that the matches can be shown as a tree. Context items come before the first
+    match below them, once per page, and count toward neither `limit` nor `total`. Left out
+    when false."""
     error: str | None = None
     """Why there is no value: e.g. its location is not available at the frame's PC (optimized
     out), or its memory cannot be read."""
+    parent: str | None = None
+    """The `expression` of the variable this is a member or element of, exactly as that one's
+    own `expression` reads (`g_s.a@2` -> `g_s@2`, `${E0/GV:12}.x` -> `${E0/GV:12}`), so a
+    client can nest items by it. Set for members and elements in `list_globals` (`search`
+    and paths in `query`) and `symbol_children` results (there the request's `expression`);
+    left out for globals."""
     per_core: bool | None = None
     """A group rather than one variable: it is in core-local RAM, which every TriCore core has
     its own of, and its symbol file is not assigned to exactly one core (`load_symbols`
@@ -631,7 +644,9 @@ class LocalVariable:
             address=d.get("address"),
             bit_offset=d.get("bit_offset"),
             bit_size=d.get("bit_size"),
+            context=d.get("context"),
             error=d.get("error"),
+            parent=d.get("parent"),
             per_core=d.get("per_core"),
             unit=d.get("unit"),
             value=d.get("value"),
@@ -1656,6 +1671,17 @@ class VariableInfo:
     """Bit field: position of its least significant bit in the storage unit at `address`."""
     bit_size: int | None = None
     """Bit field: width in bits."""
+    context: bool | None = None
+    """Not a match itself: an ancestor of a match on the same `list_globals` `search` page,
+    there so that the matches can be shown as a tree. Context items come before the first
+    match below them, once per page, and count toward neither `limit` nor `total`. Left out
+    when false."""
+    parent: str | None = None
+    """The `expression` of the variable this is a member or element of, exactly as that one's
+    own `expression` reads (`g_s.a@2` -> `g_s@2`, `${E0/GV:12}.x` -> `${E0/GV:12}`), so a
+    client can nest items by it. Set for members and elements in `list_globals` (`search`
+    and paths in `query`) and `symbol_children` results (there the request's `expression`);
+    left out for globals."""
     per_core: bool | None = None
     """A group rather than one variable: it is in core-local RAM, which every TriCore core has
     its own of, and its symbol file is not assigned to exactly one core (`load_symbols`
@@ -1678,6 +1704,8 @@ class VariableInfo:
             address=d.get("address"),
             bit_offset=d.get("bit_offset"),
             bit_size=d.get("bit_size"),
+            context=d.get("context"),
+            parent=d.get("parent"),
             per_core=d.get("per_core"),
             unit=d.get("unit"),
         )
@@ -2505,23 +2533,34 @@ class GeneratedClient:
         """
         return PeripheralWritten.from_dict(self._call("PUT", self._session_path() + f"/peripherals/{quote(str(path), safe='')}/value", None, _args({"value": value})))
 
-    def list_globals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None, target: str | None = None) -> GlobalList:
+    def list_globals(self, *, limit: int | None = None, offset: int | None = None, query: str | None = None, search: str | None = None, target: str | None = None) -> GlobalList:
         """List the global and static variables of the loaded symbols, filtered by a name pattern, one
         page at a time.
 
         The search runs on the server and stays fast for an ELF with 10^5 globals. Each item says
         whether a DAQ point can sample it and gives the expression to sample it by. A variable in
         core-local RAM whose file is not assigned to exactly one core is a `per_core` group: its
-        children are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ... Fails with
-        `not_found` when no symbols are loaded (`load_symbols`).
+        children are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ...
+
+        A query with a `.` or `[` also finds members and elements by their path
+        (`Drive_Counter.Stamp*`, `g_buf[3]`): the part before the last separator is evaluated as
+        `symbol_children` evaluates it, and the last segment is matched against its children.
+        These hits come after the globals, carry the whole path as `name` and `expression`, and a
+        parent that does not resolve finds nothing.
+
+        `search` is for a search box: it finds globals and the members of struct globals by any
+        part of their name (`DriveCounterStamp` finds `Drive_Counter_0.DriveCounterStamp`), best
+        matches first, and stays fast for 10^5 globals with 10^5 members. Fails with `not_found`
+        when no symbols are loaded (`load_symbols`).
 
         Args:
             limit: Return at most this many (default 100, at most 10000).
             offset: Skip this many matches (default 0).
-            query: Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one character. `*speed*` finds every name containing `speed`. Default: all globals.
+            query: Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one character. `*speed*` finds every name containing `speed`. Default: all globals.  With a `.` or `[`, members and elements are found too: the part before the last one is a C expression (no wildcards), the last segment a glob for a member name or an element index. Leading `*` belong to the last segment, so `*g_motor.spe*` finds the members of `g_motor` whose names contain `spe`; `g_buf[1*` finds the elements whose index starts with 1, and a closing `]` makes the index exact. A wildcard in the parent (`*.speed`) is not searched; `search` is the way to find members by name alone.
+            search: Search-box text instead of a glob: finds globals and the members of struct globals, best matches first. A name matches when it contains the text (case-insensitive), when `*` and `?` make it match, or when the text is a run of beginnings of its words (`dcs` for `DriveCounterStamp`); then come names whose source file contains the text, or whose address starts with a `0x...` text. `DriveCounterStamp` finds `Drive_Counter_0.DriveCounterStamp`. A text with `.` or `[` also finds array elements and other children the search does not hold, by evaluating the part before the last one (`g_buf[3]`, `${E0/GV:12}.x`, `g_s.a@2`). Members carry their whole path as `name`. An empty text lists the globals by name, then the members. Not together with `query`.  Each member and element names its parent's expression in `parent`; ancestors of a match that are not matches on the page come along as `context` items, so the page can be shown as a tree: `DriveCounterStamp` gives `Drive_Counter_0` (context) and `Drive_Counter_0.DriveCounterStamp` (parent `Drive_Counter_0`).
             target: Symbols of this target (name or index); default: the first core that has symbols.
         """
-        return GlobalList.from_dict(self._call("GET", self._session_path() + "/globals", _args({"limit": limit, "offset": offset, "query": query, "target": target}), None))
+        return GlobalList.from_dict(self._call("GET", self._session_path() + "/globals", _args({"limit": limit, "offset": offset, "query": query, "search": search, "target": target}), None))
 
     def symbol_children(self, *, expression: str, frame: int | None = None, limit: int | None = None, offset: int | None = None, target: str | None = None) -> SymbolChildren:
         """List the members of a struct or union, or the elements of an array, that an expression

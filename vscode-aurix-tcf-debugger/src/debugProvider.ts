@@ -54,7 +54,7 @@ import {
 } from './tcf-all';
 import { GetChildrenRegistersCommand, GetContextRegistersCommand, GetRegistersCommand, SetRegistersCommand } from './tcf/registers';
 import { TCL_SERVICE, TclEvalCommand } from './tcf/tcl';
-import { GetMemberPathsAurixTargetCommand, TargetHealth } from './tcf/aurixtarget';
+import { SearchSymbolsAurixTargetCommand, TargetHealth } from './tcf/aurixtarget';
 import { AssignExpressionsCommand, CreateExpressionsCommand, DisposeExpressionsCommand, EvaluateExpressionsCommand, GetContextExpressionsCommand } from './tcf/expressions';
 import { FindByAddrSymbolsCommand, FindByNameSymbolsCommand, GetChildrenSymbolsCommand, GetContextSymbolsCommand } from './tcf/symbols';
 import { encodeVariableValue } from './variables/encode';
@@ -5312,22 +5312,17 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 			return;
 		}
 
-		if (command === 'aurix/variableSymbols') {
-			const variables = this.getElfSymbols().variables;
-			const symbols = variables.map(s => ({ name: s.name, address: `0x${s.address.toString(16)}`, size: s.size, file: s.file }));
-			// The members of the struct globals (from the server's debug info), so that a member is
-			// found by its name too; each after the variables, with the file of its variable.
-			const files = new Map(variables.map(s => [s.name, s.file]));
-			const members = await this.tcfClient.sendCommand(new GetMemberPathsAurixTargetCommand('')).catch((e) => {
-				this.tcfLogger.log(`[dap] no struct members for the variable picker: ${AurixTCFDebugSession.formatError(e)}`);
-				return [];
-			});
-			for (const m of members) {
-				const root = m.expression.slice(0, m.expression.indexOf('.'));
-				symbols.push({ name: m.expression, address: `0x${m.address.toString(16)}`, size: m.size, file: files.get(root) });
+		if (command === 'aurix/searchVariables') {
+			// The variable picker asks as the user types: the server searches the globals and the
+			// members of the struct globals and answers with the best matches only.
+			try {
+				const text = typeof args?.text === 'string' ? args.text : '';
+				const limit = typeof args?.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 300;
+				response.body = await this.tcfClient.sendCommand(new SearchSymbolsAurixTargetCommand('', text, limit));
+				this.sendResponse(response);
+			} catch (e) {
+				this.sendErrorResponse(response, 0, '{message}', { message: AurixTCFDebugSession.formatError(e) });
 			}
-			response.body = { symbols };
-			this.sendResponse(response);
 			return;
 		}
 

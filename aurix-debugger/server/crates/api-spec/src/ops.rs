@@ -329,8 +329,18 @@ api! {
     /// The search runs on the server and stays fast for an ELF with 10^5 globals. Each item says
     /// whether a DAQ point can sample it and gives the expression to sample it by. A variable in
     /// core-local RAM whose file is not assigned to exactly one core is a `per_core` group: its
-    /// children are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ... Fails with
-    /// `not_found` when no symbols are loaded (`load_symbols`).
+    /// children are the copies of the cores, `CRASH_state@0`, `CRASH_state@1`, ...
+    ///
+    /// A query with a `.` or `[` also finds members and elements by their path
+    /// (`Drive_Counter.Stamp*`, `g_buf[3]`): the part before the last separator is evaluated as
+    /// `symbol_children` evaluates it, and the last segment is matched against its children.
+    /// These hits come after the globals, carry the whole path as `name` and `expression`, and a
+    /// parent that does not resolve finds nothing.
+    ///
+    /// `search` is for a search box: it finds globals and the members of struct globals by any
+    /// part of their name (`DriveCounterStamp` finds `Drive_Counter_0.DriveCounterStamp`), best
+    /// matches first, and stays fast for 10^5 globals with 10^5 members. Fails with `not_found`
+    /// when no symbols are loaded (`load_symbols`).
     op list_globals [variables]: GET "/api/v1/globals" (ListGlobalsRequest) -> GlobalList;
 
     /// List the members of a struct or union, or the elements of an array, that an expression

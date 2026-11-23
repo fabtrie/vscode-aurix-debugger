@@ -65,7 +65,11 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// `symbol_children`. 12: `load_svd`, `svd`, `list_peripherals`, `describe_peripheral`,
 /// `read_peripheral`, `write_peripheral` (peripheral registers by name from the SVD description).
 /// 13: `reference` (cfg guide, Tcl command reference and cfg scripts, without a session).
-pub const API_VERSION: u32 = 13;
+/// 14: `list_globals` `search` (search-box text over globals and struct members, ranked), and
+/// member/element paths in its `query` (`g_s.a*`, `g_buf[3]`).
+/// 15: `parent` (the parent's expression) on members and elements, and `context` ancestors in
+/// `list_globals` `search` pages, to show the matches as a tree.
+pub const API_VERSION: u32 = 15;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

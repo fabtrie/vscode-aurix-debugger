@@ -1563,12 +1563,111 @@ function pickDisassemblyTarget(session: vscode.DebugSession): Promise<string | u
 
 function pickLiveWatchExpression(): Promise<string | undefined> {
 	const session = vscode.debug.activeDebugSession;
-	return pickSymbolOrText({
+	return pickSearchedVariableOrText({
 		title: 'Add Live Watch Expression',
 		placeholder: 'Pick a variable or type an expression, e.g. counter_6 or *(uint32_t*)0x70000044',
 		typedDescription: 'Add expression',
 		session: session?.type === 'aurixdbg' ? session : undefined,
-		symbolsRequest: 'aurix/variableSymbols',
+	});
+}
+
+/** Rows a search shows: the server ranks, so the best are among them. */
+const VARIABLE_SEARCH_LIMIT = 300;
+/** Typing pauses this long before the server is asked, so fast typing asks once. */
+const VARIABLE_SEARCH_DELAY_MS = 40;
+
+type VariableItem = vscode.QuickPickItem & { expression?: string };
+
+/**
+ * Quick pick of the program's variables and struct members that also accepts any typed text.
+ * The server searches as the user types (`aurix/searchVariables`) and sends the best matches
+ * only, so the list stays short however large the program is. The typed text is offered first
+ * unless a variable has exactly that name.
+ */
+function pickSearchedVariableOrText(options: {
+	title: string;
+	placeholder: string;
+	typedDescription: string;
+	session: vscode.DebugSession | undefined;
+}): Promise<string | undefined> {
+	const qp = vscode.window.createQuickPick<VariableItem>();
+	qp.title = options.title;
+	qp.placeholder = options.placeholder;
+	qp.matchOnDescription = true;
+	// The text the shown items were searched for, and the number of the latest request.
+	let shownFor: string | undefined;
+	let latest = 0;
+	let timer: NodeJS.Timeout | undefined;
+	const show = (text: string, total: number, hits: Array<{ name: string; expression: string; address?: number; size: number; file?: string }>) => {
+		// The server matched already: alwaysShow keeps the quick pick from filtering them again.
+		const items: VariableItem[] = hits.map((h) => ({
+			label: h.name,
+			description: [
+				h.address !== undefined ? `0x${h.address.toString(16)}` : undefined,
+				h.size ? `${h.size} byte${h.size === 1 ? '' : 's'}` : undefined,
+				h.file ? path.basename(h.file.replace(/\\/g, '/')) : undefined,
+			].filter(Boolean).join(' · '),
+			alwaysShow: true,
+			expression: h.expression,
+		}));
+		const exact = items.some((i) => i.label === text || i.expression === text);
+		const list: VariableItem[] = text && !exact ? [{ label: text, description: options.typedDescription, alwaysShow: true }, ...items] : items;
+		if (total > hits.length) {
+			list.push({ label: `${total - hits.length} more: keep typing to narrow`, kind: vscode.QuickPickItemKind.Separator });
+		}
+		qp.items = list;
+		shownFor = text;
+	};
+	const search = () => {
+		timer = undefined;
+		const text = qp.value.trim();
+		if (!options.session) {
+			show(text, 0, []);
+			return;
+		}
+		const mine = ++latest;
+		qp.busy = true;
+		void Promise.resolve(options.session.customRequest('aurix/searchVariables', { text, limit: VARIABLE_SEARCH_LIMIT }))
+			.then((r) => {
+				if (mine === latest) {
+					show(text, typeof r?.total === 'number' ? r.total : 0, Array.isArray(r?.items) ? r.items : []);
+				}
+			})
+			.catch(() => {
+				if (mine === latest) {
+					show(text, 0, []);
+				}
+			})
+			.finally(() => {
+				if (mine === latest) {
+					qp.busy = false;
+				}
+			});
+	};
+	return new Promise((resolve) => {
+		qp.onDidChangeValue(() => {
+			if (timer) {
+				clearTimeout(timer);
+			}
+			timer = setTimeout(search, VARIABLE_SEARCH_DELAY_MS);
+		});
+		qp.onDidAccept(() => {
+			const text = qp.value.trim();
+			const picked = qp.selectedItems[0];
+			// Accepted before the list caught up with the text: the text is what the user means.
+			resolve(picked && shownFor === text ? picked.expression ?? picked.label : text || undefined);
+			qp.hide();
+		});
+		qp.onDidHide(() => {
+			if (timer) {
+				clearTimeout(timer);
+			}
+			latest++;
+			resolve(undefined);
+			qp.dispose();
+		});
+		qp.show();
+		search();
 	});
 }
 

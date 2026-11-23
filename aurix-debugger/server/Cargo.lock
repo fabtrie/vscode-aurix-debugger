@@ -1296,6 +1296,7 @@ dependencies = [
  "isa",
  "jim",
  "mcds",
+ "memchr",
  "object",
  "openocd-tcl",
  "orti",

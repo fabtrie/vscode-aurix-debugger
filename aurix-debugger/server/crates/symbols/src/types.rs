@@ -112,11 +112,16 @@ pub struct MemberPath {
     pub address: u32,
     pub size: u32,
     pub global: usize,
+    /// The member path of the member this one is in, `None` for a member of the global itself.
+    pub parent: Option<usize>,
+    /// The member's type, and (bit offset, bit size) of a bit field.
+    pub ty: TypeId,
+    pub bits: Option<(u32, u32)>,
 }
 
 /// Nesting depth and number of the member paths of an ELF, as a guard against huge programs.
-const MEMBER_PATH_DEPTH: u32 = 8;
-const MEMBER_PATHS_MAX: usize = 200_000;
+pub const MEMBER_PATH_DEPTH: u32 = 8;
+pub const MEMBER_PATHS_MAX: usize = 200_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberInfo {
@@ -535,7 +540,7 @@ impl Symbols {
             }
             let ty = self.global_type(i);
             if self.type_info(&ty).class == TypeClass::Composite {
-                self.walk_members(&ty, &g.name, g.addr, i, 0, &mut out);
+                self.walk_members(&ty, &g.name, g.addr, i, None, 0, &mut out);
             }
             if out.len() >= MEMBER_PATHS_MAX {
                 out.truncate(MEMBER_PATHS_MAX);
@@ -545,21 +550,23 @@ impl Symbols {
         out
     }
 
-    fn walk_members(&self, ty: &TypeId, path: &str, addr: u32, global: usize, depth: u32, out: &mut Vec<MemberPath>) {
+    #[allow(clippy::too_many_arguments)]
+    fn walk_members(&self, ty: &TypeId, path: &str, addr: u32, global: usize, parent: Option<usize>, depth: u32, out: &mut Vec<MemberPath>) {
         if depth >= MEMBER_PATH_DEPTH || out.len() >= MEMBER_PATHS_MAX {
             return;
         }
         for m in self.members(ty) {
             let address = addr.wrapping_add(m.offset);
             match &m.name {
-                None => self.walk_members(&m.ty, path, address, global, depth + 1, out),
+                None => self.walk_members(&m.ty, path, address, global, parent, depth + 1, out),
                 Some(n) if n.starts_with("_vptr") => {}
                 Some(n) => {
                     let expression = format!("{path}.{n}");
                     let nested = self.type_info(&m.ty).class == TypeClass::Composite;
-                    out.push(MemberPath { expression: expression.clone(), address, size: m.size, global });
+                    let me = out.len();
+                    out.push(MemberPath { expression: expression.clone(), address, size: m.size, global, parent, ty: m.ty.clone(), bits: m.bits });
                     if nested {
-                        self.walk_members(&m.ty, &expression, address, global, depth + 1, out);
+                        self.walk_members(&m.ty, &expression, address, global, Some(me), depth + 1, out);
                     }
                 }
             }

@@ -696,9 +696,16 @@ type Locals<'a> = &'a [(&'a str, bool, bool, &'a [u8])];
 
 /// [`dwarf_elf`] with `(name, start, end, locals)` functions as well.
 fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32, Locals)]) -> Vec<u8> {
+    dwarf_elf_full(vars, &[], funcs)
+}
+
+/// [`dwarf_elf_with`] with `(name, address)` variables of type `struct rec_s { struct pair_s
+/// inner; unsigned int counts[12]; unsigned int DriveCounterStamp, DriveFlag; }` as well.
+fn dwarf_elf_full(vars: &[(&str, u32, bool)], recs: &[(&str, u32)], funcs: &[(&str, u32, u32, Locals)]) -> Vec<u8> {
     // (code, tag, has children, [(attribute, form)]): compile_unit, base_type, structure_type,
-    // member, variable, subprogram, subprogram with locals, formal_parameter, local variable.
-    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 9] = [
+    // member, variable, subprogram, subprogram with locals, formal_parameter, local variable,
+    // array_type, subrange_type.
+    let abbrevs: [(u8, u8, bool, &[(u8, u8)]); 11] = [
         (1, 0x11, true, &[(0x03, 0x08)]),
         (2, 0x24, false, &[(0x03, 0x08), (0x3e, 0x0b), (0x0b, 0x0b)]),
         (3, 0x13, true, &[(0x03, 0x08), (0x0b, 0x0b)]),
@@ -708,6 +715,8 @@ fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32, Locals)]
         (7, 0x2e, true, &[(0x03, 0x08), (0x11, 0x01), (0x12, 0x06)]),
         (8, 0x05, false, &[(0x03, 0x08), (0x49, 0x13), (0x02, 0x18)]),
         (9, 0x34, false, &[(0x03, 0x08), (0x49, 0x13), (0x02, 0x18)]),
+        (10, 0x01, true, &[(0x49, 0x13)]),
+        (11, 0x21, false, &[(0x37, 0x0b)]),
     ];
     let mut abbrev = Vec::new();
     for (code, tag, children, attrs) in abbrevs {
@@ -739,10 +748,26 @@ fn dwarf_elf_with(vars: &[(&str, u32, bool)], funcs: &[(&str, u32, u32, Locals)]
         info.push(offset);
     }
     info.push(0);
-    for &(name, addr, is_pair) in vars {
+    let counts = info.len() as u32;
+    info.push(10);
+    info.extend(uint.to_le_bytes());
+    info.extend([11, 12, 0]); // 12 elements
+    let rec = info.len() as u32;
+    info.push(3);
+    cstr(&mut info, "rec_s");
+    info.push(64);
+    for (name, ty, offset) in [("inner", pair, 0u8), ("counts", counts, 8), ("DriveCounterStamp", uint, 56), ("DriveFlag", uint, 60)] {
+        info.push(4);
+        cstr(&mut info, name);
+        info.extend(ty.to_le_bytes());
+        info.push(offset);
+    }
+    info.push(0);
+    let typed = vars.iter().map(|&(n, a, is_pair)| (n, a, if is_pair { pair } else { uint }));
+    for (name, addr, ty) in typed.chain(recs.iter().map(|&(n, a)| (n, a, rec))) {
         info.push(5);
         cstr(&mut info, name);
-        info.extend(if is_pair { pair } else { uint }.to_le_bytes());
+        info.extend(ty.to_le_bytes());
         info.extend([5, 0x03]); // a 5-byte location: DW_OP_addr
         info.extend(addr.to_le_bytes());
     }
@@ -1145,6 +1170,29 @@ fn core_local_variables(http: &Http, vs: &mut Tcf) {
     let m: Vec<(&str, u64)> = c["items"].as_array().unwrap().iter().map(|i| (i["expression"].as_str().unwrap(), i["address"].as_u64().unwrap())).collect();
     assert_eq!(m, [("g_pair.a@2", 0x5000_0200), ("g_pair.b@2", 0x5000_0204)], "{c}");
     assert_eq!(eval("g_pair.b@2").1["value"], 7);
+    // Found by its path, a member is a group like its parent, or its core's copy with `@N`.
+    let l = get(&format!("/api/v1/globals?query={}", enc("*g_pair.b*")));
+    assert_eq!((l["total"].as_u64(), l["items"][0]["expression"].as_str()), (Some(1), Some("g_pair.b")), "{l}");
+    assert_eq!((l["items"][0]["per_core"].as_bool(), l["items"][0]["sampleable"].as_bool()), (Some(true), Some(false)), "{l}");
+    assert!(l["items"][0]["address"].is_null(), "{l}");
+    let l = get(&format!("/api/v1/globals?query={}", enc("g_pair.b@2")));
+    assert_eq!((l["items"][0]["expression"].as_str(), l["items"][0]["address"].as_u64()), (Some("g_pair.b@2"), Some(0x5000_0204)), "{l}");
+    assert!(l["items"][0].get("per_core").is_none(), "{l}");
+    // The same by `search`: from the index a group under its group, by evaluation (a core
+    // suffix) the copy under its core's copy of the struct.
+    let l = get(&format!("/api/v1/globals?search={}", enc("g_pair.b")));
+    let found = l["items"].as_array().unwrap();
+    assert_eq!(l["total"], 1, "{l}");
+    assert_eq!((found[0]["expression"].as_str(), found[0]["context"].as_bool(), found[0]["per_core"].as_bool()), (Some("g_pair"), Some(true), Some(true)), "{l}");
+    assert_eq!((found[1]["expression"].as_str(), found[1]["parent"].as_str(), found[1]["per_core"].as_bool()), (Some("g_pair.b"), Some("g_pair"), Some(true)), "{l}");
+    assert!(found[1]["address"].is_null(), "{l}");
+    let l = get(&format!("/api/v1/globals?search={}", enc("g_pair.b@2")));
+    let found = l["items"].as_array().unwrap();
+    assert_eq!(l["total"], 1, "{l}");
+    assert_eq!((found[0]["expression"].as_str(), found[0]["context"].as_bool(), found[0]["address"].as_u64()), (Some("g_pair@2"), Some(true), Some(0x5000_0200)), "{l}");
+    assert_eq!((found[1]["expression"].as_str(), found[1]["parent"].as_str(), found[1]["address"].as_u64()), (Some("g_pair.b@2"), Some("g_pair@2"), Some(0x5000_0204)), "{l}");
+    // `symbol_children` of a group: the copies name it as their parent.
+    assert_eq!(children("g_pair")["items"][0]["parent"], "g_pair");
     // The shadowed copy's symbol reference takes a core as well.
     let shadowed = items.iter().filter(|i| i["name"] == "CRASH_state").nth(1).unwrap()["expression"].as_str().unwrap().to_string();
     assert!(shadowed.starts_with("${E") && shadowed.ends_with("/GV:0}"), "{shadowed}");
@@ -1206,6 +1254,151 @@ fn core_local_variables(http: &Http, vs: &mut Tcf) {
     let cfg = ws.recv().expect("config frame");
     assert!(cfg["points"][0]["error"].as_str().is_some_and(|m| m.contains("CRASH_state@1")), "{cfg}");
     drop(ws);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `list_globals` finds members and elements by their path, as a search box asks for them: the
+/// parent is evaluated as `symbol_children` evaluates it, the last segment is a glob.
+fn member_paths(http: &Http, vs: &mut Tcf) {
+    let dir = std::env::temp_dir().join(format!("aurix-paths-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let elf = dir.join("paths.elf");
+    std::fs::write(&elf, dwarf_elf_full(&[("g_count", 0x7000_0700, false)], &[("Drive_Counter_0", 0x7000_0600)], &[])).unwrap();
+    http.ok("POST", "/api/v1/symbols", Some(json!({ "files": [tcl_path(elf)] })));
+    let find = |q: &str| http.ok("GET", &format!("/api/v1/globals?query={}", enc(q)), None);
+    let exprs = |l: &Value| l["items"].as_array().unwrap().iter().map(|i| i["expression"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+    // A member path, exactly or wrapped in `*…*` as a search box sends it.
+    for q in ["Drive_Counter_0.DriveCounterStamp", "*Drive_Counter_0.DriveCounterStamp*"] {
+        let l = find(q);
+        assert_eq!(l["total"], 1, "{q}: {l}");
+        let hit = &l["items"][0];
+        assert_eq!((hit["name"].as_str(), hit["expression"].as_str()), (Some("Drive_Counter_0.DriveCounterStamp"), Some("Drive_Counter_0.DriveCounterStamp")), "{hit}");
+        assert_eq!((hit["address"].as_u64(), hit["sampleable"].as_bool(), hit["class"].as_str()), (Some(0x7000_0638), Some(true), Some("uint")), "{hit}");
+        assert!(hit.get("per_core").is_none(), "{hit}");
+    }
+    // The expression handed out is the one `evaluate` reads.
+    http.ok("PUT", "/api/v1/memory", Some(json!({ "address": "0x70000638", "data": "2a000000" })));
+    assert_eq!(http.ok("GET", &format!("/api/v1/expressions?expression={}", enc("Drive_Counter_0.DriveCounterStamp")), None)["value"], 42);
+
+    // A glob in the last segment, case-insensitive, members in declaration order; a pattern
+    // without wildcards matches the whole name.
+    assert_eq!(exprs(&find("*Drive_Counter_0.drive*")), ["Drive_Counter_0.DriveCounterStamp", "Drive_Counter_0.DriveFlag"]);
+    assert_eq!(exprs(&find("Drive_Counter_0.*Flag")), ["Drive_Counter_0.DriveFlag"]);
+    assert_eq!(find("Drive_Counter_0.Drive")["total"], 0);
+    let all = find("*Drive_Counter_0.*");
+    assert_eq!(exprs(&all), ["Drive_Counter_0.inner", "Drive_Counter_0.counts", "Drive_Counter_0.DriveCounterStamp", "Drive_Counter_0.DriveFlag"]);
+    assert_eq!((all["items"][0]["has_children"].as_bool(), all["items"][1]["type_name"].as_str()), (Some(true), Some("unsigned int[12]")), "{all}");
+    let p = http.ok("GET", &format!("/api/v1/globals?query={}&offset=1&limit=2", enc("Drive_Counter_0.")), None);
+    assert_eq!((p["total"].as_u64(), p["offset"].as_u64()), (Some(4), Some(1)), "{p}");
+    assert_eq!(exprs(&p), ["Drive_Counter_0.counts", "Drive_Counter_0.DriveCounterStamp"]);
+    // Deeper paths.
+    let b = find("*Drive_Counter_0.inner.b*");
+    assert_eq!((exprs(&b), b["items"][0]["address"].as_u64()), (vec!["Drive_Counter_0.inner.b".to_string()], Some(0x7000_0604)), "{b}");
+
+    // Array elements: by index, a glob over the index, or all of them, paged.
+    let e = find("Drive_Counter_0.counts[3]");
+    assert_eq!((exprs(&e), e["items"][0]["address"].as_u64()), (vec!["Drive_Counter_0.counts[3]".to_string()], Some(0x7000_0614)), "{e}");
+    assert_eq!(exprs(&find("*Drive_Counter_0.counts[3]*")), ["Drive_Counter_0.counts[3]"], "a closed index is exact");
+    assert_eq!(exprs(&find("*Drive_Counter_0.counts[1*")), ["Drive_Counter_0.counts[1]", "Drive_Counter_0.counts[10]", "Drive_Counter_0.counts[11]"]);
+    let p = http.ok("GET", &format!("/api/v1/globals?query={}&offset=10&limit=5", enc("*Drive_Counter_0.counts[*")), None);
+    assert_eq!((p["total"].as_u64(), exprs(&p)), (Some(12), vec!["Drive_Counter_0.counts[10]".to_string(), "Drive_Counter_0.counts[11]".to_string()]), "{p}");
+
+    // A parent that does not resolve, or that has no such children, finds nothing - no error.
+    for q in ["no_such.x", "*no_such.x*", "Drive_Counter_0.counts.x", "Drive_Counter_0[1]", "g_count.x", "*.DriveCounterStamp", "Drive_Counter_0 +.x"] {
+        assert_eq!(find(q)["total"], 0, "{q}");
+    }
+    // Plain names are searched as before.
+    assert_eq!(exprs(&find("*drive*")), ["Drive_Counter_0"]);
+    // The operation by name, as the hub's MCP front door calls it.
+    let l = http.ok("POST", "/api/v1/ops/list_globals", Some(json!({ "query": "*Drive_Counter_0.DriveCounterStamp*" })));
+    assert_eq!(exprs(&l), ["Drive_Counter_0.DriveCounterStamp"]);
+
+    // --- `search`: search-box text over the globals and the struct members, best first ---
+    let search = |t: &str| http.ok("GET", &format!("/api/v1/globals?search={}", enc(t)), None);
+    // The matches, without the ancestors that come along as context.
+    let hits = |l: &Value| l["items"].as_array().unwrap().iter().filter(|i| i.get("context").is_none()).map(|i| i["expression"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // The whole page as (expression, parent, context).
+    let tree = |l: &Value| {
+        l["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["expression"].as_str().unwrap().to_string(), i["parent"].as_str().map(str::to_string), i["context"] == true))
+            .collect::<Vec<_>>()
+    };
+    let node = |e: &str, parent: Option<&str>, context: bool| (e.to_string(), parent.map(str::to_string), context);
+    // A member by its own name, with what a DAQ point needs; its global comes along as context.
+    let l = search("DriveCounterStamp");
+    assert_eq!(l["total"], 1, "{l}");
+    assert_eq!(tree(&l), [node("Drive_Counter_0", None, true), node("Drive_Counter_0.DriveCounterStamp", Some("Drive_Counter_0"), false)]);
+    let (ctx, hit) = (&l["items"][0], &l["items"][1]);
+    assert_eq!((ctx["name"].as_str(), ctx["class"].as_str(), ctx["has_children"].as_bool(), ctx["address"].as_u64()), (Some("Drive_Counter_0"), Some("struct"), Some(true), Some(0x7000_0600)), "{ctx}");
+    assert_eq!((hit["name"].as_str(), hit["address"].as_u64(), hit["sampleable"].as_bool()), (Some("Drive_Counter_0.DriveCounterStamp"), Some(0x7000_0638), Some(true)), "{hit}");
+    assert_eq!((hit["class"].as_str(), hit["unit"].as_str()), (Some("uint"), Some("local.c")), "{hit}");
+    // Two levels deep: both ancestors, outermost first, each naming its own parent.
+    assert_eq!(
+        tree(&search("inner.b")),
+        [node("Drive_Counter_0", None, true), node("Drive_Counter_0.inner", Some("Drive_Counter_0"), true), node("Drive_Counter_0.inner.b", Some("Drive_Counter_0.inner"), false)]
+    );
+    // Ranked: the global itself (a prefix, shortest), then its members by length. A parent that
+    // is a match itself needs no context.
+    let l = search("drive");
+    assert_eq!(
+        hits(&l),
+        ["Drive_Counter_0", "Drive_Counter_0.inner", "Drive_Counter_0.counts", "Drive_Counter_0.inner.a", "Drive_Counter_0.inner.b", "Drive_Counter_0.DriveFlag", "Drive_Counter_0.DriveCounterStamp"]
+    );
+    assert_eq!(l["items"].as_array().unwrap().len(), 7, "no context: {l}");
+    assert_eq!((tree(&l)[1].1.as_deref(), tree(&l)[3].1.as_deref()), (Some("Drive_Counter_0"), Some("Drive_Counter_0.inner")));
+    // Context counts toward neither `limit` nor `total`: the page's parent is on the first page.
+    let p = http.ok("GET", &format!("/api/v1/globals?search={}&offset=1&limit=2", enc("drive")), None);
+    assert_eq!(p["total"], 7, "{p}");
+    assert_eq!(
+        tree(&p),
+        [node("Drive_Counter_0", None, true), node("Drive_Counter_0.inner", Some("Drive_Counter_0"), false), node("Drive_Counter_0.counts", Some("Drive_Counter_0"), false)]
+    );
+    // At the start of a word (`g_count`, `Drive_Counter…`), shorter first; word beginnings,
+    // wildcards, addresses.
+    assert_eq!(hits(&search("count"))[..3], ["g_count", "Drive_Counter_0", "Drive_Counter_0.inner"]);
+    assert_eq!(hits(&search("dcs")), ["Drive_Counter_0.DriveCounterStamp"]);
+    assert_eq!(hits(&search("*count*stamp")), ["Drive_Counter_0.DriveCounterStamp"]);
+    assert_eq!(hits(&search("0x7000063")), ["Drive_Counter_0.DriveFlag", "Drive_Counter_0.DriveCounterStamp"]);
+    // Elements, which the search does not hold, by evaluating the parent; the ancestors are
+    // evaluated too.
+    let e = search("Drive_Counter_0.counts[3]");
+    assert_eq!(
+        tree(&e),
+        [node("Drive_Counter_0", None, true), node("Drive_Counter_0.counts", Some("Drive_Counter_0"), true), node("Drive_Counter_0.counts[3]", Some("Drive_Counter_0.counts"), false)]
+    );
+    assert_eq!((e["total"].as_u64(), e["items"][1]["class"].as_str(), e["items"][2]["address"].as_u64()), (Some(1), Some("array"), Some(0x7000_0614)), "{e}");
+    assert_eq!(hits(&search("Drive_Counter_0.counts[1")), ["Drive_Counter_0.counts[1]", "Drive_Counter_0.counts[10]", "Drive_Counter_0.counts[11]"]);
+    // Nothing found is an empty page; an empty text lists the globals by name, then members.
+    for t in ["no_such.x", "zzz", "no_such[1]"] {
+        let l = search(t);
+        assert_eq!((l["total"].as_u64(), l["items"].as_array().map(Vec::len)), (Some(0), Some(0)), "{t}");
+    }
+    let all = search("");
+    assert_eq!((all["total"].as_u64(), hits(&all)[..3].to_vec()), (Some(8), vec!["Drive_Counter_0".to_string(), "g_count".to_string(), "Drive_Counter_0.counts".to_string()]), "{all}");
+    let (status, e) = http.request("GET", &format!("/api/v1/globals?search=a&query={}", enc("*a*")), None, &[]);
+    assert_eq!((status, e["code"].as_str()), (400, Some("bad_request")), "{e}");
+    let l = http.ok("POST", "/api/v1/ops/list_globals", Some(json!({ "search": "DriveCounterStamp" })));
+    assert_eq!(hits(&l), ["Drive_Counter_0.DriveCounterStamp"]);
+    // `parent` in `symbol_children` and in path queries too.
+    let c = http.ok("GET", &format!("/api/v1/expressions/children?expression={}", enc("Drive_Counter_0.inner")), None);
+    assert_eq!(c["items"][0]["parent"], "Drive_Counter_0.inner", "{c}");
+    assert_eq!(find("Drive_Counter_0.inner.b")["items"][0]["parent"], "Drive_Counter_0.inner");
+    assert!(find("*drive*")["items"][0].get("parent").is_none(), "a global has no parent");
+    // The VS Code variable picker's command: the same search, without types.
+    let r = vs.command("AurixTarget", "searchSymbols", &[json!(""), json!("dcs"), json!(10)]);
+    assert_eq!(r[0], "", "{r:?}");
+    let found: Value = serde_json::from_str(&r[1]).unwrap();
+    assert_eq!(found["total"], 1, "{found}");
+    let item = &found["items"][0];
+    assert_eq!((item["expression"].as_str(), item["address"].as_u64(), item["size"].as_u64(), item["file"].as_str()), (Some("Drive_Counter_0.DriveCounterStamp"), Some(0x7000_0638), Some(4), Some("local.c")), "{item}");
+    let r = vs.command("AurixTarget", "searchSymbols", &[json!(""), json!(""), json!(1)]);
+    let found: Value = serde_json::from_str(&r[1]).unwrap();
+    assert_eq!((found["total"].as_u64(), found["items"].as_array().map(Vec::len)), (Some(8), Some(1)), "{found}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1371,13 +1564,31 @@ fn variables_of_real_elf(http: &Http) {
     let q = http.ok("GET", &format!("/api/v1/globals?query={}", enc("*a*")), None);
     eprintln!("list_globals *a*: {} matches in {:?}", q["total"], t.elapsed());
     assert!(t.elapsed() < Duration::from_secs(2), "a search must stay interactive");
+    let readable = |v: &Value| v["size"].as_u64().is_some_and(|n| n <= 65536);
+    // `search`: the first one builds the index of globals and members, then each keystroke is
+    // one ranked pass over it.
+    let t = Instant::now();
+    let first = http.ok("GET", "/api/v1/globals?search=a&limit=300", None);
+    eprintln!("search a (builds the index): {} matches in {:?}", first["total"], t.elapsed());
+    for text in ["sp", "spe", "spee", "speed", "speedsetpoint", "dcs", "*cnt*", "stamp", "0x7000", "zzzzzz", "Drive_Counter_0.counts["] {
+        let t = Instant::now();
+        let l = http.ok("GET", &format!("/api/v1/globals?search={}&limit=300", enc(text)), None);
+        eprintln!("search {text}: {} matches in {:?}", l["total"], t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(2), "a search must stay interactive");
+    }
+    // Every hit names what it describes, members included.
+    let hits = first["items"].as_array().unwrap();
+    assert!(hits.iter().any(|h| h["name"].as_str().is_some_and(|n| n.contains('.'))), "members are searched: {first}");
+    for h in hits.iter().filter(|h| readable(h) && h.get("per_core").is_none()).take(100) {
+        let v = http.ok("GET", &format!("/api/v1/expressions?expression={}", enc(h["expression"].as_str().unwrap())), None);
+        assert_eq!((&v["address"], &v["type_name"]), (&h["address"], &h["type_name"]), "{h} -> {v}");
+    }
     let items = all["items"].as_array().unwrap();
     assert!(!items.is_empty());
     // Sorted by name, ignoring case.
     let names: Vec<String> = items.iter().map(|i| i["name"].as_str().unwrap().to_ascii_lowercase()).collect();
     assert!(names.windows(2).all(|w| w[0] <= w[1]), "not sorted");
     // Every expression handed out evaluates to the variable it describes.
-    let readable = |v: &Value| v["size"].as_u64().is_some_and(|n| n <= 65536);
     for g in items.iter().filter(|g| readable(g)).take(200) {
         let v = http.ok("GET", &format!("/api/v1/expressions?expression={}", enc(g["expression"].as_str().unwrap())), None);
         assert_eq!(v["address"], g["address"], "{g} -> {v}");
@@ -1956,6 +2167,7 @@ fn rest_mcp_and_tcf_share_one_session() {
     call_stack(&http, &mut vs, &c0);
     variables(&http, &mut vs);
     core_local_variables(&http, &mut vs);
+    member_paths(&http, &mut vs);
     watchpoints(&http, &mut vs, &h, &sse);
     variables_of_real_elf(&http);
     trace(&http, &mut vs);

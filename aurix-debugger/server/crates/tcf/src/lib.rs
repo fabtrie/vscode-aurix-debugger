@@ -14,6 +14,7 @@ pub mod live;
 mod osaware;
 mod profile;
 mod queue;
+pub mod search;
 mod stack;
 mod stepping;
 mod symstore;

@@ -512,24 +512,25 @@ impl Channel {
                 let v = live::values(&self.shared, self.id, &key).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
-            // The members of the struct globals of a context's symbol files, for a variable picker:
-            // [[expression, address, size], ...]. An expression names the global a lookup finds,
-            // so a global whose name an earlier file has too is left out.
-            ("AurixTarget", "getMemberPaths") => {
+            // The variable picker's search (see `search::search`): the best `limit` matches of the
+            // text among the globals and struct members of a context's symbol files.
+            // {"total": n, "items": [{"name", "expression", "address", "size", "file"}, ...]}; the
+            // address is the one the symbols give (core-local RAM untranslated), absent for none.
+            ("AurixTarget", "searchSymbols") => {
                 let ctx = a.opt_string(0)?.unwrap_or_default();
-                let s = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
-                let mut out = Vec::new();
-                for (k, (_, syms)) in s.elfs.iter().enumerate() {
-                    let earlier = &s.elfs[..k];
-                    for m in syms.member_paths() {
-                        let root = &syms.globals[m.global].name;
-                        if earlier.iter().any(|(_, e)| !e.global_indices(root).is_empty()) {
-                            continue;
-                        }
-                        out.push(json!([m.expression, m.address, m.size]));
-                    }
-                }
-                Ok(vec![String::new(), Value::Array(out).to_string()])
+                let text = a.string(1)?;
+                let limit = a.u64(2)?.min(10_000) as usize;
+                let set = self.shared.symbols_for(&ctx).ok_or_else(|| err(ERR_SYM_NOT_FOUND, "No symbols loaded"))?;
+                let found = crate::search::search(&self.shared, &ctx, &set, &text, 0, limit, false);
+                let items: Vec<Value> = found
+                    .hits
+                    .iter()
+                    .map(|h| {
+                        let (address, size, file) = crate::search::hit_details(&set, h);
+                        json!({ "name": h.name, "expression": h.expression, "address": address, "size": size, "file": file })
+                    })
+                    .collect();
+                Ok(vec![String::new(), json!({ "total": found.total, "items": items }).to_string()])
             }
             ("AurixTarget", "clearLiveSet") => {
                 live::clear(&self.shared, self.id, &a.string(0)?);

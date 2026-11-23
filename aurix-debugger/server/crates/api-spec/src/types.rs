@@ -1410,6 +1410,19 @@ pub struct VariableInfo {
     /// `address`, is not `sampleable`, and `evaluate` refuses its bare name. Left out when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_core: bool,
+    /// The `expression` of the variable this is a member or element of, exactly as that one's
+    /// own `expression` reads (`g_s.a@2` -> `g_s@2`, `${E0/GV:12}.x` -> `${E0/GV:12}`), so a
+    /// client can nest items by it. Set for members and elements in `list_globals` (`search`
+    /// and paths in `query`) and `symbol_children` results (there the request's `expression`);
+    /// left out for globals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Not a match itself: an ancestor of a match on the same `list_globals` `search` page,
+    /// there so that the matches can be shown as a tree. Context items come before the first
+    /// match below them, once per page, and count toward neither `limit` nor `total`. Left out
+    /// when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context: bool,
 }
 
 /// Which globals to list.
@@ -1418,8 +1431,31 @@ pub struct VariableInfo {
 pub struct ListGlobalsRequest {
     /// Glob pattern for the name, case-insensitive: `*` matches any run of characters, `?` one
     /// character. `*speed*` finds every name containing `speed`. Default: all globals.
+    ///
+    /// With a `.` or `[`, members and elements are found too: the part before the last one is a
+    /// C expression (no wildcards), the last segment a glob for a member name or an element
+    /// index. Leading `*` belong to the last segment, so `*g_motor.spe*` finds the members of
+    /// `g_motor` whose names contain `spe`; `g_buf[1*` finds the elements whose index starts
+    /// with 1, and a closing `]` makes the index exact. A wildcard in the parent
+    /// (`*.speed`) is not searched; `search` is the way to find members by name alone.
     #[serde(default)]
     pub query: Option<String>,
+    /// Search-box text instead of a glob: finds globals and the members of struct globals, best
+    /// matches first. A name matches when it contains the text (case-insensitive), when `*` and
+    /// `?` make it match, or when the text is a run of beginnings of its words (`dcs` for
+    /// `DriveCounterStamp`); then come names whose source file contains the text, or whose
+    /// address starts with a `0x...` text. `DriveCounterStamp` finds
+    /// `Drive_Counter_0.DriveCounterStamp`. A text with `.` or `[` also finds array elements
+    /// and other children the search does not hold, by evaluating the part before the last one
+    /// (`g_buf[3]`, `${E0/GV:12}.x`, `g_s.a@2`). Members carry their whole path as `name`. An
+    /// empty text lists the globals by name, then the members. Not together with `query`.
+    ///
+    /// Each member and element names its parent's expression in `parent`; ancestors of a match
+    /// that are not matches on the page come along as `context` items, so the page can be shown
+    /// as a tree: `DriveCounterStamp` gives `Drive_Counter_0` (context) and
+    /// `Drive_Counter_0.DriveCounterStamp` (parent `Drive_Counter_0`).
+    #[serde(default)]
+    pub search: Option<String>,
     /// Skip this many matches (default 0).
     #[serde(default)]
     pub offset: Option<u32>,
@@ -1431,7 +1467,9 @@ pub struct ListGlobalsRequest {
     pub target: Option<String>,
 }
 
-/// One page of the globals that match a query, sorted by name.
+/// One page of the globals that match a query, sorted by name; then, for a path query, the
+/// matching members or elements in declaration or index order. For a `search`, the best matches
+/// first.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GlobalList {
     /// Matches in all, not only on this page.

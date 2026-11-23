@@ -20,8 +20,8 @@ use api_spec::types::*;
 use api_spec::{ApiError, ErrorCode, MAX_TRANSFER};
 use aurix_core::events::emit;
 use aurix_core::Event;
-use symbols::expr::{Eval, Place, SymbolRef, Target};
-use symbols::types::{MemberInfo, TypeClass, TypeId};
+use symbols::expr::{Eval, Place, SymbolRef};
+use symbols::types::{TypeClass, TypeId};
 use symbols::Symbols;
 
 use crate::core_impl::CoreApi;
@@ -154,6 +154,8 @@ fn variable(name: String, expression: String, syms: &Symbols, ty: &TypeId, size:
     let s = shape(syms, ty, bits);
     VariableInfo {
         per_core: false,
+        parent: None,
+        context: false,
         name,
         expression,
         type_name: s.type_name,
@@ -215,76 +217,36 @@ impl GlobalsCache {
     }
 }
 
-/// Case-insensitive glob match: `*` any run of characters, `?` exactly one.
-pub(crate) fn glob(pattern: &[u8], name: &[u8]) -> bool {
-    let (mut p, mut n) = (0, 0);
-    // Where the last `*` was, and the name position it currently swallows up to.
-    let mut star: Option<(usize, usize)> = None;
-    while n < name.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p].eq_ignore_ascii_case(&name[n])) {
-            p += 1;
-            n += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
-            star = Some((p, n));
-            p += 1;
-        } else if let Some((sp, sn)) = star {
-            p = sp + 1;
-            n = sn + 1;
-            star = Some((sp, sn + 1));
-        } else {
-            return false;
-        }
-    }
-    pattern[p..].iter().all(|&c| c == b'*')
-}
-
-/// A C identifier, or a qualified C++ name of identifiers (`app::Motor::count`).
-fn is_identifier(s: &str) -> bool {
-    symbols::is_expression_name(s)
-}
-
-/// The expression that names global `i` of the ELF at position `p`: its plain name if a lookup
-/// of that name finds it, else a symbol reference.
-///
-/// A lookup tries the ELF files in order and takes the first that knows the name (as a global,
-/// a function or an enumerator); within one file it prefers an external definition to a static.
-fn global_expression(set: &tcf::SymbolSet, p: usize, i: usize) -> String {
-    let (n, syms) = &set.elfs[p];
-    let name = &syms.globals[i].name;
-    let earlier = set.elfs[..p].iter().any(|(_, s)| {
-        !s.global_indices(name).is_empty() || !s.function_indices(name).is_empty() || !s.enumerators_named(name).is_empty()
-    });
-    let gi = syms.global_indices(name);
-    let found = gi.iter().copied().find(|&j| syms.globals[j].external).or(gi.first().copied());
-    if is_identifier(name) && !earlier && found == Some(i) {
-        name.clone()
-    } else {
-        format!("${{{}}}", tcf::elf_id(*n, &format!("GV:{i}")))
-    }
-}
-
-/// Evaluation needs a target, but the type of a global reads nothing.
-struct NoMemory;
-
-impl Target for NoMemory {
-    fn pc(&self) -> Option<u32> {
-        None
-    }
-    fn reg(&self, _: u16) -> Option<u32> {
-        None
-    }
-    fn read(&mut self, _: u32, _: usize) -> Result<Vec<u8>, String> {
-        Err("no memory access while listing".into())
-    }
-    fn symbol(&mut self, _: &str) -> Option<SymbolRef> {
-        None
-    }
-}
+pub(crate) use tcf::search::glob;
+use tcf::search::{global_expression, Children, HitKind, NoMemory};
 
 /// The TriCore cores by core ID, for [`tcf::home_core`]. Asked for only once a page holds a
 /// core-local global: the question waits for the core thread, which a plain search never does.
 fn tricores<'a>(api: &CoreApi, cache: &'a OnceCell<Vec<u32>>) -> &'a [u32] {
     cache.get_or_init(|| tcf::cores(&api.handle).into_iter().filter(|c| c.tricore()).map(|c| c.coreid).collect())
+}
+
+/// The system-bus address of a variable the symbols of ELF number `elf` place at `addr`:
+/// core-local RAM in the one core the ELF is meant for; `None` when no core is determined.
+fn bus_address(api: &CoreApi, cores: &OnceCell<Vec<u32>>, elf: usize, addr: u32) -> Option<u32> {
+    if aurix_core::tricore::local_address(addr) {
+        tcf::home_core(&api.session, tricores(api, cores), elf, None).ok().map(|core| aurix_core::tricore::global_address(core, addr))
+    } else {
+        Some(addr)
+    }
+}
+
+/// A variable in core-local RAM that no core is determined for: a group of the cores' copies.
+fn group(mut v: VariableInfo) -> VariableInfo {
+    v.per_core = true;
+    v.has_children = true;
+    v.sampleable = false;
+    v.address = None;
+    v
+}
+
+fn unit_name(syms: &Symbols, unit: usize) -> Option<String> {
+    syms.units.get(unit).map(|u| u.name.clone()).filter(|n| !n.is_empty())
 }
 
 fn global_info(api: &CoreApi, cores: &OnceCell<Vec<u32>>, set: &tcf::SymbolSet, p: usize, i: usize) -> VariableInfo {
@@ -293,28 +255,68 @@ fn global_info(api: &CoreApi, cores: &OnceCell<Vec<u32>>, set: &tcf::SymbolSet, 
     // The evaluator's own idea of the type: a label without debug information is one word.
     let ty = Eval::new(syms, &mut NoMemory).value_of(&SymbolRef::Global(i)).map(|v| v.ty).unwrap_or(TypeId::Void);
     let size = syms.type_info(&ty).size;
-    // Core-local RAM: the global address in the one core the ELF is meant for, else a group.
-    let address = if aurix_core::tricore::local_address(g.addr) {
-        tcf::home_core(&api.session, tricores(api, cores), *n, None).ok().map(|core| aurix_core::tricore::global_address(core, g.addr))
-    } else {
-        Some(g.addr)
-    };
+    let address = bus_address(api, cores, *n, g.addr);
     let mut v = variable(g.name.clone(), global_expression(set, p, i), syms, &ty, size, address, None);
     if address.is_none() {
-        v.per_core = true;
-        v.has_children = true;
-        v.sampleable = false;
+        v = group(v);
     }
-    v.unit = syms.units.get(g.unit).map(|u| u.name.clone()).filter(|n| !n.is_empty());
+    v.unit = unit_name(syms, g.unit);
     v
 }
 
+/// Member path `k` of the ELF at position `p`, named by its whole path.
+fn member_info(api: &CoreApi, cores: &OnceCell<Vec<u32>>, set: &tcf::SymbolSet, p: usize, k: usize) -> VariableInfo {
+    let (n, syms) = &set.elfs[p];
+    let m = &syms.member_paths()[k];
+    let address = bus_address(api, cores, *n, m.address);
+    let mut v = variable(m.expression.clone(), m.expression.clone(), syms, &m.ty, m.size, address, m.bits);
+    if address.is_none() {
+        v = group(v);
+    }
+    v.unit = unit_name(syms, syms.globals[m.global].unit);
+    v
+}
+
+/// A child found by its path: a flat list of hits names it by its whole path. The child of a
+/// `per_core` group is a group too.
+fn child_info(syms: &Symbols, c: tcf::search::Child, per_core: bool) -> VariableInfo {
+    let v = variable(c.expression.clone(), c.expression, syms, &c.ty, c.size, c.address, c.bits);
+    if per_core {
+        group(v)
+    } else {
+        v
+    }
+}
+
 pub fn list_globals(api: &CoreApi, req: ListGlobalsRequest) -> Result<GlobalList, ApiError> {
-    let (_, set) = symbol_set(api, req.target.as_deref())?;
+    let (ctx, set) = symbol_set(api, req.target.as_deref())?;
     let cores = OnceCell::new();
-    let index = api.globals.index(&set);
     let (offset, limit) = page(req.offset, req.limit);
-    let pattern = req.query.as_deref().map(str::trim).filter(|q| !q.is_empty() && *q != "*").map(str::as_bytes);
+    if let Some(text) = req.search.as_deref() {
+        if req.query.is_some() {
+            return Err(ApiError::bad_request("give `query` (a glob) or `search` (search-box text), not both"));
+        }
+        let found = tcf::search::search(&api.session, &ctx, &set, text, offset, limit, true);
+        // Types are looked up for this page only.
+        let items = found
+            .hits
+            .into_iter()
+            .map(|h| {
+                let mut v = match h.kind {
+                    HitKind::Global { elf, index } => global_info(api, &cores, &set, elf, index),
+                    HitKind::Member { elf, index } => member_info(api, &cores, &set, elf, index),
+                    HitKind::Child { syms, child, per_core } => child_info(&syms, child, per_core),
+                };
+                v.parent = h.parent;
+                v.context = h.context;
+                v
+            })
+            .collect();
+        return Ok(GlobalList { total: found.total as u32, offset: offset as u32, items });
+    }
+    let index = api.globals.index(&set);
+    let query = req.query.as_deref().map(str::trim).filter(|q| !q.is_empty() && *q != "*");
+    let pattern = query.map(str::as_bytes);
     let mut total = 0usize;
     let mut items = Vec::new();
     for &(p, i) in &index.order {
@@ -330,32 +332,26 @@ pub fn list_globals(api: &CoreApi, req: ListGlobalsRequest) -> Result<GlobalList
         }
         total += 1;
     }
+    // Members and elements of an expression, after the globals whose names match as a whole (a
+    // label without debug information may have a `.` in its name). The parent is evaluated as
+    // `symbol_children` evaluates it; one that does not resolve has no children to find.
+    let path = query.and_then(tcf::search::path_query);
+    let parent = path.as_ref().and_then(|q| evaluate_in(api, req.target.as_deref(), &q.parent).ok());
+    if let (Some(q), Some(gv)) = (&path, &parent) {
+        let kids = Children::of(&api.session, gv);
+        for i in q.matches(&kids) {
+            if total >= offset && items.len() < limit {
+                let mut v = child_info(kids.symbols(), kids.child(i), kids.per_core);
+                v.parent = Some(q.parent.clone());
+                items.push(v);
+            }
+            total += 1;
+        }
+    }
     Ok(GlobalList { total: total as u32, offset: offset as u32, items })
 }
 
 // --- symbol_children -------------------------------------------------------------------------
-
-/// `expr` ready to take `.member` or `[i]`: postfix operators bind tighter than everything but a
-/// primary expression, so anything else needs parentheses (`(*p).x`, `(a + 1)[2]`).
-fn postfix_base(syms: &Symbols, expr: &str) -> String {
-    use symbols::expr::Expr;
-    let parsed = symbols::expr::parse(expr, &|n| Eval::<NoMemory>::resolve_type(syms, n));
-    match parsed {
-        Ok(Expr::Ident(_) | Expr::SymRef(_) | Expr::Member(..) | Expr::Arrow(..) | Expr::Index(..)) => expr.to_string(),
-        _ => format!("({expr})"),
-    }
-}
-
-/// Members of a struct or union, with the members of anonymous ones lifted to where C finds them.
-fn named_members(syms: &Symbols, ty: &TypeId, base: u32, out: &mut Vec<MemberInfo>) {
-    for m in syms.members(ty) {
-        if m.name.is_some() {
-            out.push(MemberInfo { offset: base + m.offset, ..m });
-        } else {
-            named_members(syms, &m.ty, base + m.offset, out);
-        }
-    }
-}
 
 /// The children of a variable in core-local RAM that no core is determined for: one per core it
 /// may mean, each the variable `expr@N` at that core's global address.
@@ -379,55 +375,27 @@ pub fn symbol_children(api: &CoreApi, req: SymbolChildrenRequest) -> Result<Symb
     let info = syms.type_info(&v.ty);
     let (offset, limit) = page(req.offset, req.limit);
     if let Some(cores) = gv.per_core(&api.session) {
+        let items = per_core_children(&gv, &cores, offset, limit).into_iter().map(|v| VariableInfo { parent: Some(expression.clone()), ..v }).collect();
         return Ok(SymbolChildren {
             expression,
             type_name: info.name.unwrap_or_else(|| "<unknown>".into()),
             total: cores.len() as u32,
             offset: offset as u32,
-            items: per_core_children(&gv, &cores, offset, limit),
+            items,
         });
     }
-    // Children of something stored at a fixed place have an address; of a computed value, none.
-    let base = match (&v.place, &v.bytes) {
-        (Place::Memory(a), None) => gv.global_address(&api.session, *a).ok(),
-        _ => None,
-    };
-    // A child names the same core as its parent: `g_s@2` -> `g_s.a@2`.
-    let parent = postfix_base(syms, gv.expression());
-    let suffix = gv.suffix().map(|s| s.to_string()).unwrap_or_default();
-    let (total, items) = match info.class {
-        TypeClass::Composite => {
-            let mut members = Vec::new();
-            named_members(syms, &v.ty, 0, &mut members);
-            let items = members
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .map(|m| {
-                    let name = m.name.clone().unwrap_or_default();
-                    variable(name.clone(), format!("{parent}.{name}{suffix}"), syms, &m.ty, m.size, base.map(|a| a.wrapping_add(m.offset)), m.bits)
-                })
-                .collect();
-            (members.len(), items)
-        }
-        TypeClass::Array => {
-            let len = info.length.unwrap_or(0) as usize;
-            let elem = info.base.clone().unwrap_or(TypeId::Void);
-            let es = syms.type_info(&elem).size;
-            let items = (offset..len.min(offset.saturating_add(limit)))
-                .map(|i| {
-                    let addr = base.map(|a| a.wrapping_add(es.wrapping_mul(i as u32)));
-                    variable(format!("[{i}]"), format!("{parent}[{i}]{suffix}"), syms, &elem, es, addr, None)
-                })
-                .collect();
-            (len, items)
-        }
-        _ => (0, Vec::new()),
-    };
+    let kids = Children::of(&api.session, &gv);
+    let syms = kids.symbols();
+    let items = (offset..kids.len().min(offset.saturating_add(limit)))
+        .map(|i| {
+            let c = kids.child(i);
+            VariableInfo { parent: Some(expression.clone()), ..variable(c.name, c.expression, syms, &c.ty, c.size, c.address, c.bits) }
+        })
+        .collect();
     Ok(SymbolChildren {
         expression,
         type_name: info.name.unwrap_or_else(|| "<unknown>".into()),
-        total: total as u32,
+        total: kids.len() as u32,
         offset: offset as u32,
         items,
     })
@@ -657,20 +625,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glob_patterns() {
-        let m = |p: &str, n: &str| glob(p.as_bytes(), n.as_bytes());
-        assert!(m("*speed*", "g_Motor_SPEED_rpm"));
-        assert!(m("g_?otor", "g_motor"));
-        assert!(m("*", ""));
-        assert!(m("a*b*c", "aXXbYYc"));
-        assert!(m("a*b*c", "abcbc"));
-        assert!(!m("a*b*c", "aXXbYY"));
-        assert!(!m("motor", "g_motor"), "a pattern matches the whole name");
-        assert!(!m("g_?otor", "g_otor"));
-        assert!(m("**x", "abx"));
-    }
-
-    #[test]
     fn integers_from_json() {
         use serde_json::json;
         assert_eq!(integer(&json!(42)), Some((42, false)));
@@ -687,13 +641,13 @@ mod tests {
 
     #[test]
     fn identifiers() {
-        assert!(is_identifier("g_motor2"));
-        assert!(!is_identifier("2x"));
-        assert!(!is_identifier("a.b"));
-        assert!(!is_identifier(""));
-        assert!(is_identifier("app::Motor::count"));
-        assert!(!is_identifier("::count"));
-        assert!(!is_identifier("std::ctype<char>::id"));
-        assert!(!is_identifier("(anonymous namespace)::x"));
+        assert!(symbols::is_expression_name("g_motor2"));
+        assert!(!symbols::is_expression_name("2x"));
+        assert!(!symbols::is_expression_name("a.b"));
+        assert!(!symbols::is_expression_name(""));
+        assert!(symbols::is_expression_name("app::Motor::count"));
+        assert!(!symbols::is_expression_name("::count"));
+        assert!(!symbols::is_expression_name("std::ctype<char>::id"));
+        assert!(!symbols::is_expression_name("(anonymous namespace)::x"));
     }
 }

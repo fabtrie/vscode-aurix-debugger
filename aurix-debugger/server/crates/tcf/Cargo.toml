@@ -15,6 +15,7 @@ orti.workspace = true
 mcds = { workspace = true, features = ["capstone"] }
 isa.workspace = true
 serde = "1"
+memchr = "2"
 serde_json.workspace = true
 base64.workspace = true
 capstone = { version = "0.14", default-features = false, features = ["full", "std", "arch_tricore", "arch_arm"] }

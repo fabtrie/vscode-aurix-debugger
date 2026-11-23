@@ -238,42 +238,61 @@ export class ClearLiveSetAurixTargetCommand extends AurixTargetCommand<undefined
 	}
 }
 
-/** A member of a struct global, nested or not, by the expression that names it. */
-export interface MemberPath {
+/** A variable the server's search found: a global, or a member by its whole path. */
+export interface SymbolHit {
+	/** As a list shows it: a global's name, a member's path. */
+	name: string;
+	/** The expression that names it for a live watch. */
 	expression: string;
-	address: number;
+	/** As the symbols give it (core-local RAM untranslated). */
+	address?: number;
 	size: number;
+	/** The source file that defines it. */
+	file?: string;
 }
 
-/** The reply of `getMemberPaths`: `[[expression, address, size], ...]`. */
-export function asMemberPaths(json: unknown): MemberPath[] {
-	if (!Array.isArray(json)) {
-		throw new JSONValidationError('Not an array', json);
+/** The reply of `searchSymbols`: the best matches, and how many matched in all. */
+export interface SymbolSearch {
+	total: number;
+	items: SymbolHit[];
+}
+
+export function asSymbolSearch(json: unknown): SymbolSearch {
+	const o = json as { total?: unknown; items?: unknown };
+	if (typeof o !== 'object' || o === null || typeof o.total !== 'number' || !Array.isArray(o.items)) {
+		throw new JSONValidationError('Not a symbol search result', json);
 	}
-	return json
-		.filter((e): e is [string, number, number] => Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'number' && typeof e[2] === 'number')
-		.map(([expression, address, size]) => ({ expression, address, size }));
+	const items = (o.items as Array<Record<string, unknown>>)
+		.filter((i) => typeof i?.name === 'string' && typeof i?.expression === 'string')
+		.map((i) => ({
+			name: i.name as string,
+			expression: i.expression as string,
+			address: typeof i.address === 'number' ? i.address : undefined,
+			size: typeof i.size === 'number' ? i.size : 0,
+			file: typeof i.file === 'string' ? i.file : undefined,
+		}));
+	return { total: o.total, items };
 }
 
 /**
- * The members of the struct globals of the symbol files of context `ctx` (empty: the first
- * context with symbols), for a variable picker. A server without the command answers with an
- * error.
+ * The server's search over the globals and struct members of the symbol files of context `ctx`
+ * (empty: the first context with symbols), for a variable picker: the best `limit` matches of
+ * search-box text, best first.
  */
-export class GetMemberPathsAurixTargetCommand extends AurixTargetCommand<MemberPath[]> {
-	constructor(readonly ctx: string) {
+export class SearchSymbolsAurixTargetCommand extends AurixTargetCommand<SymbolSearch> {
+	constructor(readonly ctx: string, readonly text: string, readonly limit: number) {
 		super();
 	}
 
 	command(): string {
-		return 'getMemberPaths';
+		return 'searchSymbols';
 	}
 
 	protected args(): unknown[] {
-		return [this.ctx];
+		return [this.ctx, this.text, this.limit];
 	}
 
-	result(responseAll: Buffer[], success: PromiseSuccess<MemberPath[]>, error: PromiseError<MemberPath[]>): void {
-		parseResponse(responseAll, success, error, asMemberPaths);
+	result(responseAll: Buffer[], success: PromiseSuccess<SymbolSearch>, error: PromiseError<SymbolSearch>): void {
+		parseResponse(responseAll, success, error, asSymbolSearch);
 	}
 }

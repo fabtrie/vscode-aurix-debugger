@@ -660,15 +660,17 @@
 		tog('tlColFn', !byCtx());
 		$('tlLayoutLanes').disabled = !data.tracked;
 		$('tlColCtx').disabled = !data.tracked;
-		// What the Task / ISR row is based on.
-		const note = $('flowNote');
+		// What the Task / ISR row is based on: in the legend, or why there is none behind the ⓘ.
+		const info = $('tlInfo');
+		info.hidden = data.tracked;
 		if (data.tracked) {
-			note.textContent = ` Task / ISR from ${data.vars.map((v) => v.Name).join(', ')}: ${data.switches} switch${data.switches === 1 ? '' : 'es'} recorded`;
-		} else if (data.note) {
-			note.textContent = ' ' + data.note;
+			$('tlLegend').insertAdjacentHTML('afterbegin',
+				`<span>Task / ISR from ${esc(data.vars.map((v) => v.Name).join(', '))}: ${data.switches} switch${data.switches === 1 ? '' : 'es'}</span>`);
 		} else {
-			note.textContent = ' Task / ISR not recorded: tick "with the task / ISR (ORTI)" and arm again';
+			info.title = (data.note || 'Task / ISR not recorded: tick "with the task / ISR (ORTI)" in the configuration and arm again') +
+				'\nClick to open the configuration';
 		}
+		if (window.traceFitHeader) window.traceFitHeader();
 	}
 
 	// ---- frame ------------------------------------------------------------------------------
@@ -924,19 +926,29 @@
 	}).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
 	// ---- the Flow tab's views ---------------------------------------------------------------
-	function setView(v) {
-		st.view = v;
-		remember();
-		document.querySelectorAll('#flowBar [data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
-		const program = result && result.Kind === 'program';
-		$('flowPane').classList.toggle('timeline', program && v === 'timeline');
-		$('timeline').hidden = !(program && v === 'timeline');
-		if (program && v === 'timeline') {
+	/** The tab shown (traceInsns.js): the Flow pane as the timeline (Timeline) or the list (List). */
+	function setView(tab) {
+		const program = !!(result && result.Kind === 'program');
+		if (program && (tab === 'timeline' || tab === 'list')) {
+			st.view = tab;
+			remember();
+		}
+		const on = program && tab === 'timeline';
+		$('flowPane').classList.toggle('timeline', on);
+		$('timeline').hidden = !on;
+		$('tlToolbar').hidden = !on;
+		if (window.traceFitHeader) window.traceFitHeader();
+		if (on) {
 			request();
 			redraw();
 		}
 	}
-	document.querySelectorAll('#flowBar [data-view]').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
+	window.addEventListener('trace-tab', (e) => setView(e.detail));
+	window.traceFlowView = () => st.view;
+	$('tlInfo').addEventListener('click', (e) => {
+		e.stopPropagation();
+		if (window.traceEditConfig) window.traceEditConfig('contextLabel');
+	});
 
 	/** Asks for the calls of the shown recording (once per recording). */
 	function request() {
@@ -953,10 +965,8 @@
 		st.sel = null;
 		st.hover = null;
 		st.meas = null;
-		const program = result && result.Kind === 'program';
-		$('flowBar').hidden = !program;
-		$('flowNote').textContent = '';
-		setView(st.view);
+		$('tlInfo').hidden = true;
+		setView(window.traceTab ? window.traceTab() : st.view);
 	});
 
 	window.addEventListener('message', (e) => {

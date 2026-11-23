@@ -11,7 +11,7 @@ body {
 	background: var(--vscode-editor-background);
 }
 
-#toolbar, #actions {
+#toolbar {
 	display: flex;
 	align-items: center;
 	gap: 8px;
@@ -61,11 +61,6 @@ button:disabled { opacity: 0.5; cursor: default; }
 .sub input { width: 28em; max-width: 100%; }
 .hint { color: var(--vscode-descriptionForeground); }
 
-.resources {
-	padding: 6px 8px;
-	background: var(--vscode-textBlockQuote-background);
-	border-left: 3px solid var(--vscode-textBlockQuote-border);
-}
 
 .state {
 	padding: 1px 8px;
@@ -121,15 +116,13 @@ table.data td { padding: 1px 12px 1px 0; }
 table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 
 /* ---- Instructions tab ---------------------------------------------------------------------- */
-#tabs { display: flex; gap: 2px; margin: 4px 0 6px; border-bottom: 1px solid var(--vscode-panel-border); }
-#tabs .tab { background: none; color: var(--vscode-descriptionForeground); border: 0; border-bottom: 2px solid transparent; padding: 3px 12px; border-radius: 0; }
-#tabs .tab.on { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder); }
-#insnToolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
-#insnToolbar input[type=search] { width: 26em; }
+#insnToolbar input[type=search] { width: 14em; }
+#toolbar .toolset button { padding: 4px 8px; }
 #insnToolbar input.miss { outline: 1px solid var(--vscode-inputValidation-errorBorder); }
 #insnToolbar .toggle { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 #insnToolbar .toggle.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-#insnMain { display: grid; grid-template-columns: 1fr 320px; height: 70vh; min-height: 320px; border: 1px solid var(--vscode-panel-border); }
+#insns { margin-top: 6px; }
+#insnMain { display: grid; grid-template-columns: 1fr 320px; height: calc(100vh - var(--hdr, 48px) - 48px); min-height: 300px; border: 1px solid var(--vscode-panel-border); }
 #insnList { position: relative; overflow: auto; outline: none; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
 #insnRows { position: absolute; top: 0; left: 0; right: 0; }
 /* Rows keep their full width (min. the list's); the list scrolls horizontally. */
@@ -172,7 +165,9 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 #insnRegs .why { margin-top: 8px; padding: 6px 8px; background: var(--vscode-editor-background); border-radius: 3px; }
 #insnRegs .stack { font-family: var(--vscode-editor-font-family); }
 #insnRegs .frame.top { font-weight: 600; }
-#insns .legend { display: flex; gap: 16px; padding: 4px 0; color: var(--vscode-descriptionForeground); font-size: 12px; }
+#insns .legend { display: flex; gap: 16px; padding: 4px 0; color: var(--vscode-descriptionForeground); font-size: 12px; white-space: nowrap; }
+#insns .legend .sumline { color: var(--vscode-foreground); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+#insns .legend .spacer { flex: 1 0 8px; }
 #insns .legend b { font-weight: normal; font-family: var(--vscode-editor-font-family); }
 #insns .legend .w { background: var(--vscode-editor-findMatchHighlightBackground); padding: 0 3px; }
 
@@ -191,13 +186,10 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 .seg button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 .seg button:first-child { margin-left: 0; border-radius: 2px 0 0 2px; }
 .seg button:last-child { border-radius: 0 2px 2px 0; }
-#flowBar { display: flex; align-items: center; gap: 10px; padding: 2px 0 4px; }
-#flowBar[hidden] { display: none; }
-#flowPane.timeline #result, #flowPane.timeline .bars { display: none; }
-#timeline { margin-top: 2px; }
-#tlToolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
-#tlToolbar input[type=search] { width: 16em; }
-#tlMain { display: grid; grid-template-columns: 1fr 300px; height: 62vh; min-height: 340px; border: 1px solid var(--vscode-panel-border); }
+#flowPane.timeline #result, #flowPane.timeline #coverage { display: none; }
+#timeline { margin-top: 6px; }
+#tlToolbar input[type=search] { width: 12em; }
+#tlMain { display: grid; grid-template-columns: 1fr 300px; height: calc(100vh - var(--hdr, 48px) - 22px); min-height: 300px; border: 1px solid var(--vscode-panel-border); }
 #tlLeft { display: flex; flex-direction: column; min-width: 0; }
 #tlTop { display: block; width: 100%; height: 54px; border-bottom: 1px solid var(--vscode-panel-border); cursor: crosshair; }
 #tlScroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
@@ -237,3 +229,99 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 #tlTip .r > span:nth-child(odd) { color: var(--vscode-descriptionForeground); }
 #tlTip .mono { font-family: var(--vscode-editor-font-family); }
 #tlTip .w { margin-top: 3px; color: var(--vscode-editorWarning-foreground); }
+
+/* ---- Compact header: the configuration as a summary, the form only while editing ------------ */
+#toolbar { flex-wrap: wrap; gap: 6px 8px; padding: 6px 0; }
+#cfgChip {
+	display: inline-flex; align-items: center; max-width: 300px; min-width: 0; padding: 0; cursor: pointer;
+	color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px;
+}
+#cfgChip:hover:not(:disabled), #cfgChip.open { border-color: var(--vscode-focusBorder); }
+#cfgChip.open { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
+#cfgChip .nm { color: var(--vscode-descriptionForeground); }
+#cfgChip.bad { border-color: var(--vscode-errorForeground); }
+#cfgChip.bad .sum { color: var(--vscode-errorForeground); }
+#cfgChip .sum { padding: 2px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#cfgChip .sum b { font-weight: 600; }
+#cfgChip .sep { margin: 0 5px; color: var(--vscode-descriptionForeground); }
+#cfgChip .dirty { color: var(--vscode-focusBorder); }
+#cfgChip .chev { padding: 2px 8px 2px 0; color: var(--vscode-descriptionForeground); }
+.budget { color: var(--vscode-descriptionForeground); font-size: 0.92em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#toolbar button { white-space: nowrap; }
+#toolbar button.icon { padding: 4px 8px; }
+
+.menuWrap { position: relative; display: inline-flex; }
+.menu {
+	position: absolute; top: calc(100% + 3px); left: 0; z-index: 20; min-width: 240px; padding: 4px 0;
+	background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 4px; box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,.3));
+}
+.menu.right { left: auto; right: 0; }
+.menu[hidden] { display: none; }
+.menu .item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 12px; text-align: left; white-space: nowrap; background: none; color: inherit; border-radius: 0; }
+.menu button.item:hover:not(:disabled), .menu label.item:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, inherit); }
+.menu .hint.item { white-space: normal; font-size: 0.92em; }
+#autoBtn { display: inline-flex; align-items: center; gap: 6px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+#autoBtn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-descriptionForeground); opacity: .6; }
+#autoBtn.on { color: var(--vscode-charts-blue); }
+#autoBtn.on .dot { background: var(--vscode-charts-blue); opacity: 1; }
+
+#form { display: block; padding: 6px 0; }
+#form .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; min-height: 28px; }
+#form .field { display: inline-flex; align-items: center; gap: 6px; }
+#form .field[hidden] { display: none; }
+#form .lbl { color: var(--vscode-descriptionForeground); }
+#form .field input:not([type]) { width: 22em; }
+#form .seg label { display: inline-flex; margin-left: -1px; cursor: pointer; }
+#form .seg label:first-child { margin-left: 0; }
+#form .seg input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+#form .seg label > span {
+	padding: 2px 9px; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+}
+#form .seg label:first-child > span { border-radius: 2px 0 0 2px; }
+#form .seg label:last-child > span { border-radius: 0 2px 2px 0; }
+#form .seg input:checked + span { position: relative; z-index: 1; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-background); }
+#form .seg input:focus-visible + span { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+#form .seg input:disabled + span { opacity: .5; cursor: default; }
+#form .hintline { display: flex; flex-wrap: wrap; gap: 2px 14px; padding-top: 3px; color: var(--vscode-descriptionForeground); font-size: 0.92em; }
+#form .hintline span:empty { display: none; }
+#message:empty { display: none; }
+
+/* ---- Header: the tabs, the shown tab's tools, the recording (one row, two when narrow) ------- */
+#toolbar { gap: 4px 8px; padding: 4px 0; min-height: 34px; }
+#toolbar .title[hidden] { display: none; }
+#tabs { display: flex; align-self: stretch; margin: -4px 0; }
+#tabs[hidden], #tabs .tab[hidden] { display: none; }
+#tabs .tab { background: none; color: var(--vscode-descriptionForeground); border: 0; border-bottom: 2px solid transparent; padding: 0 10px; border-radius: 0; white-space: nowrap; }
+#tabs .tab:hover { color: var(--vscode-foreground); }
+#tabs .tab.on { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder); }
+#tabs .cnt { margin-left: 5px; font-size: 0.9em; color: var(--vscode-descriptionForeground); }
+#tabs .cnt:empty { display: none; }
+#tools { display: flex; flex: 1 1 auto; min-width: 0; }
+#tools[hidden] { display: none; }
+.toolset { display: flex; flex: 1; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.toolset[hidden] { display: none; }
+#rec { position: relative; display: flex; align-items: center; gap: 6px; margin-left: auto; }
+#toolbar.two #tools { order: 5; flex-basis: 100%; }
+#toolbar .seg button { padding: 4px 10px; }
+.S { display: none; }
+@media (max-width: 1450px) { .L { display: none; } .S { display: inline; } }
+@media (max-width: 1400px) { #tlView { display: none; } }
+#toolbar .toolset button.info {
+	flex: none; width: 17px; height: 17px; padding: 0; border-radius: 50%; font-size: 10px; font-weight: 700; line-height: 15px;
+	background: none; color: var(--vscode-editorWarning-foreground, #bf8803); border: 1px solid var(--vscode-editorWarning-foreground, #bf8803);
+}
+#toolbar button.info[hidden] { display: none; }
+#cfgPop {
+	position: absolute; top: calc(100% + 5px); right: 0; z-index: 30; width: min(780px, calc(100vw - 24px)); padding: 8px 12px;
+	background: var(--vscode-editorWidget-background); color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); border-radius: 4px;
+	box-shadow: 0 2px 10px var(--vscode-widget-shadow, rgba(0,0,0,.3));
+}
+#cfgPop[hidden] { display: none; }
+#cfgPop .popHead, #cfgPop .popFoot { display: flex; align-items: center; gap: 8px; }
+#cfgPop .popHead .name { color: var(--vscode-descriptionForeground); }
+#cfgPop .popFoot { padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
+#contextLabel.flash { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }

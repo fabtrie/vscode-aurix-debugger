@@ -10,6 +10,13 @@
 	let armed = false;
 	let result;
 	let applying = false;
+	// The form is open (the header shows the configuration as a summary otherwise).
+	let editing = true;
+	// The configuration changed since it was armed or since the shown recording.
+	let dirty = false;
+	// The check's verdict, for the summary's tooltip.
+	let checkText = '';
+	const num = (n) => Number(n).toLocaleString('en-US').replace(/,/g, '\u2009');
 
 	function esc(s) {
 		return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -100,7 +107,72 @@
 		$('context').checked = !!c.Context;
 		applying = false;
 		updateFormState();
+		renderSummary();
 	}
+
+	/** The header's short summary of the configuration; all of it in the tooltip. */
+	function renderSummary() {
+		const c = config || {};
+		const sel = $('saved').value;
+		$('cfgName').textContent = sel || 'unsaved';
+		const chip = $('cfgChip');
+		if (window.aurixReverse) {
+			$('cfgSum').textContent = 'reverse debugging';
+			chip.title = 'The trace is used by reverse debugging';
+			return;
+		}
+		const r = (c.Ranges || [])[0];
+		const short = [`CPU${c.Core ?? 0}`];
+		if (c.Kind === 'data') short.push(`writes into ${rangeText(r) || '?'}`);
+		else if (r) short.push(`inside ${rangeText(r)}`);
+		else short.push('All code');
+		if (c.Kind !== 'data' && c.Context) short.push('task / ISR');
+		const stop = c.Stop;
+		const stopText = stop && typeof stop === 'object' ? `stop at ${stop.Function || '?'}` : stop === 'full' ? 'first 8 KB' : stop === 'manual' ? 'stop by hand' : 'stop on halt';
+		const tsText = c.Timestamps === 'ticks' ? 'tick time stamps' : 'time stamps with messages';
+		const sep = '<span class="sep">·</span>';
+		$('cfgSum').innerHTML = (sel ? `<span class="nm">${esc(sel)}</span>${sep}` : '') + short.map(esc).join(sep) +
+			(dirty ? ' <span class="dirty">●</span>' : '');
+		chip.title = `${sel || 'Unsaved configuration'}: ${[...short, stopText, tsText].join(' · ')}` +
+			(checkText ? `\n${checkText}` : '') + (dirty ? '\n● changed since it was armed' : '') + '\nClick to change it';
+	}
+
+	/** The configuration popover. */
+	function setEditing(v) {
+		editing = !!v && !window.aurixReverse;
+		$('cfgPop').hidden = !editing;
+		$('cfgChip').classList.toggle('open', editing);
+		$('cfgChev').textContent = editing ? '▴' : '▾';
+		if (editing) document.querySelectorAll('.menu').forEach((x) => (x.hidden = true));
+	}
+	/** Opens the configuration, pointing at one of its fields (traceTimeline.js: the ⓘ). */
+	window.traceEditConfig = (focus) => {
+		setEditing(true);
+		const el = focus && $(focus);
+		if (el) {
+			el.classList.add('flash');
+			setTimeout(() => el.classList.remove('flash'), 1600);
+		}
+	};
+
+	/** Two header rows when one is not enough: the tab's tools then take the second row. */
+	function fitHeader() {
+		const tb = $('toolbar');
+		const tools = $('tools');
+		tools.hidden = !tools.querySelector('.toolset:not([hidden])');
+		tb.classList.remove('two');
+		const first = $('tabs').hidden ? $('title') : $('tabs');
+		const top = first.getBoundingClientRect().top;
+		if ([$('rec'), tools].some((el) => !el.hidden && el.getBoundingClientRect().top > top + 6)) tb.classList.add('two');
+		// Where the tab's content starts: the timeline and the instruction list fill the rest.
+		let h = tb.getBoundingClientRect().bottom;
+		for (const el of [$('reverseBanner'), $('message')]) {
+			if (el.offsetParent !== null) h = Math.max(h, el.getBoundingClientRect().bottom);
+		}
+		document.documentElement.style.setProperty('--hdr', Math.ceil(h + window.scrollY) + 'px');
+	}
+	window.traceFitHeader = fitHeader;
+	window.addEventListener('resize', fitHeader);
 
 	function updateFormState() {
 		const kind = radio('kind') || 'all';
@@ -109,21 +181,26 @@
 		const stop = $('stop').value;
 		$('stopAt').hidden = stop !== 'function';
 		$('stopHint').textContent =
-			stop === 'halt' ? ' the debugger stops it when the core halts: the trace runs up to the halt, and Step Back replays it' :
-			stop === 'full' ? ' a single buffer: the first 8 KB of the run' :
-			stop === 'manual' ? ' a ring: the last 8 KB before "Stop and read"' :
-			' the trace ends when the function is entered';
-		$('keep').textContent =
-			stop === 'full' ? 'the start (the buffer fills once)' :
-			'the end (the buffer is a ring and keeps the newest messages)';
-		$('rangeInfo').textContent = kind === 'inside' ? ' only code in this range is recorded' : '';
+			stop === 'halt' ? 'The debugger stops it when the core halts: the trace runs up to the halt, and Step Back replays it.' :
+			stop === 'full' ? 'A single buffer: the first 8 KB of the run.' :
+			stop === 'manual' ? 'A ring: the last 8 KB before "Stop and read".' :
+			'The trace ends when the function is entered; the ring keeps the 8 KB before.';
+		$('keep').textContent = '';
+		$('rangeInfo').textContent = kind === 'inside' ? 'Only code in this range is recorded.' : '';
+		$('rangeField').hidden = kind !== 'inside';
+		$('dataField').hidden = kind !== 'data';
+		$('contextLabel').hidden = kind === 'data';
 		$('context').disabled = kind === 'data';
 		if (window.aurixReverse) {
 			$('range').disabled = true;
 			$('dataRange').disabled = true;
 			$('context').disabled = true;
 		}
-		$('arm').textContent = armed ? 'Re-arm' : 'Arm';
+		// One record button: Arm, or Stop and read while armed (Re-arm is in the configuration).
+		$('armPop').textContent = armed ? 'Re-arm' : 'Arm';
+		$('arm').hidden = armed;
+		$('stopBtn').hidden = !armed;
+		fitHeader();
 	}
 
 	let timer;
@@ -132,6 +209,8 @@
 		updateFormState();
 		config = readForm();
 		$('saved').value = '';
+		dirty = armed || !!result;
+		renderSummary();
 		clearTimeout(timer);
 		timer = setTimeout(() => vscode.postMessage({ type: 'config', config }), 250);
 	}
@@ -145,24 +224,48 @@
 
 	function message(text, cls) {
 		const m = $('message');
+		// With a recording shown, notes go into the state's tooltip: the header keeps its height.
+		if (text && (cls || 'info') === 'info' && result) {
+			$('state').title = text;
+			text = '';
+		}
 		m.textContent = text || '';
 		m.className = text ? cls || 'info' : '';
+		fitHeader();
 	}
 
 	function showCheck(m) {
 		const el = $('resources');
+		const budget = $('budget');
 		if (!m.ok) {
 			el.innerHTML = `<span class="bad">Cannot be armed: ${esc(m.error)}</span>`;
+			budget.innerHTML = '<span class="bad">cannot be armed</span>';
+			budget.title = m.error || '';
 			$('arm').disabled = true;
+			$('armPop').disabled = true;
+			$('cfgChip').classList.add('bad');
+			checkText = `Cannot be armed: ${m.error || ''}`;
+			renderSummary();
+			// Show why, in the form.
+			setEditing(true);
 			return;
 		}
 		$('arm').disabled = !!window.aurixReverse;
+		$('armPop').disabled = !!window.aurixReverse;
+		$('cfgChip').classList.remove('bad');
 		const c = m.check || {};
 		const r = c.Resources || {};
-		el.innerHTML =
-			`Uses <b>${r.PtuComparators ?? 0}</b> of 2 program comparators, <b>${r.DtuComparators ?? 0}</b> of 2 data comparators, ` +
-			`<b>${typeof r.Events === 'number' ? r.Events : (r.Events || []).length}</b> of 16 events · ` +
-			`buffer ${c.Ring ? 'ring' : 'linear'} 8 KB · covers ${esc(c.Window || '')}`;
+		const events = typeof r.Events === 'number' ? r.Events : (r.Events || []).length;
+		const full =
+			`Uses ${r.PtuComparators ?? 0} of 2 program comparators, ${r.DtuComparators ?? 0} of 2 data comparators, ` +
+			`${events} of 16 events · buffer ${c.Ring ? 'ring' : 'linear'} 8 KB · covers ${c.Window || ''}`;
+		el.textContent = full;
+		const win = String(c.Window || '').replace(/^about /, '≈ ').replace(/ of execution$/, '');
+		budget.textContent = `${win} · ${r.PtuComparators ?? 0}/2 program, ${r.DtuComparators ?? 0}/2 data comparators · ${events}/16 events`;
+		budget.title = full;
+		checkText = budget.textContent;
+		$('arm').title = full;
+		renderSummary();
 	}
 
 	/** Why the recording does not end where the core stands now (`RanSince`), as a phrase. */
@@ -336,6 +439,12 @@
 
 	function showResult(r) {
 		result = r;
+		if (r) {
+			// A recording: the configuration folds into the header.
+			dirty = false;
+			setEditing(false);
+			renderSummary();
+		}
 		$('export').disabled = !r;
 		message('');
 		if (!r) {
@@ -346,8 +455,17 @@
 		} else {
 			renderData(r);
 		}
-		// The Instructions view (traceInsns.js) takes over a program recording.
-		$('tabs').hidden = !(r && r.Kind === 'program') && !window.aurixReverse;
+		// The tabs: Timeline, List and Instructions for a program recording, the writes for data.
+		const program = !!(r && r.Kind === 'program');
+		const s = (r && r.Stats) || {};
+		$('tabs').hidden = !r && !window.aurixReverse;
+		$('title').hidden = !$('tabs').hidden;
+		$('listName').textContent = r && !program ? 'Writes' : 'List';
+		$('cntList').textContent = r && !program ? num(s.Events ?? 0) : '';
+		const warn = [s.Gaps ? `${s.Gaps} gap${s.Gaps === 1 ? '' : 's'}` : '', s.Lost ? `${s.Lost} lost` : ''].filter(Boolean).join(', ');
+		$('cntInsns').innerHTML = program ? esc(num(s.Instructions ?? 0)) + (warn ? ` <span class="warn">${esc(warn)}</span>` : '') : '';
+		for (const t of ['timeline', 'insns']) document.querySelector(`#tabs [data-tab="${t}"]`).hidden = !!r && !program;
+		fitHeader();
 		window.dispatchEvent(new CustomEvent('trace-result', { detail: r }));
 	}
 
@@ -359,6 +477,45 @@
 			el.addEventListener('input', changed);
 		}
 	});
+	$('cfgChip').addEventListener('click', (e) => {
+		e.stopPropagation();
+		setEditing(!editing);
+	});
+	$('cfgPop').addEventListener('click', (e) => e.stopPropagation());
+	$('cfgClose').addEventListener('click', () => setEditing(false));
+	$('armPop').addEventListener('click', () => $('arm').click());
+	// The Auto and ⋯ menus.
+	function menu(btn, el) {
+		btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const show = el.hidden;
+			document.querySelectorAll('.menu').forEach((x) => (x.hidden = true));
+			el.hidden = !show;
+		});
+		el.addEventListener('click', (e) => e.stopPropagation());
+	}
+	menu($('autoBtn'), $('autoMenu'));
+	menu($('moreBtn'), $('moreMenu'));
+	document.addEventListener('click', () => {
+		document.querySelectorAll('.menu').forEach((x) => (x.hidden = true));
+		if (editing) setEditing(false);
+	});
+	$('export').addEventListener('click', () => ($('moreMenu').hidden = true));
+	$('save').addEventListener('click', () => ($('moreMenu').hidden = true));
+	window.addEventListener('reverse-changed', () => {
+		$('cfgChip').disabled = !!window.aurixReverse;
+		$('autoBtn').disabled = !!window.aurixReverse;
+		if (window.aurixReverse) setEditing(false);
+		renderSummary();
+	});
+	function showAuto(on, steps) {
+		$('autoBtn').classList.toggle('on', on);
+		$('autoText').textContent = 'Auto';
+		$('autoBtn').title = on
+			? `Auto is on: the trace is armed on every run${steps ? ' and step' : ''} and read on every halt, and Step Back replays it`
+			: 'Auto is off: click to arm the trace on every run and read it on every halt';
+	}
+
 	$('arm').addEventListener('click', () => {
 		message('Arming…', 'info');
 		vscode.postMessage({ type: 'arm' });
@@ -391,18 +548,24 @@
 		switch (m.type) {
 			case 'init':
 				config = m.config || {};
-				applyForm(config);
 				fillSaved(m.saved, m.selected);
+				applyForm(config);
+				// Open while there is nothing to show yet; a recording folds it.
+				setEditing(!result && !armed);
 				break;
 			case 'saved':
 				fillSaved(m.saved, m.selected);
+				renderSummary();
 				break;
 			case 'check':
 				showCheck(m);
 				break;
 			case 'armed':
 				armed = true;
+				dirty = false;
+				setEditing(false);
 				showResult(undefined);
+				renderSummary();
 				message('Armed. The core records until the stop condition; run the target.', 'info');
 				setState('armed', 'armed');
 				$('stopBtn').disabled = false;
@@ -424,6 +587,7 @@
 				$('auto').checked = !!m.on && !window.aurixReverse;
 				$('autoSteps').checked = !!m.on && !!m.steps && !window.aurixReverse;
 				$('autoSteps').disabled = !m.on || !!window.aurixReverse;
+				showAuto($('auto').checked, $('autoSteps').checked);
 				if (window.aurixReverse) break;
 				if (m.error) message(m.error, 'bad');
 				else if (m.on && !armed) message('Armed on every run: run the target; at the next halt the trace up to it is read here (Step Back replays it).', 'info');
@@ -431,5 +595,6 @@
 		}
 	});
 
+	fitHeader();
 	vscode.postMessage({ type: 'ready' });
 })();

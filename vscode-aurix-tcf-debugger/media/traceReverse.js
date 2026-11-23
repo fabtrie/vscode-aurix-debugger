@@ -19,7 +19,7 @@
 	function setControls() {
 		window.aurixReverse = on;
 		$('reverseBanner').hidden = !on;
-		document.querySelectorAll('#form input, #form select, #arm, #stopBtn, #auto, #autoSteps, #save, #saved').forEach((el) => {
+		document.querySelectorAll('#form input, #form select, #arm, #stopBtn, #auto, #autoSteps, #save, #saved, #cfgChip, #autoBtn, #armPop').forEach((el) => {
 			if (on) {
 				el.dataset.reverseOff = el.disabled ? '1' : '';
 				el.disabled = true;
@@ -33,7 +33,9 @@
 		tab.hidden = !on;
 		if (on) {
 			$('tabs').hidden = false;
+			$('title').hidden = true;
 		}
+		if (window.traceFitHeader) window.traceFitHeader();
 		const b = $('insnReplay');
 		b.textContent = on ? 'Go here' : 'Show in debugger';
 		b.title = on

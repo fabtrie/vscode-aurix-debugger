@@ -552,69 +552,89 @@ export class TracePanel {
 </head>
 <body>
 <div id="toolbar">
-  <span class="title">Trace</span>
-  <select id="saved" title="Saved configurations"><option value="">(unsaved configuration)</option></select>
-  <button id="save" type="button" class="secondary">Save…</button>
-  <span class="spacer"></span>
-  <span id="state" class="state idle">idle</span>
+  <span id="title" class="title">Trace</span>
+  <span id="tabs" class="tabs" hidden><button type="button" data-tab="timeline" class="tab on">Timeline</button><button type="button" data-tab="list" class="tab"><span id="listName">List</span><span id="cntList" class="cnt"></span></button><button type="button" data-tab="insns" class="tab">Instructions<span id="cntInsns" class="cnt"></span></button><button type="button" data-tab="history" class="tab" hidden>History</button></span>
+  <span id="tools" hidden>
+    <span id="tlToolbar" class="toolset" hidden>
+      <input id="tlFind" type="search" placeholder="Find function" spellcheck="false">
+      <span class="seg"><button type="button" id="tlOut" class="secondary" title="Zoom out (S)">−</button><button type="button" id="tlFit" class="secondary" title="The whole recording (F)">Fit</button><button type="button" id="tlIn" class="secondary" title="Zoom in (W)">+</button></span>
+      <span id="tlView" class="hint"></span>
+      <span class="spacer"></span>
+      <span class="seg" title="Rows: call depth on one timeline, or a band per task and ISR"><button type="button" id="tlLayoutOne" class="on"><span class="L">One timeline</span><span class="S">One</span></button><button type="button" id="tlLayoutLanes"><span class="L">Lane per task / ISR</span><span class="S">Lanes</span></button></span>
+      <span class="seg" title="Bar colour: by task / ISR or by function"><button type="button" id="tlColCtx" class="on"><span class="L">by task / ISR</span><span class="S">Task</span></button><button type="button" id="tlColFn"><span class="L">by function</span><span class="S">Fn</span></button></span>
+      <button type="button" id="tlInfo" class="info" hidden>i</button>
+    </span>
+    <span id="insnToolbar" class="toolset" hidden>
+    <input id="insnFind" type="search" placeholder="Find: address, insn, function, d15=0xC" title="Find an address, an instruction, a function, a register value (d15=0xC) or where a register changes (a4 changes)" spellcheck="false">
+    <button id="insnSrc" type="button" class="toggle on" title="Source lines between the instructions">Source</button>
+    <button id="insnEff" type="button" class="toggle on" title="What each instruction wrote">Effects</button>
+    <button id="insnCalls" type="button" class="toggle" title="Only calls, returns and interrupt entries">Calls only</button>
+    <button id="insnHistory" type="button" class="toggle on" hidden title="Reverse debugging: the instructions of every action in the history, oldest first (off: the last action only)">Whole history</button>
+    <button id="insnStart" type="button" class="secondary" title="First instruction">⇤</button>
+    <button id="insnEnd" type="button" class="secondary" title="Last instruction (the halt)">⇥</button>
+    <span class="spacer"></span>
+    <button id="insnReplay" type="button" title="Show the selected instruction in the debugger: source, registers, locals, call stack (Step Back and Step move on from there)">Show in debugger</button>
+    <button id="insnReplayOff" type="button" class="secondary" hidden>Back to the halt</button>
+    </span>
+  </span>
+  <span id="rec">
+    <button type="button" id="cfgChip" class="chip" title="The trace configuration: click to change it"><span id="cfgSum" class="sum"></span><span id="cfgChev" class="chev">▾</span></button>
+    <span id="state" class="state idle">idle</span>
+    <span class="menuWrap">
+      <button type="button" id="autoBtn" class="toggle" title="Arm this trace whenever the core runs (Continue, not a step) and stop it when the core halts: every halt comes with the trace up to it, and Step Back replays it"><span class="dot"></span><span id="autoText">Auto</span> ▾</button>
+      <div id="autoMenu" class="menu right" hidden>
+      <label class="item" title="Arm this trace whenever the core runs (Continue, not a step) and stop it when the core halts: every halt comes with the trace up to it, and Step Back replays it"><input id="auto" type="checkbox"> Arm on every run, stop on halt</label>
+      <label class="item" title="With arming on every run: record steps too. A Step Over, Into or Out is one recording, an instruction step one of its own, each joined to the trace before it (up to 8 KB in all), so Step Back replays through them"><input id="autoSteps" type="checkbox" disabled> and on steps</label>
+      <div class="hint item">Every halt comes with the trace up to it; Step Back replays it.</div>
+      </div>
+    </span>
+    <button id="arm" type="button">Arm</button>
+    <button id="stopBtn" type="button" hidden>Stop and read</button>
+    <span class="menuWrap">
+      <button type="button" id="moreBtn" class="secondary icon" title="More actions">⋯</button>
+      <div id="moreMenu" class="menu right" hidden>
+        <button type="button" id="save" class="item">Save configuration…</button>
+        <button type="button" id="export" class="item" disabled>Export CSV</button>
+      </div>
+    </span>
+    <div id="cfgPop" hidden>
+      <div class="popHead"><b>Configuration</b><span id="cfgName" class="name">unsaved</span><span class="spacer"></span><span id="budget" class="budget"></span></div>
+<form id="form">
+  <div class="row">
+    <span class="field"><span class="lbl">Core</span><select id="core"><option value="0">CPU0</option><option value="1">CPU1</option><option value="2">CPU2</option></select></span>
+    <span class="field"><span class="lbl">Record</span><span class="seg">
+      <label><input type="radio" name="kind" value="all"><span>All code</span></label><label><input type="radio" name="kind" value="inside"><span>Only inside</span></label><label title="Every write into a variable range (data trace)"><input type="radio" name="kind" value="data"><span>Writes into</span></label>
+    </span></span>
+    <span class="field" id="rangeField"><input id="range" placeholder="function, or 0xLO..0xHI" spellcheck="false"></span>
+    <span class="field" id="dataField"><input id="dataRange" placeholder="variable range: 0xADDR..0xEND, or function name" spellcheck="false"></span>
+    <label class="field" id="contextLabel" title="Records the OS variables that say which task or ISR runs (the ORTI file's RUNNINGTASK and RUNNINGISR2 of the core) with the data trace, next to the program flow: the Timeline shows every call in its task or ISR. Needs the ORTI file loaded (ortiFile)."><input id="context" type="checkbox"> with the task / ISR (ORTI)</label>
+  </div>
+  <div class="row">
+    <span class="field"><span class="lbl">Stop</span><select id="stop">
+      <option value="halt">when the core halts</option>
+      <option value="full">when the buffer is full</option>
+      <option value="manual">manually</option>
+      <option value="function">at a function</option>
+    </select> <input id="stopAt" placeholder="function" spellcheck="false" hidden></span>
+    <span class="field"><span class="lbl">Time stamps</span><span class="seg">
+      <label><input type="radio" name="ts" value="tsu"><span>with messages</span></label><label title="A tick message per step: exact, but the buffer fills within milliseconds"><input type="radio" name="ts" value="ticks"><span>ticks</span></label>
+    </span></span>
+    <span class="spacer"></span>
+    <span class="field"><select id="saved" title="Saved configurations"><option value="">(unsaved configuration)</option></select></span>
+  </div>
+  <div class="hintline"><span id="stopHint"></span><span id="keep"></span><span id="rangeInfo"></span><span id="resources"></span></div>
+</form>
+      <div class="popFoot"><span class="spacer"></span><button type="button" id="cfgClose" class="secondary">Close</button><button type="button" id="armPop">Arm</button></div>
+    </div>
+  </span>
 </div>
 <div id="reverseBanner" class="banner" hidden>Trace used by reverse debugging: the setup and Arm are off while it is on. The tabs show the recording of the last action; History lists the checkpoints. Switch it off with <b>AURIX: Disable Reverse Debugging</b> to record here.</div>
-<form id="form">
-  <label>Core</label>
-  <div><select id="core"><option value="0">CPU0</option><option value="1">CPU1</option><option value="2">CPU2</option></select></div>
-
-  <label>Record</label>
-  <div class="col">
-    <label class="inline"><input type="radio" name="kind" value="all"> All code</label>
-    <label class="inline"><input type="radio" name="kind" value="inside"> Only inside</label>
-    <div class="sub"><input id="range" placeholder="function, or 0xLO..0xHI" spellcheck="false"><span id="rangeInfo" class="hint"></span></div>
-    <label class="inline" id="contextLabel" title="Records the OS variables that say which task or ISR runs (the ORTI file's RUNNINGTASK and RUNNINGISR2 of the core) with the data trace, next to the program flow: the Timeline shows every call in its task or ISR. Needs the ORTI file loaded (ortiFile)."><input id="context" type="checkbox"> with the task / ISR (ORTI)</label>
-    <label class="inline"><input type="radio" name="kind" value="data"> Every write into</label>
-    <div class="sub"><input id="dataRange" placeholder="variable range: 0xADDR..0xEND, or function name" spellcheck="false"></div>
-  </div>
-
-  <label>Stop</label>
-  <div><select id="stop">
-    <option value="halt">When the core halts</option>
-    <option value="full">When the buffer is full</option>
-    <option value="manual">Manually</option>
-    <option value="function">At a function</option>
-  </select> <input id="stopAt" placeholder="function" spellcheck="false" hidden><span id="stopHint" class="hint"></span></div>
-
-  <label>Keep</label>
-  <div id="keep" class="hint"></div>
-
-  <label>Time stamps</label>
-  <div>
-    <label class="inline"><input type="radio" name="ts" value="tsu"> With messages</label>
-    <label class="inline"><input type="radio" name="ts" value="ticks"> Ticks (fills the buffer)</label>
-  </div>
-</form>
-<div id="resources" class="resources"></div>
-<div id="actions">
-  <button id="arm" type="button">Arm</button>
-  <button id="stopBtn" type="button" class="secondary">Stop and read</button>
-  <label class="inline" id="autoLabel" title="Arm this trace whenever the core runs (Continue, not a step) and stop it when the core halts: every halt comes with the trace up to it, and Step Back replays it"><input id="auto" type="checkbox"> Arm on every run, stop on halt</label>
-  <label class="inline" id="autoStepsLabel" title="With arming on every run: record steps too. A Step Over, Into or Out is one recording, an instruction step one of its own, each joined to the trace before it (up to 8 KB in all), so Step Back replays through them"><input id="autoSteps" type="checkbox" disabled> and on steps</label>
-  <span class="spacer"></span>
-  <button id="export" type="button" class="secondary" disabled>Export CSV</button>
-</div>
 <div id="message"></div>
-<div id="tabs" hidden><button type="button" data-tab="flow" class="tab on">Flow</button><button type="button" data-tab="insns" class="tab">Instructions</button><button type="button" data-tab="history" class="tab" hidden>History</button></div>
 <div id="history" hidden></div>
 <div id="flowPane">
-<div id="flowBar" hidden><span class="seg"><button type="button" data-view="timeline" class="on">Timeline</button><button type="button" data-view="list">List</button></span><span id="flowNote" class="hint"></span></div>
 <div id="coverage"></div>
 <div id="result"></div>
 <div id="timeline" hidden>
-  <div id="tlToolbar">
-    <input id="tlFind" type="search" placeholder="Find function" spellcheck="false">
-    <span class="seg"><button type="button" id="tlOut" class="secondary" title="Zoom out (S)">−</button><button type="button" id="tlFit" class="secondary" title="The whole recording (F)">Fit</button><button type="button" id="tlIn" class="secondary" title="Zoom in (W)">+</button></span>
-    <span id="tlView" class="hint"></span>
-    <span class="spacer"></span>
-    <span class="seg" title="Rows: call depth on one timeline, or a band per task and ISR"><button type="button" id="tlLayoutOne" class="on">One timeline</button><button type="button" id="tlLayoutLanes">Lane per task / ISR</button></span>
-    <span class="seg" title="Bar colour"><button type="button" id="tlColCtx" class="on">by task / ISR</button><button type="button" id="tlColFn">by function</button></span>
-  </div>
   <div id="tlMain">
     <div id="tlLeft">
       <canvas id="tlTop"></canvas>
@@ -627,24 +647,11 @@ export class TracePanel {
 </div>
 </div>
 <div id="insns" hidden>
-  <div id="insnSummary" class="summary"></div>
-  <div id="insnToolbar">
-    <input id="insnFind" type="search" placeholder="Find: address, instruction, function, d15=0xC, a4 changes" spellcheck="false">
-    <button id="insnSrc" type="button" class="toggle on" title="Source lines between the instructions">Source</button>
-    <button id="insnEff" type="button" class="toggle on" title="What each instruction wrote">Effects</button>
-    <button id="insnCalls" type="button" class="toggle" title="Only calls, returns and interrupt entries">Calls only</button>
-    <button id="insnHistory" type="button" class="toggle on" hidden title="Reverse debugging: the instructions of every action in the history, oldest first (off: the last action only)">Whole history</button>
-    <button id="insnStart" type="button" class="secondary" title="First instruction">⇤</button>
-    <button id="insnEnd" type="button" class="secondary" title="Last instruction (the halt)">⇥</button>
-    <span class="spacer"></span>
-    <button id="insnReplay" type="button" title="Show the selected instruction in the debugger: source, registers, locals, call stack (Step Back and Step move on from there)">Show in debugger</button>
-    <button id="insnReplayOff" type="button" class="secondary" hidden>Back to the halt</button>
-  </div>
   <div id="insnMain">
     <div id="insnList" tabindex="0"><div id="insnSpacer"></div><div id="insnRows"></div></div>
     <div id="insnRegs"></div>
   </div>
-  <div class="legend"><span><b class="v-exact">0x0000000C</b> exact</span><span><b class="v-mem">≈0x0000003C</b> from memory at the halt</span><span><b class="v-unk">········</b> unknown</span><span><b class="w">d15</b> written here</span></div>
+  <div class="legend"><span id="insnSummary" class="sumline"></span><span class="spacer"></span><span><b class="v-exact">0x0000000C</b> exact</span><span><b class="v-mem">≈0x0000003C</b> from memory at the halt</span><span><b class="v-unk">········</b> unknown</span><span><b class="w">d15</b> written here</span></div>
 </div>
 <script nonce="${nonce}" src="${js}"></script>
 <script nonce="${nonce}" src="${insnsJs}"></script>

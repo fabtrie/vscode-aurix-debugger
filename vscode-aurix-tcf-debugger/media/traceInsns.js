@@ -383,12 +383,19 @@
 
 	// ---- wiring -------------------------------------------------------------------------------
 
+	// The tab shown: timeline, list (the Flow pane, traceTimeline.js), insns or history.
+	let current = ((vscode.getState && vscode.getState()) || {}).flowView || 'timeline';
 	function setTab(tab) {
+		if (tab === 'flow') tab = window.traceFlowView ? window.traceFlowView() : 'timeline';
+		current = tab;
 		active = tab === 'insns';
 		document.querySelectorAll('#tabs .tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
 		$('insns').hidden = !active;
-		$('flowPane').hidden = tab !== 'flow';
+		$('flowPane').hidden = tab !== 'timeline' && tab !== 'list';
 		$('history').hidden = tab !== 'history';
+		$('insnToolbar').hidden = !active;
+		window.dispatchEvent(new CustomEvent('trace-tab', { detail: tab }));
+		if (window.traceFitHeader) window.traceFitHeader();
 		if (active) {
 			if (result && result.Kind === 'program' && !total && !loading) load();
 			draw();
@@ -396,6 +403,7 @@
 	}
 
 	document.querySelectorAll('#tabs .tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+	window.traceTab = () => current;
 
 	// The Timeline (traceTimeline.js): show a row of the last recording here.
 	let pendingRow;
@@ -501,7 +509,8 @@
 
 	window.addEventListener('trace-result', (e) => {
 		reset(e.detail);
-		if (!e.detail || e.detail.Kind !== 'program') setTab('flow');
+		// A data recording has only its list of writes.
+		setTab(e.detail && e.detail.Kind !== 'program' ? 'list' : current);
 	});
 
 	window.addEventListener('message', (e) => {

@@ -21,6 +21,7 @@ mod symstore;
 pub mod trace;
 pub mod reverse;
 pub mod trace_insns;
+pub mod trace_calls;
 pub mod trace_history;
 mod wire;
 

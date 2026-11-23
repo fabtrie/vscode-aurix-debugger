@@ -2214,7 +2214,7 @@ class GeneratedClient:
         """
         return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/compare", None, _args({"files": files})))
 
-    def trace_arm(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
+    def trace_arm(self, *, context: bool | None = None, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
         """Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow
         (optionally only while the PC is inside a function or address range) or every write into an
         address range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),
@@ -2223,13 +2223,14 @@ class GeneratedClient:
         use it.
 
         Args:
+            context: Program trace: record which task or ISR runs besides, from the loaded ORTI file's `RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with `trace_calls`. Default: off.
             core: Observed core; only 0 (CPU0) so far.
             kind: `program` (default) or `data`.
             ranges: Program: at most one range the PC must be inside; data: exactly one range.
             stop: `halt` (default for program), `full`, `manual` (default for data), or a function name to stop at.
             timestamps: `tsu` (default: time stamps with messages) or `ticks`.
         """
-        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/arm", None, _args({"core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/arm", None, _args({"context": context, "core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
 
     def trace_auto(self, *, config: TraceConfigRequest | None = None, steps: bool | None = None) -> TraceData:
         """Arm a trace automatically whenever the traced core runs and read the recording when it
@@ -2242,18 +2243,19 @@ class GeneratedClient:
         """
         return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/auto", None, _args({"config": config, "steps": steps})))
 
-    def trace_check(self, *, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
+    def trace_check(self, *, context: bool | None = None, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
         """Check a trace configuration without arming: the resources it takes and the window to
         expect, or why it cannot be armed.
 
         Args:
+            context: Program trace: record which task or ISR runs besides, from the loaded ORTI file's `RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with `trace_calls`. Default: off.
             core: Observed core; only 0 (CPU0) so far.
             kind: `program` (default) or `data`.
             ranges: Program: at most one range the PC must be inside; data: exactly one range.
             stop: `halt` (default for program), `full`, `manual` (default for data), or a function name to stop at.
             timestamps: `tsu` (default: time stamps with messages) or `ticks`.
         """
-        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/check", None, _args({"core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
+        return TraceData.from_dict(self._call("POST", self._session_path() + "/trace/check", None, _args({"context": context, "core": core, "kind": kind, "ranges": ranges, "stop": stop, "timestamps": timestamps})))
 
     def trace_status(self) -> TraceData:
         """Whether a trace is armed, by whom, how full the trace RAM is and whether it finished (a
@@ -2291,6 +2293,17 @@ class GeneratedClient:
             scope: With reverse debugging on: `history` (default) numbers the rows of every action of the history one after the other (`Act`: checkpoint index, `R`: row for `reverse_goto`), `action` only the last action's recording.
         """
         return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/insns", _args({"count": count, "from": from_, "scope": scope}), None))
+
+    def trace_calls(self) -> TraceData:
+        """The last program recording as calls, for a timeline: each call (`Calls`, fields named by
+        `Columns`: function index, context index, call depth, first and last row, start and end in
+        ns, flags, file index, line) with the task or ISR it ran in (`Contexts`, `Segments` of rows
+        and times each ran) when the recording holds the OS variables (`context` in the trace
+        configuration). Flags (`Flags`): began before the recording, still open at its end, an
+        interrupt entry, a trap. Depth 0 is the shallowest call of each task or ISR; times are the
+        trace's stamps spread over the instructions between them.
+        """
+        return TraceData.from_dict(self._call("GET", self._session_path() + "/trace/calls", None, None))
 
     def trace_regs(self, *, at: int | None = None, before: bool | None = None, scope: str | None = None) -> TraceData:
         """All registers after one row of the instruction trace, each with how sure it is and where

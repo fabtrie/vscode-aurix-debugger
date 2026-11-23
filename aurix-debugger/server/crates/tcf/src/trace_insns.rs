@@ -47,6 +47,13 @@ pub struct ProgramTrace {
     /// The flow starts at the PC the core was started from (a reverse debugging checkpoint), and
     /// the replay from its registers as well.
     pub from_entry: bool,
+    /// The traced core.
+    pub core: u8,
+    /// The data range recorded besides the program flow (the task / ISR variables), if any.
+    pub data: Option<mcds::AddrRange>,
+    /// The writes into it, each with the index of the step it comes before (see
+    /// [`mcds::ProgramDecode::writes`]).
+    pub writes: Vec<(usize, mcds::DataEvent)>,
 }
 
 /// Where the replay takes memory at the halt from.
@@ -110,7 +117,7 @@ pub fn build_with(sh: &Shared, r: &Recording, entry: Option<&[u32]>, mem: MemAt)
     let halt_pc = r.halt_pc.filter(|_| r.ring);
     let entry = entry.filter(|e| e.len() > 36 && !lapped(r));
     let start_pc = entry.map(|e| e[36]);
-    let (steps, flow, decode, reached) = mcds::decode_program_segments(&r.segments(halt_pc), &mut code, start_pc);
+    let mcds::ProgramDecode { steps, flow, decode, reached, writes } = mcds::decode_program_full(&r.segments(halt_pc), &mut code, start_pc);
     let t_start = steps.iter().find_map(|s| match s {
         Step::Insn { time, .. } | Step::Gap { time, .. } => *time,
     });
@@ -218,6 +225,12 @@ pub fn build_with(sh: &Shared, r: &Recording, entry: Option<&[u32]>, mem: MemAt)
         target,
         memory,
         from_entry: entry.is_some(),
+        core: r.cfg.core,
+        data: match r.cfg.kind {
+            mcds::Kind::Program { data, .. } => data,
+            mcds::Kind::Data { .. } => None,
+        },
+        writes,
     })
 }
 

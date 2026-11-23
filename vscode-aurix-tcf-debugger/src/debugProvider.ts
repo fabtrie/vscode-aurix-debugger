@@ -5158,8 +5158,9 @@ export class AurixTCFDebugSession extends LifetimeDebugSession {
 
 		if (command === 'aurix/trace') {
 			// miniMCDS trace (AurixTrace): `op` arm | check | status | stop | read, with `config` or `max`;
-			// the instruction trace: insns {from, count}, regs {at}, find {query, from, back}.
-			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read', 'auto', 'insns', 'regs', 'find'];
+			// the instruction trace: insns {from, count}, regs {at}, find {query, from, back}; the
+			// timeline: calls.
+			const ops: TraceOp[] = ['arm', 'check', 'status', 'stop', 'read', 'auto', 'insns', 'regs', 'find', 'calls'];
 			const op = ops.find((o) => o === args?.op);
 			try {
 				if (!op) {

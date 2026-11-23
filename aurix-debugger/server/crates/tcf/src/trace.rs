@@ -8,7 +8,9 @@
 //! Configuration (JSON):
 //! `{"Core":0, "Kind":"program"|"data", "Ranges":[{"Function":"f"} | {"Start":"0x..","Len":n}],
 //!   "Stop":"halt"|"full"|"manual"|{"Function":"f"}, "Timestamps":"tsu"|"ticks"}`
-//! Program trace: `Ranges` (at most one in this version) limits it to the PC inside the range.
+//! Program trace: `Ranges` (at most one in this version) limits it to the PC inside the range;
+//! `"Context": true` records which task or ISR runs besides (the ORTI file's `RUNNINGTASK` /
+//! `RUNNINGISR2` of the core, with the data trace; see [`crate::trace_calls`]).
 //! Data trace: exactly one range, every write into it.
 
 use std::path::Path;
@@ -54,8 +56,13 @@ pub fn parse_config(sh: &Shared, v: &Value) -> Result<TraceConfig, String> {
     if ranges.len() > 1 {
         return Err("one range at a time (the inputs of an event are ANDed, so two ranges cannot both enable the trace)".into());
     }
+    let context = v.get("Context").and_then(Value::as_bool).unwrap_or(false);
     let kind = match v.get("Kind").and_then(Value::as_str).unwrap_or("program") {
-        "program" => Kind::Program { filter: ranges.first().copied() },
+        "program" => {
+            let data = if context { Some(crate::trace_calls::context_range(&crate::trace_calls::context_vars(sh, core)?)?) } else { None };
+            Kind::Program { filter: ranges.first().copied(), data }
+        }
+        "data" if context => return Err("Context (the task / ISR) is recorded with a program trace".into()),
         "data" => Kind::Data { range: *ranges.first().ok_or("a data trace needs one range")? },
         o => return Err(format!("unknown Kind '{o}' (program or data)")),
     };
@@ -84,8 +91,8 @@ pub fn parse_config(sh: &Shared, v: &Value) -> Result<TraceConfig, String> {
 fn estimate(cfg: &TraceConfig) -> &'static str {
     match (&cfg.kind, cfg.timestamps) {
         (_, Timestamps::Ticks) => "a few ms (ticks fill the buffer)",
-        (Kind::Program { filter: None }, _) => "about 80 µs of execution",
-        (Kind::Program { filter: Some(_) }, _) => "depends on how often the range runs (ms)",
+        (Kind::Program { filter: None, .. }, _) => "about 50 µs of execution",
+        (Kind::Program { filter: Some(_), .. }, _) => "depends on how often the range runs (ms)",
         (Kind::Data { .. }, _) => "about 600 writes",
     }
 }

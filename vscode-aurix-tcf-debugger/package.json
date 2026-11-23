@@ -1224,6 +1224,7 @@
 									},
 									"Stop": { "description": "\"halt\", \"full\", \"manual\" or { \"Function\": name }", "default": "halt" },
 									"Timestamps": { "type": "string", "enum": ["tsu", "ticks"], "default": "tsu" },
+									"Context": { "type": "boolean", "default": false, "description": "Program trace: record which task or ISR runs besides (the ORTI file's RUNNINGTASK / RUNNINGISR2 of the core, with the data trace), for the Timeline of the Trace panel. Needs ortiFile." },
 									"Auto": { "type": "boolean", "default": false, "description": "Arm the trace on every run (Continue) instead of once, stopping on the halt: every halt then comes with the trace up to it, and Step Back replays it." },
 									"Steps": { "type": "boolean", "default": false, "description": "With Auto: record steps too. A Step Over, Into or Out is one recording, an instruction step one of its own, each joined to the trace before it (up to 8 KB in all), so Step Back replays through them. Costs a trace arm and read per step." }
 								}

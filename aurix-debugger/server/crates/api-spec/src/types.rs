@@ -862,6 +862,11 @@ pub struct TraceConfigRequest {
     /// `tsu` (default: time stamps with messages) or `ticks`.
     #[serde(default)]
     pub timestamps: Option<String>,
+    /// Program trace: record which task or ISR runs besides, from the loaded ORTI file's
+    /// `RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with
+    /// `trace_calls`. Default: off.
+    #[serde(default)]
+    pub context: bool,
 }
 
 /// Automatic arming on run.

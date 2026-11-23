@@ -197,6 +197,15 @@ api! {
     /// memory at the halt) or unknown (null). `Replay` summarises how much could be rebuilt.
     op trace_insns [trace]: GET "/api/v1/trace/insns" (TraceInsnsRequest) -> TraceData;
 
+    /// The last program recording as calls, for a timeline: each call (`Calls`, fields named by
+    /// `Columns`: function index, context index, call depth, first and last row, start and end in
+    /// ns, flags, file index, line) with the task or ISR it ran in (`Contexts`, `Segments` of rows
+    /// and times each ran) when the recording holds the OS variables (`context` in the trace
+    /// configuration). Flags (`Flags`): began before the recording, still open at its end, an
+    /// interrupt entry, a trap. Depth 0 is the shallowest call of each task or ISR; times are the
+    /// trace's stamps spread over the instructions between them.
+    op trace_calls [trace]: GET "/api/v1/trace/calls" (NoArgs) -> TraceData;
+
     /// All registers after one row of the instruction trace, each with how sure it is and where
     /// it came from (`Why`), and the call stack at that point.
     op trace_regs [trace]: GET "/api/v1/trace/regs" (TraceRegsRequest) -> TraceData;

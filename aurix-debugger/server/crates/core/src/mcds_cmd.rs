@@ -75,14 +75,16 @@ pub fn parse_config(a: &[&str]) -> Result<TraceConfig, String> {
         }
     }
     let kind = match (kind, program) {
-        (Some(_), true) => return Err("give -data or -program, not both".into()),
+        // A program trace that records the writes into the range besides.
+        (Some(Kind::Data { range }), true) => Kind::Program { filter, data: Some(range) },
+        (Some(_), true) => return Err("give -data or -program".into()),
         (Some(k), false) => {
             if filter.is_some() {
                 return Err("-filter is for -program".into());
             }
             k
         }
-        (None, _) => Kind::Program { filter },
+        (None, _) => Kind::Program { filter, data: None },
     };
     let stop = stop.unwrap_or(match kind {
         Kind::Data { .. } => Stop::Manual,
@@ -96,7 +98,9 @@ pub fn config_json(cfg: &TraceConfig) -> Value {
     json!({
         "core": cfg.core,
         "kind": match &cfg.kind { Kind::Data { .. } => "data", Kind::Program { .. } => "program" },
-        "range": match &cfg.kind { Kind::Data { range } => r(range), Kind::Program { filter: Some(f) } => r(f), _ => Value::Null },
+        "range": match &cfg.kind { Kind::Data { range } => r(range), Kind::Program { filter: Some(f), .. } => r(f), _ => Value::Null },
+        // A program trace's data range (the writes recorded besides).
+        "data": match &cfg.kind { Kind::Program { data: Some(d), .. } => r(d), _ => Value::Null },
         "stop": match cfg.stop { Stop::BufferFull => json!("full"), Stop::Halt => json!("halt"), Stop::Manual => json!("manual"), Stop::Function(f) => json!({"at": r(&f)}) },
         "timestamps": match cfg.timestamps { Timestamps::Ticks => "ticks", Timestamps::Messages => "tsu" },
     })
@@ -306,7 +310,8 @@ mod tests {
         let c = parse_config(&["-program", "-filter", "0x80000000", "0x100", "-stop", "full", "-ticks"]).unwrap();
         assert_eq!(c.stop, Stop::BufferFull);
         assert_eq!(c.timestamps, Timestamps::Ticks);
-        assert!(parse_config(&["-data", "1", "4", "-program"]).is_err());
+        let c = parse_config(&["-data", "1", "4", "-program"]).unwrap();
+        assert_eq!(c.kind, Kind::Program { filter: None, data: Some(AddrRange::new(1, 4).unwrap()) });
         assert!(parse_config(&["-stop", "never"]).is_err());
     }
 }

@@ -565,7 +565,7 @@ mod tests {
     fn rec(n: usize, tag: u8, pc: u32) -> Recording {
         let mut raw = vec![0u8; regs::TRAM_SIZE as usize];
         raw[..n * regs::PARAGRAPH as usize].fill(tag);
-        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None }, stop: Stop::Halt, timestamps: Timestamps::Messages };
+        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None, data: None }, stop: Stop::Halt, timestamps: Timestamps::Messages };
         let t = SystemTime::now();
         Recording { raw, write_ptr: n as u32 * regs::PARAGRAPH - 0x20, ring: true, done: true, cfg, armed_at: t, stopped_at: t, halt_pc: Some(pc), halt_regs: None, ran_since: None, earlier: Vec::new() }
     }

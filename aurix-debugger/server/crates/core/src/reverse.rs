@@ -256,7 +256,7 @@ fn traced_core(c: &Ctx, t: usize) -> Option<u8> {
 }
 
 pub fn trace_config(core: u8) -> mcds::TraceConfig {
-    mcds::TraceConfig { core, kind: mcds::Kind::Program { filter: None }, stop: mcds::Stop::Manual, timestamps: mcds::Timestamps::Messages }
+    mcds::TraceConfig { core, kind: mcds::Kind::Program { filter: None, data: None }, stop: mcds::Stop::Manual, timestamps: mcds::Timestamps::Messages }
 }
 
 /// Switches reverse debugging on for `cfg.target`. Refused while a manual trace is set up.

@@ -4417,6 +4417,11 @@
         "additionalProperties": false,
         "description": "A trace configuration.",
         "properties": {
+          "context": {
+            "default": false,
+            "description": "Program trace: record which task or ISR runs besides, from the loaded ORTI file's\n`RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with\n`trace_calls`. Default: off.",
+            "type": "boolean"
+          },
           "core": {
             "default": null,
             "description": "Observed core; only 0 (CPU0) so far.",
@@ -9571,6 +9576,11 @@
                 "additionalProperties": false,
                 "description": "A trace configuration.",
                 "properties": {
+                  "context": {
+                    "default": false,
+                    "description": "Program trace: record which task or ISR runs besides, from the loaded ORTI file's\n`RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with\n`trace_calls`. Default: off.",
+                    "type": "boolean"
+                  },
                   "core": {
                     "default": null,
                     "description": "Observed core; only 0 (CPU0) so far.",
@@ -9725,6 +9735,49 @@
         ]
       }
     },
+    "/api/v1/sessions/{session}/trace/calls": {
+      "get": {
+        "description": "The last program recording as calls, for a timeline: each call (`Calls`, fields named by\n`Columns`: function index, context index, call depth, first and last row, start and end in\nns, flags, file index, line) with the task or ISR it ran in (`Contexts`, `Segments` of rows\nand times each ran) when the recording holds the OS variables (`context` in the trace\nconfiguration). Flags (`Flags`): began before the recording, still open at its end, an\ninterrupt entry, a trap. Depth 0 is the shallowest call of each task or ISR; times are the\ntrace's stamps spread over the instructions between them.",
+        "operationId": "trace_calls",
+        "parameters": [
+          {
+            "description": "Session ID or name (see `list_sessions`). `/api/v1/session/...` (no ID) is the only open session.",
+            "in": "path",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceData"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "The last program recording as calls, for a timeline: each call (`Calls`, fields named by `Columns`: function index, context index, call depth, first and last row, start and end in ns, flags, file index, line) with the task or ISR it ran in (`Contexts`, `Segments` of rows and times each ran) when the recording holds the OS variables (`context` in the trace configuration).",
+        "tags": [
+          "trace"
+        ]
+      }
+    },
     "/api/v1/sessions/{session}/trace/check": {
       "post": {
         "description": "Check a trace configuration without arming: the resources it takes and the window to\nexpect, or why it cannot be armed.",
@@ -9747,6 +9800,11 @@
                 "additionalProperties": false,
                 "description": "A trace configuration.",
                 "properties": {
+                  "context": {
+                    "default": false,
+                    "description": "Program trace: record which task or ISR runs besides, from the loaded ORTI file's\n`RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with\n`trace_calls`. Default: off.",
+                    "type": "boolean"
+                  },
                   "core": {
                     "default": null,
                     "description": "Observed core; only 0 (CPU0) so far.",

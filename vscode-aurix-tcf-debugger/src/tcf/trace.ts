@@ -3,11 +3,11 @@
  * read the trace RAM, and get the recording decoded (program flow with function and source line,
  * or data trace writes), and the instruction trace: pages of instructions with the registers
  * rebuilt from the halt (`insns`, `regs`, `find`) and the replay of a trace position in the
- * debugger (`replay`, `replayMove`). Every command answers with free-form JSON.
+ * debugger (`replay`, `replayMove`), and the calls with the task or ISR they ran in (`calls`). Every command answers with free-form JSON.
  */
 import { toBuffer, ValidatingCommand } from './tcfutils';
 
-export type TraceOp = 'arm' | 'check' | 'status' | 'stop' | 'read' | 'auto' | 'insns' | 'regs' | 'find' | 'replay' | 'replayMove';
+export type TraceOp = 'arm' | 'check' | 'status' | 'stop' | 'read' | 'auto' | 'insns' | 'regs' | 'find' | 'calls' | 'replay' | 'replayMove';
 
 /** Trace configuration as the service takes it. */
 export interface TraceConfig {
@@ -16,6 +16,8 @@ export interface TraceConfig {
 	Ranges?: Array<{ Function: string } | { Start: string | number; Len: number }>;
 	Stop?: 'halt' | 'full' | 'manual' | { Function: string };
 	Timestamps?: 'tsu' | 'ticks';
+	/** Program trace: record which task or ISR runs besides (ORTI RUNNINGTASK / RUNNINGISR2). */
+	Context?: boolean;
 	/** Launch configuration only: arm this trace on every run instead of once. */
 	Auto?: boolean;
 	/** Launch configuration only, with `Auto`: record steps too (a source step as one recording). */

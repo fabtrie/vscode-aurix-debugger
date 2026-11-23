@@ -69,7 +69,9 @@ Addresses accept numbers or strings in decimal or `0x` hex; memory contents are 
 /// member/element paths in its `query` (`g_s.a*`, `g_buf[3]`).
 /// 15: `parent` (the parent's expression) on members and elements, and `context` ancestors in
 /// `list_globals` `search` pages, to show the matches as a tree.
-pub const API_VERSION: u32 = 15;
+/// 16: `trace_calls` (a program recording as calls with their task or ISR), `context` in the
+/// trace configuration.
+pub const API_VERSION: u32 = 16;
 
 /// Largest memory transfer of one `read_memory` / `write_memory` call in bytes. One call occupies
 /// the debug core while it runs; larger transfers are split by the client.

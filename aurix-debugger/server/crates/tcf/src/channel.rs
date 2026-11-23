@@ -261,6 +261,11 @@ impl Channel {
                 let v = crate::trace_insns::insns_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])
             }
+            // The flow timeline: calls with their depth and the task / ISR they ran in.
+            ("AurixTrace", "calls") => {
+                let v = crate::trace_calls::calls_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
+                Ok(vec![String::new(), v.to_string()])
+            }
             ("AurixTrace", "regs") => {
                 let v = crate::trace_insns::regs_cmd(&self.shared, &a.value(0).unwrap_or(Value::Null)).map_err(|e| err(ERR_OTHER, e))?;
                 Ok(vec![String::new(), v.to_string()])

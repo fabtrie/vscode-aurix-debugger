@@ -87,11 +87,33 @@ pub struct Segment<'a> {
 /// on every run). The flow goes on through the halts; every recording starts with fresh
 /// compression bases. Returns whether the flow reaches the last recording's halt PC.
 pub fn decode_program_segments(segments: &[Segment<'_>], code: &mut dyn Code, start_pc: Option<u32>) -> (Vec<Step>, flow::FlowStats, decode::Stats, bool) {
+    let d = decode_program_full(segments, code, start_pc);
+    (d.steps, d.flow, d.decode, d.reached)
+}
+
+/// A decoded program recording ([`decode_program_full`]).
+#[derive(Debug, Default)]
+pub struct ProgramDecode {
+    pub steps: Vec<Step>,
+    pub flow: flow::FlowStats,
+    pub decode: decode::Stats,
+    /// The flow reaches the last recording's halt PC.
+    pub reached: bool,
+    /// The data trace's writes recorded along with the flow (a program trace with a data range):
+    /// each with the index of the first step after it in `steps` (the write happened in the
+    /// stretch of code that step starts: the program trace reports a stretch at its end, so a
+    /// write is known to the instruction only up to that stretch).
+    pub writes: Vec<(usize, DataEvent)>,
+}
+
+/// [`decode_program_segments`], with the data writes recorded along with the flow.
+pub fn decode_program_full(segments: &[Segment<'_>], code: &mut dyn Code, start_pc: Option<u32>) -> ProgramDecode {
     let mut f = Flow::new();
     if let Some(pc) = start_pc {
         f.start_at(pc);
     }
     let mut out = Vec::new();
+    let mut writes = Vec::new();
     let mut ds = decode::Stats::default();
     let mut reached = false;
     for (k, s) in segments.iter().enumerate() {
@@ -109,6 +131,7 @@ pub fn decode_program_segments(segments: &[Segment<'_>], code: &mut dyn Code, st
                 match d.feed(m) {
                     Some(Event::Ptu { time, ev }) => f.feed(ev, time, code, &mut out),
                     Some(Event::Lost { time, .. }) | Some(Event::Undecodable { time }) => f.gap(&mut out, time),
+                    Some(Event::Data(d)) if d.access == Access::Write => writes.push((out.len(), d)),
                     _ => {}
                 }
             }
@@ -122,7 +145,7 @@ pub fn decode_program_segments(segments: &[Segment<'_>], code: &mut dyn Code, st
         ds.lost += d.stats.lost;
         ds.gaps += d.stats.gaps;
     }
-    (out, f.stats, ds, reached)
+    ProgramDecode { steps: out, flow: f.stats, decode: ds, reached, writes }
 }
 
 #[cfg(test)]
@@ -188,6 +211,36 @@ mod tests {
         let (steps, _, _, reached) = decode_program_segments(&[seg(&a, 0x10C), seg(&b, 0x110)], &mut code, None);
         assert!(reached);
         assert_eq!(addrs(&steps), vec![Some(0x100), Some(0x102), None, Some(0x104)]);
+    }
+
+    /// A program trace with a data range: the writes come out with the step they precede.
+    #[test]
+    fn writes_along_with_the_flow() {
+        use crate::flow::{Insn, InsnKind};
+        use crate::frame::CORE_PTU;
+        struct Lin;
+        impl Code for Lin {
+            fn insn(&mut self, _a: u32) -> Option<Insn> {
+                Some(Insn { size: 2, direct: None, kind: InsnKind::Other })
+            }
+        }
+        let (tt, data, bits) = dtw(0x42, 4, 0x7000_1000);
+        let recs = [
+            Rec::Unit { core: CORE_TSU, tt: 0, data: 1000, bits: 32 },
+            Rec::Unit { core: CORE_PTU, tt: 0, data: 0x100, bits: 32 },
+            Rec::Unit { core: CORE_PTU, tt: 2, data: 4, bits: 4 },
+            Rec::Unit { core: CORE_DTU0, tt, data, bits },
+            Rec::Unit { core: CORE_PTU, tt: 0, data: 0x200, bits: 32 },
+            Rec::Unit { core: CORE_PTU, tt: 2, data: 6, bits: 4 },
+        ];
+        let raw = paragraphs(&recs, 0x400, 1);
+        let d = decode_program_full(&[Segment { paragraphs: vec![(0, &raw[..])], halt_pc: None }], &mut Lin, None);
+        let addrs: Vec<u32> = d.steps.iter().filter_map(|s| if let Step::Insn { addr, .. } = s { Some(*addr) } else { None }).collect();
+        assert_eq!(addrs, vec![0x100, 0x102, 0x200, 0x202, 0x204]);
+        assert_eq!(d.writes.len(), 1);
+        let (at, w) = d.writes[0];
+        assert_eq!(at, 2, "after the first stretch, before the code at 0x200");
+        assert_eq!((w.addr, w.value, w.time), (Some(0x7000_1000), Some(0x42), Some(1000)));
     }
 
     /// Local recordings (not in the repository): set MCDS_CAPTURES to their folder.

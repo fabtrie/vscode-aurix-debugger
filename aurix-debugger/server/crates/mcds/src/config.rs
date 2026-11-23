@@ -7,6 +7,7 @@
 //! |---|---|
 //! | data trace of a range | DTU comparator 0 (X, len-1), event with `dtu_ea_trig_0`, `dtu_wadr` + `dtu_wdat` while it |
 //! | program trace | `ptu_enable` always, or while an event with `ptu_trig_0` (PTU comparator 0) |
+//! | program trace with a data range | the program trace, and the data trace's comparator, event and actions besides (measured on a TC377: both kinds land in one buffer with one time base) |
 //! | stop when full | `trace_done` always, linear buffer |
 //! | stop on halt | ring buffer, no `trace_done`: the debugger stops it when it sees the halt, after a
 //! |   | [`Plan::flush`] (measured: a `trace_done` stop leaves the last trace RAM word, the last few
@@ -52,8 +53,9 @@ impl AddrRange {
 pub enum Kind {
     /// Every write into the range (DTU).
     Data { range: AddrRange },
-    /// Program flow (PTU), optionally only while the PC is inside `filter`.
-    Program { filter: Option<AddrRange> },
+    /// Program flow (PTU), optionally only while the PC is inside `filter`, and every write into
+    /// `data` besides (DTU), e.g. the OS variables that say which task or ISR runs.
+    Program { filter: Option<AddrRange>, data: Option<AddrRange> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,17 +192,22 @@ impl TraceConfig {
         let mut ptu = [(0u32, regs::PTU_CMP_UNUSED); 2];
         let mut res = Resources::default();
 
+        // The data trace: the range of a data trace, or the one a program trace records besides.
+        let data = match &self.kind {
+            Kind::Data { range } => Some(*range),
+            Kind::Program { data, .. } => *data,
+        };
         let mut data_event = None;
-        match &self.kind {
-            Kind::Data { range } => {
-                let e = ev.alloc(Input::DtuEaTrig0)?;
-                data_event = Some(e);
-                dtu[0] = (range.start, range.len - 1);
-                res.dtu_comparators = 1;
-                act[Action::DtuWadr.index()] = When::While(e);
-                act[Action::DtuWdat.index()] = When::While(e);
-            }
-            Kind::Program { filter } => match filter {
+        if let Some(range) = data {
+            let e = ev.alloc(Input::DtuEaTrig0)?;
+            data_event = Some(e);
+            dtu[0] = (range.start, range.len - 1);
+            res.dtu_comparators = 1;
+            act[Action::DtuWadr.index()] = When::While(e);
+            act[Action::DtuWdat.index()] = When::While(e);
+        }
+        if let Kind::Program { filter, .. } = &self.kind {
+            match filter {
                 None => act[Action::PtuEnable.index()] = When::Always,
                 Some(r) => {
                     let e = ev.alloc(Input::PtuTrig0)?;
@@ -208,7 +215,7 @@ impl TraceConfig {
                     res.ptu_comparators += 1;
                     act[Action::PtuEnable.index()] = When::While(e);
                 }
-            },
+            }
         }
 
         let ring = match self.stop {
@@ -253,7 +260,9 @@ impl TraceConfig {
                     // A stamp per write: the data comparator, qualified so that most reads of the
                     // range do not stamp (the unqualified comparator stamps every access).
                     (Kind::Data { .. }, Some(_)) => ev.alloc_all(&[(Input::DtuEaTrig0, true), (Input::DtuAccTrig0, true)])?,
-                    // Periodic stamps while the core runs; none while it is halted.
+                    // Periodic stamps while the core runs; none while it is halted. A program
+                    // trace with a data range stamps the same way: its writes come between the
+                    // program messages and take their time.
                     _ => ev.alloc_all(&[(Input::TsuTcTrig, true), (Input::DcuSus, false)])?,
                 };
                 act[Action::TsuRelSync.index()] = When::On(sync);
@@ -403,7 +412,7 @@ mod tests {
 
     #[test]
     fn restart_rewrites_what_the_stop_changes() {
-        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None }, stop: Stop::Manual, timestamps: Timestamps::Messages };
+        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None, data: None }, stop: Stop::Manual, timestamps: Timestamps::Messages };
         let plan = cfg.plan().unwrap();
         let r = plan.restart_writes();
         // The recorder reset first, the ring bounds and 0x404 last, as in the full write.
@@ -457,7 +466,7 @@ mod tests {
         // ptu_enable = 0xC0, PTU comparator 0 = function start / size - 1.
         let cfg = TraceConfig {
             core: 0,
-            kind: Kind::Program { filter: Some(AddrRange::new(0x8019_D3B0, 0x4EE).unwrap()) },
+            kind: Kind::Program { filter: Some(AddrRange::new(0x8019_D3B0, 0x4EE).unwrap()), data: None },
             stop: Stop::BufferFull,
             timestamps: Timestamps::Ticks,
         };
@@ -481,7 +490,7 @@ mod tests {
         // line 1 (debugger halt, another core's breakpoint); dcu_sus (EVT3 block 7) sees all.
         // Then: a trace_done stop leaves the last trace RAM word in the unit, so the debugger
         // stops it after a flush; ticks only while the core is not suspended.
-        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
+        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None, data: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
         let p = cfg.plan().unwrap();
         assert_eq!(get(&p, 0xFB71_88D8), 0);
         assert_eq!(get(&p, 0xFB71_88D4), 0xC3);
@@ -501,7 +510,7 @@ mod tests {
         // winIDEA's program trace wizard: tsu_rel_en always, tsu_rel_sync on tsu_tc_trig. Here
         // the trigger only counts while the core is not suspended (EVT2: tsu_tc_trig and not
         // dcu_sus), else its stamps fill the trace RAM within a millisecond of a halt.
-        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None }, stop: Stop::BufferFull, timestamps: Timestamps::Messages };
+        let cfg = TraceConfig { core: 0, kind: Kind::Program { filter: None, data: None }, stop: Stop::BufferFull, timestamps: Timestamps::Messages };
         let p = cfg.plan().unwrap();
         assert_eq!(get(&p, 0xFB71_8880), 0x60);
         assert_eq!(get(&p, 0xFB71_8884), 0x42);
@@ -534,7 +543,7 @@ mod tests {
     fn filter_and_tsu_use_different_events() {
         let cfg = TraceConfig {
             core: 0,
-            kind: Kind::Program { filter: Some(AddrRange::new(0x8000_0000, 0x100).unwrap()) },
+            kind: Kind::Program { filter: Some(AddrRange::new(0x8000_0000, 0x100).unwrap()), data: None },
             stop: Stop::Halt,
             timestamps: Timestamps::Messages,
         };
@@ -545,8 +554,43 @@ mod tests {
     }
 
     #[test]
+    fn program_with_a_data_range() {
+        // Measured on a TC377 (the ORTI task / ISR variables of core 0 next to an all-code program
+        // trace): the program setup plus DTU comparator 0, EVT7 = dtu_ea_trig_0 and
+        // dtu_wadr/dtu_wdat while EVT7; the same start value.
+        let cfg = TraceConfig {
+            core: 0,
+            kind: Kind::Program { filter: None, data: Some(AddrRange::new(0x7000_1000, 8).unwrap()) },
+            stop: Stop::Manual,
+            timestamps: Timestamps::Messages,
+        };
+        let p = cfg.plan().unwrap();
+        assert_eq!(get(&p, 0xFB71_A400), 0x7000_1000);
+        assert_eq!(get(&p, 0xFB71_A404), 7);
+        assert_eq!(get(&p, 0xFB71_881C), 0xFFFF_FFEF);
+        assert_eq!(get(&p, 0xFB71_88EC), 0xC7);
+        assert_eq!(get(&p, 0xFB71_88F0), 0xC7);
+        assert_eq!(get(&p, 0xFB71_88FC), 0x60);
+        assert_eq!(get(&p, 0xFB71_8884), 0x42);
+        assert_eq!(get(&p, 0xFB71_8808), 0xFFEF_7FFF);
+        assert_eq!(p.start, 0x6002);
+        assert_eq!(p.resources.dtu_comparators, 1);
+        assert_eq!(p.resources.events, vec![(2, "tsu_tc_trig and not dcu_sus"), (7, "dtu_ea_trig_0")]);
+        // With a function filter and a stop function: four events, both PTU comparators.
+        let cfg = TraceConfig {
+            core: 0,
+            kind: Kind::Program { filter: Some(AddrRange::new(0x8000_0000, 0x100).unwrap()), data: Some(AddrRange::new(0x7000_1000, 8).unwrap()) },
+            stop: Stop::Function(AddrRange::new(0x8000_0200, 2).unwrap()),
+            timestamps: Timestamps::Messages,
+        };
+        let p = cfg.plan().unwrap();
+        assert_eq!(p.resources.ptu_comparators, 2);
+        assert_eq!(p.resources.events.len(), 4);
+    }
+
+    #[test]
     fn other_cores_are_refused() {
-        let cfg = TraceConfig { core: 1, kind: Kind::Program { filter: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
+        let cfg = TraceConfig { core: 1, kind: Kind::Program { filter: None, data: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
         assert!(cfg.plan().unwrap_err().contains("CPU0"));
     }
 

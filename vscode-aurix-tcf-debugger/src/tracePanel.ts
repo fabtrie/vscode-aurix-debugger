@@ -6,8 +6,9 @@
  * stamps; every change is checked by the server (`check`), which answers with the resources the
  * setup takes or why it cannot be armed. While armed the panel polls the status; a trace that
  * finished by itself (the core halted, the buffer filled) is read at once. The result is the
- * executed instructions grouped by function, with source lines and target times, gaps marked
- * (Flow), or every instruction with its source line, what it wrote and the registers rebuilt from
+ * executed instructions as a timeline of calls, with the task or ISR each ran in when the ORTI
+ * variables were recorded too, or grouped by function with source lines and target times, gaps
+ * marked (Flow), or every instruction with its source line, what it wrote and the registers rebuilt from
  * the halt (Instructions); a row can be shown in the debugger (trace replay).
  *
  * Configurations are saved per workspace by name.
@@ -323,6 +324,9 @@ export class TracePanel {
 			case 'find':
 				await this.forward('found', 'find', { query: m.query, from: m.from, back: m.back, scope: m.scope }, { query: m.query });
 				break;
+			case 'calls':
+				await this.forward('calls', 'calls', {}, { stoppedMs: m.stoppedMs });
+				break;
 			case 'sources':
 				this.post({ type: 'sources', sources: await this.readSources((m.files ?? []) as string[]) });
 				break;
@@ -536,6 +540,7 @@ export class TracePanel {
 		const js = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'trace.js'));
 		const insnsJs = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'traceInsns.js'));
 		const reverseJs = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'traceReverse.js'));
+		const timelineJs = webview.asWebviewUri(vscode.Uri.joinPath(this.mediaRoot, 'traceTimeline.js'));
 		const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -563,6 +568,7 @@ export class TracePanel {
     <label class="inline"><input type="radio" name="kind" value="all"> All code</label>
     <label class="inline"><input type="radio" name="kind" value="inside"> Only inside</label>
     <div class="sub"><input id="range" placeholder="function, or 0xLO..0xHI" spellcheck="false"><span id="rangeInfo" class="hint"></span></div>
+    <label class="inline" id="contextLabel" title="Records the OS variables that say which task or ISR runs (the ORTI file's RUNNINGTASK and RUNNINGISR2 of the core) with the data trace, next to the program flow: the Timeline shows every call in its task or ISR. Needs the ORTI file loaded (ortiFile)."><input id="context" type="checkbox"> with the task / ISR (ORTI)</label>
     <label class="inline"><input type="radio" name="kind" value="data"> Every write into</label>
     <div class="sub"><input id="dataRange" placeholder="variable range: 0xADDR..0xEND, or function name" spellcheck="false"></div>
   </div>
@@ -596,8 +602,30 @@ export class TracePanel {
 <div id="message"></div>
 <div id="tabs" hidden><button type="button" data-tab="flow" class="tab on">Flow</button><button type="button" data-tab="insns" class="tab">Instructions</button><button type="button" data-tab="history" class="tab" hidden>History</button></div>
 <div id="history" hidden></div>
+<div id="flowPane">
+<div id="flowBar" hidden><span class="seg"><button type="button" data-view="timeline" class="on">Timeline</button><button type="button" data-view="list">List</button></span><span id="flowNote" class="hint"></span></div>
 <div id="coverage"></div>
 <div id="result"></div>
+<div id="timeline" hidden>
+  <div id="tlToolbar">
+    <input id="tlFind" type="search" placeholder="Find function" spellcheck="false">
+    <span class="seg"><button type="button" id="tlOut" class="secondary" title="Zoom out (S)">−</button><button type="button" id="tlFit" class="secondary" title="The whole recording (F)">Fit</button><button type="button" id="tlIn" class="secondary" title="Zoom in (W)">+</button></span>
+    <span id="tlView" class="hint"></span>
+    <span class="spacer"></span>
+    <span class="seg" title="Rows: call depth on one timeline, or a band per task and ISR"><button type="button" id="tlLayoutOne" class="on">One timeline</button><button type="button" id="tlLayoutLanes">Lane per task / ISR</button></span>
+    <span class="seg" title="Bar colour"><button type="button" id="tlColCtx" class="on">by task / ISR</button><button type="button" id="tlColFn">by function</button></span>
+  </div>
+  <div id="tlMain">
+    <div id="tlLeft">
+      <canvas id="tlTop"></canvas>
+      <div id="tlScroll"><canvas id="tlLanes"></canvas></div>
+      <div id="tlLegend"></div>
+    </div>
+    <div id="tlSide"></div>
+  </div>
+  <div id="tlTip"></div>
+</div>
+</div>
 <div id="insns" hidden>
   <div id="insnSummary" class="summary"></div>
   <div id="insnToolbar">
@@ -621,6 +649,7 @@ export class TracePanel {
 <script nonce="${nonce}" src="${js}"></script>
 <script nonce="${nonce}" src="${insnsJs}"></script>
 <script nonce="${nonce}" src="${reverseJs}"></script>
+<script nonce="${nonce}" src="${timelineJs}"></script>
 </body>
 </html>`;
 	}

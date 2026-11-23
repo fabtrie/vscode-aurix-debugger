@@ -471,11 +471,13 @@ Time stamps:
 | `trace_insns` | GET `/api/v1/trace/insns?from=&count=` | Rows with registers (below). |
 | `trace_regs` | GET `/api/v1/trace/regs?at=` | All registers and the call stack after a row. |
 | `trace_find` | | Search by address, register value (`d15=0xC`), register write (`a4 changes`) or text. |
+| `trace_calls` | GET `/api/v1/trace/calls` | The last program recording as calls with call depth, and the task or ISR each ran in (below). |
 
 ```json
 {"core":0,"kind":"program","ranges":[{"function":"Os_Task_10ms"}],"stop":"halt","timestamps":"tsu"}
 {"kind":"data","ranges":[{"start":"0x70001000","len":16}],"stop":"manual"}
 {"kind":"program","ranges":[{"function":"Fee_MainFunction"}],"stop":"Os_Task_5ms"}
+{"kind":"program","stop":"halt","context":true}
 ```
 
 TCF service `AurixTrace` takes the same object with capitalized keys (`{"Stop":{"Function":…}}` for a function).
@@ -492,6 +494,12 @@ Results:
 - `mem`: read from the device as it is at the halt (another bus master may have changed it). Program flash comes from the ELF. Peripheral addresses are never read. Memory is used only while the core still stands where the recording stopped.
 - Unknown: results of instructions the model does not know (mostly FPU), and everything after a gap (so a filtered trace gives few values).
 - TCF: `AurixTrace insns|regs|find`; `replay {At}` / `replayMove {Kind}` show a trace row as the core's stack, registers and locals (VS Code's Step Back).
+
+**Calls and tasks / ISRs** (`trace_calls`, `"context": true`):
+- `context` records the loaded ORTI file's `RUNNINGTASK` / `RUNNINGISR2` of the core with the data trace, next to the program trace in the same buffer (one data comparator over both variables; measured on a TC377: same window, nothing lost).
+- `Calls` rows `[function, context, depth, row0, row1, t0_ns, t1_ns, flags, file, line]`; flags 1: began before the recording, 2: still open at its end, 4: interrupt entry, 8: trap. Every task and ISR has its own call stack; depth 0 is its shallowest call.
+- `Contexts [{Kind, Name}]` (`task`, `isr`, `none`, `unknown` before the first write, `all` without the variables) and `Segments [context, row0, row1, t0_ns, t1_ns]`: which ran when. A write is placed at the start of the stretch of code it happened in, and the OS writes it a little before the switch.
+- Times are spread over the instructions between the time stamps (one every ~160 ns).
 
 **Hardware behaviour:**
 - Leaving a filter range is reported one instruction late (the first instruction outside, then a `trace_off` gap).

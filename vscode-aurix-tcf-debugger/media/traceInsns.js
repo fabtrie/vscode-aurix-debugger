@@ -124,7 +124,10 @@
 		showSummary();
 		build();
 		vscode.postMessage({ type: 'sources', files });
-		if (sel < 0 && total > 0) select(replayAt ?? total - 1, true);
+		if (pendingRow !== undefined && total > 0) {
+			select(Math.min(pendingRow, total - 1), true);
+			pendingRow = undefined;
+		} else if (sel < 0 && total > 0) select(replayAt ?? total - 1, true);
 	}
 
 	function showSummary() {
@@ -384,8 +387,7 @@
 		active = tab === 'insns';
 		document.querySelectorAll('#tabs .tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
 		$('insns').hidden = !active;
-		$('coverage').hidden = tab !== 'flow';
-		$('result').hidden = tab !== 'flow';
+		$('flowPane').hidden = tab !== 'flow';
 		$('history').hidden = tab !== 'history';
 		if (active) {
 			if (result && result.Kind === 'program' && !total && !loading) load();
@@ -394,6 +396,23 @@
 	}
 
 	document.querySelectorAll('#tabs .tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+
+	// The Timeline (traceTimeline.js): show a row of the last recording here.
+	let pendingRow;
+	window.traceGotoRow = (row) => {
+		if (historyMode()) {
+			// Rows of the whole history are numbered differently: show the last action's rows.
+			wholeHistory = false;
+			$('insnHistory').classList.remove('on');
+			reset(result);
+		}
+		pendingRow = row;
+		setTab('insns');
+		if (total && loaded >= total && !loading) {
+			select(Math.min(row, total - 1), true);
+			pendingRow = undefined;
+		}
+	};
 	$('insnList').addEventListener('scroll', draw);
 	$('insnList').addEventListener('click', (e) => {
 		if (e.target.closest('a.src')) return;

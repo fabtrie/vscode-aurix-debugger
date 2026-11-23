@@ -184,3 +184,56 @@ table.data tr.lost td { color: var(--vscode-editorWarning-foreground); }
 .histTable th, .histTable td { text-align: left; padding: 2px 8px 2px 0; white-space: nowrap; }
 .histTable td.num { text-align: right; }
 .histTable tr.cur td { font-weight: bold; }
+
+/* ---- Flow tab: Timeline ------------------------------------------------------------------- */
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: 1px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+.seg button.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.seg button:first-child { margin-left: 0; border-radius: 2px 0 0 2px; }
+.seg button:last-child { border-radius: 0 2px 2px 0; }
+#flowBar { display: flex; align-items: center; gap: 10px; padding: 2px 0 4px; }
+#flowBar[hidden] { display: none; }
+#flowPane.timeline #result, #flowPane.timeline .bars { display: none; }
+#timeline { margin-top: 2px; }
+#tlToolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+#tlToolbar input[type=search] { width: 16em; }
+#tlMain { display: grid; grid-template-columns: 1fr 300px; height: 62vh; min-height: 340px; border: 1px solid var(--vscode-panel-border); }
+#tlLeft { display: flex; flex-direction: column; min-width: 0; }
+#tlTop { display: block; width: 100%; height: 54px; border-bottom: 1px solid var(--vscode-panel-border); cursor: crosshair; }
+#tlScroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
+#tlLanes { display: block; width: 100%; }
+#tlLanes.pan { cursor: grabbing !important; }
+#tlLegend { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 4px 8px; border-top: 1px solid var(--vscode-panel-border); font-size: 12px; color: var(--vscode-descriptionForeground); }
+#tlLegend .chip { display: inline-flex; align-items: center; gap: 5px; }
+#tlLegend .chip i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+#tlLegend .chip i.hatch { background: repeating-linear-gradient(135deg, var(--vscode-panel-border) 0 2px, transparent 2px 4px); }
+#tlLegend .chip i.halt { width: 3px; background: var(--vscode-errorForeground); }
+#tlLegend .chip i.dashed { border: 1px dashed var(--vscode-descriptionForeground); }
+#tlLegend .keys { margin-left: auto; }
+#tlLegend kbd { font-family: var(--vscode-editor-font-family); font-size: 11px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; padding: 0 4px; }
+#tlSide { overflow: auto; padding: 8px 10px; border-left: 1px solid var(--vscode-panel-border); background: var(--vscode-sideBar-background); font-size: 12px; }
+#tlSide h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--vscode-descriptionForeground); margin: 12px 0 4px; font-weight: 600; }
+#tlSide h3:first-child { margin-top: 0; }
+#tlSide .nocase { text-transform: none; font-weight: normal; }
+#tlSide .fnname { font-family: var(--vscode-editor-font-family); font-size: 13px; font-weight: 600; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground)); word-break: break-all; }
+#tlSide .ctxchip { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; padding: 1px 7px 1px 5px; border-radius: 9px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+#tlSide .ctxchip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+#tlSide .path { font-family: var(--vscode-editor-font-family); line-height: 1.6; }
+#tlSide .path .cur { font-weight: 600; }
+#tlSide .kv { display: grid; grid-template-columns: 92px 1fr; gap: 1px 8px; }
+#tlSide .kv > span:nth-child(odd) { color: var(--vscode-descriptionForeground); }
+#tlSide .mono { font-family: var(--vscode-editor-font-family); }
+#tlSide .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+#tlSide .hint.top { margin-top: 10px; }
+#tlSide .share { display: grid; grid-template-columns: 120px 1fr 44px; gap: 3px 6px; align-items: center; }
+#tlSide .share .n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#tlSide .share .n.mono { font-family: var(--vscode-editor-font-family); }
+#tlSide .share .track { height: 8px; background: var(--vscode-editorWidget-background); border-radius: 2px; overflow: hidden; }
+#tlSide .share .track span { display: block; height: 100%; }
+#tlSide .share .p { text-align: right; color: var(--vscode-descriptionForeground); }
+#tlTip { position: fixed; display: none; pointer-events: none; z-index: 10; max-width: 380px; padding: 6px 9px; font-size: 12px; background: var(--vscode-editorHoverWidget-background); color: var(--vscode-editorHoverWidget-foreground); border: 1px solid var(--vscode-editorHoverWidget-border); border-radius: 3px; }
+#tlTip .f { font-family: var(--vscode-editor-font-family); font-weight: 600; }
+#tlTip .r { display: grid; grid-template-columns: 80px 1fr; gap: 0 8px; margin-top: 3px; }
+#tlTip .r > span:nth-child(odd) { color: var(--vscode-descriptionForeground); }
+#tlTip .mono { font-family: var(--vscode-editor-font-family); }
+#tlTip .w { margin-top: 3px; color: var(--vscode-editorWarning-foreground); }

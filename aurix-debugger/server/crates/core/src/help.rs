@@ -432,11 +432,13 @@ pub static ENTRIES: &[Entry] = &[
          data: from the baseline). `-staged`: the staged content instead of the device's. File `-`: the HEX text is returned (`-json`: in `hex`) instead of written."),
     e!(Ucb, "ucb dir", "[<directory>]", "Where baselines, backups and the write log go; default `~/.aurix-dbg/ucb`."),
     e!(Ucb, "ucb status", "[-json]", "Whether writing is enabled, what is staged."),
-    e!(Trace, "mcds arm", "[-json] [-core 0] -data <addr> <len> | -program [-filter <addr> <len>] [-stop full|halt|manual | -stopat <addr> <len>] [-ticks|-tsu]",
+    e!(Trace, "mcds arm", "[-json] [-core 0] -data <addr> <len> | -program [-filter <addr> <len>] [-data <addr> <len>] [-stop full|halt|manual | -stopat <addr> <len>] [-ticks|-tsu]",
         "Arm a miniMCDS trace of one core: data writes into a range, or the program flow.",
         "Switches the MCDS on, clears the 8 KB trace RAM and starts.\n\n\
          - `-data <addr> <len>`: every write into the range.\n\
-         - `-program [-filter <addr> <len>]`: the program flow, optionally only inside the range.\n\
+         - `-program [-filter <addr> <len>]`: the program flow, optionally only inside the range. With `-data <addr> \
+           <len>` as well: the writes into that range besides, in the same buffer (e.g. the OS variables that say which \
+           task or ISR runs).\n\
          - `-stop full`: keep the first 8 KB. `halt`: the last 8 KB before the core halts. `manual`: the last 8 KB \
            before `mcds stop`. `-stopat <addr> <len>`: stop when the PC enters the range.\n\
          - `-tsu` (default): time stamps only with messages. `-ticks`: a tick message per step, exact but fills the \

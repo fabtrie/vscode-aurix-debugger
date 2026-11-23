@@ -101,6 +101,7 @@ fn trace_config(r: &TraceConfigRequest) -> serde_json::Value {
         "Ranges": r.ranges.iter().map(range).collect::<Vec<_>>(),
         "Stop": stop,
         "Timestamps": r.timestamps.clone().unwrap_or_else(|| "tsu".into()),
+        "Context": r.context,
     })
 }
 
@@ -1026,6 +1027,11 @@ impl DebuggerApi for CoreApi {
 
     fn trace_insns(&self, req: TraceInsnsRequest) -> Result<TraceData, ApiError> {
         let v = tcf::trace_insns::insns_cmd(&self.session, &serde_json::json!({ "From": req.from, "Count": req.count, "Scope": req.scope })).map_err(api_msg)?;
+        Ok(TraceData { data: v })
+    }
+
+    fn trace_calls(&self, _req: NoArgs) -> Result<TraceData, ApiError> {
+        let v = tcf::trace_calls::calls_cmd(&self.session, &serde_json::Value::Null).map_err(api_msg)?;
         Ok(TraceData { data: v })
     }
 

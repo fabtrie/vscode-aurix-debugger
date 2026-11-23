@@ -70,6 +70,7 @@
 			c.Kind = 'program';
 			const r = kind === 'inside' ? parseRange($('range').value) : undefined;
 			c.Ranges = r ? [r] : [];
+			if ($('context').checked) c.Context = true;
 		}
 		const stop = $('stop').value;
 		c.Stop = stop === 'function' ? { Function: $('stopAt').value.trim() } : stop;
@@ -96,6 +97,7 @@
 			$('stop').value = c.Stop || 'halt';
 		}
 		setRadio('ts', c.Timestamps || 'tsu');
+		$('context').checked = !!c.Context;
 		applying = false;
 		updateFormState();
 	}
@@ -115,9 +117,11 @@
 			stop === 'full' ? 'the start (the buffer fills once)' :
 			'the end (the buffer is a ring and keeps the newest messages)';
 		$('rangeInfo').textContent = kind === 'inside' ? ' only code in this range is recorded' : '';
+		$('context').disabled = kind === 'data';
 		if (window.aurixReverse) {
 			$('range').disabled = true;
 			$('dataRange').disabled = true;
+			$('context').disabled = true;
 		}
 		$('arm').textContent = armed ? 'Re-arm' : 'Arm';
 	}

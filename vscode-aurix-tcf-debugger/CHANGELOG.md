@@ -2,6 +2,23 @@
 
 All notable changes to the "AURIX™ Debugger" extension will be documented in this file.
 
+## 0.8.0
+
+### Added
+
+- Trace panel: a Timeline of the calls in a program recording: the call depth as rows over time, with overview, zoom, pan, measuring and find, and a side panel with each call's path, times, source, instructions and Show in debugger
+- trace option "with the task / ISR (ORTI)": the OS variables that say which task or ISR runs are recorded together with the program flow, so the Timeline shows every call in its task or ISR, on one timeline or with a lane per task and ISR
+- MCP and REST: `trace_calls`, the calls of the last program recording with their call depth, times and task or ISR; `trace_arm` `context` for the task / ISR recording; Tcl `mcds arm -program -data <addr> <len>` records a data range together with the program flow
+
+### Changed
+
+- Trace panel: the tabs (Timeline, List, Instructions), the shown tab's tools and the recording controls share one header row (two on a narrow panel); the configuration is a short summary that opens as a popover, and one button arms or stops and reads
+
+### Fixed
+
+- a stop-on-halt recording timed the code before the halt by when the trace was read, so a recording of microseconds could span seconds
+- the debug server stopped when an update failed to restart it, leaving no server; an update installed from inside an app container (such as the Claude desktop app's shell) broke the installation and is now refused
+
 ## 0.7.0
 
 ### Added

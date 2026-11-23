@@ -323,10 +323,38 @@ pub(crate) fn build(kinds: &[K], funcs: &[Option<u32>], isr: &[bool], switches: 
     b
 }
 
-/// Start time of every row (and the end, at index `n`) in ns from the first row: the time stamps
-/// of the steps spread evenly over the rows between them. Rows before the first stamp (after a
-/// ring lap the first paragraph's stamps lack their base) go back at the average rate.
-pub(crate) fn spread(raw: &[Option<f64>]) -> Vec<f64> {
+/// A stretch without instructions between two time stamps: shorter than this is never one.
+const PAUSE_MIN_NS: f64 = 20_000.0;
+/// ... and it is one when the stamps are this many times further apart than the rows between
+/// them take at the typical rate.
+const PAUSE_FACTOR: f64 = 100.0;
+
+/// Row times ([`spread`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Times {
+    /// Start of every row, and the end at index `n`, in ns from the first row.
+    pub at: Vec<f64>,
+    /// `(row, from, to)`: nothing ran from `from` (the end of the row before) to `to` (the start
+    /// of `row`): the core was halted or stood still between two rows.
+    pub pauses: Vec<(usize, f64, f64)>,
+}
+
+impl Times {
+    /// End of row `r`.
+    pub fn end(&self, r: usize) -> f64 {
+        let n = self.at.len() - 1;
+        let r = r.min(n.saturating_sub(1));
+        self.pauses.iter().find(|p| p.0 == r + 1).map_or(self.at[(r + 1).min(n)], |p| p.1)
+    }
+}
+
+/// Row times from the time stamps of the steps (`raw`, per row), spread evenly over the rows
+/// between them. Rows before the first stamp (after a ring lap the first paragraph's stamps lack
+/// their base) go back at the average rate. Two stamps far further apart than the rows between
+/// them can take (see [`PAUSE_FACTOR`]) are a pause, not one slow stretch of code: the rows run
+/// at the typical rate and the rest is a pause before the next stamp; with a gap row (`gap`) in
+/// between, the gap takes it.
+pub(crate) fn spread(raw: &[Option<f64>], gap: &[bool]) -> Times {
     let n = raw.len();
     let mut out = vec![0.0; n + 1];
     let known: Vec<(usize, f64)> = raw.iter().enumerate().filter_map(|(i, t)| t.map(|t| (i, t))).collect();
@@ -335,7 +363,7 @@ pub(crate) fn spread(raw: &[Option<f64>]) -> Vec<f64> {
         for (i, o) in out.iter_mut().enumerate() {
             *o = i as f64 * 3.3;
         }
-        return out;
+        return Times { at: out, pauses: Vec::new() };
     }
     // Groups of rows that carry the same stamp: each spread up to the next stamp.
     let mut groups: Vec<(usize, f64)> = Vec::new();
@@ -344,14 +372,40 @@ pub(crate) fn spread(raw: &[Option<f64>]) -> Vec<f64> {
             groups.push((i, t));
         }
     }
+    // The typical time per row: the median over the stretches between stamps.
+    let mut rates: Vec<f64> = groups.windows(2).filter(|w| w[1].1 > w[0].1).map(|w| (w[1].1 - w[0].1) / (w[1].0 - w[0].0).max(1) as f64).collect();
+    rates.sort_by(f64::total_cmp);
+    let typical = rates.get(rates.len() / 2).copied().unwrap_or(3.3);
+    let is_pause = |w: &[(usize, f64)]| w[1].1 - w[0].1 > PAUSE_MIN_NS.max(PAUSE_FACTOR * typical * (w[1].0 - w[0].0) as f64);
+    // The average rate, pauses left out.
+    let (dt, dr) = groups.windows(2).filter(|w| w[1].1 > w[0].1 && !is_pause(w)).fold((0.0, 0usize), |(t, r), w| (t + w[1].1 - w[0].1, r + w[1].0 - w[0].0));
+    let rate = if dr > 0 && dt > 0.0 { dt / dr as f64 } else { typical };
+
     let first = groups[0];
-    let last = *groups.last().unwrap();
-    let rate = if last.0 > first.0 && last.1 > first.1 { (last.1 - first.1) / (last.0 - first.0) as f64 } else { 3.3 };
-    for i in 0..first.0 {
-        out[i] = first.1 - (first.0 - i) as f64 * rate;
+    for (i, o) in out.iter_mut().enumerate().take(first.0) {
+        *o = first.1 - (first.0 - i) as f64 * rate;
     }
+    let mut pauses = Vec::new();
     for (k, &(i0, t0)) in groups.iter().enumerate() {
         let (i1, t1) = groups.get(k + 1).copied().unwrap_or((n, t0 + (n - i0) as f64 * rate));
+        if k + 1 < groups.len() && is_pause(&[(i0, t0), (i1, t1)]) {
+            match (i0..i1).rev().find(|&j| gap.get(j) == Some(&true)) {
+                // The gap row spans the pause: rows before it from the earlier stamp, rows after
+                // it up to the later one.
+                Some(g) => {
+                    for (j, o) in out.iter_mut().enumerate().take(i1).skip(i0) {
+                        *o = if j <= g { t0 + (j - i0) as f64 * rate } else { t1 - (i1 - j) as f64 * rate };
+                    }
+                }
+                None => {
+                    for (j, o) in out.iter_mut().enumerate().take(i1).skip(i0) {
+                        *o = t0 + (j - i0) as f64 * rate;
+                    }
+                    pauses.push((i1, t0 + (i1 - i0) as f64 * rate, t1));
+                }
+            }
+            continue;
+        }
         let len = (i1 - i0).max(1) as f64;
         for (j, o) in out.iter_mut().enumerate().take(i1).skip(i0) {
             *o = t0 + (t1 - t0) * (j - i0) as f64 / len;
@@ -367,6 +421,24 @@ pub(crate) fn spread(raw: &[Option<f64>]) -> Vec<f64> {
     }
     let base = out[0];
     out.iter_mut().for_each(|t| *t -= base);
+    for p in &mut pauses {
+        p.1 = (p.1 - base).min(out[p.0]);
+        p.2 = out[p.0];
+    }
+    Times { at: out, pauses }
+}
+
+/// Splits `(context, first row, last row)` segments at the pauses' rows.
+fn split_at_pauses(segments: &[(usize, usize, usize)], pauses: &[(usize, f64, f64)]) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::with_capacity(segments.len() + pauses.len());
+    for &(c, r0, r1) in segments {
+        let mut s = r0;
+        for p in pauses.iter().map(|p| p.0).filter(|&p| p > r0 && p <= r1) {
+            out.push((c, s, p - 1));
+            s = p;
+        }
+        out.push((c, s, r1));
+    }
     out
 }
 
@@ -460,8 +532,10 @@ pub fn calls_cmd(sh: &Shared, _v: &Value) -> Result<Value, String> {
             None => None,
         })
         .collect();
-    let at = spread(&raw);
-    let tm = |r: usize| round1(at[r.min(n)]);
+    let gap: Vec<bool> = kinds.iter().map(|k| *k == K::Gap).collect();
+    let times = spread(&raw, &gap);
+    let tm = |r: usize| round1(times.at[r.min(n)]);
+    let te = |r: usize| round1(times.end(r));
 
     // Code without a function symbol: named by its address.
     let mut funcs_out = t.funcs.clone();
@@ -482,11 +556,15 @@ pub fn calls_cmd(sh: &Shared, _v: &Value) -> Result<Value, String> {
                     funcs_out.len() - 1
                 }) as u32)
             });
-            json!([func, c.ctx, c.depth, c.r0, c.r1, tm(c.r0), tm(c.r1 + 1), c.flags, fl, line])
+            json!([func, c.ctx, c.depth, c.r0, c.r1, tm(c.r0), te(c.r1), c.flags, fl, line])
         })
         .collect();
-    let segments: Vec<Value> = built.segments.iter().map(|&(c, r0, r1)| json!([c, r0, r1, tm(r0), tm(r1 + 1)])).collect();
-    let gaps: Vec<Value> = built.gaps.iter().map(|&r| json!([r, tm(r), tm(r + 1)])).collect();
+    // A pause splits the segments (a call across it runs before and after it) and shows as a gap.
+    let segments: Vec<Value> = split_at_pauses(&built.segments, &times.pauses).iter().map(|&(c, r0, r1)| json!([c, r0, r1, tm(r0), te(r1)])).collect();
+    let mut gaps: Vec<(usize, f64, f64)> = built.gaps.iter().map(|&r| (r, tm(r), te(r))).collect();
+    gaps.extend(times.pauses.iter().map(|&(r, a, b)| (r, round1(a), round1(b))));
+    gaps.sort_by_key(|g| g.0);
+    let gaps: Vec<Value> = gaps.iter().map(|g| json!([g.0, g.1, g.2])).collect();
     let contexts: Vec<Value> = built.contexts.iter().map(|(k, name)| json!({"Kind": k, "Name": name})).collect();
     let source = if vars.is_empty() { "none" } else { "trace" };
     Ok(json!({
@@ -589,14 +667,88 @@ mod tests {
 
     #[test]
     fn times_spread_between_stamps() {
-        let t = spread(&[Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(160.0), Some(160.0)]);
+        let t = spread(&[Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(160.0), Some(160.0)], &[]).at;
         assert_eq!(t[..5], [0.0, 40.0, 80.0, 120.0, 160.0]);
         // The last group goes on at the average rate (40 ns per row).
         assert_eq!(t[5], 200.0);
         assert_eq!(t[6], 240.0);
         // Before the first stamp: back at the average rate (100 ns per row), from 0.
-        let t = spread(&[None, None, Some(100.0), Some(200.0)]);
+        let t = spread(&[None, None, Some(100.0), Some(200.0)], &[]).at;
         assert_eq!(t, vec![0.0, 100.0, 200.0, 300.0, 400.0]);
+    }
+
+    /// A stop-on-halt recording as recorded on a TC377: a stamp every 4 instructions (160 ns),
+    /// the stretch that leads to the halt never closed (the core halted in it), then the forced
+    /// stamps of the flush when the host stopped the recording 15.6 s later. The code from the
+    /// last message to the halt ran right after it, not at the flush: before the fix the
+    /// recording spanned 15.6 s and the last function took all of it.
+    #[test]
+    fn flush_stamps_after_the_halt_do_not_stretch_the_recording() {
+        use mcds::encode::{paragraphs, Rec};
+        use mcds::flow::{Code, Insn, InsnKind};
+        use mcds::frame::{CORE_PTU, CORE_TSU};
+        struct Lin;
+        impl Code for Lin {
+            fn insn(&mut self, _a: u32) -> Option<Insn> {
+                Some(Insn { size: 2, direct: None, kind: InsnKind::Other })
+            }
+        }
+        let tsu = |t: u128| Rec::Unit { core: CORE_TSU, tt: 0, data: t, bits: 32 };
+        let addr = |a: u32| Rec::Unit { core: CORE_PTU, tt: 0, data: a as u128, bits: 32 };
+        let count = |c: u32| Rec::Unit { core: CORE_PTU, tt: 2, data: c as u128, bits: 8 };
+        let mut recs = Vec::new();
+        for k in 0..50u32 {
+            recs.push(tsu(1000 + 24 * k as u128));
+            recs.push(addr(0x8000_0000 + 0x40 * k));
+            recs.push(count(8));
+        }
+        recs.push(tsu(1000 + 24 * 50));
+        recs.push(addr(0x8000_1000));
+        // The flush: forced stamps, 15.6 s (2.34e9 units) after the last one.
+        for _ in 0..mcds::config::FLUSH_EDGES {
+            recs.push(tsu(2_347_000_000));
+        }
+        let raw = paragraphs(&recs, 0x400, 4);
+        let seg = mcds::Segment { paragraphs: vec![(0, &raw[..])], halt_pc: Some(0x8000_1006) };
+        let d = mcds::decode_program_full(&[seg], &mut Lin, None);
+        assert!(d.reached);
+        assert_eq!(d.steps.len(), 50 * 4 + 3);
+        let t0 = 1000;
+        let raw_t: Vec<Option<f64>> = d
+            .steps
+            .iter()
+            .map(|s| match s {
+                Step::Insn { time, .. } | Step::Gap { time, .. } => time.map(|x| mcds::units_to_ns(x.saturating_sub(t0)) as f64),
+            })
+            .collect();
+        let t = spread(&raw_t, &[]);
+        let end = *t.at.last().unwrap();
+        // 51 stamps 160 ns apart, the code to the halt at 40 ns per instruction after the last.
+        assert!((8000.0..8300.0).contains(&end), "the recording spans {end} ns");
+        assert!(t.pauses.is_empty());
+    }
+
+    /// Two stamps far apart with a few rows between (the core stood still, e.g. halted between
+    /// two recordings decoded as one): the rows go on at the usual rate and the rest is a pause.
+    #[test]
+    fn a_long_stretch_without_rows_is_a_pause() {
+        // 40 ns per row, then 1 ms between the stamps of rows 8 and 10.
+        let raw = [0.0, 0.0, 80.0, 80.0, 160.0, 160.0, 240.0, 240.0, 320.0, 320.0, 1_000_320.0, 1_000_320.0, 1_000_400.0].map(Some);
+        let t = spread(&raw, &[]);
+        assert_eq!(t.at[..10], [0.0, 40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0, 360.0]);
+        assert_eq!(t.pauses, vec![(10, 400.0, 1_000_320.0)]);
+        assert_eq!(t.end(9), 400.0);
+        assert_eq!(t.at[10], 1_000_320.0);
+        assert_eq!(t.end(10), 1_000_360.0);
+        // Segments and calls across it are split there.
+        assert_eq!(split_at_pauses(&[(0, 0, 12)], &t.pauses), vec![(0, 0, 9), (0, 10, 12)]);
+        // A gap row in between takes the pause instead.
+        let mut gap = [false; 13];
+        gap[9] = true;
+        let t = spread(&raw, &gap);
+        assert!(t.pauses.is_empty());
+        assert_eq!(t.at[9], 360.0);
+        assert_eq!(t.at[10], 1_000_320.0);
     }
 
     #[test]

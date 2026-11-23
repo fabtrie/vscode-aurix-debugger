@@ -126,10 +126,17 @@ pub fn decode_program_full(segments: &[Segment<'_>], code: &mut dyn Code, start_
             }
         }
         let mut d = Decoder::new();
+        // Time of the last program message: the straight code after it up to the halt ran then.
+        // Not the decoder's time at the end: a recording stopped by the host ends with the
+        // flush's forced stamps, taken when the host stopped it (any time after the halt).
+        let mut last = None;
         for (_, p) in &s.paragraphs {
             for (_, m) in frame::messages(p) {
                 match d.feed(m) {
-                    Some(Event::Ptu { time, ev }) => f.feed(ev, time, code, &mut out),
+                    Some(Event::Ptu { time, ev }) => {
+                        last = time.or(last);
+                        f.feed(ev, time, code, &mut out)
+                    }
                     Some(Event::Lost { time, .. }) | Some(Event::Undecodable { time }) => f.gap(&mut out, time),
                     Some(Event::Data(d)) if d.access == Access::Write => writes.push((out.len(), d)),
                     _ => {}
@@ -137,7 +144,7 @@ pub fn decode_program_full(segments: &[Segment<'_>], code: &mut dyn Code, start_
             }
         }
         reached = match s.halt_pc {
-            Some(pc) => f.run_to(pc, d.now(), code, &mut out),
+            Some(pc) => f.run_to(pc, last, code, &mut out),
             None => false,
         };
         ds.messages += d.stats.messages;

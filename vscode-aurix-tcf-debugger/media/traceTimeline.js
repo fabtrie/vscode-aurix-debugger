@@ -33,6 +33,7 @@
 	}
 	function fmt(ns) {
 		const a = Math.abs(ns);
+		if (a >= 1e9) return (ns / 1e9).toFixed(3) + ' s';
 		if (a >= 1e6) return (ns / 1e6).toFixed(3) + ' ms';
 		if (a >= 1e5) return (ns / 1e3).toFixed(1) + ' µs';
 		if (a >= 1e4) return (ns / 1e3).toFixed(2) + ' µs';
@@ -237,9 +238,11 @@
 		const p = Math.pow(10, Math.floor(Math.log10(raw)));
 		return [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw);
 	}
-	function tickLabel(t, step) {
-		if (step >= 1000) return (t / 1000).toFixed(step >= 10000 ? 0 : 1) + ' µs';
-		return (t / 1000).toFixed(step >= 100 ? 1 : step >= 10 ? 2 : 3) + ' µs';
+	// Ruler label: the unit from the visible span (ns, µs, ms, s), the decimals from the tick step.
+	function tickLabel(t, step, span) {
+		const [div, unit] = span >= 2e9 ? [1e9, 's'] : span >= 2e6 ? [1e6, 'ms'] : span >= 2e3 ? [1e3, 'µs'] : [1, 'ns'];
+		const dec = Math.min(6, Math.max(0, -Math.floor(Math.log10(step / div) + 1e-9)));
+		return (t / div).toFixed(dec) + ' ' + unit;
 	}
 	function matches(c) {
 		return !st.find || c.fn.toLowerCase().includes(st.find);
@@ -300,7 +303,7 @@
 			g.moveTo(x, 46);
 			g.lineTo(x, 54);
 			g.stroke();
-			g.fillText(tickLabel(t, step), x + 3, 44);
+			g.fillText(tickLabel(t, step, st.v1 - st.v0), x + 3, 44);
 		}
 		if (haltShown() && data.end >= st.v0 && data.end <= st.v1 * 1.0001) {
 			const x = Math.min(X(data.end), W - 1);

@@ -2,6 +2,17 @@
 
 All notable changes to the "AURIX™ Debugger" extension will be documented in this file.
 
+## 0.7.0
+
+### Added
+
+- MCP and REST: `list_globals` `search` for search boxes: globals and struct members by any part of their name, by the beginnings of their words (`dcs` finds `DriveCounterStamp`), by source file or by address, best matches first; members and elements name their `parent`, and the ancestors of a match come along as context, so the results can be shown as a tree
+- MCP and REST: a `list_globals` `query` with `.` or `[` finds struct members and array elements by their path (`g_motor.spe*`, `g_buf[3]`)
+
+### Changed
+
+- Add Live Watch Expression: the debug server searches the variables and struct members as you type and sends only the best matches, so the picker no longer lags in large programs; array elements are found by their path (`g_buf[3]`)
+
 ## 0.6.0
 
 ### Added

@@ -101,7 +101,7 @@ pub fn self_detach(args: &[String]) {
     }
     let Ok(exe) = std::env::current_exe() else { return };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match create_process(&exe, &args, None, &[(MARKER_ENV, "1")]) {
+    match create_process(&exe, &args, crate::spawn::own_dir(&exe), &[(MARKER_ENV, "1")]) {
         Ok(_) => std::process::exit(0),
         Err(e) => crate::log::line(&format!("could not detach ({e}); running attached")),
     }

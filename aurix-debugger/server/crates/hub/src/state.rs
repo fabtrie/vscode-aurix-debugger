@@ -586,8 +586,9 @@ impl Hub {
                     }
                     if live == 0 && hub.update_pending.load(Ordering::Relaxed) {
                         hlog!("no session open: applying the update");
-                        hub.restart();
-                        return;
+                        if hub.restart() {
+                            return;
+                        }
                     }
                     let idle_exit = hub.cfg.idle_exit_min;
                     if idle_exit > 0 && idle_since.elapsed() >= Duration::from_secs(idle_exit * 60) {
@@ -709,14 +710,18 @@ impl Hub {
     }
 
     /// Starts the installed (or the same) hub again and stops this one: the new one waits for
-    /// the port.
-    pub fn restart(&self) {
-        let exe = self.restart_exe.lock().unwrap().clone().unwrap_or_else(crate::install::installed_hub_exe);
+    /// the port. When the new one cannot be started this one keeps running (and forgets the
+    /// update): a machine without a hub is worse than an old hub. Returns whether it stopped.
+    pub fn restart(&self) -> bool {
+        let exe = self.restart_exe.lock().unwrap().take().unwrap_or_else(crate::install::installed_hub_exe);
         hlog!("restarting from {}", exe.display());
         if let Err(e) = spawn::spawn_detached(&exe, &["serve", "--wait-port"]) {
-            hlog!("cannot start {}: {e}", exe.display());
+            hlog!("cannot start {}: {e}; this hub keeps running", exe.display());
+            self.update_pending.store(false, Ordering::Relaxed);
+            return false;
         }
         self.stop();
+        true
     }
 
     /// Closes every session (`stop --now`).

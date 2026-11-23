@@ -8,17 +8,30 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Starts `exe args` fully detached: no console, no inherited handles (see [`crate::detach`]),
-/// null stdio. Returns the process ID.
+/// null stdio, in [`own_dir`]. Returns the process ID.
 pub fn spawn_detached(exe: &Path, args: &[&str]) -> std::io::Result<u32> {
+    let dir = own_dir(exe);
     #[cfg(windows)]
     {
-        crate::detach::create_process(exe, args, None, &[])
+        crate::detach::create_process(exe, args, dir, &[])
     }
     #[cfg(not(windows))]
     {
-        let child = Command::new(exe).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        let mut cmd = Command::new(exe);
+        if let Some(d) = dir {
+            cmd.current_dir(d);
+        }
+        let child = cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
         Ok(child.id())
     }
+}
+
+/// The working directory of a detached hub: the folder of its executable. It exists while the
+/// process runs, and the hub does not pin whatever folder its starter ran in (a worktree, an
+/// extension folder that an update replaces): Windows refuses to delete a process's working
+/// directory.
+pub fn own_dir(exe: &Path) -> Option<&Path> {
+    exe.parent().filter(|d| !d.as_os_str().is_empty())
 }
 
 /// Starts a worker in `cwd`: detached like [`spawn_detached`] (it logs to the file its `-l`

@@ -210,6 +210,15 @@ pub fn install(o: &InstallOptions) -> Result<Vec<String>, String> {
     let src = paths::exe_dir();
     let versions = paths::versions_dir();
     std::fs::create_dir_all(&versions).map_err(|e| format!("{}: {e}", versions.display()))?;
+    for dir in [paths::local_dir(), versions.clone()] {
+        if let Some(to) = redirected(&dir) {
+            return Err(format!(
+                "{} is redirected to {} for this process: it runs inside an app container (an MSIX-packaged app such as the Claude desktop app) that keeps its own copy of the folder, so hubs and VS Code outside the app would not see this installation. Nothing was changed; run `aurix-hub install` from a terminal outside that app.",
+                dir.display(),
+                to.display()
+            ));
+        }
+    }
     let installed_here = std::fs::canonicalize(&src).ok().zip(std::fs::canonicalize(&versions).ok()).is_some_and(|(s, v)| s.starts_with(v));
     if !installed_here {
         let build = build_id(&src)?;
@@ -289,6 +298,25 @@ pub fn install(o: &InstallOptions) -> Result<Vec<String>, String> {
     }
     cleanup();
     Ok(did)
+}
+
+/// Where new files in `dir` really go when that differs from `dir`: inside an MSIX app container
+/// (the Claude desktop app runs Claude Code and its shells in one) Windows redirects writes to
+/// a per-app copy of the folder under `%LOCALAPPDATA%\Packages\<app>\LocalCache` as soon as that
+/// copy has the folder, while deletes still reach the real one. `install` would then remove the
+/// real `current` junction and create the new one where only that app sees it.
+pub fn redirected(dir: &Path) -> Option<PathBuf> {
+    let probe = dir.join(format!(".redirect-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"").ok()?;
+    let real = std::fs::canonicalize(&probe);
+    let _ = std::fs::remove_file(&probe);
+    let real_dir = real.ok()?.parent()?.to_path_buf();
+    let in_app_copy = |p: &Path| {
+        let parts: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+        parts.windows(3).any(|w| w[0] == "packages" && w[2] == "localcache")
+    };
+    let moved = std::fs::canonicalize(dir).ok().is_some_and(|d| d != real_dir);
+    (moved || (in_app_copy(&real_dir) && !in_app_copy(dir))).then_some(real_dir)
 }
 
 /// Removes version directories nothing uses (a locked one stays until the next install).

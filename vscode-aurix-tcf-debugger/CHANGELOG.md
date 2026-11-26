@@ -2,6 +2,13 @@
 
 All notable changes to the "AURIX™ Debugger" extension will be documented in this file.
 
+## 0.9.0
+
+### Added
+
+- trace of CPU1 and CPU2: the Trace panel's Core, `trace_arm` `core`, Tcl `mcds arm -core 1|2` and the launch configuration's `trace` record the program flow and the data writes of the selected core (miniMCDS, TC37x); before, only CPU0 could be traced
+- reverse debugging records each action with the program trace on CPU1 and CPU2 too
+
 ## 0.8.0
 
 ### Added

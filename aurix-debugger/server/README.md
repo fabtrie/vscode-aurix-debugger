@@ -444,8 +444,10 @@ The TC37x production device has a small trace unit: 8 KB of trace RAM at `0x9800
 
 | Kind | Content |
 |---|---|
-| Program trace (CPU0) | Executed instructions, with function, source line and target time. Optionally only inside one function or address range (outside: a gap). |
-| Data trace | Every write into an address range (up to `0x1000` bytes), with value, size and target time. **Only CPU0's stores** are seen. |
+| Program trace | Executed instructions, with function, source line and target time. Optionally only inside one function or address range (outside: a gap). |
+| Data trace | Every write into an address range (up to `0x1000` bytes), with value, size and target time. **Only the traced core's stores** are seen. |
+
+One core is traced at a time: `core` 0, 1 or 2 (CPU0..CPU2, default 0). Traced DAQ points (`trace: true`) always use CPU0.
 
 | `stop` | Buffer | Keeps |
 |---|---|---|

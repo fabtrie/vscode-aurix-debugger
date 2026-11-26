@@ -1215,7 +1215,7 @@
 								"type": "object",
 								"description": "Arms a miniMCDS trace once the session is set up (the Trace panel reads it). Same keys as the panel configuration.",
 								"properties": {
-									"Core": { "type": "number", "default": 0, "description": "Traced core; only CPU0 is supported." },
+									"Core": { "type": "number", "default": 0, "description": "Traced core: 0, 1 or 2 (CPU0..CPU2). The data trace sees only this core's writes." },
 									"Kind": { "type": "string", "enum": ["program", "data"], "default": "program" },
 									"Ranges": {
 										"type": "array",
@@ -1238,7 +1238,7 @@
 										"properties": {
 											"enabled": { "type": "boolean", "default": true },
 											"history": { "type": "number", "default": 50, "description": "Checkpoints kept (0: all since the last reset)." },
-											"trace": { "type": "boolean", "default": true, "description": "Record every action with the miniMCDS (CPU0): shared memory is restored only where the core wrote, and Step Back can go to a line inside a run. false: whole actions only, restored by difference." },
+											"trace": { "type": "boolean", "default": true, "description": "Record every action with the miniMCDS (CPU0..CPU2): shared memory is restored only where the core wrote, and Step Back can go to a line inside a run. false: whole actions only, restored by difference." },
 											"regions": {
 												"type": "array",
 												"description": "RAM saved in addition to the ELF's writable sections, stacks and context save area.",

@@ -7,7 +7,8 @@
 //!   recorded as write messages with TSU time stamps, so streaming can be tested end to end.
 //! - Program trace (`ptu_enable` active): a synthetic flow is written at start - all 8 KB and
 //!   done when the buffer stops when full, one and a half laps of the ring otherwise. A ring
-//!   stopped by `dcu_sus` (or `dcu_halt`) finishes when core 0 halts.
+//!   stopped by `dcu_sus` (or `dcu_halt`) finishes when the observed core ([`regs::POB_SEL`],
+//!   CPU0 until written) halts.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -225,9 +226,14 @@ impl SimMcds {
         self.recorded += 1;
     }
 
-    /// Core 0's run state: a ring stopped by `dcu_sus` finishes when it halts.
-    pub fn observe(&mut self, core0_halted: bool) {
-        if self.running && self.stop_on_halt && core0_halted {
+    /// The core the observation block follows ([`regs::POB_SEL`]; CPU0 until written).
+    pub fn observed_core(&self) -> usize {
+        self.regs.get(&regs::POB_SEL).and_then(|&v| regs::pob_core(v)).unwrap_or(0) as usize
+    }
+
+    /// The observed core's run state: a ring stopped by `dcu_sus` finishes when it halts.
+    pub fn observe(&mut self, observed_halted: bool) {
+        if self.running && self.stop_on_halt && observed_halted {
             self.running = false;
             self.done = true;
         }

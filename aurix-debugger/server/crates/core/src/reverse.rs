@@ -63,7 +63,7 @@ pub struct Config {
     pub target: usize,
     /// Checkpoints kept (0: no limit).
     pub history: usize,
-    /// Record each action (miniMCDS program trace, CPU0 only).
+    /// Record each action (miniMCDS program trace of the target's core, CPU0..CPU2).
     pub trace: bool,
     pub regions: Vec<Region>,
     /// Refuse a Step Back that cannot restore everything.
@@ -250,7 +250,7 @@ fn halted(c: &Ctx, t: usize) -> bool {
 /// The MCDS core number of target `t` if it can be traced.
 fn traced_core(c: &Ctx, t: usize) -> Option<u8> {
     match c.targets.get(t).map(|e| &e.core) {
-        Some(Core::Tricore(tc)) if tc.coreid == 0 => Some(0),
+        Some(Core::Tricore(tc)) if tc.coreid < mcds::regs::POB_CORES as u32 => Some(tc.coreid as u8),
         _ => None,
     }
 }

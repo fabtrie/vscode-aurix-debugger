@@ -2215,7 +2215,7 @@ class GeneratedClient:
         return UcbData.from_dict(self._call("POST", self._session_path() + "/ucb/compare", None, _args({"files": files})))
 
     def trace_arm(self, *, context: bool | None = None, core: int | None = None, kind: str | None = None, ranges: list[TraceRange] | None = None, stop: str | None = None, timestamps: str | None = None) -> TraceData:
-        """Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow
+        """Arm a miniMCDS trace of one core (TC37x production device; CPU0..CPU2): the program flow
         (optionally only while the PC is inside a function or address range) or every write into an
         address range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),
         `full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds
@@ -2224,7 +2224,7 @@ class GeneratedClient:
 
         Args:
             context: Program trace: record which task or ISR runs besides, from the loaded ORTI file's `RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with `trace_calls`. Default: off.
-            core: Observed core; only 0 (CPU0) so far.
+            core: Observed core: 0..2 (CPU0..CPU2, default 0). The data trace sees only this core's writes.
             kind: `program` (default) or `data`.
             ranges: Program: at most one range the PC must be inside; data: exactly one range.
             stop: `halt` (default for program), `full`, `manual` (default for data), or a function name to stop at.
@@ -2249,7 +2249,7 @@ class GeneratedClient:
 
         Args:
             context: Program trace: record which task or ISR runs besides, from the loaded ORTI file's `RUNNINGTASK` / `RUNNINGISR2` of the core (their writes, with the data trace); read with `trace_calls`. Default: off.
-            core: Observed core; only 0 (CPU0) so far.
+            core: Observed core: 0..2 (CPU0..CPU2, default 0). The data trace sees only this core's writes.
             kind: `program` (default) or `data`.
             ranges: Program: at most one range the PC must be inside; data: exactly one range.
             stop: `halt` (default for program), `full`, `manual` (default for data), or a function name to stop at.
@@ -2347,7 +2347,7 @@ class GeneratedClient:
             stack_symbols: Linker symbol pairs bounding the stacks (`[[low, high], ...]`; defaults for iLLD/TASKING).
             strict: Refuse a Step Back that cannot restore everything.
             target: The core (default: CPU0).
-            trace: Record every action with the miniMCDS (default true; CPU0 only).
+            trace: Record every action with the miniMCDS (default true; CPU0..CPU2).
             verify: Check of the faster checkpoints: read the core's stacks and context save area in full at every checkpoint anyway and log where they differ from what the decoded writes predict.
         """
         return ReverseData.from_dict(self._call("POST", self._session_path() + "/reverse/enable", None, _args({"csa_symbols": csa_symbols, "exclude": exclude, "history": history, "max_hits": max_hits, "regions": regions, "stack_symbols": stack_symbols, "strict": strict, "target": target, "trace": trace, "verify": verify})))

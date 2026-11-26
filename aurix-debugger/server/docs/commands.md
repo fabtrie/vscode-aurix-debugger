@@ -1269,7 +1269,7 @@ Whether writing is enabled, what is staged.
 ### `mcds arm`
 
 ```
-mcds arm [-json] [-core 0] -data <addr> <len> | -program [-filter <addr> <len>] [-stop full|halt|manual | -stopat <addr> <len>] [-ticks|-tsu]
+mcds arm [-json] [-core 0|1|2] -data <addr> <len> | -program [-filter <addr> <len>] [-data <addr> <len>] [-stop full|halt|manual | -stopat <addr> <len>] [-ticks|-tsu]
 ```
 
 Arm a miniMCDS trace of one core: data writes into a range, or the program flow.
@@ -1277,11 +1277,11 @@ Arm a miniMCDS trace of one core: data writes into a range, or the program flow.
 Switches the MCDS on, clears the 8 KB trace RAM and starts.
 
 - `-data <addr> <len>`: every write into the range.
-- `-program [-filter <addr> <len>]`: the program flow, optionally only inside the range.
+- `-program [-filter <addr> <len>]`: the program flow, optionally only inside the range. With `-data <addr> <len>` as well: the writes into that range besides, in the same buffer (e.g. the OS variables that say which task or ISR runs).
 - `-stop full`: keep the first 8 KB. `halt`: the last 8 KB before the core halts. `manual`: the last 8 KB before `mcds stop`. `-stopat <addr> <len>`: stop when the PC enters the range.
 - `-tsu` (default): time stamps only with messages. `-ticks`: a tick message per step, exact but fills the buffer within milliseconds.
 
-CPU0 only. The trace is shared with traced DAQ points.
+`-core` picks the observed CPU (default 0): its program flow, its writes and its halts. The trace is shared with traced DAQ points.
 
 ### `mcds plan`
 

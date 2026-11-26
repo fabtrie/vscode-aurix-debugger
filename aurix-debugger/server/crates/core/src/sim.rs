@@ -1120,7 +1120,8 @@ impl Adapter for SimAdapter {
         self.tick();
         self.execs += 1;
         self.run_cpu0();
-        self.mcds.observe(self.halted[0]);
+        let observed = self.mcds.observed_core().min(NUM_CORES - 1);
+        self.mcds.observe(self.halted[observed]);
         let mut out = Vec::with_capacity(batch.len());
         // As on the chip, a failing bridge access fails the bridge accesses after it in the batch.
         let mut bridge_failed = false;

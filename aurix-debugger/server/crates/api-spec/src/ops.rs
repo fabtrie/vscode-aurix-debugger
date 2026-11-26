@@ -159,7 +159,7 @@ api! {
     /// UCBs are reported but cannot be applied.
     op ucb_compare [ucb]: POST "/api/v1/ucb/compare" (UcbCompareRequest) -> UcbData;
 
-    /// Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow
+    /// Arm a miniMCDS trace of one core (TC37x production device; CPU0..CPU2): the program flow
     /// (optionally only while the PC is inside a function or address range) or every write into an
     /// address range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),
     /// `full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds

@@ -12,6 +12,7 @@
 //! | stop on halt | ring buffer, no `trace_done`: the debugger stops it when it sees the halt, after a
 //! |   | [`Plan::flush`] (measured: a `trace_done` stop leaves the last trace RAM word, the last few
 //! |   | hundred nanoseconds of program flow, inside the unit for good) |
+//! | observed core | [`regs::POB_SEL`] = [`regs::pob_select`] (CPU0..CPU2) |
 //! | stop manually | `trace_done` never, ring buffer |
 //! | stop at a function | `trace_done` on an event with `ptu_trig_1` (comparator 1), ring buffer |
 //! | time stamps | ticks: `tick_enable` always; messages: `tsu_rel_en` always, `tsu_rel_sync` on the data
@@ -80,7 +81,8 @@ pub enum Timestamps {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceConfig {
-    /// Observed core (POB). Only CPU0 is known.
+    /// Observed core (POB): CPU0..CPU2. Its program flow, its data writes and its debug state
+    /// (`dcu_sus`, `dcu_halt`) are what the MCX sees.
     pub core: u8,
     pub kind: Kind,
     pub stop: Stop,
@@ -180,11 +182,8 @@ impl Events {
 
 impl TraceConfig {
     pub fn plan(&self) -> Result<Plan, String> {
-        if self.core != 0 {
-            return Err(format!(
-                "only CPU0 can be traced so far (the observation block's core selection is known for CPU0 only), not CPU{}",
-                self.core
-            ));
+        if self.core >= regs::POB_CORES {
+            return Err(format!("the miniMCDS observes CPU0..CPU{} only, not CPU{}", regs::POB_CORES - 1, self.core));
         }
         let mut ev = Events::default();
         let mut act = [When::Never; regs::ACT_COUNT];
@@ -322,6 +321,7 @@ impl TraceConfig {
         w.push((regs::PTU_CMP[0], ptu[0].0));
         w.push((regs::PTU_CMP[1], ptu[1].0));
         w.extend_from_slice(&regs::CONSTANTS[8..]);
+        w.push((regs::POB_SEL, regs::pob_select(self.core)));
         w.push((regs::FIFO_BOTTOM, 0));
         w.push((regs::FIFO_WRAP, if ring { regs::TRAM_SIZE - 1 } else { 0 }));
         w.push((regs::FIFO_END, regs::TRAM_SIZE - 1));
@@ -589,9 +589,22 @@ mod tests {
     }
 
     #[test]
-    fn other_cores_are_refused() {
-        let cfg = TraceConfig { core: 1, kind: Kind::Program { filter: None, data: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
-        assert!(cfg.plan().unwrap_err().contains("CPU0"));
+    fn core_selects_the_observation_block() {
+        // winIDEA's POB_X = CPU0/1/2: 0x81/0x82/0x83, right after BASE + 0x020.
+        for (core, v) in [(0u8, 0x81u32), (1, 0x82), (2, 0x83)] {
+            let cfg = TraceConfig { core, kind: Kind::Program { filter: None, data: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
+            let w = cfg.plan().unwrap().writes;
+            let i = w.iter().position(|&(a, _)| a == 0xFB71_8014).unwrap();
+            assert_eq!(w[i], (0xFB71_8014, v));
+            assert_eq!(w[i - 1], (0xFB71_8020, 0x0800_8000));
+            assert_eq!(w.iter().filter(|&&(a, _)| a == 0xFB71_8014).count(), 1);
+            assert_eq!(regs::pob_core(v), Some(core));
+        }
+        let cfg = TraceConfig { core: 3, kind: Kind::Program { filter: None, data: None }, stop: Stop::Halt, timestamps: Timestamps::Ticks };
+        assert!(cfg.plan().unwrap_err().contains("CPU3"));
+        assert_eq!(regs::pob_core(0), None);
+        // Read back without bit 7.
+        assert_eq!(regs::pob_core(0x2), Some(1));
     }
 
     #[test]

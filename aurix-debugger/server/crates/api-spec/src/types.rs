@@ -849,7 +849,7 @@ pub struct TraceConfigRequest {
     /// `program` (default) or `data`.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Observed core; only 0 (CPU0) so far.
+    /// Observed core: 0..2 (CPU0..CPU2, default 0). The data trace sees only this core's writes.
     #[serde(default)]
     pub core: Option<u32>,
     /// Program: at most one range the PC must be inside; data: exactly one range.
@@ -966,7 +966,7 @@ pub struct ReverseEnableRequest {
     /// Checkpoints kept (default 50; 0: all since the last reset).
     #[serde(default)]
     pub history: Option<u32>,
-    /// Record every action with the miniMCDS (default true; CPU0 only).
+    /// Record every action with the miniMCDS (default true; CPU0..CPU2).
     #[serde(default)]
     pub trace: Option<bool>,
     /// RAM saved in addition to the ELF's writable sections.

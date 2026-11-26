@@ -88,7 +88,11 @@ fn reset_ends_the_recording_and_plan_needs_no_target() {
     let p = json(&s, "mcds plan -program -filter 0x80001000 0x200 -stop halt -json");
     assert_eq!(p["resources"]["ptu_comparators"], 1);
     assert!(p["register_writes"].as_array().unwrap().iter().any(|w| w == "0xfb718800=0xffffffbf"), "{p}");
-    assert!(tcl(&s, "mcds arm -core 1 -program").unwrap_err().contains("CPU0"));
+    assert!(tcl(&s, "mcds arm -core 3 -program").unwrap_err().contains("CPU3"));
+    // The observed core: winIDEA's POB_X = CPU1 writes 0x82.
+    let p = json(&s, "mcds plan -core 1 -program -json");
+    assert_eq!(p["config"]["core"], 1);
+    assert!(p["register_writes"].as_array().unwrap().iter().any(|w| w == "0xfb718014=0x82"), "{p}");
     // A finished recording, then a reset: it says it is from before the reset (no longer the
     // trace up to where the core stands).
     json(&s, "mcds arm -program -stop full -json");
@@ -186,6 +190,26 @@ fn auto_set_while_running_arms_at_once() {
     tcl(&s, "halt").unwrap();
     let st = json(&s, "mcds status -json");
     assert_eq!(st["last"]["earlier_paragraphs"], 0, "{st}");
+    json(&s, "mcds auto off -json");
+}
+
+/// Another core's trace: the observation block follows CPU1, the CPU1 halt (not CPU0's) reads
+/// it, and only a CPU1 run arms it again.
+#[test]
+fn auto_trace_of_cpu1() {
+    let s = board_running();
+    tcl(&s, "targets tc37x.cpu1").unwrap();
+    assert_eq!(tcl(&s, "tc37x.cpu1 curstate").unwrap(), "running");
+    let v = json(&s, "mcds auto -core 1 -program -stop halt -json");
+    assert_eq!(v["auto"]["core"], 1, "{v}");
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(true), "{st}");
+    assert_eq!(sim(&s, |a| a.mcds.observed_core()), 1);
+    tcl(&s, "tc37x.cpu1 arp_halt").unwrap();
+    tcl(&s, "tc37x.cpu1 arp_poll").unwrap();
+    let st = json(&s, "mcds status -json");
+    assert_eq!(st["armed"], Value::Bool(false), "{st}");
+    assert!(st["last"]["paragraphs"].as_u64().unwrap() >= 7, "{st}");
     json(&s, "mcds auto off -json");
 }
 

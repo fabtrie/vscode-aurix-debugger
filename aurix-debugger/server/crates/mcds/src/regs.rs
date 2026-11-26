@@ -15,6 +15,26 @@ pub const CFG10: u32 = BASE + 0x010;
 pub const CBS_47C: u32 = 0xF000_047C;
 pub const CBS_47C_VALUE: u32 = 0x300;
 
+/// Observation block (POB) core selection: [`pob_select`] of the traced core. winIDEA's
+/// `HW.MUX.POB_X` = CPU0 / CPU1 / CPU2 writes 0x81 / 0x82 / 0x83 here (the only write that differs
+/// between the three, measured on a TC377 on 2026-11-26), right after `BASE + 0x020`. Reads back
+/// without bit 7 (0x1 / 0x2 / 0x3). Checked on hardware: the program and the data trace follow it.
+pub const POB_SEL: u32 = BASE + 0x014;
+/// Cores the observation block can follow (TC37x: CPU0..CPU2).
+pub const POB_CORES: u8 = 3;
+
+/// The [`POB_SEL`] value that makes the miniMCDS observe CPU `core`.
+pub const fn pob_select(core: u8) -> u32 {
+    0x80 | (core as u32 + 1)
+}
+
+/// The CPU a [`POB_SEL`] value selects, as written or as read back (bit 7 reads as 0); `None`
+/// for no CPU.
+pub const fn pob_core(v: u32) -> Option<u8> {
+    let n = v & 0x7F;
+    if n >= 1 && n <= POB_CORES as u32 { Some((n - 1) as u8) } else { None }
+}
+
 /// Write pointer into the trace RAM (byte offset, 32-byte granularity; 0x1FE0 = full).
 pub const FIFONOW: u32 = BASE + 0x200;
 /// Ring bounds: 0x204 bottom, 0x208 = 0x1FFF for a ring (0 = linear), 0x20C end (0x1FFF).
@@ -72,7 +92,7 @@ pub const CONSTANTS: &[(u32, u32)] = &[
     (0xFB71_A00C, 0),
     (0xFB71_A500, 0), (0xFB71_A518, 0), (0xFB71_A508, 0x3001), (0xFB71_A520, 0x3001),
     (0xFB71_A504, 0), (0xFB71_A51C, 0),
-    (BASE + 0x020, 0x0800_8000), (BASE + 0x014, 0x81),
+    (BASE + 0x020, 0x0800_8000),
 ];
 /// Written as 0 by winIDEA (0xFB718A00..A74), meaning unknown.
 pub const ZERO_BLOCK_A00: core::ops::Range<u32> = 0xFB71_8A00..0xFB71_8A80;

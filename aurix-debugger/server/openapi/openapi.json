@@ -3436,7 +3436,7 @@
           },
           "trace": {
             "default": null,
-            "description": "Record every action with the miniMCDS (default true; CPU0 only).",
+            "description": "Record every action with the miniMCDS (default true; CPU0..CPU2).",
             "type": [
               "boolean",
               "null"
@@ -4424,7 +4424,7 @@
           },
           "core": {
             "default": null,
-            "description": "Observed core; only 0 (CPU0) so far.",
+            "description": "Observed core: 0..2 (CPU0..CPU2, default 0). The data trace sees only this core's writes.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -8224,7 +8224,7 @@
                   },
                   "trace": {
                     "default": null,
-                    "description": "Record every action with the miniMCDS (default true; CPU0 only).",
+                    "description": "Record every action with the miniMCDS (default true; CPU0..CPU2).",
                     "type": [
                       "boolean",
                       "null"
@@ -9556,7 +9556,7 @@
     },
     "/api/v1/sessions/{session}/trace/arm": {
       "post": {
-        "description": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow\n(optionally only while the PC is inside a function or address range) or every write into an\naddress range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),\n`full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds\nabout 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they\nuse it.",
+        "description": "Arm a miniMCDS trace of one core (TC37x production device; CPU0..CPU2): the program flow\n(optionally only while the PC is inside a function or address range) or every write into an\naddress range. Stop: `halt` (the last 8 KB up to the core's halt; the debugger stops it),\n`full` (the first 8 KB), `manual` (the last 8 KB before `trace_stop`). The trace RAM holds\nabout 80 µs of unfiltered program flow. Shared with traced DAQ points: fails while they\nuse it.",
         "operationId": "trace_arm",
         "parameters": [
           {
@@ -9583,7 +9583,7 @@
                   },
                   "core": {
                     "default": null,
-                    "description": "Observed core; only 0 (CPU0) so far.",
+                    "description": "Observed core: 0..2 (CPU0..CPU2, default 0). The data trace sees only this core's writes.",
                     "format": "uint32",
                     "minimum": 0,
                     "type": [
@@ -9652,7 +9652,7 @@
             "description": "Error"
           }
         },
-        "summary": "Arm a miniMCDS trace of one core (TC37x production device; CPU0 so far): the program flow (optionally only while the PC is inside a function or address range) or every write into an address range.",
+        "summary": "Arm a miniMCDS trace of one core (TC37x production device; CPU0..CPU2): the program flow (optionally only while the PC is inside a function or address range) or every write into an address range.",
         "tags": [
           "trace"
         ]
@@ -9807,7 +9807,7 @@
                   },
                   "core": {
                     "default": null,
-                    "description": "Observed core; only 0 (CPU0) so far.",
+                    "description": "Observed core: 0..2 (CPU0..CPU2, default 0). The data trace sees only this core's writes.",
                     "format": "uint32",
                     "minimum": 0,
                     "type": [
